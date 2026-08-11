@@ -1,0 +1,32 @@
+# ---- Secrets: never commit ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+keycloak/realm-config/*-secrets.json
+backup/*.sql
+backup/*.sql.gz
+backup/*.dump
+
+# ---- Runtime data ----
+data/
+volumes/
+caddy/data/
+caddy/config/
+
+# ---- Adapter ----
+adapter/node_modules/
+adapter/__pycache__/
+adapter/**/__pycache__/
+adapter/.venv/
+adapter/*.egg-info/
+adapter/.pytest_cache/
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
