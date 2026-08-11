@@ -1,22 +1,29 @@
 # Daher Health — v1 Pilot Architecture
 
-**Status:** DRAFT — awaiting review by Liban before implementation begins.
+**Status:** REVIEWED — decisions recorded 2026-08-10. Cleared to begin build step 1.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-10
 
 ---
 
-## 0. Read this first — three things the spec asks for that need a decision
+## 0. Decisions taken — where this build deviates from the brief, and why
 
-I did the research before writing anything. Three items in the brief cannot be built exactly as
-written, and one has significant prior art you should know about before I spend time duplicating it.
-None of these block starting; all of them block calling a bullet "done".
+Three items in the brief could not be built exactly as written. All three were raised before any
+code was written and resolved by Liban on 2026-08-10. Recorded here so the deviations are visible
+to anyone who reads this repo later without the conversation.
 
-| # | Item in the brief | Reality | What I need |
+| # | Item in the brief | Reality | **Decision** |
 |---|---|---|---|
-| A | "One PostgreSQL instance, separate DBs per service (OpenMRS, OpenELIS, Keycloak)" | **OpenMRS cannot safely run on PostgreSQL.** See §3. | A decision (Q1 below) |
-| B | "Enable and configure the **Partograph module**" | **No such maintained OpenMRS module exists.** See §7. | A decision (§7 options) |
-| C | Build the adapter from scratch | An OpenMRS module (`labonfhir`) already does the OpenMRS↔OpenELIS FHIR order/result round-trip, in production, maintained. See §6. | A decision (Q4 below) |
+| A | "One PostgreSQL instance, separate DBs per service" | OpenMRS cannot safely run on PostgreSQL (§3) | **Two engines** — MariaDB for OpenMRS, PostgreSQL for OpenELIS + Keycloak + adapter |
+| B | "Enable and configure the **Partograph module**" | No such maintained OpenMRS module exists (§7) | **Plain O3 form, structured capture only.** No alert lines, no action-line flagging, no prolonged-labour logic — that is decision support and belongs to Liban + the clinical lead, explicitly, before it is ever built |
+| C | Build the adapter from scratch | `labonfhir` already does the FHIR round-trip (§6) | **Build the minimal custom round-trip first** against native OpenMRS/OpenELIS FHIR APIs; revisit `labonfhir` once the real message shapes are visible |
+
+Two further decisions taken at the same time:
+
+| Item | **Decision** |
+|---|---|
+| RapidPro | **Dropped from v1.** 5–7 containers for one content-free notification is disproportionate. Adapter calls the WhatsApp Cloud API directly (§8). RapidPro returns in v1.1/v1.2 when two-way messaging, campaigns, or SMS fallback are actually wanted. |
+| WhatsApp credentials | **None held yet.** Build against a local mock/sandbox; real credentials are a `.env` change, never a code change. The WhatsApp bullet stays explicitly marked incomplete until real credentials are exercised. |
 
 Everything else in the brief is buildable as specified.
 
@@ -43,7 +50,10 @@ template — see §8) and the encrypted nightly backup to object storage (§9).
 
 ## 2. Service topology
 
-Nine containers, one `docker-compose.yml`, one `.env`.
+Eleven containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
+MariaDB, OpenELIS webapp, OpenELIS FHIR, OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and
+the backup sidecar. (The diagram below collapses the OpenELIS frontend into its webapp box for
+legibility.)
 
 ```
                           Internet
@@ -105,7 +115,7 @@ to ask when a changeset fails.
 not designed to be pointed at a generic empty Postgres. Its app *connection* is configurable, but
 its *provisioning* is not.
 
-**Recommended topology (Q1, option A):**
+**Decided topology (approved 2026-08-10):**
 
 | Engine | Container | Databases | Why |
 |---|---|---|---|
@@ -116,9 +126,9 @@ That is **two engines, two containers** — one more container than the brief, b
 brief (small footprint, no per-service DB sprawl) is preserved: Keycloak and the adapter are
 co-tenants of the Postgres instance OpenELIS already requires, rather than getting their own.
 
-The alternative (Q1, option B) is to attempt all-PostgreSQL. I can try it, but I'd be the first
-person to run this module set that way, and I would not want to discover the problem during a
-delivery.
+The rejected alternative was all-PostgreSQL: literal compliance with the brief, but running this
+module set on a database path essentially nobody runs in production, with failures likely to
+surface during a module upgrade rather than at build time.
 
 **Multi-facility note:** at multi-site scale each facility keeps its own pair; a central OpenHIM/
 OpenCR layer would sit above them. Nothing in this topology blocks that — it just isn't v1.
@@ -176,23 +186,23 @@ Ozone ships Apache Camel routes (`eip-openelis-openmrs`) for the same integratio
 I am telling you this before building rather than after, because "write a custom adapter" and
 "there is a maintained module that does this" are worth two minutes of your time to reconcile.
 
-### The options (Q4)
+### Decision — build minimal first, decide on the dependency later
 
-**Option A — thin adapter (my recommendation).** Use `labonfhir` for the order/result transport,
-and build the custom adapter for what nothing off-the-shelf provides: the **durable audit ledger**,
-the **idempotency guarantee**, the **retry/backoff supervision**, and the **notification trigger**.
-The adapter subscribes to result write-backs, records them, and fires the WhatsApp notification.
-Less code we own, a maintained upstream for the hard FHIR mapping, and you still get every
-requirement in the brief — the audit trail and idempotency requirements are *ours* either way,
-because `labonfhir` does not provide the durable per-message audit log you asked for.
+**Approved 2026-08-10:** build the minimal custom order/result round-trip directly against the
+native OpenMRS and OpenELIS FHIR APIs. Once the actual message shapes are visible in practice,
+revisit whether `labonfhir` earns its place as a dependency or whether the hand-rolled version is
+already sufficient.
 
-**Option B — full custom adapter, as specified.** We own the entire path: poll/subscribe for
-OpenMRS orders, build the `ServiceRequest` ourselves, post to OpenELIS's HAPI FHIR endpoint,
-subscribe to OpenELIS results, build the `Observation`/`DiagnosticReport`, write to OpenMRS. Total
-control and no dependence on module compatibility; correspondingly more surface area we maintain
-and more clinical-data-path code that is ours to get right.
+The reasoning is that the decision is cheap to defer and expensive to take blind: the audit ledger,
+idempotency, retry supervision, and notification trigger are ours to build under either choice, so
+no work is wasted by starting minimal. What we gain by waiting is a concrete view of the payloads
+before committing to a module whose compatibility becomes a constraint on every future OpenMRS
+upgrade.
 
-### Adapter design (identical under either option)
+Revisit trigger: once step 5 of §13 passes end-to-end, record the observed `ServiceRequest` and
+`DiagnosticReport` shapes here and make the call.
+
+### Adapter design (unchanged by that later decision)
 
 **Language: Python.** You left it to me. Python's `fhir.resources` provides Pydantic models
 generated from the FHIR R4 specification, with active maintenance — it validates resources at
@@ -228,36 +238,53 @@ problem, not a cosmetic one.
 ### Bed management — buildable as specified
 
 `openmrs-module-bedmanagement` (backend) + the O3 `esm-ward-app` and `esm-bed-management-app`
-frontends give ward/bed configuration, admission, bed assignment, and transfer. I'll configure one
-"Maternité / Maternity" ward with delivery beds and postpartum beds — **exact counts pending your
-answer to Q2**; I am not guessing at a facility's bed count.
+frontends give ward/bed configuration, admission, bed assignment, and transfer. One
+"Maternité / Maternity" ward, with two bed types: delivery (`Salle d'accouchement`) and postpartum
+(`Post-partum`).
+
+**Bed counts are configuration, not code** (decided 2026-08-10). Two `.env` variables —
+`MATERNITY_DELIVERY_BEDS` and `MATERNITY_POSTPARTUM_BEDS` — drive an idempotent seed that creates
+beds up to the configured count on boot. Changing a count is an `.env` edit and a restart; no
+rebuild, no SQL, no admin clicking. The seed only *adds* beds; it never deletes a bed that may have
+a patient or history attached to it, so lowering a count is a deliberate manual operation
+documented in the runbook rather than a silent destructive side effect of an `.env` typo.
+
+⚠️ The committed defaults are **placeholders, not the facility's real numbers** — they are marked as
+such in `.env.example` and in the clinical sign-off checklist. Real counts from the birth centre
+replace them before go-live.
 
 ### ANC forms — buildable as specified
 
 O3 form schemas (JSON), loaded via Initializer, based on the OpenMRS reference maternal health
 configuration. Marked **needs sign-off from clinical lead** — see §11.
 
-### Partograph — cannot be delivered as written
+### Partograph — rescoped, decided 2026-08-10
 
-There is no maintained OpenMRS partograph module to enable. Searching OpenMRS's own repositories
-and community forums turns up discussion and third-party mobile apps, but no module we could pin a
-version of and support. So "enable and configure the Partograph module" has no referent.
+There is no maintained OpenMRS partograph module to enable. What exists in the ecosystem are
+external tools (CommCare/mLabor, iDeliver) that some implementers interface with OpenMRS — not a
+native module you flip on. "Enable and configure the Partograph module" therefore had no referent,
+and the brief was corrected.
 
-What *is* deliverable:
+**What v1 builds:** a plain OpenMRS custom form, authored with the O3 Form Builder / form engine,
+capturing partograph data points as **structured, time-stamped data entry only** — cervical
+dilatation, fetal heart rate, contractions, descent, maternal observations. Values a midwife
+enters, stored and displayed back chronologically. Nothing more.
 
-- **Option 1 (in v1):** a **WHO Labour Care Guide data-capture form** in O3 — a structured form for
-  recording cervical dilatation, fetal heart rate, contractions, descent, maternal observations, on
-  a timed basis. Pure recording. Fits the constraints cleanly, viewable as a chronological table.
-- **Option 2 (v1.1):** the above, plus a **custom O3 widget** that graphs the recorded observations
-  against time in the familiar partogram layout.
+**What v1 explicitly does not build, by decision, not by omission:**
 
-⚠️ **A note that is properly yours to decide, not mine:** the classical partograph's *alert and
-action lines* are a decision-support device — drawing a line that says "this labour has crossed
-into the action zone" is the system making a clinical judgement, which is exactly what constraint
-#3 rules out. A partogram that plots recorded data with no threshold lines stays on the right side
-of that boundary. If you want the alert/action lines, that is a deliberate exception to your own
-non-negotiable and needs your explicit sign-off plus the clinical lead's. I will not add them on my
-own judgement.
+- ❌ alert lines
+- ❌ action lines and action-line flagging
+- ❌ any automated "this labour is prolonged / obstructed" determination
+- ❌ any threshold, colour-coding, or highlight that communicates a clinical judgement
+
+These are decision support. They collide directly with non-negotiable constraint #3, and the
+determination of whether this system should ever make them is a **clinical-safety call belonging to
+Liban and the clinical lead at the birth centre, made explicitly and in advance** — not something
+this build infers its way into. If that sign-off is ever given, it gets recorded in
+`docs/CLINICAL-SIGNOFF.md` with a date and a name before any line of that code is written.
+
+A graphical partogram that plots *only* recorded values, with no threshold lines, is a candidate
+for v1.1 and would still need the same conversation about what the axes imply.
 
 ---
 
@@ -275,19 +302,27 @@ future misconfiguration cannot leak them.
 `adapter/templates/`. Language selected from the patient's recorded language preference in OpenMRS,
 defaulting to French.
 
-**Transport (Q3).** The brief says RapidPro. I want you to make that call with the footprint in
-front of you: RapidPro is Django + Celery + Redis + its own PostgreSQL + Elasticsearch + mailroom +
-courier — **five to seven additional containers**, comfortably the heaviest component in the stack,
-to send one templated message with no branching logic. It earns its keep when you want flows,
-campaigns, and two-way SMS/WhatsApp conversations; it does not earn its keep for a single
-fire-and-forget notification. The alternative is a ~150-line notifier inside the adapter calling the
-WhatsApp Cloud API (or Twilio) directly, with RapidPro added in v1.1 when there are actual flows to
-run. Either way, **swapping mock → sandbox → production credentials is `.env`-only, never a code
-change**, and if no WhatsApp Business credentials exist yet I build against a local mock and mark
-the item explicitly incomplete rather than pretending it works.
+**Transport — decided 2026-08-10: RapidPro dropped from v1.**
 
-This choice also drives VM sizing: without RapidPro this stack fits comfortably on 4 vCPU / 16 GB;
-with RapidPro, plan 8 vCPU / 32 GB.
+The brief specified RapidPro. RapidPro is Django + Celery + Redis + its own PostgreSQL +
+Elasticsearch + mailroom + courier — five to seven additional containers, comfortably the heaviest
+component in the stack, to send one templated message with no branching logic. That is
+disproportionate to the job, and it enlarges the surface area that has to be stable for the
+1 September pilot.
+
+Instead: a small notifier inside the adapter calls the **WhatsApp Cloud API (or Twilio) directly** —
+one HTTP call, one message type, no platform. RapidPro returns in v1.1/v1.2 when two-way messaging,
+campaigns, or SMS fallback logic are actually wanted; those are real capabilities that justify a
+real platform, and none of them are v1.
+
+**Credentials — decided 2026-08-10: none held yet.** No WhatsApp Cloud API account and no BSP
+account exist at time of writing. The notifier is therefore built against a **local mock/sandbox**:
+fully wired, fully testable, exercising the real code path and the real templates. Swapping
+mock → sandbox → production is **`.env`-only, never a code change**. The WhatsApp line item stays
+explicitly marked **incomplete** until real credentials have been exercised end-to-end — it is not
+reported as done on the strength of a passing mock.
+
+VM sizing without RapidPro: 4 vCPU / 16 GB is comfortable.
 
 ---
 
@@ -382,7 +417,7 @@ perform yourself before I move on.
 | 3 | PostgreSQL + OpenELIS standalone | Open OpenELIS, log in, see the prenatal panel tests |
 | 4 | Keycloak + SSO for both | One login, both apps, no second prompt |
 | 5 | Adapter — order out, result back | Place an order in OpenMRS, see it in OpenELIS, enter a result, see it in the chart |
-| 6 | WhatsApp notification | Result write-back fires a message (mock or real per Q3) |
+| 6 | WhatsApp notification (against mock) | Result write-back fires a message; inspect the mock's captured payload and both language templates |
 | 7 | Backup + **restore drill** | Watch the restore drill and confirm the test patient survives it |
 | 8 | Caddy + TLS + domains | Reach all three subdomains over HTTPS |
 
@@ -401,10 +436,19 @@ Where a v1 choice would need to change for multi-facility, it is noted inline in
 
 ---
 
-## 15. Open questions blocking implementation
+## 15. Open items
 
-1. **Q1 — Database topology.** Two engines (MariaDB for OpenMRS + Postgres for the rest), or attempt all-PostgreSQL?
-2. **Q2 — Bed count.** How many delivery beds and how many postpartum beds?
-3. **Q3 — WhatsApp.** Which credentials do you actually hold, and RapidPro now or in v1.1?
-4. **Q4 — Adapter.** Thin adapter on top of `labonfhir`, or full custom adapter?
-5. **§7 — Partograph.** Labour Care Guide capture form in v1 with the graphical partogram in v1.1, or attempt the custom graph widget now? (And: alert/action lines — yes or no, with the constraint-#3 caveat above.)
+**Nothing blocks implementation.** All five questions raised in the first draft were answered on
+2026-08-10 and are recorded in §0. What remains open is tracked here and none of it gates the build:
+
+| Item | Status | Needed by |
+|---|---|---|
+| Real maternity bed counts | Placeholder values in `.env`; changing them is an `.env` edit + restart (§7) | Go-live |
+| WhatsApp Cloud API / BSP credentials | Building against mock; swap is `.env`-only. Line item stays marked **incomplete** until real credentials run end-to-end (§8) | Go-live |
+| `labonfhir` vs. hand-rolled transport | Deferred by decision; revisit after step 5 of §13 with real payloads in hand (§6) | Before v1.1 |
+| Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
+| Clinical sign-off on all clinical content | `docs/CLINICAL-SIGNOFF.md`, unsigned (§11) | Go-live — **hard gate** |
+
+**Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
+to keep the surface area small enough to be stable by then. Anything that grows the container count
+between now and then should be weighed against that date.
