@@ -18,24 +18,25 @@ it exposed five defects that `docker compose config` could never have caught —
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001 |
-| 🟡 Verified by agent — **awaiting Liban's own run** | **DH-002** |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11) |
+| 🟡 Awaiting Liban's review | **DH-009a** (ADR-005 evidence + watermark design) |
 | 🔨 In progress | DH-017 (README — now covers step 1 fully, incl. boot timing and the demo-patient warning) |
-| 📋 Ready — **do this next** | DH-009 (spike; needs no Docker) |
+| 📋 Ready | DH-019 (admin password) |
 | 🆕 New, from DH-002 | DH-019 (admin password wiring) |
 | ⏸ Waiting on dependencies | DH-003 … DH-018 |
 
 ## ▶ START HERE (next session)
 
-1. **Get Liban's own run of DH-002 done first — it is the only thing standing between DH-002 and
-   ✅.** Give him the URL, the timing warning, and the four verification steps in `README.md`.
-   Everything so far went through `curl`; the O3 single-page app has never been opened in a
-   browser, so the SPA, the French default locale, and the registration form are unproven.
-2. **Put BLOCKER-2 in front of him at the same time** — the distro creates 50 fictional patients
-   on first boot, and `OMRS_ADD_DEMO_DATA=false` does not stop it. It is not urgent for a local
-   stack; it is a hard gate before the pilot VM is built. It shapes DH-003.
-3. **Then DH-009** (ADR-005 spike). It needs no Docker, it gates the longest pole after SSO, and
-   the stack can stay up while it is worked.
+1. **DH-009a needs Liban's review before any adapter code exists.** ADR-005 forbids building the
+   poller until the watermark design has been read. `docs/WATERMARK-DESIGN.md` is written and
+   built into nothing. The two questions that actually need his judgement are §9.1 (poll interval
+   — a clinical-workflow question, not a technical one) and §9.3 (polling being the only available
+   trigger is new information bearing on ADR-004's `labonfhir` deferral).
+2. **BLOCKER-2 also needs him** — the distro creates 50 fictional patients on first boot, and
+   `OMRS_ADD_DEMO_DATA=false` does not stop it. Not urgent locally; a hard gate before the pilot
+   VM is built, and it shapes DH-003.
+3. **Then DH-003 or DH-005**, whichever he prefers. DH-005 (PostgreSQL + OpenELIS) additionally
+   unblocks DH-009b, the untouched half of ADR-005.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
 `docker compose down -v` — that destroys the volumes and the evidence.
@@ -132,7 +133,7 @@ reported as passing.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Register test patient in OpenMRS | 🟡 done via REST/FHIR by the agent; **not yet demonstrated to Liban in the SPA** |
+| 1 | Register test patient in OpenMRS | ✅ Liban registered a patient in the O3 SPA himself, 2026-08-11 |
 | 2 | Same SSO session into OpenELIS, no second login | ⏸ |
 | 3 | Place prenatal panel lab order in OpenMRS | ⏸ |
 | 4 | Order appears in OpenELIS worklist | ⏸ |
@@ -153,8 +154,14 @@ Move the reasoning that existed only in conversation into `DECISIONS.md`. Twelve
 ADR-005 (the open Subscriptions/polling question) and ADR-004 (the `labonfhir` deferral).
 **DoD:** ✅ ADRs committed; `CURRENT_STATE.md`, `PROJECT_STATE.md`, `AGENTS.md` created.
 
-### DH-002 · First pull, digest pinning, verify OpenMRS · P0 · 🟡 VERIFIED BY AGENT — awaiting Liban
-**Worked:** 2026-08-11.
+### DH-002 · First pull, digest pinning, verify OpenMRS · P0 · ✅ DONE
+**Worked:** 2026-08-11. **Confirmed by Liban 2026-08-11** — he registered a patient through the O3
+single-page app himself and reported it working. That was the one criterion an agent could not
+close.
+
+**Precision about what his run covered:** he confirmed registration works. He did **not** report
+on the SPA's display language, so the French-locale question below is still open — it is a DH-003
+item either way.
 
 **Acceptance criteria, individually:**
 
@@ -193,7 +200,37 @@ rather than silently falling back to the default; document the post-first-boot r
 **Acceptance:** a fresh stack with a generated password refuses `Admin123` and accepts the
 configured one. Verified on an empty volume, since that is the only case where it applies.
 
-### DH-009 · Spike: resolve ADR-005 (Subscriptions vs. polling) · P0 · 📋 READY
+### DH-009a · Spike: ADR-005, **OpenMRS leg** · P0 · 🟡 EVIDENCE READY — awaiting Liban's review
+**Worked:** 2026-08-11, against the running DH-002 stack rather than from documentation.
+
+**Answer: neither event-driven option exists in the O3 3.7.x distro as we deploy it.**
+- FHIR `Subscription` → HTTP 404, `HAPI-0302: Unknown resource type`; absent from the
+  CapabilityStatement's 24 advertised types; `ServiceRequest` returns 200 as a control.
+- `event-4.0.0`'s ActiveMQ broker is `vm://localhost` (in-JVM), the module ships an empty
+  `moduleApplicationContext.xml`, and 61616 is refused. A separate adapter container cannot reach
+  it. (A bare `tcp://` string exists in the jar; no way to expose it was found — "none found" is
+  recorded as exactly that, not as "none exists".)
+- Polling is viable: `_lastUpdated` is advertised **and verified applied** on `ServiceRequest`,
+  `DiagnosticReport`, `Observation`, `Task`.
+
+**Evidence** is appended to ADR-005 in `DECISIONS.md` — **status deliberately left `OPEN`**, since
+that ADR's acceptance is "reviewed by Liban personally". **The watermark design is written and
+built into nothing**: `docs/WATERMARK-DESIGN.md`, as ADR-005 requires.
+
+**What Liban is being asked to read**, in order: ADR-005's evidence section, then
+`WATERMARK-DESIGN.md` §4 (why `ge` and not `gt` — the choice that trades duplicates for never
+losing a result), §6 (the void-visibility gap), §7 (the timezone constraint), and §9.3
+(polling being the only trigger is new information bearing on ADR-004's `labonfhir` deferral).
+
+**Not done here, by instruction:** no poller was written. ADR-005 forbids building before review.
+
+### DH-009b · Spike: ADR-005, **OpenELIS leg** · P0 · ⏸ (needs DH-005)
+The reverse direction — how OpenELIS tells us a result is ready — **could not be touched**:
+OpenELIS is not deployed. DH-009a's "polling" answer covers the OpenMRS leg **only** and must not
+be read as covering this one. Same standard applies: primary evidence, and if the answer is polling,
+the result-leg watermark design gets reviewed before it is built.
+
+### DH-009 · (superseded by DH-009a / DH-009b above) · P0
 **Objective:** answer, with primary evidence, how the adapter learns an order/result exists.
 **Depends on:** nothing — this is source and documentation reading. **Do it early**; it gates the
 longest pole after SSO, and it does not need a running stack.

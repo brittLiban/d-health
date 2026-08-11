@@ -122,6 +122,101 @@ Do not resolve this by defaulting to whichever is easier to implement.
 
 ---
 
+### ADR-005 — evidence appended 2026-08-11 (DH-009a). **Status remains OPEN.**
+
+Status stays `OPEN` deliberately: this ADR's own acceptance is *"reviewed by Liban personally"*, and
+nothing below has been reviewed yet. What follows is evidence and a **proposed** resolution.
+
+Scope note: every statement is about **the O3 3.7.x distribution as we deploy it** — `fhir2-4.2.0`,
+`event-4.0.0`, HAPI FHIR Server 5.7.9 — not about OpenMRS in general. Gathered against the running
+stack from DH-002, not from documentation.
+
+#### Q1 — Does `fhir2` support outbound FHIR Subscriptions? **No.**
+
+1. The server's own CapabilityStatement (`GET /ws/fhir2/R4/metadata`) advertises **24 resource
+   types**, and `Subscription` is not among them:
+   `AllergyIntolerance, CarePlan, Condition, DiagnosticReport, Encounter, EpisodeOfCare, Flag,
+   Group, Immunization, Invoice, Location, Medication, MedicationDispense, MedicationRequest,
+   Observation, OperationDefinition, Patient, Person, PlanDefinition, Practitioner, RelatedPerson,
+   ServiceRequest, Task, ValueSet`
+2. `GET /ws/fhir2/R4/Subscription` → **HTTP 404**, body:
+   `HAPI-0302: Unknown resource type 'Subscription' - Server knows how to handle: [...]`
+3. `POST /ws/fhir2/R4/Subscription` with a valid `rest-hook` subscription → same error.
+4. Control on the same server, same session: `GET /ws/fhir2/R4/ServiceRequest` → **HTTP 200**.
+
+#### Q2 — Is the `event` module a usable trigger for an out-of-process adapter? **Not as shipped.**
+
+`event-4.0.0.omod` *is* installed, and an ActiveMQ broker really is running (visible as
+`ActiveMQ Broker[localhost]`, `KahaDB Scheduler` threads in a JVM thread dump). But:
+
+1. The only broker URL in the module's own jar (`lib/event-api-4.0.0.jar`, package
+   `org/openmrs/event/`) is
+   `vm://localhost?broker.persistent=true&broker.useJmx=false&broker.dataDirectory=` —
+   the **in-JVM** transport. The observed connection is `vm://localhost#1-2`.
+2. The module ships **no broker configuration**: `moduleApplicationContext.xml` contains an empty
+   `<beans>` element, and there is no properties file or bean exposing a broker URL.
+3. No TCP connector is listening. Listening ports inside the backend container are **8080, 8005**
+   and one ephemeral port; **61616 (ActiveMQ's default) is refused**.
+
+**Honest limit of this claim:** a bare `tcp://` string also appears in `event-api-4.0.0.jar`. No
+property, bean, or documented setting was found that exposes the broker over TCP — but "none found"
+is not "none exists". What is established is that **as configured and as shipped, a separate
+adapter container cannot subscribe to it.** Using JMS would require a custom in-process Java module
+that forwards events outward, which is a substantially larger commitment than this project's
+adapter design assumes — and close to re-implementing what `labonfhir` already does (ADR-004).
+
+#### Q3 — Is polling viable, and what does it key on?
+
+Yes, and the necessary search support exists. `_lastUpdated` is advertised **and applied** on all
+four relevant resources — `ServiceRequest`, `DiagnosticReport`, `Observation`, `Task`. Verified
+applied, not merely accepted: `_lastUpdated=gt2030-01-01` → `total: 0` against a baseline of `52`.
+
+Observed on a real order placed for this purpose (`ORD-96`, Haemoglobin, read back as
+`ServiceRequest/23ff7a38-…`):
+
+- `meta.lastUpdated` = `2026-08-11T14:33:33+03:00`, equal to both `date_created` and
+  `date_activated` in the `orders` table.
+- **The `orders` table has no `date_changed` column** (columns: `date_activated`, `date_stopped`,
+  `date_created`, `date_voided`). OpenMRS orders are not updated in place — revisions and
+  discontinuations are *new rows*. This materially reduces the "record modified after the watermark
+  passed it" hazard for the order leg.
+- Timestamps are **whole-second** (`.000`); multiple records routinely share one second (7 patients
+  shared `10:24:46`).
+
+#### Q4 — OpenELIS outbound direction: **not answerable yet**
+
+OpenELIS is not deployed (DH-005), so nothing here was exercised against it. This half of ADR-005
+is untouched, and "polling is the answer" **must not be read as covering it**. Split out as DH-009b.
+
+#### Proposed resolution — for Liban's review, not yet adopted
+
+**Polling, on the OpenMRS side, with the idempotency ledger as a load-bearing safety component
+rather than a defensive nicety.** Two findings drive that second clause:
+
+- `gt` at second precision behaves **inclusively** of the boundary second in testing, so the
+  boundary record is **re-delivered rather than skipped**. That is the safe failure direction —
+  duplicates, not silent loss — but only if something absorbs duplicates. That something is
+  DH-010's ledger. "No result is lost between the laboratory and a mother's chart" therefore
+  depends on the ledger, and the ledger becomes patient-safety code, not plumbing.
+- Correctness is coupled to **every component running `TZ=Africa/Djibouti`**. Filtering behaviour is
+  consistent with the server comparing naive local timestamps; a client that round-trips
+  `meta.lastUpdated` unchanged stays self-consistent, but an adapter container running UTC would
+  silently shift its window by three hours. This is one `.env` variable away from being wrong, and
+  the design asserts it with a test.
+
+  *This mechanism is black-box inference* consistent with eight probe results across two timestamp
+  encodings — not a claim about `fhir2` internals.
+
+The write direction is available: `DiagnosticReport`, `Observation` and `Task` all advertise
+`create`, so the result leg is feasible over FHIR. `ServiceRequest` is **read/search only** — the
+adapter can read orders from OpenMRS but cannot write them there, which is all this design needs.
+
+Full watermark design — keying, advancement, restart mid-window, back-dating, observable failure
+mode — is in [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md), **written before any code, as
+this ADR requires.** Nothing has been built.
+
+---
+
 ## ADR-006 — Partograph ships as data entry only; no decision support
 
 **Date:** 2026-08-10 · **Status:** ACCEPTED · **Decided by:** Liban
