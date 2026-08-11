@@ -17,25 +17,41 @@ Step 1 (MariaDB + OpenMRS O3) is written and validates; nothing has ever been st
 | Status | Tickets |
 |---|---|
 | ✅ Done | DH-001 |
-| 🔨 In progress | — |
-| ⛔ Blocked | DH-002 (docker access — human) |
-| 📋 Ready | DH-009 (spike; no dependency on DH-002) |
+| 🔨 In progress | DH-017 (README, step-1 coverage only) |
+| 📋 Ready — **do this first** | **DH-002** (unblocked 2026-08-10) |
+| 📋 Ready — no Docker needed | DH-009 (spike) |
 | ⏸ Waiting on dependencies | DH-003 … DH-018 |
+
+## ▶ START HERE (next session)
+
+1. **Verify the environment first:** `docker info` should print server details. If it still says
+   `permission denied`, the machine has not been logged out and back in since the group change —
+   say so and stop, don't work around it with `sudo`.
+2. **Then run DH-002** (below): pull the four images, record real digests into
+   `docker-compose.yml` replacing the `TODO`, `docker compose up -d`, wait out OpenMRS's
+   multi-minute first boot **without restarting it**, and confirm a test patient can be registered
+   and survives a `down`/`up` cycle.
+3. Hand Liban the URL and the verification steps to try himself — he verifies alongside, he does
+   not receive a finished pile at the end.
+
+If DH-002 hits trouble, DH-009 needs no Docker and can be worked instead.
 
 ---
 
 ## Blockers
 
-### BLOCKER-1 — Docker daemon unreachable · **Human Decision Required: Yes**
+### BLOCKER-1 — Docker daemon unreachable · ✅ RESOLVED 2026-08-10
 
-**Ticket:** DH-002 · **Raised:** 2026-08-10
-**Problem:** `libanbritt` is not in the `docker` group; every docker command fails with
-`permission denied` on `/var/run/docker.sock`. This blocks all verification work.
-**Options:** (a) `sudo usermod -aG docker $USER` + re-login — convenient, permanent, effectively
-root-equivalent on this machine; (b) per-invocation `sudo` — no standing privilege, more friction.
-**Why not an agent decision:** it is a standing privilege grant on Liban's machine, and the same
-question recurs with different stakes on the pilot VM.
-**Response recorded:** _(none yet)_
+**Ticket:** DH-002
+**Was:** `libanbritt` was not in the `docker` group; every docker command failed with
+`permission denied` on `/var/run/docker.sock`.
+**Response recorded:** Liban ran `sudo usermod -aG docker $USER`. Verified in `/etc/group`
+(`docker:x:973:libanbritt`). Group membership attaches at login, so it required a logout/reboot
+and a Claude Code restart to take effect — done 2026-08-10.
+**Note for the pilot VM:** the same choice recurs there with higher stakes. `docker` group
+membership is effectively root on the host. Decide it deliberately, not by habit.
+
+_No open blockers._
 
 ---
 
@@ -67,9 +83,9 @@ Move the reasoning that existed only in conversation into `DECISIONS.md`. Twelve
 ADR-005 (the open Subscriptions/polling question) and ADR-004 (the `labonfhir` deferral).
 **DoD:** ✅ ADRs committed; `CURRENT_STATE.md`, `PROJECT_STATE.md`, `AGENTS.md` created.
 
-### DH-002 · Docker access, first pull, digest pinning, verify OpenMRS · P0 · ⛔ BLOCKED
+### DH-002 · First pull, digest pinning, verify OpenMRS · P0 · 📋 READY — **next ticket**
 **Objective:** get step 1 from "written" to "verified", and make the deployment reproducible.
-**Depends on:** BLOCKER-1 (human).
+**Depends on:** nothing — BLOCKER-1 resolved 2026-08-10.
 **Files:** `docker-compose.yml`, `.env.example`, `README.md` (created here).
 **Requirements:** pull the four images; record real digests into the compose file, replacing the
 `TODO`; `docker compose up -d`; watch O3's first-boot Liquibase run to completion (minutes — do
@@ -186,7 +202,11 @@ None — nothing has run.
 
 ## Notes for next session
 
+- See **▶ START HERE** near the top of this file for the immediate next action.
 - Read `DECISIONS.md` before touching anything. ADR-005 is the live open question; ADR-003,
   ADR-006, ADR-007 are pinned and not to be "simplified".
-- **DH-009 needs no docker access.** If BLOCKER-1 is still unresolved, work that instead of idling.
+- **Nothing has ever been run.** Treat every existing artefact as unverified until you see it
+  work. `docker compose config` passing means the syntax parses, nothing more.
+- The compose file's image digests are a `TODO`, not a mistake — they get filled in during DH-002
+  after the first real pull. **Never fabricate a digest.**
 - Nothing here authorizes real patient data. Pilot-ready ≠ clinically live (ADR-012).
