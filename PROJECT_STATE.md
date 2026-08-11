@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-11 · **Phase:** Build step 1 of 8 (**runs; verified via API, awaiting Liban**)
+**Updated:** 2026-08-11 · **Phase:** Step 1 of 8 ✅ done · ADR-005 evidence awaiting review
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -21,8 +21,7 @@ it exposed five defects that `docker compose config` could never have caught —
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11) |
 | 🟡 Awaiting Liban's review | **DH-009a** (ADR-005 evidence + watermark design) |
 | 🔨 In progress | DH-017 (README — now covers step 1 fully, incl. boot timing and the demo-patient warning) |
-| 📋 Ready | DH-019 (admin password) |
-| 🆕 New, from DH-002 | DH-019 (admin password wiring) |
+| 📋 Ready | DH-019 (admin password wiring — new, from DH-002) |
 | ⏸ Waiting on dependencies | DH-003 … DH-018 |
 
 ## ▶ START HERE (next session)
