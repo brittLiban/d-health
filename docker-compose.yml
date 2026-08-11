@@ -190,9 +190,225 @@ services:
       - "127.0.0.1:${OMRS_LOCAL_PORT:-8080}:80"
     networks: [internal]
 
+  # ===========================================================================
+  # BUILD STEP 3 — PostgreSQL + OpenELIS (DH-005)
+  #
+  # Upstream ships six services; we run five and drop one.
+  #
+  # DROPPED: `proxy` (nginx, :80/:443). Caddy terminates TLS for the whole stack
+  #   at DH-016, so a second public-facing reverse proxy is redundant.
+  #
+  # KEPT, CORRECTING docs/ARCHITECTURE.md §2: `certs`. §2 said we drop `certs`
+  #   AND `proxy` "because Caddy terminates TLS for us". That is wrong, and it
+  #   was verified wrong rather than argued: both the webapp and the FHIR server
+  #   define an SSL connector on 8443 in their own server.xml, referencing
+  #   ${oe.ssl.keystorepath} / ${hapi.ssl.keystorepath}. Started without the
+  #   keystore volume, Tomcat aborts at boot:
+  #
+  #     SEVERE  Failed to initialize component [Connector["https-openssl-nio-8443"]]
+  #     Caused by: java.lang.IllegalArgumentException: Error creating SSLContext
+  #
+  #   `certs` is not about public TLS — it generates the internal keystore those
+  #   connectors need in order to start at all. Dropping it and editing upstream's
+  #   server.xml to delete the connector would mean owning someone else's Tomcat
+  #   configuration across every upgrade, which is exactly the trade ADR-010
+  #   rejected for the O3 gateway. One short-lived container is cheaper.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Internal keystore/truststore generator. Runs once, writes into a shared
+  # volume, exits. Not a long-running service — `service_completed_successfully`
+  # is what the consumers wait on.
+  #
+  # Pinned by digest: upstream publishes only the moving tag `main`, so the tag
+  # alone is not reproducible (AGENTS.md). Digest pulled 2026-08-11.
+  # ---------------------------------------------------------------------------
+  openelis-certs:
+    image: itechuw/certgen:main@sha256:e27a8194300ba73309e835a4070e9ce531687eb3ee604895de781f3061791635
+    restart: "no"
+    environment:
+      <<: *common-env
+      # ⚠️ These do NOT set the keystore password. Verified at DH-005: this image
+      # has no entrypoint (CMD=/bin/bash) and generates nothing at runtime — it
+      # ships PRE-BUILT keystores at /etc/openelis-global, which Docker seeds into
+      # the named volume on first mount. The passwords are baked in and fixed:
+      # `keytool -list` opens keystore with `kspass` and truststore with `tspass`.
+      # Passed anyway to match upstream's compose, and so this comment sits next
+      # to them rather than in a file nobody opens.
+      KEYSTORE_PW: ${OE_KEYSTORE_PASSWORD:-kspass}
+      TRUSTSTORE_PW: ${OE_TRUSTSTORE_PASSWORD:-tspass}
+    volumes:
+      - openelis-keystore:/etc/openelis-global
+      - openelis-keys:/etc/ssl/private/
+      - openelis-certs:/etc/ssl/certs/
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 14.4 — OpenELIS's own image, with `clinlims` baked in, plus the
+  # Keycloak and adapter databases as co-tenants (ADR-001).
+  #
+  # We do not choose this Postgres version; the image does. The schema and
+  # reference data are provisioned from /docker-entrypoint-initdb.d, which is
+  # why this cannot simply be pointed at a generic empty Postgres.
+  #
+  # ⚠️ initdb.d runs ONCE, on an empty data directory. Everything this instance
+  # must contain has to be present at first boot — see the seed script's header.
+  # ---------------------------------------------------------------------------
+  openelis-db:
+    image: itechuw/openelis-global-2-database:3.2.1.11@sha256:c7750aad1650a1dbc73f97240167bb778e9df23592e41c2c2232d47a4054c14f
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      # The image defaults these to `clinlims` / `superuser` when unset (see its
+      # init.sh). Guarded, for the same reason as the OpenMRS admin password in
+      # DH-019: a published default credential must never be reachable by
+      # forgetting to set a variable.
+      DB_PASSWORD: ${OE_DB_PASSWORD:?set OE_DB_PASSWORD in .env}
+      DB_SUPERUSER_PASSWORD: ${OE_DB_SUPERUSER_PASSWORD:?set OE_DB_SUPERUSER_PASSWORD in .env}
+      # The base postgres entrypoint's own bootstrap variables. Upstream's compose
+      # does not show these, but the image needs them: without POSTGRES_PASSWORD
+      # it exits with "Database is uninitialized and superuser password is not
+      # specified" and crash-loops (observed at DH-005).
+      #
+      # Three distinct credentials, deliberately not shared:
+      #   postgres  — initdb bootstrap superuser, used to run initdb.d
+      #   admin     — OpenELIS's own superuser role, from DB_SUPERUSER_PASSWORD
+      #   clinlims  — the application role, from DB_PASSWORD
+      #
+      # POSTGRES_DB must be `clinlims`: the baked dump loads into it, init.sh runs
+      # `ALTER DATABASE clinlims OWNER TO clinlims`, and every datasource URL in
+      # this stack ends in /clinlims.
+      POSTGRES_USER: postgres
+      POSTGRES_DB: clinlims
+      POSTGRES_PASSWORD: ${OE_POSTGRES_PASSWORD:?set OE_POSTGRES_PASSWORD in .env}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD in .env}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-adapter}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in .env}
+    volumes:
+      - openelis-db-data:/var/lib/postgresql/data
+      - ./openelis-config/postgres-init/zz-daher-extra-databases.sh:/docker-entrypoint-initdb.d/zz-daher-extra-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinlims -d clinlims"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      internal:
+        # Upstream hard-codes `db.openelis.org` in the webapp's CATALINA_OPTS and
+        # the FHIR server's datasource URL. Those are env-overridable, but the O3
+        # gateway at DH-002 taught that upstream hostnames also turn up baked into
+        # places that are not — so the alias is belt and braces, and costs nothing.
+        aliases: [db.openelis.org]
+
+  # ---------------------------------------------------------------------------
+  # OpenELIS webapp (Tomcat). Not publicly routed; Caddy reaches it at DH-016.
+  # ---------------------------------------------------------------------------
+  openelis-webapp:
+    image: itechuw/openelis-global-2:3.2.1.11@sha256:c7c7200141baf4c496121db1a6712f9fcf0866654e6f91e150fa0e4bbfc5ecab
+    restart: unless-stopped
+    depends_on:
+      openelis-db:
+        condition: service_healthy
+      openelis-certs:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      # Upstream's compose sets DEFAULT_PW=adminADMIN! — a published default
+      # admin password, the same hazard DH-019 fixed for OpenMRS. Guarded here.
+      # Whether it is first-boot-only (as OpenMRS's is) has NOT been verified;
+      # treat it as if it were and set it before the first `up`.
+      DEFAULT_PW: ${OE_ADMIN_PASSWORD:?set OE_ADMIN_PASSWORD in .env}
+      CATALINA_OPTS: >-
+        -Ddatasource.url=jdbc:postgresql://db.openelis.org:5432/clinlims
+        -Ddatasource.username=clinlims
+        -Ddatasource.password=${OE_DB_PASSWORD}
+        -Doe.ssl.keystorepath=/etc/openelis-global/keystore
+        -Doe.ssl.truststorepath=/etc/openelis-global/truststore
+        -Doe.ssl.keystorepassword=${OE_KEYSTORE_PASSWORD:-kspass}
+        -Doe.ssl.truststorepassword=${OE_TRUSTSTORE_PASSWORD:-tspass}
+    volumes:
+      - openelis-keystore:/etc/openelis-global
+      - openelis-plugins:/var/lib/openelis-global/plugins
+      - openelis-logs:/var/lib/openelis-global/logs
+    # The webapp reads its Spring configuration from a Docker secret, not from
+    # environment variables. Without it the WAR deploys and then dies with
+    #   java.io.FileNotFoundException: /run/secrets/common.properties
+    # while Tomcat itself reports a successful startup — a failure that looks
+    # like success in `docker compose ps` (observed at DH-005).
+    secrets:
+      - common.properties
+    networks:
+      internal:
+        aliases: [oe.openelis.org]
+
+  # ---------------------------------------------------------------------------
+  # OpenELIS HAPI FHIR server — the endpoint the adapter actually talks to
+  # (docs/ARCHITECTURE.md §2), not the webapp.
+  # ---------------------------------------------------------------------------
+  openelis-fhir:
+    image: itechuw/openelis-global-2-fhir:3.2.1.11@sha256:e58bc63f2248b55670017b7854ca3dd17c69c2977c4b38b98c20068f8f8e2320
+    restart: unless-stopped
+    depends_on:
+      openelis-db:
+        condition: service_healthy
+      openelis-certs:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      FHIR_DATASOURCE_URL: jdbc:postgresql://db.openelis.org:5432/clinlims
+      FHIR_DATASOURCE_USERNAME: clinlims
+      FHIR_DATASOURCE_PASSWORD: ${OE_DB_PASSWORD}
+      FHIR_SERVER_ADRESS: http://fhir.openelis.org:8080/fhir/
+      JAVA_OPTS: >-
+        -Dhapi.ssl.keystorepath=/etc/openelis-global/keystore
+        -Dhapi.ssl.keystorepassword=${OE_KEYSTORE_PASSWORD:-kspass}
+        -Dhapi.ssl.truststorepath=/etc/openelis-global/truststore
+        -Dhapi.ssl.truststorepassword=${OE_TRUSTSTORE_PASSWORD:-tspass}
+    volumes:
+      - openelis-keystore:/etc/openelis-global
+    networks:
+      internal:
+        # NOTE the spelling: upstream's variable is FHIR_SERVER_ADRESS (one 'd').
+        # It is their typo, not ours — do not "fix" it, it is the key they read.
+        aliases: [fhir.openelis.org]
+
+  # ---------------------------------------------------------------------------
+  # OpenELIS React frontend. Upstream publishes no port for it — the dropped
+  # `proxy` served it. Caddy takes that job at DH-016.
+  # ---------------------------------------------------------------------------
+  openelis-frontend:
+    image: itechuw/openelis-global-2-frontend:3.2.1.11@sha256:8054581aee1ef5b15e4a1ebc4fa8d96d7c5021ca36e580a7d78d2f2c7c78bb5a
+    restart: unless-stopped
+    depends_on:
+      - openelis-webapp
+    environment:
+      <<: *common-env
+    networks:
+      internal:
+        aliases: [frontend.openelis.org]
+
+secrets:
+  # Upstream ships this as a secret rather than a mount; we keep that shape.
+  # It is committed to the repo because it holds no credentials — the keystore
+  # passwords in it are upstream's published values (see DH-021), and the
+  # database password is passed separately via CATALINA_OPTS.
+  common.properties:
+    file: ./openelis-config/properties/common.properties
+
 volumes:
   openmrs-db-data:
   openmrs-data:
+  # OpenELIS (DH-005)
+  openelis-db-data:
+  openelis-keystore:   # internal keystore/truststore from openelis-certs
+  openelis-keys:
+  openelis-certs:
+  openelis-plugins:
+  openelis-logs:
 
 networks:
   # Nothing in this stack is reachable from outside except through the reverse
