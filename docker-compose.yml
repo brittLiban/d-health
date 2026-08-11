@@ -75,6 +75,18 @@ services:
       OMRS_CONFIG_CONNECTION_DATABASE: ${OMRS_DB_NAME}
       OMRS_CONFIG_CONNECTION_USERNAME: ${OMRS_DB_USER}
       OMRS_CONFIG_CONNECTION_PASSWORD: ${OMRS_DB_PASSWORD}
+      # Admin account password. ⚠️ APPLIED ON FIRST BOOT ONLY — it is written into
+      # the database when OpenMRS initialises an empty schema. Setting it against an
+      # already-initialised volume does nothing; recovery is then a manual password
+      # change, not an .env edit.
+      #
+      # Without this, the image defaults to the published value `Admin123`
+      # (`OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in the
+      # image's /openmrs/startup-init.sh). The `:?` guard is deliberate: a missing
+      # value must fail loudly at `up`, because the alternative is silently shipping
+      # a known admin password — and the failure would only be noticed by whoever
+      # found it first.
+      OMRS_CONFIG_ADMIN_USER_PASSWORD: ${OMRS_ADMIN_PASSWORD:?set OMRS_ADMIN_PASSWORD in .env}
       # ⚠️ VERIFIED INERT AT DH-002. This variable does nothing in this image.
       # `grep -oE "OMRS_[A-Z_]+" /openmrs/startup-init.sh /openmrs/startup.sh`
       # inside the backend container lists every OMRS_* name those scripts read,
