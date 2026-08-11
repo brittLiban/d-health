@@ -7,7 +7,10 @@
 # moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
 # the deployment is reproducible even though the tag is not.
 #
-#   TODO(step 1): digests are recorded once the images can be pulled — see README.
+#   Digests below were pulled and recorded on 2026-08-10 (DH-002). They are the
+#   repository digests reported by the registry, not image IDs. Re-pinning after an
+#   intentional upgrade means pulling again and copying the new digest — never
+#   hand-editing one. Also recorded in docs/ARCHITECTURE.md §12.
 #
 # Versions and the reasoning behind them: docs/ARCHITECTURE.md §12.
 
@@ -28,7 +31,7 @@ services:
   # tests against. Following upstream's tested pairing beats picking the newer LTS.
   # ---------------------------------------------------------------------------
   openmrs-db:
-    image: mariadb:10.11.18
+    image: mariadb:10.11.18@sha256:de61fed4a40d3842f3ee09944ba52792156cfd9adf489b2cc670fc6ded28df8d
     restart: unless-stopped
     command: >
       mysqld
@@ -58,7 +61,7 @@ services:
   # Not publicly routed. Reached through the gateway (and later, Caddy).
   # ---------------------------------------------------------------------------
   openmrs-backend:
-    image: openmrs/openmrs-reference-application-3-backend:3.7.x
+    image: openmrs/openmrs-reference-application-3-backend:3.7.x@sha256:440bf92f4749faa38ca48a3e09f6651dee016089f0cbf6031dc5b1a979000ed7
     restart: unless-stopped
     depends_on:
       openmrs-db:
@@ -72,18 +75,54 @@ services:
       OMRS_CONFIG_CONNECTION_DATABASE: ${OMRS_DB_NAME}
       OMRS_CONFIG_CONNECTION_USERNAME: ${OMRS_DB_USER}
       OMRS_CONFIG_CONNECTION_PASSWORD: ${OMRS_DB_PASSWORD}
-      # Demo data is a build-step-1 convenience for verification only.
-      # It is turned OFF before the pilot carries real patients — see README.
+      # ⚠️ VERIFIED INERT AT DH-002. This variable does nothing in this image.
+      # `grep -oE "OMRS_[A-Z_]+" /openmrs/startup-init.sh /openmrs/startup.sh`
+      # inside the backend container lists every OMRS_* name those scripts read,
+      # and OMRS_CONFIG_ADD_DEMO_DATA is not among them. That grep covers the two
+      # startup scripts only — it does not prove no other mechanism exists — so
+      # the variable is kept, pinned to false, rather than removed.
+      #
+      # Practical consequence: do NOT rely on this to keep demo data out. No demo
+      # patients appeared on a boot with it set to false, but that is the default
+      # behaviour, not this switch working.
       OMRS_CONFIG_ADD_DEMO_DATA: ${OMRS_ADD_DEMO_DATA:-false}
     volumes:
       - openmrs-data:/openmrs/data
+    # Readiness, not liveness. The previous probe (`curl -f http://localhost:8080/openmrs`)
+    # reported HEALTHY 8 seconds into the first boot, while Liquibase was still running and
+    # the gateway was returning 502 — measured at DH-002. Two reasons it lied:
+    #
+    #   1. `curl -f` only fails on HTTP >= 400. That URL answers 302 during startup, which
+    #      `-f` treats as success. Changing the URL alone would not have fixed it.
+    #   2. `/openmrs` is served by Tomcat before OpenMRS itself has finished starting.
+    #
+    # So this asserts an explicit 200 from the REST session endpoint, which only answers once
+    # the OpenMRS application context is up. This matters beyond cosmetics: DH-005 and DH-007
+    # hang `depends_on: condition: service_healthy` off this container, and a probe that goes
+    # green early would start those services against an OpenMRS that cannot serve them.
+    #
+    # Timings come from a measured cold boot at DH-002: 49 minutes on 4 vCPU / 30 GB, almost
+    # all of it importing the distro's 23 OCL concept packages. start_period 30m + 60x30s
+    # tolerates ~60 minutes before the container is called unhealthy. Deliberately generous:
+    # nothing restarts on unhealthy, so the cost of being too tight is a misleading red
+    # status that invites someone to "fix" a working system mid-import.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/openmrs"]
-      interval: 20s
+      test:
+        - CMD-SHELL
+        - test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/openmrs/ws/rest/v1/session)" = "200"
+      interval: 30s
       timeout: 10s
-      retries: 30
-      start_period: 180s
-    networks: [internal]
+      retries: 60
+      start_period: 1800s
+    networks:
+      internal:
+        # The gateway image's nginx config hard-codes `http://backend:8080` — it is
+        # not templated from an env var (verified in the image at DH-002:
+        # /etc/nginx/templates/default.conf.template). Upstream's own compose names
+        # the service `backend`; ours is named for the service group it belongs to.
+        # An alias satisfies upstream's baked-in routing without us renaming services
+        # or hand-editing someone else's nginx config — same reasoning as ADR-010.
+        aliases: [backend]
 
   # ---------------------------------------------------------------------------
   # OpenMRS frontend — nginx serving the O3 single-page application.
@@ -94,7 +133,7 @@ services:
   # data layer considers available.
   # ---------------------------------------------------------------------------
   openmrs-frontend:
-    image: openmrs/openmrs-reference-application-3-frontend:3.7.x
+    image: openmrs/openmrs-reference-application-3-frontend:3.7.x@sha256:34352f481bf7e72b62406843925479042463fbbd7c8c3f7f5b9cda20b8390117
     restart: unless-stopped
     depends_on:
       - openmrs-backend
@@ -109,7 +148,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    networks: [internal]
+    networks:
+      internal:
+        # See the note on openmrs-backend: the gateway proxies /openmrs/spa/ to
+        # `http://frontend`, hard-coded.
+        aliases: [frontend]
 
   # ---------------------------------------------------------------------------
   # OpenMRS gateway — nginx, joins the SPA and the API on one origin.
@@ -124,7 +167,7 @@ services:
   # binds to loopback only, and it goes away when Caddy lands in step 8.
   # ---------------------------------------------------------------------------
   openmrs-gateway:
-    image: openmrs/openmrs-reference-application-3-gateway:3.7.x
+    image: openmrs/openmrs-reference-application-3-gateway:3.7.x@sha256:e0f59c5e361bb092d0f5b36b32a1ac314aaabdd95db9047c8ca3309d0f2d7eb3
     restart: unless-stopped
     depends_on:
       - openmrs-frontend

@@ -1,30 +1,40 @@
 # Current State — Daher Health
 
-**Assessed:** 2026-08-10 · **Target:** pilot-ready by 2026-09-01 (22 days)
+**Assessed:** 2026-08-11 (was 2026-08-10) · **Target:** pilot-ready by 2026-09-01 (21 days)
 **Method:** inspection of the actual repository and running environment, not the plan.
 
 ---
 
 ## 1. Honest summary
 
-**Nothing is running.** Four commits exist. The stack has never been started, because the Docker
-daemon is not reachable from this account (§4). One service group — MariaDB + OpenMRS O3 — is
-written and syntactically valid but **entirely unverified**: no image has been pulled, no
-container has started, no page has been loaded.
+**Step 1 now runs, and running it produced five defects that the syntax check could not.** The
+four images have been pulled and pinned by digest; MariaDB and OpenMRS O3 boot; the admin API
+authenticates; a test patient was registered, retrieved by name, by identifier, and through the
+FHIR R4 endpoint; and the data survived a `down`/`up` cycle.
 
-Do not read the tidy repository as progress. What exists is a well-reasoned plan, a validated
-compose file, and a set of decisions recorded (`DECISIONS.md`). Step 1 of 8 is written, not done.
+**What running it cost, and what it exposed** (details in §3a):
+
+1. The gateway could not reach the backend at all — it hard-codes upstream hostnames.
+2. The backend healthcheck reported **healthy 8 seconds in**, while the application was unusable.
+3. `OMRS_CONFIG_ADD_DEMO_DATA` is inert in this image.
+4. **The distro created 50 fictional demo patients** — the hazard `.env.example` warned about,
+   reached through a mechanism nobody had identified. See BLOCKER-2 in `PROJECT_STATE.md`.
+5. A cold boot takes **≈49 minutes**, nearly all of it importing 23 OCL concept packages.
+
+Verified by an agent, **not yet demonstrated to Liban** — DH-002 is not closed until he runs the
+steps himself. Steps 2–8 remain entirely unwritten. This is 1 of 8, now genuinely done rather
+than merely written.
 
 ---
 
 ## 2. What is running
 
-Nothing.
-
 | Service | State |
 |---|---|
-| MariaDB | not started |
-| OpenMRS (backend / frontend / gateway) | not started, images not pulled |
+| MariaDB | **running, healthy, verified** — 10.11.18, digest-pinned |
+| OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4, admin login works |
+| OpenMRS frontend | **running** — container healthy; the SPA has **not** been exercised in a browser |
+| OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
 | PostgreSQL | not written |
 | OpenELIS | not written |
 | Keycloak | not written |
@@ -33,18 +43,37 @@ Nothing.
 | Backup | not written |
 | Caddy | not written |
 
+⚠️ **This local stack contains 50 fictional demo patients** plus one deliberate test patient. It
+is a throwaway verification stack and must never be confused with a clean instance.
+
 ---
 
 ## 3. What is configured but unverified
 
-Everything written so far falls in this category.
-
-| Artefact | State | What "unverified" means here |
+| Artefact | State | What "unverified" still means here |
 |---|---|---|
-| `docker-compose.yml` | `docker compose config` passes | Syntax only. Healthcheck commands, the `mariadb` CLI name in 10.11, the `${VAR:?}` guards, the backend↔db handshake, and O3's 3-to-5-minute first-boot Liquibase run are all untested. |
-| `.env.example` | Complete for step 1 | Never used to boot anything. |
-| Image tags `3.7.x`, `mariadb:10.11.18` | Chosen from registry listings | Never pulled. **No digests recorded** — the compose file carries a `TODO`, not a fabricated digest. `3.7.x` is a moving branch tag, so until digests are pinned this deployment is not reproducible. |
-| `docs/ARCHITECTURE.md` | Current as of today | Three claims already corrected against upstream (gateway container, MariaDB line, notifier placement). Expect more corrections as reality arrives. |
+| `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, the `${VAR:?}` guards and the backend↔db handshake are all now exercised. The new backend healthcheck's *cold-start* behaviour has been observed on one warm boot only. |
+| `.env.example` | Used to boot | Two additions (`OMRS_ADMIN_PASSWORD`, corrected demo-data note) are documented but **not yet wired into compose** — DH-019. |
+| Image digests | **Pinned from a real pull, 2026-08-11** | Recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
+| O3 SPA in a browser | **Not exercised** | Every check so far went through REST/FHIR with `curl`. The single-page app, the French default locale, and the registration form have **not** been opened by a human. This is the gap Liban's own run closes. |
+| `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
+
+## 3a. What running it actually exposed
+
+| # | Finding | Evidence | Status |
+|---|---|---|---|
+| 1 | Gateway 502 on every request — its nginx template hard-codes `http://backend:8080` and `http://frontend`, which do not resolve to our service names | `backend could not be resolved` in the gateway log; `/etc/nginx/templates/default.conf.template` in the image | **Fixed** — network aliases, chosen over renaming services or hand-editing upstream's config (ADR-010 reasoning) |
+| 2 | Backend healthcheck reported `healthy` 8s into the first boot, while Liquibase ran and the gateway 502'd | `docker compose ps` vs. a 502 from the same instant | **Fixed** — explicit `= 200` test on the REST session endpoint. `curl -f` was the root cause: it passes on the 302 that URL returns during boot |
+| 3 | `OMRS_CONFIG_ADD_DEMO_DATA` is not read by the image | Absent from the `OMRS_*` names in `startup-init.sh` / `startup.sh` | Documented as inert in compose and `.env.example`; **not** removed |
+| 4 | **50 fictional demo patients created on first boot** | `SELECT COUNT(*) FROM patient` = 51 after boot; `referencedemodata-2.6.1.omod`; global property `referencedemodata.createDemoPatientsOnNextStartup` | **Open — BLOCKER-2**, human decision. Not acted on: touches patient tables and belongs to DH-003 |
+| 5 | Cold boot ≈ 49 min, dominated by 23 OCL concept-package imports | Deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z | Documented; healthcheck timings derived from it |
+| 6 | No OpenMRS admin password variable; image defaults to the published `Admin123`, applied **first boot only** | `OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in `startup-init.sh` | **Open — DH-019** |
+
+Two upstream oddities observed and deliberately not chased, recorded so they are not later
+mistaken for new breakage: `AddressConfigurationLoader` logs an ERROR that the distro's own
+`addressConfiguration.xml` "appears invalid" and skips it; and the gateway config carries a
+`/grafana → grafana:3000` block for a service this stack does not run (relevant at DH-016 — it
+should not be exposed publicly).
 
 ---
 

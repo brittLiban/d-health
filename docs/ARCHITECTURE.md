@@ -129,7 +129,7 @@ its *provisioning* is not.
 
 | Engine | Container | Databases | Why |
 |---|---|---|---|
-| MariaDB 11.4 LTS | `mariadb` | `openmrs` | The only supported path for OpenMRS + modules |
+| MariaDB 10.11 | `openmrs-db` | `openmrs` | The only supported path for OpenMRS + modules. 10.11, not 11.4 — the line the OpenMRS reference distribution tests against (ADR-011) |
 | PostgreSQL 14.4 (OpenELIS image) | `postgres` | `clinlims` (OpenELIS), `keycloak`, `adapter` | OpenELIS's own image, extended with an init script that also creates the Keycloak and adapter databases and roles |
 
 That is **two engines, two containers** — one more container than the brief, but the spirit of the
@@ -436,6 +436,23 @@ checklist tracks each item and who signed it, and it is unsigned until a clinici
 
 Exact tags are confirmed as each service is built; nothing uses `:latest`. Where an upstream
 publishes only a moving branch tag, I pin the **image digest** and record it here with its date.
+
+### Digests pulled and pinned — build step 1, 2026-08-10 (DH-002)
+
+These are repository digests as reported by the registry at pull time, copied verbatim into
+`docker-compose.yml`. They are the exact images that were booted and verified.
+
+| Image | Digest |
+|---|---|
+| `mariadb:10.11.18` | `sha256:de61fed4a40d3842f3ee09944ba52792156cfd9adf489b2cc670fc6ded28df8d` |
+| `openmrs/…-3-backend:3.7.x` | `sha256:440bf92f4749faa38ca48a3e09f6651dee016089f0cbf6031dc5b1a979000ed7` |
+| `openmrs/…-3-frontend:3.7.x` | `sha256:34352f481bf7e72b62406843925479042463fbbd7c8c3f7f5b9cda20b8390117` |
+| `openmrs/…-3-gateway:3.7.x` | `sha256:e0f59c5e361bb092d0f5b36b32a1ac314aaabdd95db9047c8ca3309d0f2d7eb3` |
+
+All four tags existed as listed — no substitutions were needed. The O3 backend runs on Amazon
+Linux 2; the frontend and gateway on Alpine 3.24. All three ship `curl`, and the MariaDB image
+ships the `mariadb` client binary, so the healthcheck commands in the compose file resolve
+(verified by `docker run`, not assumed).
 
 | Component | Tag | Why |
 |---|---|---|
