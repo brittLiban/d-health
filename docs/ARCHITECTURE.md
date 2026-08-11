@@ -51,10 +51,17 @@ template — see §8) and the encrypted nightly backup to object storage (§9).
 
 ## 2. Service topology
 
-Eleven containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
-MariaDB, OpenELIS webapp, OpenELIS FHIR, OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and
-the backup sidecar. (The diagram below collapses the OpenELIS frontend into its webapp box for
-legibility.)
+Twelve containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
+OpenMRS gateway, MariaDB, OpenELIS webapp, OpenELIS FHIR, OpenELIS frontend, PostgreSQL, Keycloak,
+the adapter, and the backup sidecar.
+
+**Corrected at build step 1:** O3 ships a fourth container, an nginx **gateway** that joins the SPA
+and the API on a single origin. Caddy proxies *to* it rather than replacing it — O3's frontend
+assumes the API lives at `/openmrs` on its own origin, and reimplementing that routing in Caddy
+means maintaining it by hand across every O3 upgrade. One container to avoid owning someone else's
+routing rules is a good trade.
+
+(The diagram below collapses the OpenELIS frontend into its webapp box for legibility.)
 
 ```
                           Internet
@@ -227,6 +234,22 @@ direction — how it notifies us that a result is ready.
 **Both are verified at build step 5, before adapter code is written**, and the answers get recorded
 here. If polling turns out to be the only reliable path on either side, the design below changes and
 I will say so rather than quietly building a poller described as a subscriber.
+
+**How this gets resolved — a commitment, not a preference.** This question does not get settled by
+a default. When step 5 arrives:
+
+1. The verification is presented as **primary evidence** — the specific `fhir2` module source files
+   and documentation consulted, quoted, with paths — not a conclusion of the form "I checked and it
+   works."
+2. If the answer is polling, the **watermark design is written out and read before it is built**:
+   what the watermark is keyed on, how it advances, what happens on a restart mid-window, what
+   happens when a record is back-dated or modified after the watermark passes it, and what the
+   observable failure mode is when the watermark is wrong.
+
+The reason for the ceremony: with polling, "no result is lost between the laboratory and a mother's
+chart" stops being a property of the transport and becomes a property of the watermark logic. That
+is load-bearing safety code, and it is reviewed as such by a human who understands it, not approved
+on the strength of an agent's summary.
 
 ### Adapter design (unchanged by that later decision)
 
@@ -418,7 +441,8 @@ publishes only a moving branch tag, I pin the **image digest** and record it her
 |---|---|---|
 | OpenMRS O3 backend | `openmrs/openmrs-reference-application-3-backend:3.7.x` + digest | Current released O3 line. Upstream publishes only branch tags here, hence the digest pin. |
 | OpenMRS O3 frontend | `openmrs/openmrs-reference-application-3-frontend:3.7.x` + digest | Must match the backend line |
-| MariaDB | `mariadb:11.4-ubi9` | Current LTS; OpenMRS-supported |
+| OpenMRS O3 gateway | `openmrs/openmrs-reference-application-3-gateway:3.7.x` + digest | nginx joining the SPA and API on one origin; upstream's tested routing |
+| MariaDB | `mariadb:10.11.18` | **Corrected from 11.4 at build step 1.** The OpenMRS reference distribution tests against the 10.11 line; following upstream's tested pairing beats picking the newer LTS on my own judgement |
 | OpenELIS | `itechuw/openelis-global-2:3.2.1.11` (+ matching `-database`, `-fhir`, `-frontend`) | Latest stable patch on the 3.2.1 line; the OpenMRS HIS distro integrates the 3.2.x line, so FHIR interop is exercised upstream |
 | PostgreSQL | `postgres:14.4` (via OpenELIS's DB image) | Pinned by OpenELIS's own image; we do not get to choose it |
 | Keycloak | `keycloak/keycloak:26.7.1` | Current stable |

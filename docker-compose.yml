@@ -1,0 +1,146 @@
+# Daher Health — v1 pilot stack
+#
+# Built incrementally, one service group at a time (see docs/ARCHITECTURE.md §13).
+# Currently at BUILD STEP 1: MariaDB + OpenMRS O3 standalone.
+#
+# Every image is pinned. No `:latest` anywhere. Where an upstream publishes only a
+# moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
+# the deployment is reproducible even though the tag is not.
+#
+#   TODO(step 1): digests are recorded once the images can be pulled — see README.
+#
+# Versions and the reasoning behind them: docs/ARCHITECTURE.md §12.
+
+name: daher-health
+
+x-common-env: &common-env
+  TZ: ${TZ:-Africa/Djibouti}
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # OpenMRS database — MariaDB.
+  #
+  # MariaDB rather than PostgreSQL: OpenMRS module SQL assumes MySQL. See
+  # docs/ARCHITECTURE.md §3 for why the brief's "one PostgreSQL" was not viable.
+  #
+  # 10.11 (not 11.x) because that is the line the OpenMRS reference distribution
+  # tests against. Following upstream's tested pairing beats picking the newer LTS.
+  # ---------------------------------------------------------------------------
+  openmrs-db:
+    image: mariadb:10.11.18
+    restart: unless-stopped
+    command: >
+      mysqld
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_general_ci
+    environment:
+      <<: *common-env
+      MYSQL_DATABASE: ${OMRS_DB_NAME:?set OMRS_DB_NAME in .env}
+      MYSQL_USER: ${OMRS_DB_USER:?set OMRS_DB_USER in .env}
+      MYSQL_PASSWORD: ${OMRS_DB_PASSWORD:?set OMRS_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${OMRS_DB_ROOT_PASSWORD:?set OMRS_DB_ROOT_PASSWORD in .env}
+    volumes:
+      - openmrs-db-data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mariadb --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute="SELECT 1;" $$MYSQL_DATABASE
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # OpenMRS backend — Tomcat, REST + FHIR R4 API, modules.
+  #
+  # Not publicly routed. Reached through the gateway (and later, Caddy).
+  # ---------------------------------------------------------------------------
+  openmrs-backend:
+    image: openmrs/openmrs-reference-application-3-backend:3.7.x
+    restart: unless-stopped
+    depends_on:
+      openmrs-db:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      OMRS_CONFIG_MODULE_WEB_ADMIN: "true"
+      OMRS_CONFIG_AUTO_UPDATE_DATABASE: "true"
+      OMRS_CONFIG_CREATE_TABLES: "true"
+      OMRS_CONFIG_CONNECTION_SERVER: openmrs-db
+      OMRS_CONFIG_CONNECTION_DATABASE: ${OMRS_DB_NAME}
+      OMRS_CONFIG_CONNECTION_USERNAME: ${OMRS_DB_USER}
+      OMRS_CONFIG_CONNECTION_PASSWORD: ${OMRS_DB_PASSWORD}
+      # Demo data is a build-step-1 convenience for verification only.
+      # It is turned OFF before the pilot carries real patients — see README.
+      OMRS_CONFIG_ADD_DEMO_DATA: ${OMRS_ADD_DEMO_DATA:-false}
+    volumes:
+      - openmrs-data:/openmrs/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/openmrs"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # OpenMRS frontend — nginx serving the O3 single-page application.
+  #
+  # French is the default locale here AND in the backend's global properties
+  # (the latter arrives with the Initializer config in build step 2). Both are
+  # needed: this one sets what the SPA opens in, the backend one sets what the
+  # data layer considers available.
+  # ---------------------------------------------------------------------------
+  openmrs-frontend:
+    image: openmrs/openmrs-reference-application-3-frontend:3.7.x
+    restart: unless-stopped
+    depends_on:
+      - openmrs-backend
+    environment:
+      <<: *common-env
+      SPA_PATH: /openmrs/spa
+      API_URL: /openmrs
+      SPA_DEFAULT_LOCALE: ${OMRS_DEFAULT_LOCALE:-fr}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # OpenMRS gateway — nginx, joins the SPA and the API on one origin.
+  #
+  # Kept (rather than folded into Caddy) because O3's frontend assumes the API
+  # lives at /openmrs on its own origin, and this is upstream's tested routing.
+  # At build step 8, Caddy terminates TLS and proxies to this — it does not
+  # replace it. Cost: one container. Benefit: we are not hand-maintaining O3's
+  # internal routing across upgrades.
+  #
+  # The published port is for build-step verification before TLS exists. It
+  # binds to loopback only, and it goes away when Caddy lands in step 8.
+  # ---------------------------------------------------------------------------
+  openmrs-gateway:
+    image: openmrs/openmrs-reference-application-3-gateway:3.7.x
+    restart: unless-stopped
+    depends_on:
+      - openmrs-frontend
+      - openmrs-backend
+    environment:
+      <<: *common-env
+    ports:
+      - "127.0.0.1:${OMRS_LOCAL_PORT:-8080}:80"
+    networks: [internal]
+
+volumes:
+  openmrs-db-data:
+  openmrs-data:
+
+networks:
+  # Nothing in this stack is reachable from outside except through the reverse
+  # proxy (step 8). Databases, the FHIR endpoints and the adapter stay internal.
+  internal:
+    driver: bridge
