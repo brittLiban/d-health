@@ -1,7 +1,8 @@
 # Daher Health — v1 Pilot Architecture
 
-**Status:** Decisions recorded 2026-08-10 (§0). **Awaiting go-ahead on build step 1** — this
-document changed substantially after those decisions and has not yet been read in full.
+**Status:** Decisions recorded 2026-08-10 (§0). **Build step 1 built and verified 2026-08-11**
+(DH-002) — §12 now carries real pulled digests, and §15 carries two items that only appeared once
+the stack actually ran.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-10
 
@@ -514,6 +515,8 @@ Where a v1 choice would need to change for multi-facility, it is noted inline in
 | WhatsApp Cloud API / BSP credentials | Building against mock; swap is `.env`-only. Line item stays marked **incomplete** until real credentials run end-to-end (§8) | Go-live |
 | `labonfhir` vs. hand-rolled transport | Deferred by decision; revisit after step 5 of §13 with real payloads in hand (§6) | Before v1.1 |
 | Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
+| **Demo content shipped by the O3 distro** — 50 fictional patients from the bundled `referencedemodata` module, plus 21 OCL packages under a `referenceapplication-demo` tree | **Open, human decision** (BLOCKER-2 in `PROJECT_STATE.md`). Observed at build step 1. `OMRS_CONFIG_ADD_DEMO_DATA=false` does not prevent it — the real control is an OpenMRS global property this repo does not set. Untangling "reference clinical content" from "sample data" is not an agent's call, and stripping the `-demo` tree may remove the lab-test concepts DH-006 needs | **Before the pilot VM is first booted** — the property self-clears after firing, so the fix only works at first boot |
+| **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
 | Clinical sign-off on all clinical content | `docs/CLINICAL-SIGNOFF.md`, unsigned (§11) | Go-live — **hard gate** |
 
 **Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
