@@ -1,6 +1,7 @@
 # Daher Health — v1 Pilot Architecture
 
-**Status:** REVIEWED — decisions recorded 2026-08-10. Cleared to begin build step 1.
+**Status:** Decisions recorded 2026-08-10 (§0). **Awaiting go-ahead on build step 1** — this
+document changed substantially after those decisions and has not yet been read in full.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-10
 
@@ -82,10 +83,12 @@ legibility.)
 │  (OpenMRS)    │ │ openelis │ keycloak │adapter│         │
 └───────┬───────┘ └────┬────────────────────────┘         │
         │              │                                   │
-    ┌───▼──────────────▼───┐                    ┌──────────▼─────────┐
-    │   backup (sidecar)   │──► S3-compatible   │ WhatsApp notifier  │──► Meta / BSP
-    │   nightly pg + mysql │    object storage  │ (see §8)           │
-    └──────────────────────┘                    └────────────────────┘
+    ┌───▼──────────────▼───┐              (notifier is a module *inside* the
+    │   backup (sidecar)   │──► S3-         adapter container, not a separate
+    │  nightly maria + pg  │    compatible  service — RapidPro dropped, §8)
+    └──────────────────────┘    storage                    │
+                                                           └──► Meta Cloud API / BSP
+                                                                (mock until credentials exist)
 ```
 
 **Note the shape of OpenMRS 3:** it is *not* one container. The O3 Reference Application is a
@@ -201,6 +204,29 @@ upgrade.
 
 Revisit trigger: once step 5 of §13 passes end-to-end, record the observed `ServiceRequest` and
 `DiagnosticReport` shapes here and make the call.
+
+### ⚠️ Known unknown this decision creates — how the adapter learns an order exists
+
+`labonfhir` is not only a mapper: it is also the thing that makes OpenMRS **emit** the order event.
+Building the transport by hand means we need our own trigger on the OpenMRS side, and I have not yet
+confirmed which mechanisms are actually available and reliable in the 3.7.x line:
+
+- **FHIR Subscription** via the `fhir2` module — clean, event-driven, and what §6's design below
+  assumes. Needs verification that outbound subscriptions are supported and stable.
+- **Polling** the FHIR `ServiceRequest`/`Task` endpoint on an interval — always available, but it
+  changes the adapter's shape: it needs a scheduler, a durable watermark, and an explicit
+  definition of "new since when" that has to interlock with the idempotency ledger. It also changes
+  what "no messages dropped" means, because the guarantee becomes a function of watermark
+  correctness rather than delivery.
+- An OpenMRS event module as a third option.
+
+The same question applies in reverse on the OpenELIS side: OpenELIS documents subscription
+*listeners* (it consuming Task/ServiceRequest/etc.); what I have **not** confirmed is the outbound
+direction — how it notifies us that a result is ready.
+
+**Both are verified at build step 5, before adapter code is written**, and the answers get recorded
+here. If polling turns out to be the only reliable path on either side, the design below changes and
+I will say so rather than quietly building a poller described as a subscriber.
 
 ### Adapter design (unchanged by that later decision)
 
