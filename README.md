@@ -184,7 +184,9 @@ curl -s -u admin:Admin123 "http://127.0.0.1:8080/openmrs/ws/fhir2/R4/Patient?ide
 `OMRS_ADD_DEMO_DATA=false` **does not prevent this** — that variable was verified inert at DH-002.
 The demo patients come from the `referencedemodata` module bundled in the O3 distribution image,
 driven by an OpenMRS global property this repo does not currently set. On a fresh boot you will
-find 50 fictional people (Betty Williams, Michael Turner, …) alongside anything you register.
+find 50 fictional people (Betty Williams, Michael Turner, …) alongside anything you register — so
+a patient count of 50 on an instance where you have registered nobody is expected, not a sign that
+something went wrong. They are created once, on the first boot; restarting does not add more.
 
 That is tolerable on a throwaway verification stack and **is not acceptable on the pilot
 instance**. Suppressing it is an open decision recorded as BLOCKER-2 in

@@ -79,24 +79,29 @@ should not be exposed publicly).
 
 ## 4. Blockers
 
-### BLOCKER-1 — Docker daemon unreachable · **Human Decision Required: Yes** · blocks everything
+**Blocker numbering lives in `PROJECT_STATE.md`.** This section summarises; that file is the
+source. (Earlier revisions of this file numbered blockers independently, which produced two
+different "BLOCKER-2"s. Fixed here — do not renumber in this file again.)
 
-`libanbritt` is not in the `docker` group; the socket is `root:docker 0660`. Every pull, build,
-and `up` fails with `permission denied`.
+### BLOCKER-1 — Docker daemon unreachable · ✅ RESOLVED 2026-08-10
 
-Two options, differing in security posture, which is why this is not an agent decision:
-- `sudo usermod -aG docker $USER` + re-login — convenient, permanent, and effectively grants root
-  on this machine (group members can bind-mount the host filesystem into a container).
-- Run docker under `sudo` per-invocation — no standing privilege, friction on every step.
+`libanbritt` was not in the `docker` group. Resolved by `usermod -aG docker $USER` plus a
+logout/reboot. Docker has since pulled images and run the full stack, so this is confirmed
+resolved by use, not just by inspection.
 
-The same question recurs on the pilot VM and deserves a more deliberate answer there.
+**Still live as a question for the pilot VM:** `docker` group membership is effectively root on
+the host. Decide it deliberately there rather than by habit.
 
-**This is the critical path.** Nothing after it can start.
+### BLOCKER-2 — The O3 distro creates 50 fictional demo patients · **Human Decision Required: Yes**
 
-### BLOCKER-2 — `fhir2` Subscriptions vs. polling unresolved · blocks the adapter
+Found at DH-002 by running the stack. `OMRS_ADD_DEMO_DATA=false` does not prevent it. Full detail,
+including the exact mechanism and what must be decided, is in `PROJECT_STATE.md`. Blocks the pilot
+instance, not local work.
 
-See `DECISIONS.md` ADR-005. Not startable-blocking today, but it gates DH-010 through DH-012, and
-those are the longest pole after SSO. Resolve it early, not when the adapter is due.
+### (Not numbered) — `fhir2` Subscriptions vs. polling unresolved · blocks the adapter
+
+See `DECISIONS.md` ADR-005, ticketed as DH-009. Not blocking today, but it gates DH-010 through
+DH-012, the longest pole after SSO. Resolve it early, not when the adapter is due.
 
 ---
 
