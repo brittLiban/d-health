@@ -152,9 +152,11 @@ a module inside the adapter (ADR-002). **Status on completion of the mock work i
 Last, deliberately — not fighting certificates while debugging applications. Removes the
 loopback port from step 1.
 
-### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · ⏸
-Grown incrementally from DH-002 onward. **DoD:** someone else could deploy a second instance
-without asking Liban anything.
+### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · 🔨 IN PROGRESS
+Started 2026-08-10 — covers project purpose, status warning, doc map, prerequisites, `.env` setup,
+and step-1 run + verification. Grows with each subsequent step.
+**DoD:** someone else could deploy a second instance without asking Liban anything. Not there yet —
+it currently documents step 1 only, and says so.
 
 ### DH-018 · Golden end-to-end demonstration · P0 · ⏸ (needs DH-013, DH-015)
 All eight steps of §8, demonstrated live to Liban, including the retry/restart no-duplicates check.
