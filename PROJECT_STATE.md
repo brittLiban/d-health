@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** DH-008 protocol plumbing verified; SSO activation blocked on authorization mapping
+**Updated:** 2026-08-13 · **Phase:** foundation re-verified; DH-025 crash reconciliation gates transport activation
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -93,16 +93,34 @@ dependency/Ruff/14 tests and maternity Ruff/5 safety tests passed; Compose varia
 XML, Git, image-tag policy, whitespace, and relative Markdown links passed. SSO activation itself
 was deliberately not attempted because BLOCKER-5 is unresolved.
 
+**Post-commit deep quality audit 2026-08-13:** rebuilt OpenMRS `on`/`off`, adapter, and backup
+images; adapter dependency/Ruff/14 tests and maternity Ruff/5 tests passed. All Compose variants,
+shell/JSON/XML/CSV syntax, Git integrity/whitespace, tracked-secret scan, image policy, and relative
+Markdown links passed. The normal graph has ten running services, six setup jobs at exit 0, only
+the OpenMRS gateway published on `127.0.0.1:8080`, and no backup scheduler by design. Configured
+OpenMRS/OpenELIS logins pass while `Admin123`/`adminADMIN!` fail; both FHIR metadata paths,
+OpenELIS frontend, OIDC/SAML metadata, adapter readiness/service token, all nine PostgreSQL tenancy
+cases, aggregate data state, and every timezone passed. Keycloak fresh import, repeated existing-
+realm reconciliation, and persisted-realm restart passed. Final project containers report zero
+OOM kills and no crash restarts.
+
+The same audit found two honest gaps. Both shipped Horiba CBC imports—not only Pentra60—fail on
+the existing `LYM#(Whole Blood)` description, so BLOCKER-4 now asks about Micros60 and Pentra60.
+More importantly, a durable unique ledger claim cannot resolve a crash after the target write but
+before `processing` becomes `completed`. No transport exists, so no message has been affected;
+DH-025 is now a P0 technical gate requiring target reconciliation and crash-point tests before
+DH-011 may activate.
+
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
-| 🆕 Raised while building | DH-021 (public keystore private key) |
+| 🆕 Raised while building | DH-021 (public keystore private key), **DH-025** (in-flight transport crash reconciliation) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5) |
-| 📋 Ready | **DH-016** (Caddy/TLS plumbing; real DNS/domain required for public verification) |
+| 📋 Ready | **DH-016** (Caddy/TLS plumbing; real DNS/domain required for public verification), **DH-025** (technical safety gate; activation still also needs BLOCKER-3) |
 | 🛑 Blocked on human decisions | **DH-004** (clinical form fields/sign-off), **DH-006** (prenatal panel/sign-off), **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-015, DH-018 |
 
@@ -116,12 +134,16 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 2. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
    first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
    implement an apparent default; see the evidence and options below.
-3. **Unblocked technical work:** DH-016's Caddy configuration can now be built; public certificate
-   issuance still needs the real domain and DNS. Continue DH-014's remaining backup layers when
-   the production encryption/off-site settings exist; DH-015's performed restore remains a pinned
-   P0 gate.
-4. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
-   a Horiba Pentra60; the upstream import is failing, but altering lab mappings is not an agent call.
+3. **Close DH-025 before any DH-011 transport activation.** An in-flight `processing` claim is
+   ambiguous after a crash. Reconcile by stable source correlation at the target; never steal it
+   on elapsed time alone. This technical work does not authorize routing a clinical order.
+4. **Other unblocked technical work:** DH-016's Caddy configuration can now be built; public
+   certificate issuance still needs the real domain and DNS. Continue DH-014's remaining backup
+   layers when the production encryption/off-site settings exist; DH-015's performed restore
+   remains a pinned P0 gate.
+5. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
+   a Horiba Micros60 and/or Pentra60; both upstream imports fail, but altering lab mappings is not
+   an agent call.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
 `docker compose down -v` — that destroys the volumes and the evidence.
@@ -148,7 +170,7 @@ exists. Each links to the detail rather than repeating it.
 | 10 | **DH-011 first-sync boundary** — import every historical order, only orders created after activation, or explicitly selected existing active orders plus new orders | This decides which patient orders enter the laboratory; it is clinical/scope surface, not a scheduler default | DH-011 |
 | 11 | **OpenELIS requester identity for routed orders** — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
 | 12 | **Cancellation contract once an order reaches OpenELIS** — revoke while retaining history, delete only while unaccepted, or leave it for explicit manual handling | Each choice changes laboratory workflow and audit/history. Upstream does not provide a completed reference behavior | DH-011 |
-| 13 | **Horiba Pentra60 analyzer scope** — does the birth centre laboratory use or plan to use this analyzer? Its upstream CBC test import currently aborts on a unique-description conflict | Disabling it or changing its test names/mappings changes laboratory configuration. The audit cannot infer facility equipment or clinical mappings | DH-023 / DH-006 |
+| 13 | **Horiba Micros60/Pentra60 analyzer scope** — does the birth centre laboratory use or plan to use either analyzer? Both upstream CBC imports currently abort on a unique-description conflict | Disabling either or changing its test names/mappings changes laboratory configuration. The audit cannot infer facility equipment or clinical mappings | DH-023 / DH-006 |
 | 14 | **SSO authorization matrix** — map `clinician`, `lab-tech`, and `sys-admin` to exact OpenMRS and OpenELIS native roles, and decide which staff classes are OpenMRS providers | These mappings grant access to clinical records and laboratory functions and change clinical attribution. An agent may not infer them from role labels | DH-008 / BLOCKER-5 |
 | 15 | **Pilot domain and DNS** — provide/control the real `BASE_DOMAIN` and point `emr`, `lab`, and `id` records at the pilot VM | Public certificate issuance cannot be demonstrated against `localhost` or invented facility DNS | DH-016 public verification |
 
@@ -297,23 +319,25 @@ is evidence of an unresolved upstream contract, not permission to choose one her
 No poller or clinical order was activated. DH-011 remains blocked; DH-010's safety skeleton remains
 healthy and unchanged.
 
-### BLOCKER-4 — OpenELIS Horiba Pentra60 analyzer import · 🛑 OPEN · **Human Decision Required: Yes**
+### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · 🛑 OPEN · **Human Decision Required: Yes**
 
 **Ticket:** DH-023
 
-**Problem:** on every observed OpenELIS webapp boot, upstream's `horiba-pentra60-cbc.csv` import
-attempts to update several test rows to the already-existing unique description
-`LYM#(Whole Blood)`. PostgreSQL rejects the update on `test_desc_uk`, the transaction aborts, and
-OpenELIS logs failed test-editor bridging for subsequent tests. Four occurrences were observed
-across 2026-08-11 and 2026-08-13. The live table has zero duplicate descriptions and the web/FHIR
-endpoints still answer, so uniqueness is preserved; the analyzer configuration is not verified.
+**Problem:** on every observed OpenELIS webapp boot, both `horiba-micros60-cbc.csv` and
+`horiba-pentra60-cbc.csv` attempt to update different test rows to the already-existing unique
+description `LYM#(Whole Blood)`. PostgreSQL rejects each update on `test_desc_uk`; each transaction
+aborts and OpenELIS logs failed test-editor bridging for subsequent rows. The live table has zero
+duplicate descriptions and the web/FHIR endpoints still answer, so uniqueness is preserved;
+neither analyzer configuration is verified.
 
-**Decision needed:** confirm whether the facility uses or plans to use the Horiba Pentra60.
+**Decision needed:** confirm whether the facility uses or plans to use the Horiba Micros60 and/or
+Pentra60.
 
-- If yes, the laboratory/clinical lead must confirm the intended test identities/mappings before
-  an upstream-compatible import fix is attempted and the analyzer workflow must be demonstrated.
-- If no, explicitly authorize excluding that analyzer configuration from this deployment; do not
-  infer that unused-looking clinical configuration may be removed.
+- For each analyzer in scope, the laboratory/clinical lead must confirm the intended test
+  identities/mappings before an upstream-compatible import fix is attempted, and its workflow must
+  be demonstrated.
+- For each analyzer out of scope, explicitly authorize excluding that configuration from this
+  deployment; do not infer that unused-looking clinical configuration may be removed.
 
 No test, mapping, or analyzer configuration was changed during the audit.
 
@@ -559,7 +583,7 @@ exist. This does not weaken the pinned gate: DH-014 production off-site verifica
 performed restore remain mandatory.
 
 ### DH-023 · Resolve OpenELIS Horiba analyzer import conflict · priority pending scope · 🛑 BLOCKED
-See BLOCKER-4. This cannot be sized or changed until Liban confirms whether the analyzer is in
+See BLOCKER-4. This cannot be sized or changed until Liban confirms whether either analyzer is in
 facility scope; any test/mapping change then requires laboratory/clinical confirmation.
 
 ### DH-024 · Deep fresh-deployment quality hardening · P0 · ✅ DONE 2026-08-13
@@ -719,7 +743,28 @@ and named uniqueness constraints inspected; operational rows remained 0; process
 audit file is mode `0600`; and the read-only root filesystem rejected a write. A restart returned
 healthy without reapplying the migration. No FHIR message was moved—that is DH-011/012.
 
-### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED (BLOCKER-3)
+**Boundary corrected by the post-commit audit:** the repository intentionally returns an existing
+claim's actual state, including `processing`; it does not yet reconcile that state after a process
+dies between an external write and `mark_completed`. The schema/skeleton remain complete for
+DH-010's transport-neutral scope, but “unique claim” must not be read as end-to-end exactly-once
+delivery. DH-025 closes that transport-specific gap before activation.
+
+### DH-025 · Reconcile ambiguous in-flight adapter writes · P0 · 📋 READY
+**Raised:** 2026-08-13 post-commit quality audit. **Human Decision Required: No** — technical
+correctness; does not select clinical content or workflow.
+
+A crash can occur (a) before an outbound write, (b) after the target accepted it but before the
+ledger commits `completed`, or (c) after completion. Cases (a) and (b) both restart as
+`processing`, but only (a) is safe to replay blindly. Elapsed time cannot distinguish them.
+
+**DoD before DH-011 activation:** correlate every outbound resource to the stable source event;
+on a stale claim, query the target first; mark complete if the write exists, retry only when its
+absence is proven, and leave the claim blocked/operator-visible if the answer is ambiguous. Test
+crashes immediately before and after the target write, concurrent claims, completed duplicates,
+dead letters, and restart/watermark behavior. `processing` and `dead_letter` must never be treated
+as completed duplicates.
+
+### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED (BLOCKER-3 + DH-025)
 The accepted 15-second inclusive watermark remains the implementation design. Activation is blocked
 on the first-sync boundary, a real OpenELIS requester identity, and the cancellation state contract;
 see BLOCKER-3. DH-006's signed-off test mappings are also required before an end-to-end pilot order
@@ -759,12 +804,13 @@ conversation), RapidPro, Orthanc/PACS, multi-facility.
 ```
 BLOCKER-1 (human) → DH-002 → DH-005 → DH-007 → DH-008 ──┐
                        │                                 ├→ DH-018
-DH-009 ✅ → DH-010 ✅ → DH-011 → DH-012 → DH-013 ─┘
+DH-009 ✅ → DH-010 ✅ → DH-025 → DH-011 → DH-012 → DH-013 ─┘
                        │
         DH-014 → DH-015  (run parallel with SSO, not after)
 ```
 
-Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed message shapes).
+Longest poles: DH-008 (SSO) and DH-025/DH-011–012 (crash-safe adapter transport and observed
+message shapes).
 
 ## Known bugs
 
@@ -777,9 +823,11 @@ Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed mes
 | 5 | Admin password defaults to the published `Admin123` | **Fixed and empty-volume verified — DH-019** |
 | 6 | The old throwaway volume still accepted `Admin123` after DH-019 landed | **Fixed in live state 2026-08-13** — rotated through the OpenMRS API; current configured password passes and default is refused |
 | 7 | Default `docker compose up -d` selected an unconfigured backup scheduler and would restart-loop | **Fixed — DH-022**; backup is an explicit profile until production settings exist |
-| 8 | OpenELIS Horiba Pentra60 test import aborts on a unique-description conflict | **BLOCKED — DH-023 / BLOCKER-4; Human Decision Required: Yes** |
+| 8 | OpenELIS Horiba Micros60 and Pentra60 imports abort on a unique-description conflict | **BLOCKED — DH-023 / BLOCKER-4; Human Decision Required: Yes** |
 | 9 | PostgreSQL health passed against the temporary init server, racing hardening into shutdown | **Fixed and exact empty-volume graph verified — DH-024** |
 | 10 | OpenELIS ignores `DEFAULT_PW` and shipped `adminADMIN!` even on empty volumes | **Fixed and empty-volume form-login verified — DH-024** |
+| 11 | Optional OpenELIS Odoo test-product mapping CSV is absent and logs an error | **Documented, not fabricated** — no Odoo service or billing integration is in v1; adding product/test mappings would be scope and laboratory configuration work |
+| 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Open — DH-025 P0 gate before transport activation**; no transport exists yet, so no message has been affected |
 
 ## Notes for next session
 

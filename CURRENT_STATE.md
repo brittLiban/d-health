@@ -27,6 +27,9 @@ throwaway stack retains 3 delivery + 4 postpartum beds created only for lifecycl
 **DH-010 now runs as well:** the adapter's transport-neutral safety skeleton migrated its real
 PostgreSQL database and is healthy with a durable unique ledger, dead-letter table, private audit
 volume, transient-only retry policy, and dependency-aware readiness. It does not move FHIR data yet.
+The unique claim protects concurrent delivery, but it does not by itself resolve a crash after an
+outbound write and before `processing` becomes `completed`; DH-025 now makes that reconciliation
+an explicit P0 gate before DH-011 transport activation.
 
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
@@ -45,6 +48,15 @@ distribution layer and therefore did not reach an existing data volume; the runt
 installs the exact release atomically. Existing-realm reconciliation is idempotent, fresh realm
 import passed in an isolated database, all service endpoint/authentication checks passed, and the
 final stack has zero restarts/OOM kills. SSO remains intentionally disabled pending BLOCKER-5.
+
+**Post-commit quality audit 2026-08-13:** all local image paths rebuilt, both Python suites passed
+again (adapter 14, maternity 5), all Compose/static/document checks passed, and the normal stack
+returned to ten running services plus six successful setup jobs. Authentication, both FHIR
+metadata paths, OIDC/SAML metadata, adapter service credentials, all nine PostgreSQL tenancy
+cases, aggregate persistence, UTC+3, host-port confinement, Keycloak fresh import, repeated
+reconciliation, and persisted-realm restart all passed. The log/code review expanded BLOCKER-4 to
+both shipped Horiba CBC imports and exposed DH-025's in-flight crash ambiguity. No clinical
+message is transported today, so the DH-025 defect has not affected a patient or test record.
 
 **What running it cost, and what it exposed** (details in §3a):
 
@@ -78,7 +90,7 @@ complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.
 | OpenMRS demo preflight | **one-shot job exited 0** — default patients-off path is inert; opt-in mode requires initialized `OpenMRS ID` metadata before backend startup |
 | OpenMRS maternity config | **one-shot job exited 0** — French backend metadata, admission ward, both bed types, additive-only bed lifecycle verified; committed counts are `0/0` placeholders |
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
-| OpenELIS webapp | **running, healthy, with a configuration warning** — serves HTTPS 8443; configured admin form login passes and `adminADMIN!` is refused; SAML properties are present but disabled; no browser workflow performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
+| OpenELIS webapp | **running, healthy, with configuration warnings** — serves HTTPS 8443; configured admin form login passes and `adminADMIN!` is refused; SAML properties are present but disabled; no browser workflow performed; upstream Horiba Micros60 and Pentra60 CBC imports abort on a duplicate target description (BLOCKER-4) |
 | OpenELIS admin password | **one-shot job exited 0** — runs after genuine webapp readiness, updates exactly one admin bcrypt hash, verifies it, and gates the frontend |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
@@ -125,22 +137,22 @@ complete.
 | 5 | Cold boot ≈ 49 min, dominated by 23 OCL concept-package imports | Deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z | Documented; healthcheck timings derived from it |
 | 6 | No OpenMRS admin password variable; image defaults to the published `Admin123`, applied **first boot only** | `OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in `startup-init.sh` | **Fixed and verified on an empty volume — DH-019** |
 | 7 | Existing throwaway OpenMRS volume still accepted `Admin123` because its container/DB predated DH-019 | Authenticated session probes against both configured and published passwords | **Fixed in live state 2026-08-13** — rotated through OpenMRS's password API; container recreated with current Compose env; configured secret passes and default is refused |
-| 8 | OpenELIS startup repeatedly aborts `horiba-pentra60-cbc.csv` processing while attempting to give several tests the existing unique description `LYM#(Whole Blood)` | Four boots across 2026-08-11/13; `test_desc_uk` violations followed by failed test-editor bridging. Live table has zero duplicate descriptions, so the transaction rollback protects uniqueness but the analyzer import is incomplete | **BLOCKER-4 — Human Decision Required: Yes.** Do not alter laboratory tests until Liban confirms whether that analyzer is in facility scope |
+| 8 | OpenELIS startup repeatedly aborts both `horiba-micros60-cbc.csv` and `horiba-pentra60-cbc.csv` while attempting to give different rows the existing unique description `LYM#(Whole Blood)` | Repeated `test_desc_uk` violations followed by failed test-editor bridging. Live table has zero duplicate descriptions, so each transaction rollback protects uniqueness but both analyzer imports are incomplete | **BLOCKER-4 — Human Decision Required: Yes.** Do not alter laboratory tests until Liban confirms whether either analyzer is in facility scope |
 | 9 | OpenELIS PostgreSQL health went green against the temporary `initdb.d` server; hardening then hit connection refused during its deliberate shutdown | Reproduced from empty volumes: `pg_isready` passed, hardening exited 2, final server started afterward | **Fixed and empty-volume verified — DH-024.** Health also requires PID 1 to be `postgres`; hardening exited 0 on the exact from-zero graph |
 | 10 | OpenELIS ignores `DEFAULT_PW`; fresh volumes still accepted published `adminADMIN!` | Actual CSRF/form login on both old and empty volumes; configured secret refused before repair | **Fixed and empty-volume verified — DH-024.** Post-webapp one-shot rotates/verifies bcrypt; frontend waits for exit 0; configured login passes and default is refused |
 
-Four upstream oddities observed and deliberately not chased, recorded so they are not later
+Known upstream oddities observed and deliberately not chased, recorded so they are not later
 mistaken for new breakage: `AddressConfigurationLoader` logs an ERROR that the distro's own
 `addressConfiguration.xml` "appears invalid" and skips it; and the gateway config carries a
 `/grafana → grafana:3000` block for a service this stack does not run (relevant at DH-016 — it
 should not be exposed publicly). The pinned OpenMRS base itself runs as UID 1001 while its
 root-owned Tomcat `conf` directory lacks `Catalina/localhost`, so Tomcat logs a non-blocking SEVERE
 when it cannot create that deployment directory; the same permissions are present in the untouched
-upstream image and REST/FHIR still pass. During OpenELIS FHIR startup, PostgreSQL also logs failed
-compatibility/pre-migration probes (`aurora_version()` and relations not yet created). The FHIR
-service then continues normal scheduler passes and its live mutual-TLS metadata request returns
-HTTP 200; treat the messages as this known non-blocking startup behaviour only while that endpoint
-continues to pass.
+upstream image and REST/FHIR still pass. Keycloak startup/restart makes a failed PostgreSQL
+`aurora_version()` compatibility probe before continuing healthy against ordinary PostgreSQL.
+OpenELIS also logs that the optional Odoo test-product mapping CSV is absent; this stack has no
+Odoo integration and v1 billing is out of scope, so no mapping was invented. Treat these as known
+non-blocking startup behaviours only while the corresponding live endpoints continue to pass.
 
 ---
 
@@ -185,11 +197,12 @@ state transition for a `ServiceRequest.replaces` discontinuation. Upstream's ref
 explicitly leaves panel support and discontinuation incomplete. These choices are recorded under
 **NEEDS LIBAN** in `PROJECT_STATE.md`; no default was inferred and no order transport was activated.
 
-### BLOCKER-4 — OpenELIS Horiba Pentra60 analyzer import · 🛑 OPEN
+### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · 🛑 OPEN
 
-The webapp remains reachable, but its upstream analyzer CSV is not importing cleanly. Whether that
-analyzer and its test mappings belong in this facility is laboratory/clinical scope; the audit did
-not disable, rename, or repair any tests. Exact evidence and options are in `PROJECT_STATE.md`.
+The webapp remains reachable, but both upstream analyzer CSVs fail on the same unique description.
+Whether either analyzer and its test mappings belong in this facility is laboratory/clinical
+scope; the audit did not disable, rename, or repair any tests. Exact evidence and options are in
+`PROJECT_STATE.md`.
 
 ### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN
 
@@ -229,7 +242,7 @@ and a README complete enough to hand the stack to another operator.
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
 | SSO across two apps | High | Protocol/client plumbing is verified, but role/provider mapping grants clinical access and cannot be inferred. Public-origin cookies also need DH-016 HTTPS. | Keep fail-closed off; obtain BLOCKER-5's explicit authorization matrix, then activate and demonstrate the full two-app session after Caddy. |
-| OpenMRS order polling safety | Medium | The accepted scheduler, watermark, ledger, and restart semantics are safety-relevant code — days, not hours. | ADR-005/DH-009 and DH-010's safety foundation are complete; implement and test the accepted poller in DH-011. |
+| OpenMRS order polling safety | **High** | The watermark is accepted, but a crash after an outbound write and before ledger completion leaves an ambiguous `processing` claim. Blind replay can duplicate an order; skipping can lose it. | DH-025 must implement target-side reconciliation and crash-point tests before DH-011 transport activation; never steal a stale claim on elapsed time alone. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |
 | Clinical sign-off not obtained | **High** | Gates *clinically live*, not pilot-ready — but a pilot with no sign-off path is a pilot that cannot proceed to use. | Get the order set and partograph fields in front of the clinical lead as soon as they are drafted, in week 1, not week 3. |

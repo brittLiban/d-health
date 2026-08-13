@@ -1,12 +1,19 @@
 # Watermark design — how the adapter learns an order or result exists
 
-**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation is built; the
-watermark and poller are not.** ADR-005 records the approval and the 15-second configurable
+**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation is built; DH-025
+must close in-flight crash reconciliation; the watermark and poller are not built.** ADR-005
+records the approval and the 15-second configurable
 interval. With polling, *"no result is lost between the laboratory and a mother's chart"* stops
 being a property of the transport and becomes a property of the logic below.
 
 **Written:** 2026-08-11 (DH-009a) · **Evidence:** ADR-005's appended evidence section
 **Covers:** the OpenMRS leg only. The OpenELIS leg is DH-009b, after DH-005.
+
+**Safety correction 2026-08-13 (DH-025):** a unique ledger claim prevents concurrent ownership;
+it does not resolve a crash after the target accepted a write but before the ledger recorded
+completion. The state-specific behavior below replaces the earlier shorthand that treated every
+existing ledger row as a completed duplicate. This preserves the accepted no-gap invariant and
+makes the previously implicit crash boundary explicit before transport code exists.
 
 ---
 
@@ -54,9 +61,21 @@ poll(resource_type):
     highest = since
 
     for resource in every page, in _lastUpdated order:
-        if ledger.already_processed(resource.id, resource.meta.versionId):
-            continue                  # duplicate — expected, not an error
-        process(resource)             # idempotent; writes to the ledger on success
+        claim = ledger.claim_or_get(resource.id, resource.meta.versionId)
+
+        if claim.state == "completed":
+            highest = max(highest, resource.meta.lastUpdated)
+            continue                  # completed duplicate — expected and safe
+
+        if claim.state == "dead_letter":
+            stop_before(resource)     # operator-visible; never advance past it
+
+        if claim.state == "processing" and not claim.is_new:
+            reconcile_target(resource)  # DH-025; see §5
+            stop_if_still_ambiguous()
+
+        process(resource)             # new claim or proven-safe retry
+        ledger.mark_completed(resource)
         highest = max(highest, resource.meta.lastUpdated)
 
     # advance ONLY after the whole page set is processed without error
@@ -71,8 +90,10 @@ Three rules that matter more than the code:
    recoverable, so the design never risks one.
 2. **Advance to the highest *processed* timestamp, not to "now".** "Now" would skip anything
    created during the poll cycle.
-3. **A failed item does not advance the watermark past itself.** It goes to the dead-letter table
-   (DH-010) and the watermark stops at the last contiguous success. Loud, not silent.
+3. **A failed or ambiguous item does not advance the watermark past itself.** A terminal failure
+   goes to the dead-letter table; an uncertain in-flight write remains `processing` until target
+   reconciliation resolves it. In either case the watermark stops at the last contiguous success.
+   Loud, not silent.
 
 ## 4. The boundary second — why `ge`, not `gt`
 
@@ -95,13 +116,25 @@ rely on that: `ge` is chosen explicitly so correctness does not depend on an inf
 
 ## 5. Restart mid-window
 
-Falls out of §3 rather than needing its own mechanism: the watermark is durable (adapter Postgres),
-advances only after success, and the lower bound is inclusive. A restart re-polls from the last
-fully-processed timestamp and re-presents some records the ledger has already seen.
+The watermark is durable (adapter Postgres), advances only after success, and the lower bound is
+inclusive. A restart re-polls from the last fully-processed timestamp and re-presents some records
+the ledger has already seen.
 
 **Required property:** the ledger must be keyed on something stable across a restart —
 `(resource_type, resource_id, meta.versionId)` — and the insert must be the thing that claims the
-work, with a unique constraint, so two adapter instances or a restart mid-write cannot double-apply.
+work, with a unique constraint, so two adapter instances cannot own it concurrently.
+
+**That unique constraint is necessary but not sufficient.** A crash has three relevant points:
+
+1. before the outbound write — retry is safe;
+2. after the target accepted the write but before `mark_completed` — blind retry can duplicate;
+3. after `mark_completed` — the completed duplicate is safe to skip.
+
+Cases 1 and 2 both restart as `processing`. Never steal that claim merely because a timeout
+expired. DH-025 requires a stable source correlation on every target resource and a target lookup:
+mark the ledger complete if the write already exists; retry only when absence is proven; keep the
+watermark stopped and require operator review when the target cannot give a definitive answer.
+Crash-point tests immediately before and after the target write are part of DH-025's DoD.
 
 ## 6. Back-dated and modified records — the honest gap
 

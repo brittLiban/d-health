@@ -13,6 +13,12 @@ It does **not** yet poll OpenMRS, map a `ServiceRequest`, call OpenELIS, return 
 WhatsApp. Those remain DH-011 through DH-013. A healthy adapter at this stage proves its safety
 foundation and dependencies, not the clinical round trip.
 
+It also does not yet reconcile a stale `processing` claim. If the process dies after an external
+write but before `mark_completed`, elapsed time alone cannot distinguish “safe to retry” from
+“already delivered.” DH-025 is a P0 gate on DH-011: query the target by stable source correlation,
+then complete, retry, or stop for operator review. Never silently treat `processing` or
+`dead_letter` as a completed duplicate.
+
 The audit model deliberately rejects unknown fields. It records identifiers and outcomes required
 for incident reconstruction, but never a FHIR payload, patient name, or clinical result value.
 Payloads that need operator recovery live in the access-controlled `dead_letters` database table,

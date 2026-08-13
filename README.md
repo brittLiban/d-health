@@ -10,12 +10,13 @@ one `docker-compose.yml`.
 > **Step 1 (MariaDB + OpenMRS O3)** is API-verified and Liban registered a test patient in the SPA.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
 > verified; configured admin authentication is form-verified, but its browser workflow has not
-> been exercised, and an upstream Horiba analyzer test import is blocked
-> pending confirmation that the device is in facility scope. **DH-008 SSO protocol plumbing** is
+> been exercised, and the upstream Horiba Micros60/Pentra60 analyzer imports are blocked
+> pending confirmation that either device is in facility scope. **DH-008 SSO protocol plumbing** is
 > running fail-closed: Keycloak has verified OpenMRS OIDC and OpenELIS SAML clients, but staff-role
 > mapping is a human authorization decision and SSO remains disabled.
 > **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
-> volume verified; it does not move FHIR messages yet. One-login SSO proof and the
+> volume verified; it does not move FHIR messages yet. In-flight crash reconciliation is now an
+> explicit P0 gate (DH-025) before transport may activate. One-login SSO proof and the
 > clinical/integration steps remain incomplete.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.

@@ -348,6 +348,20 @@ remains the appropriate point to reconsider it using observed payloads and runti
 authorises implementation of the adapter skeleton and OpenMRS order poller; it does not claim that
 either exists yet.
 
+### ADR-005 — implementation safety note appended 2026-08-13 (DH-025)
+
+The unique ledger claim required above prevents two workers from owning the same source event, but
+does not by itself resolve a crash after the target accepted a write and before the ledger recorded
+`completed`. Both “write never happened” and “write happened, completion commit did not” restart as
+`processing`; replaying the second can duplicate an order, while skipping the first can lose one.
+
+This does not change the accepted polling decision. It sharpens “advance only after contiguous
+successful processing”: stale `processing` is neither success nor a completed duplicate. Before
+DH-011 transport activation, DH-025 must attach stable source correlation to the target write,
+query the target on recovery, retry only when absence is proven, and remain blocked/operator-visible
+when the outcome is ambiguous. A timeout alone never authorises stealing the claim. Crash-point
+tests immediately before and after the outbound write are part of that gate.
+
 ---
 
 ## ADR-006 — Partograph ships as data entry only; no decision support

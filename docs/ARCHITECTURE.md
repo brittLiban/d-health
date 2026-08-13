@@ -3,8 +3,9 @@
 **Status:** DH-003's maternity foundation, build steps 1 and 3, the Keycloak provider, adapter
 safety skeleton, local backup path, PostgreSQL tenant isolation, and DH-008's fail-closed SSO
 plumbing are built and runtime-verified. SSO activation and the one-login demonstration remain
-blocked on the staff-to-native-role authorization matrix. See `CURRENT_STATE.md` for the exact
-verification boundary.
+blocked on the staff-to-native-role authorization matrix. DH-025's in-flight crash reconciliation
+is a P0 gate before adapter transport activation. See `CURRENT_STATE.md` for the exact verification
+boundary.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-13 (Africa/Djibouti)
 
@@ -326,6 +327,13 @@ retry. The non-root container has a read-only root filesystem and readiness chec
 the named audit volume. Fourteen containerised tests and the live migration/health check passed.
 Order polling and FHIR transport are still DH-011, not implied by a healthy skeleton.
 
+**Crash boundary found by the post-commit audit:** a unique `processing` claim prevents concurrent
+workers from both owning a message, but it cannot prove whether an external write occurred before
+a crash. A stale claim must not be stolen merely because time elapsed. DH-025 requires DH-011 to
+query the target by stable source correlation: mark complete if the target write exists, retry
+only when absence is proven, and remain blocked/operator-visible when the answer is ambiguous.
+Crash-point tests on both sides of the outbound write are required before transport activation.
+
 **Timezone:** every container and both databases run `TZ=Africa/Djibouti` (UTC+3). Clinical
 timestamps that silently differ by three hours between the EMR and the LIS are a patient-safety
 problem, not a cosmetic one.
@@ -621,7 +629,8 @@ implementation or pilot acceptance:
 | Keycloak session lifetimes | **Resolved for pilot (ADR-013):** 1h idle / 10h maximum / 5m token | Revisit after observed pilot workflow |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
 | Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |
-| Horiba Pentra60 analyzer test import | Upstream `horiba-pentra60-cbc.csv` repeatedly aborts on the existing unique test description `LYM#(Whole Blood)`. Endpoints remain reachable, but the analyzer configuration is not verified. **Human Decision Required: Yes** — confirm whether this analyzer is in facility scope before changing laboratory tests | DH-023 / laboratory configuration |
+| Horiba Micros60/Pentra60 analyzer test imports | Both upstream CBC CSVs repeatedly abort on the existing unique test description `LYM#(Whole Blood)`. Endpoints remain reachable, but neither analyzer configuration is verified. **Human Decision Required: Yes** — confirm whether either analyzer is in facility scope before changing laboratory tests | DH-023 / laboratory configuration |
+| Adapter in-flight crash reconciliation | Unique claiming is built, but a stale `processing` row cannot prove whether the target accepted the write. Target lookup and before/after-write crash tests are required; timeout-based claim stealing is forbidden | DH-025 before DH-011 activation |
 
 **Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
 to keep the surface area small enough to be stable by then. Anything that grows the container count
