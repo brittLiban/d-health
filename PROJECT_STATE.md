@@ -31,8 +31,8 @@ agent may invent.
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-009a**, **DH-009b**, **DH-019** (verified on an empty volume) |
-| 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look), **DH-007** (session lifetimes) |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-019** (verified on an empty volume) |
+| 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
 | 📋 Ready | DH-003 (maternity configuration), **DH-010** (adapter skeleton) |
@@ -45,9 +45,7 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 1. **DH-010 adapter skeleton.** ADR-005 is accepted: custom adapter, 15-second configurable
    OpenMRS order polling, inclusive watermark, and durable ledger. The result leg still has
    delivery and corrected-result gates before DH-012 may be trusted.
-2. **DH-007 session lifetimes** (item 5). The identity-provider foundation is verified, but its
-   provisional timeouts are not approved for a shared ward-terminal workflow.
-3. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
+2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
    and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
@@ -67,7 +65,7 @@ exists. Each links to the detail rather than repeating it.
 | ~~2~~ | ~~**Poll interval for the adapter**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 15 seconds, configurable by environment variable | — | DH-010 is unblocked |
 | ~~3~~ | ~~**Does voiding an order need to reach the laboratory?**~~ — ✅ **RESOLVED TECHNICALLY 2026-08-13.** A proper `DISCONTINUE` creates a new visible ServiceRequest carrying `replaces`; the adapter must forward it and must not filter on `status` | — | Nothing; implementation constraint recorded in `WATERMARK-DESIGN.md` §6 |
 | ~~4~~ | ~~**Revisit `labonfhir` (ADR-004)?**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** continue the custom adapter for v1; revisit after the golden flow | — | DH-010 is unblocked |
-| 5 | **Keycloak session lifetimes** — provisional values are 1h idle, 10h maximum, 5m access token | Shared-terminal security versus continuity during labour is a clinical workflow decision | DH-007 final acceptance / pilot |
+| ~~5~~ | ~~**Keycloak session lifetimes**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 1h idle, 10h maximum, 5m access token (ADR-013) | — | DH-007 complete |
 | 6 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / clinically live |
 | 7 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
 | 8 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
@@ -371,7 +369,7 @@ certificate from this same keystore, so replacing it is a coordinated change, no
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
 the clinical lead has time.
 
-### DH-007 · Keycloak + realm import · P0 · 🟢 BUILT AND VERIFIED 2026-08-13 — awaiting timeout decision
+### DH-007 · Keycloak + realm import · P0 · ✅ DONE 2026-08-13
 Keycloak 26.7.1 is digest-pinned and running in production mode against its PostgreSQL co-tenant.
 The committed `daher` realm imports automatically with French as default and English selectable;
 roles `clinician`, `lab-tech`, and `sys-admin`; confidential browser clients for OpenMRS and
@@ -392,10 +390,9 @@ OpenELIS; and a non-browser adapter service account. No staff users are committe
 **Not DH-008:** neither OpenMRS nor OpenELIS authenticates through Keycloak yet. One-login SSO is
 still unbuilt and must not be inferred from a healthy identity-provider container.
 
-**Human Decision Required: Yes — session lifetimes.** The committed 1h idle / 10h maximum / 5m
-access-token values are explicit provisional settings, not approved workflow. A midwife must not
-be dropped mid-labour, while a shared ward terminal must not remain authenticated overnight.
-Liban's decision is required before this ticket is final for pilot use.
+**Session lifetimes approved by Liban 2026-08-12 (ADR-013):** 1h idle / 10h maximum / 5m access
+token. These are the already-verified committed values. Revisit after observed pilot workflow;
+changing them remains a human workflow/security decision.
 
 ### DH-008 · SSO wiring · P0 · ⏸ (needs DH-003, DH-005, DH-007)
 ✅ **Re-estimate WITHDRAWN at DH-007 — the risk was mine, not real.** I briefly raised this ticket

@@ -206,9 +206,8 @@ against the realm until DH-008 is implemented and the one-login flow is demonstr
   trail rather than borrowing a clinician's account.
 - **Keycloak login theme is French by default**, English selectable.
 
-The committed 1-hour idle, 10-hour maximum, and 5-minute access-token lifetimes are provisional.
-They have clinical-workflow and shared-terminal security surface and require Liban's decision before
-pilot use; DH-007 records them as such rather than presenting them as approved defaults.
+The committed 1-hour idle, 10-hour maximum, and 5-minute access-token lifetimes were approved by
+Liban for the pilot (ADR-013). They remain a human workflow/security decision if later changed.
 
 Break-glass: a local OpenMRS admin account remains valid so the system is not unusable if Keycloak
 fails to start. This is a deliberate tradeoff (one credential outside SSO) and is documented in the
@@ -571,7 +570,7 @@ implementation or pilot acceptance:
 | `labonfhir` vs. hand-rolled transport | **Resolved for v1:** custom adapter; revisit after the golden flow (§6) | After golden flow |
 | Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
 | Demo patients | **Resolved:** `OMRS_DEMO_PATIENTS=off|on`, default `off`, selects the distribution-source global-property overlay. Demo concept content remains a separate DH-003 seam because removing it may remove lab vocabulary | DH-003 |
-| Keycloak session lifetimes | Provisional 1h idle / 10h maximum / 5m token; **Human Decision Required: Yes** | DH-007 final acceptance / pilot |
+| Keycloak session lifetimes | **Resolved for pilot (ADR-013):** 1h idle / 10h maximum / 5m token | Revisit after observed pilot workflow |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
 | Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |
 

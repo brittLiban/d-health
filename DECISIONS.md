@@ -463,3 +463,28 @@ on (a) the prenatal lab order set and (b) the partograph form fields.
 If a ticket's completion would result in real patient data flowing through the system, stop and
 flag it. That is a human decision, not a technical one. Documentation uses the word
 "pilot-ready" specifically, never "launched" or "in production."
+
+---
+
+## ADR-013 — Keycloak session lifetimes for the pilot
+
+**Date:** 2026-08-12 (2026-08-13 in Djibouti) · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** Shared ward terminals create a real tradeoff: a short session can interrupt a
+midwife's work during labour, while an overnight authenticated session can expose patient records
+to the next person using the terminal. DH-007 therefore committed explicit provisional values but
+did not present them as approved workflow.
+
+**Decision.** For the pilot, use:
+
+- **1 hour** SSO idle timeout (`ssoSessionIdleTimeout = 3600`);
+- **10 hours** maximum SSO session (`ssoSessionMaxLifespan = 36000`); and
+- **5 minutes** access-token lifetime (`accessTokenLifespan = 300`).
+
+These values are already present in the committed realm and were runtime-verified during DH-007;
+approval requires no configuration mutation. Revisit them after observed pilot workflow and the
+shared-terminal operating procedure are available. Changing them later is a human workflow and
+security decision, not an inert tuning change.
+
+**Consequence.** DH-007 is complete. This accepts the identity-provider foundation only; DH-008
+must still wire and demonstrate one login across OpenMRS and OpenELIS.

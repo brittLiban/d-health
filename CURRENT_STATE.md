@@ -48,7 +48,7 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | OpenELIS webapp | **running** — serves HTTPS 8443; no OpenELIS login performed yet |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | running, **not exercised** — it has no route until Caddy (DH-016) |
-| Keycloak | **running, healthy, realm verified** — DH-007 technical foundation; session lifetimes await Liban |
+| Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
 | Adapter | not written |
 | WhatsApp notifier | not written |
 | Backup | **local path verified end-to-end** — both engines, realm, volumes, manifest, encryption, scheduler; off-site upload unverified; no retained test archive; no restore performed |
@@ -74,7 +74,7 @@ not complete.
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. The French default locale was **not** reported on either way — still open, and a DH-003 concern. |
 | OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
-| Keycloak realm | **Runtime verified** | Provider foundation only. Session lifetimes need Liban's decision; OpenMRS/OpenELIS SSO wiring is DH-008. |
+| Keycloak realm | **Runtime verified** | Provider foundation only. Pilot session lifetimes are approved (ADR-013); OpenMRS/OpenELIS SSO wiring is DH-008. |
 | `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
 
 ## 3a. What running it actually exposed

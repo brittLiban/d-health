@@ -46,12 +46,12 @@ facility's actual staff list. Usernames in a git repository would be both a secu
 clinical-records problem. The break-glass local admin lives in OpenMRS itself, deliberately outside
 SSO, so that Keycloak failing does not lock the clinic out of its own records.
 
-## ⚠️ Not decided — session lifetimes
+## Session lifetimes — accepted for the pilot
 
 `ssoSessionIdleTimeout` (1h), `ssoSessionMaxLifespan` (10h) and `accessTokenLifespan` (5m) are
-**starting values, not decisions**. They are a clinical-workflow question as much as a security one:
-a midwife mid-labour must not be logged out, but a shared ward terminal must not stay open all
-night. Flagged for Liban in `PROJECT_STATE.md` rather than presented as settled.
+approved by Liban for the pilot (ADR-013). They balance continuity during labour with exposure on
+a shared ward terminal. Revisit after observing pilot workflow; do not silently tune them as inert
+technical constants.
 
 ## Verifying an import actually worked
 
