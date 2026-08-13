@@ -119,7 +119,7 @@ complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.
 | Keycloak SSO config | **one-shot job exited 0** — non-deleting client/mapper reconciliation; idempotency exercised twice |
 | Adapter | **running, healthy, DH-010 + DH-025 core verified** — ledger/dead-letter/retry/audit plus process-lifetime recovery fence and fail-closed crash coordinator; concrete OpenELIS correlation binding and all FHIR transport remain absent |
 | WhatsApp notifier | not written |
-| Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
+| Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path is verified end-to-end, and **a restore has now actually been performed** (DH-015, `backup/restore-drill.md`): archive decrypted, all seven manifest hashes re-verified, restored into an isolated scratch stack, and patient `10001MJ` read back through the OpenMRS REST API. Off-site upload remains unverified; the drill archive and passphrase were destroyed afterwards. Two acceptance legs (a lab result, an SSO login) remain unexercised, so DH-015 is **performed, not done** |
 | Caddy | not written |
 
 ⚠️ **This local stack contains 100 fictional demo patients** plus two deliberate test patients (one
@@ -263,7 +263,7 @@ and a README complete enough to hand the stack to another operator.
 
 | Risk | Severity | Why | Mitigation |
 |---|---|---|---|
-| **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
+| **Restore drill gets squeezed last** | **Reduced 2026-08-13** | Was the top risk. A real restore has now been performed and documented, and it found two defects — `pg_restore --clean` silently losing rows over the pre-populated OpenELIS image, and a half-initialised Postgres at exit 127. | Largely mitigated. Residual: the drill must be **re-run** once a lab result exists and SSO is active, and off-site is still unexercised. Budget that re-run rather than assuming DH-015 is closed. |
 | SSO across two apps | High | Protocol/client plumbing is verified, but role/provider mapping grants clinical access and cannot be inferred. Public-origin cookies also need DH-016 HTTPS. | Keep fail-closed off; obtain BLOCKER-5's explicit authorization matrix, then activate and demonstrate the full two-app session after Caddy. |
 | OpenMRS order polling safety | **High** | DH-025's recovery core and crash tests pass, but safety still depends on the concrete OpenELIS write carrying its correlation and a demonstrated exact target lookup. | Bind and demonstrate correlation attach/query in DH-011 before activation; multiple matches or unavailable lookup remain ambiguous and fail closed. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |

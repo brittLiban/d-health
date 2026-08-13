@@ -42,7 +42,8 @@ and all 14 tests. Shell syntax, realm JSON, OpenMRS XML, Git integrity/whitespac
 patterns, image-tag policy, and every relative Markdown link passed static checks. A completed
 two-container `daher-demotest` password-verification stack was found and stopped without deleting
 its containers or volumes. The backup scheduler remains intentionally absent from the running
-stack until production encryption/off-site settings are supplied; DH-015 remains unperformed.
+stack until production encryption/off-site settings are supplied; DH-015 was unperformed at that
+time — it has since been **performed 2026-08-13**, see the DH-015 ticket.
 
 **Deep quality verification 2026-08-13:** both local images rebuilt; adapter dependency consistency,
 Ruff lint/format, and all 14 tests passed. OpenMRS REST/FHIR and configured admin authentication,
@@ -78,7 +79,8 @@ mapping was changed.
 A fresh local-only encrypted backup also passed decrypt, seven-entry manifest/hash validation,
 three `pg_restore --list` reads, MariaDB patient DDL/data checks, Keycloak JSON parsing, and both
 volume archive reads; the ephemeral-key archive/status were removed. This is not off-site or a
-restore, so DH-014/DH-015 remain open at their existing boundary.
+restore, so DH-014/DH-015 remained open at that time. DH-015 has since been **performed
+2026-08-13** with partial coverage; DH-014's off-site leg is still unexercised.
 
 **DH-008 deep verification 2026-08-13:** both OpenMRS backend targets built with official OAuth2
 Login 1.5.0 from the exact release commit. The live persistent volume received the byte-identical
@@ -164,7 +166,8 @@ target, not the page text, and always run the wrong-password control.
 | 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
-| 📋 Ready, agent-buildable now | **DH-015** (restore drill — pinned P0, top of START HERE), **DH-021**, **DH-016** configuration (public certificates wait on #15 DNS) |
+| 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
+| 📋 Ready, agent-buildable now | **DH-017** (README), **DH-021** (keystore), **DH-016** configuration (public certificates wait on #15 DNS) |
 | 🗓 Blocked on the birth-centre meeting | **DH-004**, **DH-006** (clinical sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
@@ -173,12 +176,11 @@ target, not the page text, and always run the wrong-password control.
 
 Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
-1. **DH-015, the performed restore drill — the highest-value unblocked P0.** It is pinned, it needs
-   only the two databases (both exist), and `CURRENT_STATE.md` §7 names "restore drill gets squeezed
-   last" as the single highest risk to 1 September. Catch: DH-014's verified archive was deleted
-   because its ephemeral key was not retained, so the drill needs a fresh local backup with the key
-   held for the duration.
-2. **Then DH-017 (README) and DH-021 (keystore).** Neither needs the birth-centre meeting.
+1. ~~**DH-015, the performed restore drill.**~~ ✅ **PERFORMED 2026-08-13** — see the ticket below and
+   `backup/restore-drill.md`. It found two real defects. It is **not closed**: re-run it once a lab
+   result exists and SSO is active, and answer the §6 question about hand-entering a result.
+2. **DH-017 (README) and DH-021 (keystore) are now the top unblocked work.** Neither needs the
+   birth-centre meeting.
 3. **Do not activate SSO or DH-011 transport.** BLOCKER-5 and BLOCKER-3's two remaining legs are
    meeting-blocked (see the 🗓 table above). ADR-015 closed the first-sync boundary only — that is
    one leg of three, not permission to build the poller.
@@ -787,12 +789,38 @@ Keycloak realm export → encrypted → S3-compatible. **Scheduled deliberately 
 with SSO, not after the adapter** — it only needs databases, and putting it last is how pinned
 work gets squeezed (`CURRENT_STATE.md` §7).
 
-### DH-015 · Restore drill, performed and documented · P0 🔒 · ⏸ (needs DH-014)
-Restore into a scratch stack; verify a known test patient, a known lab result, and a working SSO
-login. **"The dump ran" is not this ticket.** A restore that only covers PostgreSQL would return a
-working lab system and no patient records; that check must be explicit in the still-unwritten
-`backup/restore-drill.md`.
-**DoD:** drill actually performed, output recorded, dated.
+### DH-015 · Restore drill, performed and documented · P0 🔒 · 🔨 PERFORMED 2026-08-13, PARTIAL COVERAGE
+**Performed, not `DONE`.** Full evidence in `backup/restore-drill.md`.
+
+A real encrypted archive was decrypted, all seven component SHA-256s independently re-verified
+against its manifest, and the contents restored into an isolated `daher-restore-*` scratch stack
+with no published host ports. The clinical record was then read back **through the application**:
+`GET /ws/rest/v1/patient?q=10001MJ` returned `10001MJ - Test-DH002 Verification`, FHIR R4 metadata
+answered 200, the configured admin authenticated, `Admin123` stayed refused, and OAuth 2.0 Login
+1.5.0 came back `started=false` — SSO remained fail-closed across the restore. The OpenELIS admin
+bcrypt hash was byte-identical to live.
+
+**Two defects found, both now documented with the corrected procedure:**
+
+1. `pg_restore --clean --if-exists` over the OpenELIS image's pre-populated `clinlims` produced
+   **213 errors including failed row inserts** — silent data loss behind a plausible-looking run.
+   The restore must **drop and recreate** each database first; done that way, all three restored at
+   exit 0 with zero errors.
+2. A scratch/recovery stack must gate on `/proc/1/comm = postgres` (DH-024 finding 9 reproduces
+   otherwise) and must mount `harden-tenancy.sh`, or init dies at exit 127 *after* creating the
+   databases.
+
+**The measurement that matters for recovery time:** restoring the database *with* the
+`openmrs-data` volume reached first HTTP 200 in **41 seconds**, against the documented ≈49-minute
+cold boot dominated by OCL imports. The volume is not optional.
+
+**Why this is not `DONE`.** Two acceptance legs could not be exercised and the drill must be
+re-run once they can: **a known lab result** (none exists anywhere — `clinlims.analysis`, `.sample`,
+`.patient` are all 0 rows on live and restored alike, because DH-011/DH-012 are blocked) and **a
+working SSO login** (fail-closed pending BLOCKER-5). Off-site remains unexercised (DH-014).
+🗓 A question for Liban is recorded in the drill doc §6: whether to hand-enter a result in the
+throwaway stack to close the first leg. ADR-016 makes manual entry the v1 workflow, but it writes
+fabricated clinical values, so it was not an agent's call to make.
 
 ### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · ✅ DONE 2026-08-13
 Processed-message ledger keyed on stable source event ID with a unique constraint; append-only
