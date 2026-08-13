@@ -9,7 +9,8 @@ one `docker-compose.yml`.
 >
 > **Step 1 (MariaDB + OpenMRS O3)** is API-verified and Liban registered a test patient in the SPA.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
-> verified; its UI has not been exercised, and an upstream Horiba analyzer test import is blocked
+> verified; configured admin authentication is form-verified, but its browser workflow has not
+> been exercised, and an upstream Horiba analyzer test import is blocked
 > pending confirmation that the device is in facility scope. **DH-007 Keycloak** is running with
 > the French-first realm, roles, clients, secret interpolation, readiness, and restart persistence
 > verified.
@@ -94,6 +95,12 @@ Keep `.env` mode `0600`: it contains database, application, and OIDC client cred
 
 The compose file uses `${VAR:?}` guards, so a missing required value fails loudly at startup
 instead of silently falling back to a default password.
+
+OpenELIS password policy is narrower than a general password generator: its admin password must
+use only letters, numbers, and `* $ # !`, must be at least seven characters, and must contain at
+least one of those four special characters. `.env.example` includes a compliant generation command.
+DH-024 verified that the image ignores its documented `DEFAULT_PW`; a post-bootstrap one-shot now
+rotates and verifies the database hash before the OpenELIS frontend may start.
 
 ### ⚠️ The OpenMRS admin password is a first-boot-only setting
 
@@ -210,14 +217,26 @@ records. `on` deliberately creates 50 fictional people and is for training/demo 
 Choose this before first boot. The module zeroes its property after firing and Initializer leaves
 an unchanged file alone, but switching an existing database from `off` to `on` changes that file's
 checksum and can inject 50 fictional patients. Switching to `off` never removes existing patients.
-The original local verification volume predates the switch and still contains 50 fictional
-patients; it is a throwaway test stack, not a clean pilot database.
+The original local verification volume predates DH-024's sole-writer correction and now contains
+100 fictional patients from two 50-row demo batches, plus two separate deliberate test patients.
+It is a throwaway test stack, not a clean pilot database; no patient rows were deleted during the
+fix.
 
 `OMRS_DEMO_CONTENT=on|off` is separate. Its default `on` preserves the O3 reference distribution
 as shipped, including `BasicLabTests` and other vocabulary that later mapping may need. `off`
 selects a locally built backend target whose exact digest-pinned upstream base omits only the
 `referenceapplication-demo` source directories. It does not delete concepts or other metadata
 already imported into an existing database, and it is not a substitute for clinical sign-off.
+
+Demo patients require a deliberate two-stage setup because the upstream generator runs before its
+`OpenMRS ID` metadata is available on a fresh database:
+
+1. Boot once with `OMRS_DEMO_CONTENT=on` and `OMRS_DEMO_PATIENTS=off`; wait for healthy.
+2. Change only `OMRS_DEMO_PATIENTS=on` and run `docker compose up -d` again.
+
+DH-024's isolated proof created exactly 50 patients with one creator and reset the sole trigger to
+zero. A database preflight rejects first-boot `on/on`; the backend separately rejects
+content-off/on. Neither invalid state can silently reset the trigger with zero requested patients.
 
 ### Maternity ward and bed counts
 

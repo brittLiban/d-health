@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** DH-003 maternity foundation complete; steps 1 and 3 running; SSO next
+**Updated:** 2026-08-13 · **Phase:** DH-024 fresh-deployment hardening verified; steps 1 and 3 running; SSO next
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -60,11 +60,28 @@ empty-volume stack demonstrated no-click first boot with demo patients/content o
 applicable, all three setup jobs exited 0, and every container reported zero restarts and zero OOM
 kills. Exact evidence and the remaining visible-browser-language check are in DH-003 below.
 
+**DH-024 fresh-deployment audit 2026-08-13:** found and fixed three paths that looked healthy but
+were unsafe on real or empty volumes. OpenMRS had two writers for the demo-patient trigger and this
+throwaway database received a second 50-row batch; upstream's trigger is now removed from the local
+derived base so `patients.on/off.xml` is authoritative. A direct first-boot `on/on` also proved the
+upstream generator runs before its metadata is ready; the new read-only preflight refuses that
+state, while the enforced two-stage path produced exactly 50 patients. OpenELIS PostgreSQL
+readiness now rejects the temporary init server, and a post-webapp password job replaces/verifies
+the ignored published admin hash before the frontend starts. The exact empty-volume OpenELIS graph
+passed: database healthy, hardening 0, webapp healthy, password job 0, frontend running, configured
+form login accepted, `adminADMIN!` refused. No existing patient row, laboratory test, or analyzer
+mapping was changed.
+
+A fresh local-only encrypted backup also passed decrypt, seven-entry manifest/hash validation,
+three `pg_restore --list` reads, MariaDB patient DDL/data checks, Keycloak JSON parsing, and both
+volume archive reads; the ephemeral-key archive/status were removed. This is not off-site or a
+restore, so DH-014/DH-015 remain open at their existing boundary.
+
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022** |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
@@ -118,8 +135,8 @@ corrected-result behavior remain empirical gates, not assumptions.
 
 **Two security items I fixed without asking** (disabling exposure needs no permission; restoring it
 would): upstream's `mail.bcc`/`mail.from` default of a third-party gmail address is blanked, and
-every published default credential found so far is now guarded so it fails loudly instead of
-shipping — OpenMRS admin (DH-019), the OpenELIS DB roles, and OpenELIS's `DEFAULT_PW`.
+every published default credential found so far is now actively refused — OpenMRS admin (DH-019),
+the OpenELIS DB roles, and OpenELIS admin via DH-024's verified post-bootstrap bcrypt gate.
 
 ---
 
@@ -424,16 +441,19 @@ retire, void, or delete call: existing objects must match or deployment stops fo
 | Raising counts only adds the delta | ✅ `2/2 → 3/4` created `1/2` |
 | Lowering deletes nothing | ✅ `3/4 → 1/1`, then committed `0/0`, created zero and retained all 3 delivery + 4 postpartum beds |
 | French backend configuration | ✅ `default_locale=fr`, `reporting.defaultLocale=fr`, allowed list begins with `fr` |
-| Demo controls remain independent | ✅ fresh `OMRS_DEMO_PATIENTS=off`, `OMRS_DEMO_CONTENT=off` boot had zero patients and zero copied `referenceapplication-demo` directories |
+| Demo controls remain explicit | ✅ fresh `off/off` boot had zero patients and zero copied `referenceapplication-demo` directories. A metadata preflight requires one completed content-on/patients-off boot before `patients=on`; the isolated two-stage path then created exactly 50 patients from one creator and reset its sole trigger |
 | Runtime identity / safety | ✅ backend target and process uid 1001; seed uid 65534, read-only root, all capabilities dropped; conflicts fail without writes |
 
 The exact pinned upstream backend is the base of local `on`/`off` build targets because some
-Initializer loaders ignore its filename-exclusion API. `off` affects what a new/restarted image
-loads; it deliberately does not delete content already imported into a database. The scratch
-project and its volumes were removed after verification. The existing local throwaway stack now
-contains the 3+4 lifecycle-test beds; committed counts remain explicit zero placeholders pending
-real facility numbers (ADR-007). A human has not yet reported whether the SPA visibly opens in
-French, so that browser observation remains unverified rather than being inferred from config.
+Initializer loaders ignore its filename-exclusion API. DH-024 removed only upstream's competing
+demo-patient trigger from that base, leaving the mounted `patients.on/off.xml` as its sole writer;
+the other six properties in that upstream file remain. `content=off` affects what a new/restarted
+image loads and deliberately does not delete content already imported into a database. The existing
+local throwaway stack now contains 100 fictional demo patients, two deliberate test patients, and
+the 3+4 lifecycle-test beds; no patient or bed row was deleted. Committed counts remain explicit
+zero placeholders pending real facility numbers (ADR-007). A human has not yet reported whether
+the SPA visibly opens in French, so that browser observation remains unverified rather than being
+inferred from config.
 
 ### DH-004 · ANC + partograph forms · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
 Data-entry only. 🔒 No alert lines, no action lines, no prolonged-labour flagging (ADR-006).
@@ -461,8 +481,9 @@ Five services added, all digest-pinned. Verified by running, not by `compose con
    properties unsubstituted, **both** connectors stayed down while the log said "Server startup in".
 4. The OpenELIS FHIR endpoint requires **mutual TLS** — see ADR-005 Q5. Load-bearing for DH-011/012.
 
-**Not done here:** the frontend is unexercised, and no OpenELIS login has been performed. Both need
-either Caddy (DH-016) or a temporary port, and neither is required by this ticket.
+**Later DH-024 evidence:** the configured admin login is now exercised through the real CSRF/form
+path on both current and empty volumes, and published `adminADMIN!` is refused. The frontend's
+internal HTTP endpoint answers; no human browser workflow has been performed.
 
 ### DH-020 · Restrict PUBLIC on the OpenELIS database · P1 · ✅ DONE 2026-08-13
 Raised at DH-005 after the `adapter` role could connect to `clinlims` through PostgreSQL's default
@@ -496,6 +517,38 @@ performed restore remain mandatory.
 ### DH-023 · Resolve OpenELIS Horiba analyzer import conflict · priority pending scope · 🛑 BLOCKED
 See BLOCKER-4. This cannot be sized or changed until Liban confirms whether the analyzer is in
 facility scope; any test/mapping change then requires laboratory/clinical confirmation.
+
+### DH-024 · Deep fresh-deployment quality hardening · P0 · ✅ DONE 2026-08-13
+Raised by a full repository/runtime audit after DH-003. Three concrete false-green paths were
+reproduced and fixed without changing clinical content:
+
+1. **Demo-patient precedence:** the live configuration contained both upstream `value=50` and our
+   `value=0` for the same property. A second 50-row batch appeared in the throwaway volume. The
+   pinned local base now removes only upstream's four-line trigger block; six unrelated properties
+   remain, `patients.off.xml` is the sole writer, and a live restart held patient count 102→102.
+   A direct first-boot `on/on` imported all 23 concept packages but reset its trigger with zero
+   patients because the upstream generator runs before that metadata is ready. A read-only database
+   preflight now requires one completed content-on/patients-off boot before `patients=on`. The
+   enforced two-stage path then created exactly 50 patients from one creator and reset the sole
+   trigger. No patient was deleted.
+2. **PostgreSQL init race:** `pg_isready` passed against the temporary `initdb.d` server and the
+   hardening job then lost its connection during the intentional shutdown. Readiness now also
+   requires `postgres` as PID 1. The exact empty-volume dependency graph passed with hardening 0.
+3. **Published OpenELIS admin credential:** the image ignores `DEFAULT_PW` and rewrites its bundled
+   `adminADMIN!` hash during first webapp startup. A read-only one-shot now waits for the real login
+   redirect, bcrypts the required `${OE_ADMIN_PASSWORD}` into exactly one admin row, verifies it,
+   and gates the frontend. Current and exact empty-volume CSRF/form probes accept the configured
+   value and refuse the published default. The local ignored `.env` was rotated to a policy-valid
+   value and remains mode `0600`.
+
+Repository checks passed for both Compose demo targets and backup profile, every local Docker build,
+adapter dependency consistency/Ruff/14 tests, maternity Ruff/5 tests, JSON/XML/CSV/shell syntax,
+relative Markdown links, Git integrity/whitespace, image policy, and live-secret value scanning.
+Runtime checks covered all endpoints, both FHIR capability counts, all nine PostgreSQL tenancy
+cases, ten container timezones, Keycloak realm/client-secret/token behavior, adapter constraints,
+and a fresh local encrypted backup read-back. Final normal startup left ten long-running services
+healthy/running as applicable and all five setup jobs at exit 0, with zero restarts or OOM kills.
+The backup was neither off-site nor restored.
 
 ### DH-006 · Prenatal panel order set + LOINC mappings · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
@@ -552,7 +605,7 @@ and an explicit success/failure marker.
 | MariaDB `openmrs` | ✅ 15.9 MB, and it **contains the data**: test identifier `10001MJ` present, with real `patient` and `person_name` INSERTs |
 | PostgreSQL `clinlims` | ✅ 1.28 MB |
 | PostgreSQL `keycloak` | ✅ 250 KB after DH-007 — populated realm database |
-| PostgreSQL `adapter` | ✅ DH-014 test archive captured the empty pre-DH-010 database; it now has the DH-010 schema and zero operational rows, so the next backup must capture that migration |
+| PostgreSQL `adapter` | ✅ DH-024's fresh archive contains the DH-010 schema (`alembic_version`, ledger, dead-letter table) and zero operational rows; `pg_restore --list` passed |
 | Live Keycloak realm export | ✅ 59 KB from the admin API; staged only inside the encrypted archive |
 | OpenMRS data volume | ✅ 349 MB compressed; includes OCL/module data and future complex observations |
 | Adapter audit volume | ✅ mounted and archived; DH-010 now owns it, verified mode `0600`, UID/GID `10001:10001`, currently zero bytes before message transport |
@@ -650,11 +703,13 @@ Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed mes
 | 1 | Gateway could not resolve `backend`/`frontend` — hard-coded upstream names in its nginx template | Fixed (network aliases) |
 | 2 | Backend healthcheck reported healthy 8s into a 49-minute boot | Fixed (explicit `= 200` on the REST session endpoint) |
 | 3 | `OMRS_CONFIG_ADD_DEMO_DATA` inert in this image | Documented, not removed |
-| 4 | 50 fictional demo patients created on first boot | **Resolved** — `OMRS_DEMO_PATIENTS=off|on`, default `off`; old verification volume still contains them |
+| 4 | Demo-patient trigger had two writers; `off` later allowed a second 50-row batch | **Fixed — DH-024**; local base removes only upstream's trigger, mounted `on/off` is authoritative; throwaway volume retains 100 fictional rows and two deliberate patients because no patient data was deleted |
 | 5 | Admin password defaults to the published `Admin123` | **Fixed and empty-volume verified — DH-019** |
 | 6 | The old throwaway volume still accepted `Admin123` after DH-019 landed | **Fixed in live state 2026-08-13** — rotated through the OpenMRS API; current configured password passes and default is refused |
 | 7 | Default `docker compose up -d` selected an unconfigured backup scheduler and would restart-loop | **Fixed — DH-022**; backup is an explicit profile until production settings exist |
 | 8 | OpenELIS Horiba Pentra60 test import aborts on a unique-description conflict | **BLOCKED — DH-023 / BLOCKER-4; Human Decision Required: Yes** |
+| 9 | PostgreSQL health passed against the temporary init server, racing hardening into shutdown | **Fixed and exact empty-volume graph verified — DH-024** |
+| 10 | OpenELIS ignores `DEFAULT_PW` and shipped `adminADMIN!` even on empty volumes | **Fixed and empty-volume form-login verified — DH-024** |
 
 ## Notes for next session
 
@@ -669,5 +724,5 @@ Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed mes
 - Digests are recorded from a real pull (ARCHITECTURE §12). **Never fabricate a digest.**
 - Timing: cold boot ≈49 min, warm ≈38s. Never `docker compose down -v`.
 - Nothing here authorizes real patient data. Pilot-ready ≠ clinically live (ADR-012). This local
-  stack now holds 50 fictional patients, which makes that distinction concrete rather than
-  theoretical.
+  stack now holds 100 fictional demo patients plus two deliberate test patients, which makes that
+  distinction concrete rather than theoretical.

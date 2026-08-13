@@ -57,9 +57,12 @@ OpenMRS backend, OpenMRS frontend, OpenMRS gateway, MariaDB, OpenELIS webapp, Op
 OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and the backup sidecar. The current foundation
 runs ten: Caddy is not built, and backup is an opt-in profile until production credentials exist.
 
-Compose also contains short-lived setup jobs: OpenMRS maternity seeding, OpenELIS certificate
-provisioning, and DH-020 PostgreSQL tenant-grant hardening. They must exit 0 before their dependent
-services start; they do not remain running or add steady-state resource use.
+Compose also contains short-lived setup jobs: the OpenMRS demo-metadata preflight and maternity
+seed, OpenELIS certificate provisioning, DH-020 PostgreSQL tenant-grant hardening, and DH-024
+OpenELIS admin-password rotation. They must exit 0 before their dependent services start; they do
+not remain running or add steady-state resource use. The password job intentionally runs after the
+webapp's first healthy login redirect because the webapp bootstrap rewrites its bundled admin hash;
+the frontend remains gated until rotation and in-database verification finish.
 
 **Corrected at build step 1:** O3 ships a fourth container, an nginx **gateway** that joins the SPA
 and the API on a single origin. Caddy proxies *to* it rather than replacing it — O3's frontend
@@ -159,6 +162,12 @@ database owner. All six cross-tenant role/database combinations are denied. The 
 script runs from `initdb.d` on a fresh volume and as a one-shot Compose job for an existing volume;
 OpenELIS's own schema grants are deliberately left untouched.
 
+**Fresh-volume readiness correction at DH-024:** `pg_isready` alone also answers against the
+temporary server used by `initdb.d`. That server is deliberately stopped before the final one
+starts, which allowed the hardening job to race into a connection refusal. Readiness now requires
+both `pg_isready` and `postgres` as PID 1; the complete empty-volume database → hardening → webapp
+→ password rotation → frontend path was run successfully.
+
 The rejected alternative was all-PostgreSQL: literal compliance with the brief, but running this
 module set on a database path essentially nobody runs in production, with failures likely to
 surface during a module upgrade rather than at build time.
@@ -179,9 +188,10 @@ only reachable if every piece of configuration loads itself on first boot. Mecha
 | OpenMRS O3 frontend behavior | `SPA_DEFAULT_LOCALE=fr`; the pinned distro already includes `esm-ward-app` and `esm-bed-management-app` | `docker-compose.yml` + pinned frontend image |
 | Maternity ward | Initializer 2.12.0 location CSV, deterministic UUID, admission-location tag | `openmrs-config/initializer/locations/` |
 | Bed types and beds | Initializer 2.12.0 has no bed domains. A short-lived, non-root job uses bedmanagement 7.2.0 REST after backend health; create-only, conflict-failing, additive-only (ADR-007) | `openmrs-config/seed/` |
-| O3 demo content | Local `on`/`off` backend build targets share the exact digest-pinned upstream base. `off` removes only `referenceapplication-demo` source directories because not every Initializer loader honors filename exclusions | `openmrs-config/Dockerfile` |
+| O3 demo content | Local `on`/`off` backend build targets share the exact digest-pinned upstream base. `off` removes only `referenceapplication-demo` source directories because not every Initializer loader honors filename exclusions. An opt-in patient preflight requires its metadata to exist from an earlier content-on/patients-off boot | `openmrs-config/Dockerfile`, `openmrs-config/validate-demo-readiness.sh` |
 | Keycloak realm, clients, roles, French login theme | **Built and runtime-verified at DH-007.** `--import-realm` loads committed JSON; environment placeholders keep client secrets out of Git. A restart skips the existing realm without changing it. | `keycloak/realm-config/` |
 | OpenELIS lab tests, LOINC mappings, "accept external orders" | OpenELIS stores these in its DB; upstream documents them as admin-UI steps. I'll capture them as a committed SQL/REST seed applied on first boot so they are reproducible. | `openelis-config/` |
+| OpenELIS local admin password | Upstream ignores `DEFAULT_PW` and bootstraps a published hash. A post-webapp one-shot bcrypts `${OE_ADMIN_PASSWORD}`, updates exactly one admin row, verifies it, and gates the frontend | `openelis-config/postgres-init/set-admin-password.sh` |
 | Adapter behaviour | environment variables only | `.env` |
 
 Nothing in this list is "click through the admin UI after deploy". If I hit something that genuinely
@@ -546,7 +556,7 @@ The sidecar image itself is built from committed source rather than pulled from 
 
 | Component | Tag | Why |
 |---|---|---|
-| OpenMRS O3 backend | local `daher-health/openmrs-backend:3.7-{on,off}`; exact `openmrs/openmrs-reference-application-3-backend:3.7.x` digest base | Current released O3 line. Two minimal targets preserve or omit the demo overlay while retaining upstream UID 1001 and startup contract. |
+| OpenMRS O3 backend | local `daher-health/openmrs-backend:3.7-{on,off}`; exact `openmrs/openmrs-reference-application-3-backend:3.7.x` digest base | Current released O3 line. The local base removes only upstream's competing demo-patient trigger so the mounted `on/off` file is its sole writer; the two targets otherwise preserve or omit demo content while retaining upstream UID 1001 and startup contract. |
 | OpenMRS O3 frontend | `openmrs/openmrs-reference-application-3-frontend:3.7.x` + digest | Must match the backend line |
 | OpenMRS O3 gateway | `openmrs/openmrs-reference-application-3-gateway:3.7.x` + digest | nginx joining the SPA and API on one origin; upstream's tested routing |
 | MariaDB | `mariadb:10.11.18` | **Corrected from 11.4 at build step 1.** The OpenMRS reference distribution tests against the 10.11 line; following upstream's tested pairing beats picking the newer LTS on my own judgement |

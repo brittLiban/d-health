@@ -26,6 +26,16 @@ throwaway stack retains 3 delivery + 4 postpartum beds created only for lifecycl
 PostgreSQL database and is healthy with a durable unique ledger, dead-letter table, private audit
 volume, transient-only retry policy, and dependency-aware readiness. It does not move FHIR data yet.
 
+**DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
+property had two competing writers and injected a second 50-patient batch into this throwaway
+volume despite the local switch returning to `off`; the derived image now removes only upstream's
+competing trigger. Direct first-boot `on/on` also reset the trigger with zero patients, so a
+read-only metadata preflight now enforces the demonstrated two-stage opt-in path. PostgreSQL
+readiness no longer goes green against its temporary init server.
+OpenELIS's documented `DEFAULT_PW` is ignored, so a verified post-bootstrap bcrypt rotation now
+gates the frontend. Both current and empty-volume OpenELIS login tests accept the configured secret
+and refuse `adminADMIN!`.
+
 **What running it cost, and what it exposed** (details in §3a):
 
 1. The gateway could not reach the backend at all — it hard-codes upstream hostnames.
@@ -39,8 +49,8 @@ Step 3 added four more (DH-005's ticket entry): `certs` cannot be dropped as the
 claimed; the webapp needs a Docker secret or its context dies while Tomcat still reports success;
 the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
 
-**The honest boundary:** substantial buildable work remains. No OpenELIS login has been performed;
-its frontend is unexercised until Caddy (DH-016); SSO, maternity clinical forms, adapter transport,
+**The honest boundary:** substantial buildable work remains. OpenELIS local-admin authentication is
+form-verified, but its human browser workflow is unexercised until Caddy (DH-016); SSO, maternity clinical forms, adapter transport,
 notifications, complete backup/restore, and public TLS remain incomplete. The maternity ward/bed
 foundation itself is complete. Human decisions are collected under **NEEDS LIBAN** in
 `PROJECT_STATE.md`.
@@ -55,9 +65,11 @@ foundation itself is complete. Human decisions are collected under **NEEDS LIBAN
 | OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4; configured admin password works and `Admin123` is refused after the 2026-08-13 live-volume rotation |
 | OpenMRS frontend | **running** — container healthy; Liban registered a test patient in the SPA |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
+| OpenMRS demo preflight | **one-shot job exited 0** — default patients-off path is inert; opt-in mode requires initialized `OpenMRS ID` metadata before backend startup |
 | OpenMRS maternity config | **one-shot job exited 0** — French backend metadata, admission ward, both bed types, additive-only bed lifecycle verified; committed counts are `0/0` placeholders |
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
-| OpenELIS webapp | **running with a configuration warning** — serves HTTPS 8443; no OpenELIS login performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
+| OpenELIS webapp | **running, healthy, with a configuration warning** — serves HTTPS 8443; configured admin form login passes and `adminADMIN!` is refused; no browser workflow performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
+| OpenELIS admin password | **one-shot job exited 0** — runs after genuine webapp readiness, updates exactly one admin bcrypt hash, verifies it, and gates the frontend |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
@@ -66,9 +78,10 @@ foundation itself is complete. Human decisions are collected under **NEEDS LIBAN
 | Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
 
-⚠️ **This local stack contains 50 fictional demo patients** plus two deliberate test patients (one
+⚠️ **This local stack contains 100 fictional demo patients** plus two deliberate test patients (one
 registered via the API, one by Liban in the SPA). It is a throwaway verification stack and must
-never be confused with a clean instance.
+never be confused with a clean instance. The second 50-row batch was the evidence that exposed
+DH-024's competing-property bug; no patient rows were deleted during the repair.
 
 **Build steps 1 and 3 are done; the DH-003 maternity foundation and Keycloak provider are built
 and verified.** The clinical forms in the larger build step 2 remain DH-004 and require human
@@ -81,10 +94,10 @@ sign-off. SSO and the remaining steps are not complete.
 | Artefact | State | What "unverified" still means here |
 |---|---|---|
 | `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, `${VAR:?}` guards, backend↔db handshake, DH-003 dependency gate, and normal one-command startup are exercised. The OpenMRS healthcheck now also gated a genuine empty-volume DH-003 boot. |
-| `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is wired and **verified on an empty volume** (DH-019). The old local volume was rotated to it on 2026-08-13. Local `.env` permissions were corrected from `0664` to `0600`; the README now requires that mode. |
+| `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is wired and **verified on an empty volume** (DH-019). OpenELIS's narrower password alphabet is documented; its configured secret is verified on current and empty volumes (DH-024). The old local credentials were rotated. Local `.env` is valid Compose syntax and mode `0600`. |
 | Image digests | **Pinned from real pulls as each component landed** | Dates and exact values are recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. French is configured and verified in frontend env + backend properties, but the visible browser language was **not** reported either way. |
-| OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
+| OpenELIS UI | **Authentication form exercised; browser workflow not exercised** | Configured admin login succeeds and the published default is refused on current and empty volumes. Its frontend still has no host route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
 | Keycloak realm | **Runtime verified** | Provider foundation only. Pilot session lifetimes are approved (ADR-013); OpenMRS/OpenELIS SSO wiring is DH-008. |
 | `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
@@ -96,17 +109,22 @@ sign-off. SSO and the remaining steps are not complete.
 | 1 | Gateway 502 on every request — its nginx template hard-codes `http://backend:8080` and `http://frontend`, which do not resolve to our service names | `backend could not be resolved` in the gateway log; `/etc/nginx/templates/default.conf.template` in the image | **Fixed** — network aliases, chosen over renaming services or hand-editing upstream's config (ADR-010 reasoning) |
 | 2 | Backend healthcheck reported `healthy` 8s into the first boot, while Liquibase ran and the gateway 502'd | `docker compose ps` vs. a 502 from the same instant | **Fixed** — explicit `= 200` test on the REST session endpoint. `curl -f` was the root cause: it passes on the 302 that URL returns during boot |
 | 3 | `OMRS_CONFIG_ADD_DEMO_DATA` is not read by the image | Absent from the `OMRS_*` names in `startup-init.sh` / `startup.sh` | Documented as inert in compose and `.env.example`; **not** removed |
-| 4 | **50 fictional demo patients created on first boot** | `SELECT COUNT(*) FROM patient` = 51 after boot; `referencedemodata-2.6.1.omod`; global property `referencedemodata.createDemoPatientsOnNextStartup` | **Resolved by decision** — explicit `OMRS_DEMO_PATIENTS=off|on` distribution-source overlay, default `off` |
+| 4 | **50 fictional demo patients created on first boot; later a second 50-row batch appeared despite `off`** | Initial DH-002 count 51; DH-024 aggregate count 102 = 100 rows by the demo creator + two deliberate patients. The deployed tree showed upstream `value=50` and our `value=0` competing for the same property | **Fixed at DH-024** — the pinned derived image removes only upstream's trigger block, leaving the mounted `on/off` file as sole writer. An `off` restart held 102→102; no patient rows were deleted |
 | 5 | Cold boot ≈ 49 min, dominated by 23 OCL concept-package imports | Deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z | Documented; healthcheck timings derived from it |
 | 6 | No OpenMRS admin password variable; image defaults to the published `Admin123`, applied **first boot only** | `OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in `startup-init.sh` | **Fixed and verified on an empty volume — DH-019** |
 | 7 | Existing throwaway OpenMRS volume still accepted `Admin123` because its container/DB predated DH-019 | Authenticated session probes against both configured and published passwords | **Fixed in live state 2026-08-13** — rotated through OpenMRS's password API; container recreated with current Compose env; configured secret passes and default is refused |
 | 8 | OpenELIS startup repeatedly aborts `horiba-pentra60-cbc.csv` processing while attempting to give several tests the existing unique description `LYM#(Whole Blood)` | Four boots across 2026-08-11/13; `test_desc_uk` violations followed by failed test-editor bridging. Live table has zero duplicate descriptions, so the transaction rollback protects uniqueness but the analyzer import is incomplete | **BLOCKER-4 — Human Decision Required: Yes.** Do not alter laboratory tests until Liban confirms whether that analyzer is in facility scope |
+| 9 | OpenELIS PostgreSQL health went green against the temporary `initdb.d` server; hardening then hit connection refused during its deliberate shutdown | Reproduced from empty volumes: `pg_isready` passed, hardening exited 2, final server started afterward | **Fixed and empty-volume verified — DH-024.** Health also requires PID 1 to be `postgres`; hardening exited 0 on the exact from-zero graph |
+| 10 | OpenELIS ignores `DEFAULT_PW`; fresh volumes still accepted published `adminADMIN!` | Actual CSRF/form login on both old and empty volumes; configured secret refused before repair | **Fixed and empty-volume verified — DH-024.** Post-webapp one-shot rotates/verifies bcrypt; frontend waits for exit 0; configured login passes and default is refused |
 
-Three upstream oddities observed and deliberately not chased, recorded so they are not later
+Four upstream oddities observed and deliberately not chased, recorded so they are not later
 mistaken for new breakage: `AddressConfigurationLoader` logs an ERROR that the distro's own
 `addressConfiguration.xml` "appears invalid" and skips it; and the gateway config carries a
 `/grafana → grafana:3000` block for a service this stack does not run (relevant at DH-016 — it
-should not be exposed publicly). During OpenELIS FHIR startup, PostgreSQL also logs failed
+should not be exposed publicly). The pinned OpenMRS base itself runs as UID 1001 while its
+root-owned Tomcat `conf` directory lacks `Catalina/localhost`, so Tomcat logs a non-blocking SEVERE
+when it cannot create that deployment directory; the same permissions are present in the untouched
+upstream image and REST/FHIR still pass. During OpenELIS FHIR startup, PostgreSQL also logs failed
 compatibility/pre-migration probes (`aurora_version()` and relations not yet created). The FHIR
 service then continues normal scheduler passes and its live mutual-TLS metadata request returns
 HTTP 200; treat the messages as this known non-blocking startup behaviour only while that endpoint
@@ -129,12 +147,15 @@ resolved by use, not just by inspection.
 **Still live as a question for the pilot VM:** `docker` group membership is effectively root on
 the host. Decide it deliberately there rather than by habit.
 
-### BLOCKER-2 — The O3 distro creates 50 fictional demo patients · ✅ RESOLVED BY DECISION 2026-08-12
+### BLOCKER-2 — The O3 distro creates 50 fictional demo patients · ✅ RESOLVED + HARDENED DH-024
 
-`OMRS_DEMO_PATIENTS` now selects an explicit `off` (default) or `on` late Initializer overlay at
-the distribution source. This is separate from the inert `OMRS_ADD_DEMO_DATA` variable and from
-`OMRS_DEMO_CONTENT=on|off`. Both controls passed DH-003's empty-volume test; neither deletes data
-already stored in an initialized database.
+`OMRS_DEMO_PATIENTS` now selects an explicit `off` (default) or `on` Initializer overlay at the
+distribution source. The derived image removes upstream's competing trigger, so this overlay is
+the sole writer. This is separate from the inert `OMRS_ADD_DEMO_DATA` variable and from
+`OMRS_DEMO_CONTENT=on|off`. Patient generation requires one completed content-on/patients-off boot
+first because upstream runs its generator before first-boot metadata initialization. A database
+preflight rejects unready `patients=on` states. The isolated two-stage path produced exactly 50
+patients, one creator, and one reset trigger. Neither control deletes stored data.
 
 ### (Not numbered) — ADR-005 · ✅ ACCEPTED 2026-08-12 · adapter skeleton unblocked
 

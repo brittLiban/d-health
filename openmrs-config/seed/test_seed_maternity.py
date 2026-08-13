@@ -93,7 +93,11 @@ class SeedTests(unittest.TestCase):
         kind = seed.BED_KINDS[0]
         api = FakeAPI(
             types=[
-                {"name": kind.type_name, "displayName": "wrong", "description": kind.description}
+                {
+                    "name": kind.type_name,
+                    "displayName": "wrong",
+                    "description": kind.description,
+                }
             ]
         )
         with self.assertRaises(seed.SeedError):
