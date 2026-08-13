@@ -118,12 +118,13 @@ distribution source. This is separate from the inert `OMRS_ADD_DEMO_DATA` variab
 `PROJECT_STATE.md` for the mechanism and the remaining separate demo-concept-content work in
 DH-003.
 
-### (Not numbered) — ADR-005 evidence gathered, **awaiting Liban's review** · blocks the adapter
+### (Not numbered) — ADR-005 · ✅ ACCEPTED 2026-08-12 · adapter skeleton unblocked
 
-Both legs now have primary evidence (DH-009a, DH-009b) and they are asymmetric: OpenMRS cannot push
-(no `Subscription`, `event` module unreachable out of process) so the order leg polls; OpenELIS runs
-a full HAPI server that *does* advertise `Subscription`. `docs/WATERMARK-DESIGN.md` is written and
-built into nothing — ADR-005 forbids building before review. This now blocks on reading, not effort.
+Both legs have primary evidence (DH-009a, DH-009b), and Liban approved the custom adapter with a
+configurable 15-second OpenMRS order poll, inclusive watermark, and durable ledger. OpenELIS runs a
+full HAPI server that advertises `Subscription`, but delivery and corrected-result behavior still
+must be demonstrated before trusting the result path. `docs/WATERMARK-DESIGN.md` is accepted and
+still built into nothing; DH-010 is ready.
 
 ---
 
@@ -156,7 +157,7 @@ and a README complete enough to hand the stack to another operator.
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
 | SSO across two apps | High | The classic multi-day sink: realm import, redirect URIs, role mapping, two different OIDC implementations. Cannot be verified piecemeal. | Ticketed as one joint ticket (DH-008), not split. Start it early. |
-| ADR-005 resolves to polling | Medium | Adds a scheduler, watermark, and restart semantics to the adapter — days, not hours, and it is safety-relevant code needing human review. | Resolve as a spike (DH-009) before adapter work, not during. |
+| OpenMRS order polling safety | Medium | The accepted scheduler, watermark, ledger, and restart semantics are safety-relevant code — days, not hours. | ADR-005/DH-009 are complete; implement and test the accepted design in DH-010/011. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |
 | Clinical sign-off not obtained | **High** | Gates *clinically live*, not pilot-ready — but a pilot with no sign-off path is a pilot that cannot proceed to use. | Get the order set and partograph fields in front of the clinical lead as soon as they are drafted, in week 1, not week 3. |

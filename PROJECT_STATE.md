@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; Keycloak foundation verified · ADR-005 awaiting review
+**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; ADR-005 accepted; adapter skeleton ready
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -31,21 +31,20 @@ agent may invent.
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-019** (verified on an empty volume) |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-009a**, **DH-009b**, **DH-019** (verified on an empty volume) |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look), **DH-007** (session lifetimes) |
-| 🟡 Awaiting Liban's review | **DH-009a** + **DH-009b** (ADR-005 evidence, both legs) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | DH-003 (maternity configuration) |
-| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-010 … DH-013, DH-015, DH-016, DH-018 |
+| 📋 Ready | DH-003 (maternity configuration), **DH-010** (adapter skeleton) |
+| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-011 … DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
 
 Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
-1. **ADR-005 review** (items 2–4). Both legs now have evidence, and they are *asymmetric*: OpenMRS
-   cannot push, OpenELIS can. The poller is not written, deliberately — ADR-005 forbids it before
-   review. This gates DH-010 → DH-012, the longest pole after SSO.
+1. **DH-010 adapter skeleton.** ADR-005 is accepted: custom adapter, 15-second configurable
+   OpenMRS order polling, inclusive watermark, and durable ledger. The result leg still has
+   delivery and corrected-result gates before DH-012 may be trusted.
 2. **DH-007 session lifetimes** (item 5). The identity-provider foundation is verified, but its
    provisional timeouts are not approved for a shared ward-terminal workflow.
 3. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
@@ -65,18 +64,18 @@ exists. Each links to the detail rather than repeating it.
 | # | Decision | Why it isn't mine | Blocks |
 |---|---|---|---|
 | ~~1~~ | ~~**The 50 fictional demo patients**~~ — ✅ **RESOLVED 2026-08-12.** Answered with "make it an option": `OMRS_DEMO_PATIENTS`, default `off`. The demo *concept* content becomes a second knob in DH-003, default as-shipped — no decision needed from you unless you want a different default | — | Nothing |
-| 2 | **Poll interval for the adapter** — how long may a prenatal order sit before the laboratory sees it? | A clinical-workflow question, not a technical one | `WATERMARK-DESIGN.md` §9.1 → DH-010 |
+| ~~2~~ | ~~**Poll interval for the adapter**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 15 seconds, configurable by environment variable | — | DH-010 is unblocked |
 | ~~3~~ | ~~**Does voiding an order need to reach the laboratory?**~~ — ✅ **RESOLVED TECHNICALLY 2026-08-13.** A proper `DISCONTINUE` creates a new visible ServiceRequest carrying `replaces`; the adapter must forward it and must not filter on `status` | — | Nothing; implementation constraint recorded in `WATERMARK-DESIGN.md` §6 |
-| 4 | **Revisit `labonfhir` (ADR-004)?** It was deferred partly because we'd own the trigger either way. Owning it now demonstrably means *polling* | A recorded decision; ADRs are not re-litigated by an agent | ADR-005 review → DH-010 |
+| ~~4~~ | ~~**Revisit `labonfhir` (ADR-004)?**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** continue the custom adapter for v1; revisit after the golden flow | — | DH-010 is unblocked |
 | 5 | **Keycloak session lifetimes** — provisional values are 1h idle, 10h maximum, 5m access token | Shared-terminal security versus continuity during labour is a clinical workflow decision | DH-007 final acceptance / pilot |
 | 6 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / clinically live |
 | 7 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
 | 8 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
 | 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
 
-**Read-and-approve, rather than decide:** ADR-005's evidence section in `DECISIONS.md`, then
-`docs/WATERMARK-DESIGN.md`. ADR-005 forbids building the poller until you have read it, so DH-010
-is parked on your review, not on effort.
+**ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
+interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
+corrected-result behavior remain empirical gates, not assumptions.
 
 **Two security items I fixed without asking** (disabling exposure needs no permission; restoring it
 would): upstream's `mail.bcc`/`mail.from` default of a third-party gmail address is blanked, and
@@ -212,7 +211,8 @@ Priority: **P0** = required for pilot-ready · P1 = if time allows · P2 = post-
 
 ### DH-001 · Record decisions as ADRs · P0 · ✅ DONE
 Move the reasoning that existed only in conversation into `DECISIONS.md`. Twelve ADRs, including
-ADR-005 (the open Subscriptions/polling question) and ADR-004 (the `labonfhir` deferral).
+ADR-005 (the Subscriptions/polling question, later accepted 2026-08-12) and ADR-004 (the
+`labonfhir` deferral).
 **DoD:** ✅ ADRs committed; `CURRENT_STATE.md`, `PROJECT_STATE.md`, `AGENTS.md` created.
 
 ### DH-002 · First pull, digest pinning, verify OpenMRS · P0 · ✅ DONE
@@ -263,7 +263,7 @@ rather than silently falling back to the default; document the post-first-boot r
 **Acceptance:** a fresh stack with a generated password refuses `Admin123` and accepts the
 configured one. Verified on an empty volume, since that is the only case where it applies.
 
-### DH-009a · Spike: ADR-005, **OpenMRS leg** · P0 · 🟡 EVIDENCE READY — awaiting Liban's review
+### DH-009a · Spike: ADR-005, **OpenMRS leg** · P0 · ✅ DONE — reviewed by Liban
 **Worked:** 2026-08-11, against the running DH-002 stack rather than from documentation.
 
 **Answer: neither event-driven option exists in the O3 3.7.x distro as we deploy it.**
@@ -276,30 +276,35 @@ configured one. Verified on an empty volume, since that is the only case where i
 - Polling is viable: `_lastUpdated` is advertised **and verified applied** on `ServiceRequest`,
   `DiagnosticReport`, `Observation`, `Task`.
 
-**Evidence** is appended to ADR-005 in `DECISIONS.md` — **status deliberately left `OPEN`**, since
-that ADR's acceptance is "reviewed by Liban personally". **The watermark design is written and
-built into nothing**: `docs/WATERMARK-DESIGN.md`, as ADR-005 requires.
+**Evidence** is appended to ADR-005 in `DECISIONS.md`. Liban accepted the proposed resolution on
+2026-08-12: custom adapter, 15-second configurable order poll, inclusive watermark, and durable
+ledger. **The watermark design is accepted but still built into nothing**:
+`docs/WATERMARK-DESIGN.md`.
 
-**What Liban is being asked to read**, in order: ADR-005's evidence section, then
+**Review scope presented to Liban**, in order: ADR-005's evidence section, then
 `WATERMARK-DESIGN.md` §4 (why `ge` and not `gt` — the choice that trades duplicates for never
 losing a result), §6 (tested discontinuation semantics and the `replaces` obligation), §7 (the
 timezone constraint), and §9.2 (polling being the only trigger is new information bearing on
 ADR-004's `labonfhir` deferral).
 
-**Not done here, by instruction:** no poller was written. ADR-005 forbids building before review.
+**Not done here:** no poller was written. The completed review now unblocks DH-010.
 
-### DH-009b · Spike: ADR-005, **OpenELIS leg** · P0 · 🟡 EVIDENCE GATHERED — delivery not proven
+### DH-009b · Spike: ADR-005, **OpenELIS leg** · P0 · ✅ EVIDENCE COMPLETE — runtime gates remain
 OpenELIS is now deployed. Its HAPI FHIR 6.6.0 CapabilityStatement advertises `Subscription`, and
 its committed upstream-derived configuration exposes an outbound subscriber URL plus retry
 interval/resources. That establishes capability and configuration shape, **not working delivery**:
 no receiving endpoint has been registered and no outbound result has been observed.
+
+ADR-005 accepts a test-driven branch: use outbound delivery only if it is demonstrated; otherwise
+poll with equivalent safety properties. Demonstrating delivery belongs to adapter work, not this
+completed evidence spike.
 
 One higher-stakes behavior also remains uncharacterised: whether correcting a result advances the
 FHIR `DiagnosticReport`/`Observation` version and timestamp. A stale corrected value in OpenMRS is
 more dangerous than a stale order. This must be tested before the result leg is trusted; the
 order-leg answer must not be assumed to generalise.
 
-### DH-009 · (superseded by DH-009a / DH-009b above) · P0
+### DH-009 · (superseded by DH-009a / DH-009b above) · P0 · ✅ DONE
 **Objective:** answer, with primary evidence, how the adapter learns an order/result exists.
 **Depends on:** nothing — this is source and documentation reading. **Do it early**; it gates the
 longest pole after SSO, and it does not need a running stack.
@@ -446,7 +451,7 @@ working lab system and no patient records; that check must be explicit in the st
 `backup/restore-drill.md`.
 **DoD:** drill actually performed, output recorded, dated.
 
-### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · ⏸ (needs DH-009)
+### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · 📋 READY (DH-009 complete)
 Processed-message ledger keyed on stable source event ID with a unique constraint; append-only
 structured audit log on a named volume; exponential backoff with jitter; dead-letter table. Two
 separate mechanisms by design — the ledger answers "did we do this", the audit answers "what did
@@ -506,7 +511,7 @@ Longest poles: DH-008 (SSO) and DH-010–012 (adapter, shape depends on DH-009).
 ## Notes for next session
 
 - See **▶ START HERE** near the top of this file for the immediate next action.
-- Read `DECISIONS.md` before touching anything. ADR-005 is the live open question; ADR-003,
+- Read `DECISIONS.md` before touching anything. ADR-005 is accepted and load-bearing; ADR-003,
   ADR-006, ADR-007 are pinned and not to be "simplified".
 - **Step 1 has now genuinely run.** API verification and Liban's SPA registration are separate
   evidence and both are complete; the unreported French-locale observation belongs to DH-003.

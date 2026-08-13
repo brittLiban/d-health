@@ -245,13 +245,14 @@ upgrade.
 Revisit trigger: once step 5 of §13 passes end-to-end, record the observed `ServiceRequest` and
 `DiagnosticReport` shapes here and make the call.
 
-### ⚠️ Trigger evidence gathered — ADR-005 still awaits Liban's review
+### Trigger decision accepted — custom adapter with OpenMRS polling
 
 `labonfhir` is not only a mapper: it also makes OpenMRS emit order events. Evidence gathered against
 this exact distribution now establishes that OpenMRS FHIR has no `Subscription` resource and its
 event module exposes only an in-process broker. A separate adapter therefore polls
 `ServiceRequest` by `_lastUpdated`; the durable watermark and ledger design is written in
-`docs/WATERMARK-DESIGN.md` and built into nothing pending ADR-005 review.
+`docs/WATERMARK-DESIGN.md`. Liban accepted that design on 2026-08-12 with a configurable 15-second
+poll interval. It is still built into nothing; DH-010 is the first implementation ticket.
 
 Order discontinuation was tested with the correct verb. The original resource changes without
 advancing `meta.lastUpdated`, but a new timestamped `DISCONTINUE` ServiceRequest carries `replaces`.
@@ -263,8 +264,8 @@ behavior is also untested and must be characterised before trusting the result p
 
 The `labonfhir` revisit is now costed rather than hypothetical: it provides an in-process,
 event-driven order trigger but still polls results, is not shipped in this reference distribution,
-and builds against `fhir2` 2.2.0 while this stack runs 4.2.0. ADR-005 remains open because Liban's
-review—not evidence collection alone—is its acceptance criterion.
+and builds against `fhir2` 2.2.0 while this stack runs 4.2.0. Liban chose the custom adapter for v1;
+ADR-004's post-golden-flow revisit remains in place.
 
 ### Adapter design (unchanged by that later decision)
 
@@ -567,7 +568,7 @@ implementation or pilot acceptance:
 |---|---|---|
 | Real maternity bed counts | Placeholder values in `.env`; changing them is an `.env` edit + restart (§7) | Go-live |
 | WhatsApp Cloud API / BSP credentials | Building against mock; swap is `.env`-only. Line item stays marked **incomplete** until real credentials run end-to-end (§8) | Go-live |
-| `labonfhir` vs. hand-rolled transport | Compatibility/behavior spike complete; Liban's ADR-005 review still gates adapter construction (§6) | Before DH-010 |
+| `labonfhir` vs. hand-rolled transport | **Resolved for v1:** custom adapter; revisit after the golden flow (§6) | After golden flow |
 | Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
 | Demo patients | **Resolved:** `OMRS_DEMO_PATIENTS=off|on`, default `off`, selects the distribution-source global-property overlay. Demo concept content remains a separate DH-003 seam because removing it may remove lab vocabulary | DH-003 |
 | Keycloak session lifetimes | Provisional 1h idle / 10h maximum / 5m token; **Human Decision Required: Yes** | DH-007 final acceptance / pilot |

@@ -311,6 +311,43 @@ in-process event listeners that Q2 showed are unreachable from a separate contai
 Nothing here overturns ADR-004. It sharpens what the choice actually costs, which is what the
 revisit was for.
 
+### ADR-005 — resolution accepted 2026-08-12 (2026-08-13 in Djibouti)
+
+**Status:** ACCEPTED · **Decided by:** Liban
+
+Liban reviewed the evidence and proposed watermark design in discussion and approved the custom
+adapter direction. The earlier `OPEN` labels above are retained as history; this appended entry is
+the current status of ADR-005.
+
+**Decision.** Continue the ADR-004 minimal custom adapter for v1. On the OpenMRS order leg, poll
+`ServiceRequest` every **15 seconds**, configurable by environment variable, using the inclusive
+server-timestamp watermark and durable idempotency ledger in `docs/WATERMARK-DESIGN.md`.
+
+The implementation must:
+
+- round-trip the server's `meta.lastUpdated` value without normalising it;
+- use an inclusive lower bound and advance only after contiguous successful processing;
+- treat the ledger, dead-letter path, reconciliation, and timezone startup assertion as
+  correctness mechanisms, not optional observability;
+- process every returned status, including a `DISCONTINUE` ServiceRequest whose `replaces`
+  identifies the original order; and
+- never rely on the original order's `meta.lastUpdated` advancing when it is stopped.
+
+**OpenELIS result leg.** This acceptance does not convert an advertised capability into a verified
+one. Before selecting push for the result path, the adapter must demonstrate OpenELIS outbound
+delivery to a receiver and characterise a corrected result's FHIR version and timestamp. Use the
+outbound subscriber only if that test passes; otherwise use polling with equivalent watermark,
+ledger, reconciliation, and corrected-result safeguards. A stale corrected result in OpenMRS is a
+release blocker, not an acceptable degradation.
+
+**`labonfhir`.** Do not add it for v1. It is absent from this distribution, targets `fhir2` 2.2.0
+while this stack runs 4.2.0, and still polls the result leg. ADR-004's post-golden-flow revisit
+remains the appropriate point to reconsider it using observed payloads and runtime evidence.
+
+**Consequence.** DH-009 meets its acceptance criterion and no longer blocks DH-010. This decision
+authorises implementation of the adapter skeleton and OpenMRS order poller; it does not claim that
+either exists yet.
+
 ---
 
 ## ADR-006 — Partograph ships as data entry only; no decision support

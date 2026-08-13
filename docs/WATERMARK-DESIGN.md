@@ -1,9 +1,9 @@
 # Watermark design — how the adapter learns an order or result exists
 
-**Status: PROPOSED. Nothing here is built.** ADR-005 requires this document to be read by a human
-before any of it becomes code. That is not a formality — with polling, *"no result is lost between
-the laboratory and a mother's chart"* stops being a property of the transport and becomes a
-property of the logic below.
+**Status: ACCEPTED 2026-08-12 by Liban. Nothing here is built yet.** ADR-005 records the approval
+and the 15-second configurable interval. With polling, *"no result is lost between the laboratory
+and a mother's chart"* stops being a property of the transport and becomes a property of the logic
+below.
 
 **Written:** 2026-08-11 (DH-009a) · **Evidence:** ADR-005's appended evidence section
 **Covers:** the OpenMRS leg only. The OpenELIS leg is DH-009b, after DH-005.
@@ -16,8 +16,9 @@ Both event-driven options were ruled out against the running stack, not from doc
 FHIR `Subscription` returns HTTP 404 (`HAPI-0302: Unknown resource type`), and the `event` module's
 ActiveMQ broker is `vm://` in-JVM only with no TCP connector listening. Full evidence in ADR-005.
 
-Polling is therefore not a preference. It is what remains — and ADR-005 explicitly forbids
-resolving this by picking whichever is easier, so the reasoning is recorded rather than assumed.
+Polling is therefore not a preference. It is what remains — and ADR-005 explicitly forbade
+resolving this by picking whichever was easier, so the reasoning was recorded before approval
+rather than assumed.
 
 ## 2. What the watermark is keyed on
 
@@ -217,18 +218,16 @@ adapter counts OpenMRS `ServiceRequest`s created in the last 48 hours and compar
 ledger entries for the same window. A mismatch is the only signal that would ever reveal silent
 loss, and it is the check that lets anyone claim results are not being lost.
 
-## 9. What must be settled before this is built
+## 9. Decision and remaining result-path gates
 
-1. **Poll interval.** Not chosen here — it is a clinical-workflow question (how long may a
-   prenatal order sit before the laboratory sees it?), not a technical one.
-2. **Whether `labonfhir` reopens.** Spiked 2026-08-13 — see ADR-005 Q6. Short version: it solves
+1. **Poll interval — resolved by Liban:** **15 seconds**, configurable by environment variable.
+2. **Whether `labonfhir` reopens — resolved for v1:** no. Spiked 2026-08-13 — see ADR-005 Q6. It solves
    the *order* trigger (in-process event listeners, which a separate container cannot use) but
    **still polls for results** (`api/scheduler/FetchTaskUpdates.java`). So adopting it removes half
    this document, not all of it, and relocates the other half into a dependency built against
-   `fhir2` **2.2.0** while we run **4.2.0**. Still a genuine choice; now a costed one.
-3. **Liban's ADR-005 review.** The design is deliberately built into nothing until that review is
-   recorded. Discontinuation visibility is no longer an open decision—it is a tested implementation
-   constraint in §6.
+   `fhir2` **2.2.0** while we run **4.2.0**. Revisit only after the golden flow, as ADR-004 says.
+3. **Liban's ADR-005 review — completed 2026-08-12.** This design is authorised for implementation.
+   Discontinuation visibility is a tested implementation constraint in §6.
 4. **Before the result path:** prove OpenELIS outbound delivery and characterise corrected-result
    version/timestamp behavior. A correction that does not propagate would leave a stale value in
    the OpenMRS chart.
