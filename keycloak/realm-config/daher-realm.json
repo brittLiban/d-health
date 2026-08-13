@@ -1,0 +1,104 @@
+{
+  "realm": "daher",
+  "enabled": true,
+  "displayName": "Daher Health",
+  "internationalizationEnabled": true,
+  "defaultLocale": "fr",
+  "supportedLocales": [
+    "fr",
+    "en"
+  ],
+  "loginTheme": "keycloak",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "waitIncrementSeconds": 60,
+  "failureFactor": 10,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "clinician",
+        "description": "Midwives and doctors — patient care in OpenMRS"
+      },
+      {
+        "name": "lab-tech",
+        "description": "Laboratory technicians — OpenELIS"
+      },
+      {
+        "name": "sys-admin",
+        "description": "System administration across both applications"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "openmrs",
+      "name": "OpenMRS EMR",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "${KEYCLOAK_OPENMRS_CLIENT_SECRET}",
+      "redirectUris": [
+        "https://emr.${BASE_DOMAIN}/*",
+        "http://127.0.0.1:8080/*"
+      ],
+      "webOrigins": [
+        "https://emr.${BASE_DOMAIN}",
+        "http://127.0.0.1:8080"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "+"
+      }
+    },
+    {
+      "clientId": "openelis",
+      "name": "OpenELIS Laboratory",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "${KEYCLOAK_OPENELIS_CLIENT_SECRET}",
+      "redirectUris": [
+        "https://lab.${BASE_DOMAIN}/*"
+      ],
+      "webOrigins": [
+        "https://lab.${BASE_DOMAIN}"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "+"
+      }
+    },
+    {
+      "clientId": "adapter",
+      "name": "Daher Adapter (service account)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "${KEYCLOAK_ADAPTER_CLIENT_SECRET}",
+      "redirectUris": [],
+      "webOrigins": []
+    }
+  ],
+  "users": []
+}
