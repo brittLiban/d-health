@@ -125,6 +125,36 @@ OpenELIS lookup has been demonstrated because DH-011's order shape/requester/map
 selected. The transport-neutral safety core is verified; the writer/probe binding remains an
 activation criterion inside DH-011, alongside BLOCKER-3. No clinical message moved.
 
+**Deep quality verification 2026-08-13 (post-ADR-015/016).** Both Compose profiles parse; every
+tracked shell/JSON/XML file passes syntax; Git integrity and whitespace pass; `.env` is untracked.
+The three non-digest image references are the locally built `daher-health/*` images, and all four of
+their `FROM` bases are digest-pinned. Adapter: `pip check`, Ruff lint, Ruff format, and **27 tests**
+passed; maternity seed safety **5 tests** passed. Runtime: ten services running, six setup jobs at
+exit 0, **zero restarts and zero OOM kills across all sixteen containers**. OpenMRS REST session and
+FHIR R4 metadata answered 200 for the configured admin while `Admin123` returned
+`authenticated:false`; OpenELIS webapp HTTPS 200; OpenELIS FHIR returned 200 with FHIR 4.0.1 from
+HAPI **over mutual TLS**, and correctly failed TLS with `bad certificate` when no client
+certificate was presented; OpenELIS frontend 200; Keycloak realm, OIDC discovery, and SAML
+descriptor 200. All nine PostgreSQL tenancy cases behaved exactly as specified. Every container is
+`EAT+0300`. Only `127.0.0.1:8080` is published. The adapter ledger and dead-letter tables remain at
+zero rows on migration `0001_safety_ledger`; OpenMRS holds 102 patients, none voided. OAuth 2.0
+Login 1.5.0 is registered and `started=false` (fail-closed); no backup container exists in the
+default profile, by DH-022's design.
+
+**Two probe-method corrections, recorded so the next audit does not repeat them.** The OpenELIS
+frontend serves nginx on **port 80**, not 3000 — a probe against 3000 returns connection refused and
+looks like an outage. Keycloak and the frontend images contain **no `curl`**; probe them with Python
+from the adapter container over `daher-health_internal`. Extracting the client certificate for the
+mutual-TLS FHIR probe needs `openssl pkcs12 -legacy`, because the shipped keystore uses RC2-40-CBC
+which OpenSSL 3 refuses by default.
+
+**A false alarm worth recording.** An initial OpenELIS login check judged success by grepping the
+Dashboard body for "login", and reported that `adminADMIN!` still authenticated. It does not. The
+POST returns 302 in every case; the discriminator is the `Location` header — configured admin
+redirects to `/OpenELIS-Global/`, while `adminADMIN!` redirects to `/LoginPage`, byte-identical to
+the behaviour of a deliberately wrong control password. DH-024's result stands. Test the redirect
+target, not the page text, and always run the wrong-password control.
+
 ## Ticket status
 
 | Status | Tickets |

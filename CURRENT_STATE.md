@@ -66,6 +66,19 @@ reconciliation, and persisted-realm restart all passed. The log/code review expa
 both shipped Horiba CBC imports and exposed DH-025's in-flight crash ambiguity. No clinical
 message is transported today, so the DH-025 defect has not affected a patient or test record.
 
+**Post-decision quality audit 2026-08-13.** After ADR-015 and ADR-016 landed, the full check ran
+again: both Compose profiles, all tracked shell/JSON/XML syntax, Git integrity/whitespace, and the
+untracked-`.env` check passed; every image is digest-pinned once the locally built `daher-health/*`
+images are resolved to their pinned bases. Adapter `pip check`/Ruff/**27 tests** and maternity
+**5 tests** passed. Ten services run with six setup jobs at exit 0 and **zero restarts or OOM kills
+across sixteen containers**. Configured OpenMRS and OpenELIS logins pass while `Admin123` and
+`adminADMIN!` are refused; both FHIR metadata paths answer, OpenELIS FHIR only over mutual TLS and
+correctly rejecting a missing client certificate; all nine PostgreSQL tenancy cases hold; every
+container is `EAT+0300`; only `127.0.0.1:8080` is published; the adapter's ledger and dead-letter
+tables remain empty; and OAuth 2.0 Login 1.5.0 is registered with `started=false`. SSO stays
+fail-closed and no clinical message has moved. Probe-method notes and one corrected false alarm are
+in `PROJECT_STATE.md`.
+
 **What running it cost, and what it exposed** (details in §3a):
 
 1. The gateway could not reach the backend at all — it hard-codes upstream hostnames.
