@@ -18,8 +18,10 @@ it exposed five defects that `docker compose config` could never have caught —
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11) |
-| 🟡 Awaiting Liban's review | **DH-009a** (ADR-005 evidence + watermark design) |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-019** (verified on an empty volume) |
+| 🟢 Built + verified, awaiting Liban's own look | **DH-005** (PostgreSQL + OpenELIS) |
+| 🟡 Awaiting Liban's review | **DH-009a** + **DH-009b** (ADR-005 evidence, both legs) |
+| 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-017 (README — now covers step 1 fully, incl. boot timing and the demo-patient warning) |
 | 📋 Ready | DH-019 (admin password wiring — new, from DH-002) |
 | ⏸ Waiting on dependencies | DH-003 … DH-018 |
@@ -210,7 +212,10 @@ his run.
 **Surfaced here, tracked elsewhere:** BLOCKER-2 (50 demo patients — human decision) and DH-019
 (admin password). Neither blocks this ticket; both block the pilot instance.
 
-### DH-019 · Wire the OpenMRS admin password through compose · P0 · 📋 READY
+### DH-019 · Wire the OpenMRS admin password through compose · P0 · ✅ DONE 2026-08-11
+**Verified the only way it can be**: on a throwaway scratch project with an empty volume, a full
+cold boot, then `admin` + the configured password → `authenticated: true`, and `admin`/`Admin123`
+→ refused. The live stack was never touched, and the scratch stack was destroyed afterwards.
 **Raised by:** DH-002, 2026-08-11.
 **Problem.** The backend image sets the `admin` password from `OMRS_ADMIN_USER_PASSWORD`,
 defaulting to the published value `Admin123`
@@ -281,9 +286,44 @@ Data-entry only. 🔒 No alert lines, no action lines, no prolonged-labour flagg
 Fields from unmodified WHO/OpenMRS reference defaults, marked *needs sign-off from clinical lead*.
 **Cannot be marked DONE without a recorded human response**, even when technically complete.
 
-### DH-005 · PostgreSQL + OpenELIS standalone · P0 · ⏸ (needs DH-002)
-OpenELIS webapp, FHIR, frontend, DB image; drop upstream's `certs`/`proxy` (Caddy handles TLS).
-Add Keycloak + adapter databases and roles to the same Postgres (ADR-001).
+### DH-005 · PostgreSQL + OpenELIS standalone · P0 · 🟢 BUILT AND VERIFIED 2026-08-12
+Five services added, all digest-pinned. Verified by running, not by `compose config`:
+
+| Check | Result |
+|---|---|
+| Three databases as co-tenants (ADR-001) | ✅ `clinlims`, `keycloak`, `adapter`, correct owners |
+| Tenant isolation | ✅ keycloak cannot reach `adapter`; adapter cannot read OpenELIS clinical data. ⚠️ one gap left open on purpose — DH-020 |
+| OpenELIS schema provisioned | ✅ 167 tables in the `clinlims` schema |
+| Webapp serving | ✅ HTTPS 8443 (its HTTP connector does not listen) |
+| FHIR server serving | ✅ `GET /fhir/metadata` → 200, **over mutual TLS** |
+| Frontend container | ✅ running, **not yet exercised** — it had no route until Caddy (DH-016) |
+
+**Four things running it exposed** (none catchable by a syntax check):
+1. `certs` **cannot** be dropped as ARCHITECTURE §2 claimed — Tomcat aborts without the keystore.
+2. The webapp reads its Spring config from a **Docker secret**; without it the WAR deploys, the
+   context dies with `FileNotFoundException: /run/secrets/common.properties`, and Tomcat still
+   reports a clean startup — a failure that looks like success in `docker compose ps`.
+3. The FHIR container ignores `JAVA_OPTS` (bitnami replaces it); `CATALINA_OPTS` works. With the
+   properties unsubstituted, **both** connectors stayed down while the log said "Server startup in".
+4. The OpenELIS FHIR endpoint requires **mutual TLS** — see ADR-005 Q5. Load-bearing for DH-011/012.
+
+**Not done here:** the frontend is unexercised, and no OpenELIS login has been performed. Both need
+either Caddy (DH-016) or a temporary port, and neither is required by this ticket.
+
+### DH-020 · Restrict PUBLIC on the OpenELIS database · P1 · 📋 READY
+Raised at DH-005. The `adapter` role can connect to `clinlims` and create objects in its `public`
+schema, because PostgreSQL grants that to `PUBLIC` by default and our init hook only revokes on the
+two databases it creates. **It cannot read clinical data** (`permission denied for schema clinlims`),
+so this is hardening, not an exposure. Left alone deliberately: OpenELIS keeps 3 objects in that
+schema, revoking risks breaking the laboratory system, and doing it unsupervised as a side effect of
+another ticket is the wrong way to touch a clinical database.
+
+### DH-021 · Replace the shipped keystore · P1 · 📋 READY
+Raised at DH-005. `itechuw/certgen` generates nothing — it ships **pre-built** keystores inside a
+public image, so the private key protecting the internal 8443 connectors is publicly downloadable,
+and its passwords are the published `kspass`/`tspass`. Acceptable only while nothing outside the
+Docker network speaks to 8443. Interacts with ADR-005 Q5: the adapter authenticates with a client
+certificate from this same keystore, so replacing it is a coordinated change, not a drop-in.
 
 ### DH-006 · Prenatal panel order set + LOINC mappings · P0 · ⏸ (needs DH-005) · **Human Decision Required: Yes**
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
