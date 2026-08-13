@@ -1,7 +1,7 @@
 # Daher Health — v1 pilot stack
 #
 # Built incrementally, one service group at a time (see docs/ARCHITECTURE.md §13).
-# Currently includes build steps 1 (OpenMRS), 3 (OpenELIS), and 4a (Keycloak).
+# Includes steps 1 (OpenMRS), 3 (OpenELIS), 4a (Keycloak), and DH-014 backup.
 #
 # Every image is pinned. No `:latest` anywhere. Where an upstream publishes only a
 # moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
@@ -486,6 +486,49 @@ services:
       internal:
         aliases: [keycloak.openelis.org]
 
+  # ===========================================================================
+  # PINNED P0 — nightly backup sidecar (DH-014). A performed restore is DH-015.
+  # ---------------------------------------------------------------------------
+  backup:
+    image: daher-health/backup:0.1.0
+    build:
+      context: ./backup
+    restart: unless-stopped
+    depends_on:
+      openmrs-db:
+        condition: service_healthy
+      openelis-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      OMRS_DB_HOST: openmrs-db
+      OMRS_DB_NAME: ${OMRS_DB_NAME:-openmrs}
+      OMRS_DB_ROOT_PASSWORD: ${OMRS_DB_ROOT_PASSWORD}
+      OE_DB_HOST: openelis-db
+      OE_DB_NAME: ${OE_DB_NAME:-clinlims}
+      OE_POSTGRES_PASSWORD: ${OE_POSTGRES_PASSWORD}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-adapter}
+      KEYCLOAK_INTERNAL_URL: http://keycloak.openelis.org:8080
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      BACKUP_ENCRYPTION_PASSPHRASE: ${BACKUP_ENCRYPTION_PASSPHRASE:-}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-0}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_REQUIRE_OFFSITE: ${BACKUP_REQUIRE_OFFSITE:-true}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION:-us-east-1}
+    volumes:
+      - openmrs-data:/volumes/openmrs-data:ro
+      - adapter-audit:/volumes/adapter-audit:ro
+      - backup-data:/backup
+    networks: [internal]
+
 secrets:
   # Upstream ships this as a secret rather than a mount; we keep that shape.
   # It is committed to the repo because it holds no credentials — the keystore
@@ -504,6 +547,8 @@ volumes:
   openelis-certs:
   openelis-plugins:
   openelis-logs:
+  adapter-audit:
+  backup-data:
 
 networks:
   # Nothing in this stack is reachable from outside except through the reverse

@@ -1,127 +1,158 @@
 #!/bin/sh
-# =============================================================================
-# Daher Health — nightly backup of BOTH database engines and the data volumes.
-#
-# ⚠️ THIS SCRIPT IS NOT THE DELIVERABLE. DH-015 IS.
-# A backup nobody has restored is not a backup, it is a file. This script exists
-# to be exercised by the restore drill; until that drill has actually been
-# performed and its output recorded, the pinned P0 item is NOT done. See AGENTS.md.
-#
-# WHY BOTH ENGINES, EVERY TIME (ADR-001, ARCHITECTURE §10)
-# The stack has two: MariaDB holds every patient record; PostgreSQL holds the
-# laboratory, Keycloak and the adapter ledger. A restore that covers only
-# PostgreSQL comes back with a working lab system and NO PATIENT RECORDS. That
-# failure mode is the whole reason this is written as one script over both.
-#
-# Exit codes: 0 all components succeeded · 1 at least one FAILED.
-# Partial success is a failure. A backup missing one engine is not a backup.
-# =============================================================================
+# Nightly backup for both database engines, live configuration, and data volumes.
+# DH-015 (a performed restore) remains the actual pilot-ready gate.
 set -eu
+umask 077
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-WORK="${BACKUP_WORK_DIR:-/tmp/daher-backup}/${TS}"
 OUT="${BACKUP_OUTPUT_DIR:-/backup}"
+WORK_ROOT="${BACKUP_WORK_DIR:-/tmp/daher-backup}"
 STATUS_FILE="${OUT}/last-run.status"
 FAILED=0
 
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 fail() { log "FAILED: $*"; FAILED=1; }
+status() { printf '%s %s\n' "$1" "$TS" > "$STATUS_FILE"; }
 
-mkdir -p "$WORK" "$OUT"
+: "${BACKUP_ENCRYPTION_PASSPHRASE:?BACKUP_ENCRYPTION_PASSPHRASE not set}"
+: "${OMRS_DB_ROOT_PASSWORD:?OMRS_DB_ROOT_PASSWORD not set}"
+: "${OE_POSTGRES_PASSWORD:?OE_POSTGRES_PASSWORD not set}"
+: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD not set}"
+
+case "${BACKUP_RETENTION_DAYS:-30}" in
+  ''|*[!0-9]*) echo "BACKUP_RETENTION_DAYS must be a non-negative integer" >&2; exit 1 ;;
+esac
+case "${BACKUP_REQUIRE_OFFSITE:-true}" in
+  true|false) ;;
+  *) echo "BACKUP_REQUIRE_OFFSITE must be true or false" >&2; exit 1 ;;
+esac
+
+mkdir -p "$OUT" "$WORK_ROOT"
+WORK="$(mktemp -d "${WORK_ROOT}/run-${TS}-XXXXXX")"
+PLAIN="${WORK_ROOT}/daher-${TS}.tar.gz"
+cleanup() {
+  rm -rf -- "$WORK"
+  rm -f -- "$PLAIN"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 log "backup ${TS} starting"
 
-# --- 1. MariaDB: OpenMRS. The patient records. -------------------------------
-# --single-transaction keeps it consistent without locking out a live clinic.
-if mariadb-dump \
-      --host="${OMRS_DB_HOST:-openmrs-db}" \
-      --user=root --password="${OMRS_DB_ROOT_PASSWORD:?OMRS_DB_ROOT_PASSWORD not set}" \
-      --single-transaction --routines --triggers --events \
-      "${OMRS_DB_NAME:-openmrs}" > "${WORK}/openmrs.sql" 2>"${WORK}/openmrs.err"; then
-  log "  mariadb openmrs: $(wc -c < "${WORK}/openmrs.sql") bytes"
+# MariaDB contains the patient record. A logically consistent, non-locking dump.
+if mariadb-dump --host="${OMRS_DB_HOST:-openmrs-db}" --user=root \
+     --password="$OMRS_DB_ROOT_PASSWORD" --single-transaction --routines --triggers --events \
+     "${OMRS_DB_NAME:-openmrs}" >"${WORK}/openmrs.sql" 2>"${WORK}/openmrs.err"; then
+  log "  mariadb openmrs: $(wc -c <"${WORK}/openmrs.sql") bytes"
 else
   fail "mariadb-dump openmrs — $(head -1 "${WORK}/openmrs.err" 2>/dev/null)"
 fi
 
-# --- 2. PostgreSQL: all three co-tenant databases ----------------------------
-export PGPASSWORD="${OE_POSTGRES_PASSWORD:?OE_POSTGRES_PASSWORD not set}"
+# PostgreSQL contains OpenELIS, Keycloak, and the adapter ledger/dead letters.
+export PGPASSWORD="$OE_POSTGRES_PASSWORD"
 for DB in "${OE_DB_NAME:-clinlims}" "${KEYCLOAK_DB_NAME:-keycloak}" "${ADAPTER_DB_NAME:-adapter}"; do
-  if pg_dump --host="${OE_DB_HOST:-openelis-db}" --username=postgres \
-             --format=custom --file="${WORK}/${DB}.dump" "$DB" 2>"${WORK}/${DB}.err"; then
-    log "  postgres ${DB}: $(wc -c < "${WORK}/${DB}.dump") bytes"
+  if pg_dump --host="${OE_DB_HOST:-openelis-db}" --username=postgres --format=custom \
+       --file="${WORK}/${DB}.dump" "$DB" 2>"${WORK}/${DB}.err"; then
+    log "  postgres ${DB}: $(wc -c <"${WORK}/${DB}.dump") bytes"
   else
     fail "pg_dump ${DB} — $(head -1 "${WORK}/${DB}.err" 2>/dev/null)"
   fi
 done
 unset PGPASSWORD
 
-# --- 3. Data volumes ----------------------------------------------------------
-# Not optional: OpenMRS stores complex obs (uploaded files, images) on disk, not
-# in the database. A database-only restore silently loses them, and nothing
-# complains until a clinician opens a chart and the attachment is gone.
+# A live, portable Keycloak configuration export supplements (never replaces)
+# the authoritative database dump. It may contain credentials and is encrypted
+# with the rest of the staging directory before leaving this container.
+KC_BASE="${KEYCLOAK_INTERNAL_URL:-http://keycloak.openelis.org:8080}"
+if TOKEN="$(curl -fsS --data-urlencode "username=${KEYCLOAK_ADMIN_USER:-admin}" \
+     --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+     -d client_id=admin-cli -d grant_type=password \
+     "${KC_BASE}/realms/master/protocol/openid-connect/token" | jq -er .access_token)"; then
+  if curl -fsS -X POST -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+       -d '{}' "${KC_BASE}/admin/realms/daher/partial-export?exportClients=true&exportGroupsAndRoles=true" \
+       >"${WORK}/keycloak-realm.json"; then
+    log "  keycloak realm: $(wc -c <"${WORK}/keycloak-realm.json") bytes"
+  else
+    fail "Keycloak partial realm export"
+  fi
+  unset TOKEN
+else
+  fail "Keycloak admin token"
+fi
+
+# Missing mounts are failures. Silently omitting attachments or audit history
+# would create a tidy-looking archive that cannot restore the clinical record.
 for V in ${BACKUP_VOLUME_PATHS:-/volumes/openmrs-data /volumes/adapter-audit}; do
   NAME="$(basename "$V")"
-  if [ -d "$V" ]; then
-    if tar -czf "${WORK}/${NAME}.tar.gz" -C "$(dirname "$V")" "$NAME" 2>"${WORK}/${NAME}.err"; then
-      log "  volume ${NAME}: $(wc -c < "${WORK}/${NAME}.tar.gz") bytes"
-    else
-      fail "tar ${NAME}"
-    fi
+  if [ ! -d "$V" ]; then
+    fail "required volume ${NAME} is not mounted"
+  elif tar -czf "${WORK}/${NAME}.tar.gz" -C "$(dirname "$V")" "$NAME" \
+       2>"${WORK}/${NAME}.err"; then
+    log "  volume ${NAME}: $(wc -c <"${WORK}/${NAME}.tar.gz") bytes"
   else
-    log "  volume ${NAME}: not mounted, skipped"
+    fail "tar ${NAME}"
   fi
 done
 
-# --- 4. Manifest --------------------------------------------------------------
-# Written so a restore can tell WHAT it is restoring before it starts, and so a
-# silently-shrinking backup is visible rather than discovered during an incident.
+if [ "$FAILED" -ne 0 ]; then
+  status FAILED
+  log "backup ${TS} FAILED before archive creation; nothing uploaded"
+  exit 1
+fi
+
 {
   echo "backup_timestamp=${TS}"
   echo "components:"
-  for f in "${WORK}"/*.sql "${WORK}"/*.dump "${WORK}"/*.tar.gz; do
-    [ -f "$f" ] && echo "  $(basename "$f") $(wc -c < "$f") bytes"
+  for F in "${WORK}"/*.sql "${WORK}"/*.dump "${WORK}"/*.json "${WORK}"/*.tar.gz; do
+    [ -f "$F" ] || continue
+    echo "  $(basename "$F") $(wc -c <"$F") bytes sha256=$(sha256sum "$F" | cut -d' ' -f1)"
   done
-} > "${WORK}/MANIFEST.txt"
+} >"${WORK}/MANIFEST.txt"
 
-# --- 5. Encrypt ---------------------------------------------------------------
-# Patient data leaving the VM is encrypted before it leaves, never after.
-ARCHIVE="${OUT}/daher-${TS}.tar.gz"
-tar -czf "$ARCHIVE" -C "$(dirname "$WORK")" "$(basename "$WORK")"
-
-if [ -n "${BACKUP_ENCRYPTION_PASSPHRASE:-}" ]; then
-  if openssl enc -aes-256-cbc -pbkdf2 -salt \
-       -in "$ARCHIVE" -out "${ARCHIVE}.enc" \
-       -pass env:BACKUP_ENCRYPTION_PASSPHRASE 2>/dev/null; then
-    rm -f "$ARCHIVE"; ARCHIVE="${ARCHIVE}.enc"
-    log "  encrypted: $(basename "$ARCHIVE")"
-  else
-    fail "encryption"
-  fi
-else
-  # Loud, because an unencrypted archive of a maternity clinic's records is the
-  # kind of thing that should never happen quietly.
-  log "  ⚠️ BACKUP_ENCRYPTION_PASSPHRASE not set — archive is UNENCRYPTED"
-  FAILED=1
+if ! tar -czf "$PLAIN" -C "$(dirname "$WORK")" "$(basename "$WORK")"; then
+  fail "archive creation"
+  status FAILED
+  exit 1
 fi
+ARCHIVE="${OUT}/daher-${TS}.tar.gz.enc"
+if ! openssl enc -aes-256-cbc -pbkdf2 -salt -in "$PLAIN" -out "$ARCHIVE" \
+     -pass env:BACKUP_ENCRYPTION_PASSPHRASE 2>/dev/null; then
+  fail "encryption"
+  rm -f -- "$ARCHIVE"
+  status FAILED
+  exit 1
+fi
+rm -f -- "$PLAIN"
+log "  encrypted: $(basename "$ARCHIVE")"
 
-# --- 6. Off-site upload -------------------------------------------------------
 if [ -n "${BACKUP_S3_BUCKET:-}" ]; then
-  if aws s3 cp "$ARCHIVE" "s3://${BACKUP_S3_BUCKET}/$(basename "$ARCHIVE")" \
-        ${BACKUP_S3_ENDPOINT:+--endpoint-url "$BACKUP_S3_ENDPOINT"} >/dev/null 2>&1; then
-    log "  uploaded to ${BACKUP_S3_BUCKET}"
+  if [ -n "${BACKUP_S3_ENDPOINT:-}" ]; then
+    aws s3 cp "$ARCHIVE" "s3://${BACKUP_S3_BUCKET}/$(basename "$ARCHIVE")" \
+      --endpoint-url "$BACKUP_S3_ENDPOINT" >/dev/null 2>&1 || fail "S3 upload"
   else
-    fail "s3 upload"
+    aws s3 cp "$ARCHIVE" "s3://${BACKUP_S3_BUCKET}/$(basename "$ARCHIVE")" \
+      >/dev/null 2>&1 || fail "S3 upload"
   fi
+  [ "$FAILED" -ne 0 ] || log "  uploaded to ${BACKUP_S3_BUCKET}"
+elif [ "${BACKUP_REQUIRE_OFFSITE:-true}" = "true" ]; then
+  fail "BACKUP_S3_BUCKET not set — encrypted local copy retained, but no off-site copy"
 else
-  log "  BACKUP_S3_BUCKET not set — local copy only, NOT off-site"
+  log "  off-site upload explicitly disabled for local verification"
 fi
 
-# --- 7. Prune -----------------------------------------------------------------
-find "$OUT" -name 'daher-*.tar.gz*' -mtime "+${BACKUP_RETENTION_DAYS:-30}" -delete 2>/dev/null || true
-
-# --- 8. Status marker ---------------------------------------------------------
-rm -rf "$WORK"
 if [ "$FAILED" -eq 0 ]; then
-  echo "SUCCESS ${TS}" > "$STATUS_FILE"; log "backup ${TS} SUCCESS"; exit 0
-else
-  echo "FAILED ${TS}" > "$STATUS_FILE"; log "backup ${TS} FAILED"; exit 1
+  if ! find "$OUT" -type f -name 'daher-*.tar.gz.enc' \
+       -mtime "+${BACKUP_RETENTION_DAYS:-30}" -delete; then
+    fail "retention prune"
+  fi
 fi
+
+if [ "$FAILED" -eq 0 ]; then
+  status SUCCESS
+  log "backup ${TS} SUCCESS"
+  exit 0
+fi
+
+status FAILED
+log "backup ${TS} FAILED"
+exit 1

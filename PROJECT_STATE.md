@@ -35,7 +35,7 @@ agent may invent.
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look), **DH-007** (session lifetimes) |
 | 🟡 Awaiting Liban's review | **DH-009a** + **DH-009b** (ADR-005 evidence, both legs) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
-| 🔨 In progress | DH-014 (dump layer verified), DH-017 (README) |
+| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
 | 📋 Ready | DH-003 (maternity configuration) |
 | ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-010 … DH-013, DH-015, DH-016, DH-018 |
 
@@ -405,18 +405,33 @@ split — a working realm and a working OpenMRS that don't authenticate against 
 exact failure this ticket exists to prevent. Includes the documented break-glass local admin.
 **Acceptance:** one login, both apps, no second prompt.
 
-### DH-014 · Backup, both engines · P0 🔒 · 🔨 PARTLY VERIFIED 2026-08-12
-`backup/backup.sh` written and syntax-checked. **The dump layer is genuinely exercised**, not just
-written — run against the live databases:
+### DH-014 · Backup, both engines · P0 🔒 · 🔨 LOCAL PATH VERIFIED 2026-08-13 — off-site unverified
+The scheduled sidecar is built from a digest-pinned PostgreSQL 14.4 base and includes matching
+`pg_dump`, a MariaDB client, live Keycloak export, required read-only volume mounts, per-component
+SHA-256 manifest entries, AES-256-CBC/PBKDF2 encryption, optional S3-compatible upload, retention,
+and an explicit success/failure marker.
+
+**The local path is genuinely exercised**, not merely written:
 
 | Dump | Result |
 |---|---|
 | MariaDB `openmrs` | ✅ 15.9 MB, and it **contains the data**: test identifier `10001MJ` present, with real `patient` and `person_name` INSERTs |
 | PostgreSQL `clinlims` | ✅ 1.28 MB |
-| PostgreSQL `keycloak` / `adapter` | ✅ ~1 KB each — correct at the time: both were empty before DH-007/DH-010. Keycloak is populated now, so final DH-014 verification must dump it again |
+| PostgreSQL `keycloak` | ✅ 250 KB after DH-007 — populated realm database |
+| PostgreSQL `adapter` | ✅ ~1 KB — correctly still empty before DH-010 |
+| Live Keycloak realm export | ✅ 59 KB from the admin API; staged only inside the encrypted archive |
+| OpenMRS data volume | ✅ 349 MB compressed; includes OCL/module data and future complex observations |
+| Adapter audit volume | ✅ mounted and archived; currently empty before DH-010 |
+| Encryption + readability | ✅ archive created, encrypted, decrypted, and component filenames read back |
+| Scheduler | ✅ calculated the next configured UTC run while retaining container environment |
 
-**NOT yet done:** the script has never run end-to-end (encryption, S3 upload, volume tarring, the
-sidecar container and its schedule are all unexercised), and **no restore has been attempted**.
+The test explicitly set `BACKUP_REQUIRE_OFFSITE=false`; no data left the Docker host. Its ephemeral
+key was not retained, so the exact test archive and success marker were deleted after verification
+rather than left looking like a usable backup.
+
+**NOT yet done:** no S3-compatible upload has run, no production encryption key has been placed in
+escrow, and **no restore has been attempted**. Supplying an external bucket changes where encrypted
+patient data leaves the system and requires Liban's explicit approval.
 Per AGENTS.md the pinned item is "backup **plus a performed restore drill**" — this is neither
 finished nor a substitute for DH-015.
 `mariadb-dump` + `pg_dump` (all three DBs) + adapter audit volume + OpenMRS data volume +

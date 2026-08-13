@@ -49,6 +49,7 @@ language, not a localisation afterthought.
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
 | [`DECISIONS.md`](DECISIONS.md) | Architecture decision records — why things are the way they are |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order |
+| [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---

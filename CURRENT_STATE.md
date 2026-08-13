@@ -51,7 +51,7 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | Keycloak | **running, healthy, realm verified** — DH-007 technical foundation; session lifetimes await Liban |
 | Adapter | not written |
 | WhatsApp notifier | not written |
-| Backup | script written; database dump layer exercised; encryption/upload/schedule unverified; no restore performed |
+| Backup | **local path verified end-to-end** — both engines, realm, volumes, manifest, encryption, scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
 
 ⚠️ **This local stack contains 50 fictional demo patients** plus two deliberate test patients (one

@@ -414,12 +414,13 @@ not debugging certificates and application behaviour at the same time.
 
 ## 10. Backup and restore
 
-Nightly containerised cron sidecar:
+Nightly containerised scheduler sidecar (implemented at DH-014; it retains the container
+environment reliably rather than depending on distro-specific cron environment behavior):
 
 1. `mariadb-dump` of the OpenMRS database (`--single-transaction`)
 2. `pg_dump` of `clinlims`, `keycloak`, and `adapter`
 3. The adapter audit-log volume and the OpenMRS data volume (uploaded complex obs, module data)
-4. A Keycloak realm export
+4. A live Keycloak realm export, supplementing its authoritative PostgreSQL dump
 5. Compress, encrypt, upload to S3-compatible storage, prune beyond `${BACKUP_RETENTION_DAYS}`
 6. Write a success/failure marker the runbook tells you how to check
 
@@ -430,6 +431,11 @@ working lab system and no patient records. That failure mode must be an explicit
 Credentials from `.env`. The drill — restore into a scratch stack, verify a known test patient, a
 known lab result, and a working SSO login — is performed and its output recorded before this pilot
 is called ready. Per your instruction, this is not deferred and not optional.
+
+**Verification boundary, 2026-08-13:** the complete local path above—including encryption and
+archive read-back—passed. Off-site upload was explicitly disabled so no data left the host; it is
+unverified and still requires an approved destination. The test archive was removed because its
+ephemeral key was not retained. No restore has been performed.
 
 ---
 
@@ -492,6 +498,16 @@ ships the `mariadb` client binary, so the healthcheck commands in the compose fi
 
 The digest was read back from the pulled local image and is the image that passed realm import,
 secret interpolation, readiness, and restart verification.
+
+### Base digest pulled and pinned — DH-014 backup sidecar, 2026-08-13
+
+| Image | Digest |
+|---|---|
+| `postgres:14.4` | `sha256:9ceb24f8c5f15c053d973a3610866f473690875dc13eb3282b45302189321040` |
+
+The locally built `daher-health/backup:0.1.0` image uses this exact base so its `pg_dump` major and
+minor match OpenELIS PostgreSQL. The sidecar image itself is built from committed source rather
+than pulled from a registry.
 
 | Component | Tag | Why |
 |---|---|---|
