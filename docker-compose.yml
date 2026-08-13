@@ -116,7 +116,15 @@ services:
       # against a database that already holds real patients would inject 50
       # fictional ones — which is why the default is `off` and why `on` is
       # something you type deliberately.
-      - ./openmrs-config/demo/globalproperties-core_demo.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/data/configuration/globalproperties/referenceapplication-demo/globalproperties-core_demo.xml:ro
+      #
+      # MOUNTED AT THE DISTRIBUTION SOURCE, NOT THE LIVE CONFIG DIRECTORY. The
+      # entrypoint deletes and re-copies /openmrs/data/configuration from
+      # /openmrs/distribution/openmrs_config on EVERY boot ("Deleting modules,
+      # OWAs, configuration and frontend"). Mounting into the destination made the
+      # copy fail with "Permission denied" and crash-looped the container — found
+      # by doing exactly that. Mounting the source is read-only by nature, so the
+      # copy succeeds and carries our version forward.
+      - ./openmrs-config/demo/globalproperties-core_demo.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/distribution/openmrs_config/globalproperties/referenceapplication-demo/globalproperties-core_demo.xml:ro
     # Readiness, not liveness. The previous probe (`curl -f http://localhost:8080/openmrs`)
     # reported HEALTHY 8 seconds into the first boot, while Liquibase was still running and
     # the gateway was returning 502 — measured at DH-002. Two reasons it lied:
