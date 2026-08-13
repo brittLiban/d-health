@@ -104,16 +104,10 @@ work, with a unique constraint, so two adapter instances or a restart mid-write 
 
 ## 6. Back-dated and modified records — the honest gap
 
-The hazard ADR-005 names: a record whose timestamp is older than the watermark by the time we see
-it. A time-ordered watermark cannot see it, by construction.
-
-What we know:
-
-- **Orders reduce this risk structurally** — no `date_changed` column, so no in-place edits. A
-  revision or discontinuation is a new row with a current timestamp, which the poller picks up
-  normally.
-- **Results are not yet characterised.** The `DiagnosticReport`/`Observation` leg comes from
-  OpenELIS (DH-009b) and has not been observed at all.
+The hazard ADR-005 names: a record whose state changes without its timestamp advancing, so that a
+time-ordered watermark cannot see the change. This section was rewritten on 2026-08-13 after the
+question was tested properly — the original text claimed orders were structurally safe from this,
+which turned out to be wrong.
 
 ### RESOLVED 2026-08-13 — tested properly, and the answer is a hard design constraint
 
