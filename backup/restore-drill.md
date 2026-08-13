@@ -66,6 +66,32 @@ pg_restore -U postgres -d "$DB" --no-owner --no-privileges "${DB}.dump"
 
 Re-run this way, all three databases restored at **exit 0 with zero error lines**.
 
+### 3a-bis. ⚠️ That procedure DISCARDS DH-020 tenant isolation — re-harden, then verify
+
+**This is the most dangerous step in the runbook.** `harden-tenancy.sh` runs at *initdb* time, so
+dropping and recreating the three databases throws its work away, and `pg_restore --no-privileges`
+does not put the grants back either. Measured directly on a throwaway PostgreSQL 14.4:
+
+```
+CREATE DATABASE testdb OWNER tenant;
+SELECT has_database_privilege('public','testdb','CONNECT');   -- true
+```
+
+…and an unrelated login role then **connected to that database successfully**. A recovery that stops
+at "pg_restore exited 0" leaves a system where the `adapter` role can connect to `clinlims`.
+
+**Mandatory, not optional — after every restore:**
+
+1. Re-run the hardening. The live stack already has `openelis-db-hardening` as a separate one-shot
+   for exactly this existing-volume case; run that entrypoint against the restored server.
+2. **Verify all nine tenancy cases as an acceptance gate**, over TCP with real passwords (a
+   `docker exec … psql` without `-h` can pass on local-socket trust and tell you nothing about
+   password auth). Each of `clinlims`, `keycloak`, `adapter` must reach its own database and be
+   refused by the other two. Include a wrong-password control that is correctly refused.
+
+The restore is **not complete** until that nine-case check passes. This gate was **not** run during
+the 2026-08-13 drill — see §6.
+
 ### 3b. The restore must not use `pg_isready` alone to decide the database is up
 
 Reproduced DH-024 finding 9 while building the scratch stack: `pg_isready` passes against the
@@ -89,9 +115,15 @@ creating the databases — a half-initialised state that looks superficially fin
 Restoring the database **without** the data volume would force the OCL re-import — a ~49 minute
 recovery instead of a ~1 minute one. The volume is not optional.
 
-## 5. Verified through the application, not just the database
+## 5. What was verified, and at which layer
 
-On the restored instance:
+**Only OpenMRS was verified through its application.** OpenELIS and Keycloak were verified by SQL
+inspection alone — **neither was ever booted against the restored database.** That distinction
+matters, because this ticket's own warning is that a PostgreSQL-only restore returns "a working lab
+system and no patient records"; the converse is equally untested here. Both are listed as unmet in
+§6, not quietly folded into a pass.
+
+On the restored OpenMRS instance (application layer, via REST):
 
 - configured admin authenticates → `{"authenticated":true, … "System Developer" …}`
 - **`Admin123` refused** → `{"authenticated":false}` — DH-019/DH-024's rotation survived the restore
@@ -99,9 +131,14 @@ On the restored instance:
   `GET /ws/rest/v1/patient?q=10001MJ` → `10001MJ - Test-DH002 Verification`
 - `GET /ws/fhir2/R4/metadata` → **200**
 - OAuth 2.0 Login 1.5.0 present and `started=false` — SSO stayed **fail-closed** across the restore
+Database layer only (no application involved):
+
 - OpenELIS admin bcrypt hash is **byte-identical** to live (`md5` fingerprint
   `beb2a5445494052106e7044cfd36e862`), so DH-024's rotated credential survived; `clinlims.test`
   row counts match live exactly (189)
+- Keycloak's `realm` table restored with the `daher` realm present. Note `keycloak-realm.json` was
+  **hash-verified but never parsed** — a corrupt-but-correctly-hashed export would pass that check.
+  Parse it on the next drill.
 
 ## 6. What this drill did NOT cover — the honest boundary
 
@@ -111,6 +148,8 @@ On the restored instance:
 |---|---|---|
 | **"a known lab result"** | No lab result exists anywhere in the system. `clinlims.analysis`, `.sample`, and `.patient` are all **0 rows** on live and restored alike, because no order has ever been transported (DH-011/DH-012 are blocked). There was nothing to verify. | DH-011/DH-012 produce a real result |
 | **"a working SSO login"** | SSO is deliberately fail-closed pending BLOCKER-5's authorization matrix. The drill confirmed the module survives the restore in its stopped state, which is not the same as a login. | BLOCKER-5 resolved and DH-008 activated |
+| **OpenELIS and Keycloak booted against the restored database** | Neither application was started; both were checked by SQL only. "The lab system comes back up" is therefore unproven. | Next drill — boot both against the restored data |
+| **The §3a-bis tenancy re-hardening gate** | Found *after* the drill ran. The scratch databases were dropped and recreated, so they almost certainly had no cross-tenant isolation, and the nine-case check was not run against them. The defect is in the procedure, now corrected above. | Next drill — re-harden, then pass all nine cases |
 
 Also not covered: **off-site**. This was a local-only restore; no S3-compatible upload has ever run
 and no production key is in escrow (DH-014).
@@ -126,8 +165,13 @@ those two legs can be exercised. Budget for it.
 ## 7. Isolation and cleanup
 
 The scratch stack used a `daher-restore-*` name prefix, its own volumes, its own network, and
-**published no host ports** (live publishes only `127.0.0.1:8080`). No live container, volume, or
-row was written to at any point; the live stack's own restart/OOM counters were unchanged.
+**published no host ports** (live publishes only `127.0.0.1:8080`).
+
+Precisely what was and was not written: **no live database row and no live application volume was
+modified**, and the live stack's restart/OOM counters were unchanged (verified before and after).
+The one live resource written was the backup output volume `daher-health_backup-data` — the run
+wrote `daher-<TS>.tar.gz.enc` and `last-run.status` there, and both were removed during cleanup,
+leaving it empty.
 
 ⚠️ `docker compose down -v` with the wrong project name destroys the throwaway stack that every
 documented verification in this repo rests on. Enumerate with

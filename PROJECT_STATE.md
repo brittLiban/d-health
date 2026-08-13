@@ -809,6 +809,12 @@ bcrypt hash was byte-identical to live.
 2. A scratch/recovery stack must gate on `/proc/1/comm = postgres` (DH-024 finding 9 reproduces
    otherwise) and must mount `harden-tenancy.sh`, or init dies at exit 127 *after* creating the
    databases.
+3. **The corrected drop/recreate procedure silently discards DH-020 tenant isolation.** A freshly
+   created PostgreSQL database grants `CONNECT` to `PUBLIC`, and `--no-privileges` does not restore
+   the dump's grants; measured directly, an unrelated role then connects successfully. Every restore
+   must re-run `harden-tenancy` and **pass all nine tenancy cases as an acceptance gate**. This was
+   found after the drill ran, so that gate was *not* exercised on 2026-08-13 — it is listed as unmet
+   in the drill doc §6.
 
 **The measurement that matters for recovery time:** restoring the database *with* the
 `openmrs-data` volume reached first HTTP 200 in **41 seconds**, against the documented ≈49-minute
