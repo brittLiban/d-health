@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton, local backup path, and tenant isolation runtime-verified
+**Updated:** 2026-08-13 · **Phase:** DH-003 maternity foundation complete; steps 1 and 3 running; SSO next
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -25,9 +25,11 @@ The running stack surfaced multiple findings that `docker compose config` could 
 (`CURRENT_STATE.md` §3a and DH-005's ticket entry). Buildable work remains alongside the decisions
 gathered under **NEEDS LIBAN** below.
 
-Step 2 (DH-003, maternity config) has not started. Its demo-patient dependency is resolved; it is
-now technically ready, with real bed counts still a facility placeholder rather than something an
-agent may invent.
+**DH-003 is complete and empty-volume verified.** French backend locales, the `Maternité`
+admission ward, both decided bed types, the explicit demo-content switch, and an additive-only
+bed seed are configuration as code. The real bed counts remain a facility placeholder rather
+than something an agent may invent. The SPA's visible language still needs a human browser look;
+the backend properties and frontend environment are verified, but that observation is not inferred.
 
 **Quality verification 2026-08-13:** the current Compose stack passed config validation; all ten
 long-running project services had zero restarts and zero OOM kills; OpenMRS REST/FHIR, OpenELIS
@@ -50,17 +52,25 @@ not an off-site test or restore. The audit also corrected the local `.env` from 
 `0600`, rotated the old live OpenMRS volume away from `Admin123`, completed DH-022, and raised
 BLOCKER-4 for the reproducible OpenELIS analyzer import conflict.
 
+**DH-003 verification 2026-08-13:** exact Initializer 2.12.0 and bedmanagement 7.2.0 source was
+checked before selecting the native REST seam. Five seed safety tests plus Ruff lint/format passed.
+The live throwaway stack demonstrated same/increase/lower/zero count behavior, and an isolated
+empty-volume stack demonstrated no-click first boot with demo patients/content off. The normal
+`docker compose up -d` then completed with all ten long-running services healthy/running as
+applicable, all three setup jobs exited 0, and every container reported zero restarts and zero OOM
+kills. Exact evidence and the remaining visible-browser-language check are in DH-003 below.
+
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022** |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | DH-003 (maternity configuration) |
-| 🛑 Blocked on human decisions | **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
-| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-012, DH-013, DH-015, DH-016, DH-018 |
+| 📋 Ready | **DH-008** (SSO wiring; prerequisites now complete) |
+| 🛑 Blocked on human decisions | **DH-004** (clinical form fields/sign-off), **DH-006** (prenatal panel/sign-off), **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
+| ⏸ Waiting on dependencies | DH-012, DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
 
@@ -69,8 +79,9 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 1. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
    first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
    implement an apparent default; see the evidence and options below.
-2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
-   and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
+2. **Unblocked technical work:** DH-008 SSO wiring is now ready. Continue the remaining DH-014
+   backup layers when the production encryption/off-site settings exist; DH-015's performed
+   restore remains a pinned P0 gate.
 3. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
    a Horiba Pentra60; the upstream import is failing, but altering lab mappings is not an agent call.
 
@@ -131,19 +142,20 @@ membership is effectively root on the host. Decide it deliberately, not by habit
 the option to be able to include demo data or not."* He rejected the either/or I presented and asked
 for a knob — consistent with ADR-007's treatment of bed counts.
 
-**Built:** `OMRS_DEMO_PATIENTS` (default `off`) in `.env`, selecting which version of the distro's
-`globalproperties-core_demo.xml` the container sees. Mounted at the **distribution source**, because
-the entrypoint re-copies the live config tree on every boot — mounting the destination crash-loops
-the container. Verified on an empty volume: 0 permission errors, 0 restarts, live config reads 0.
-Final acceptance (patient count 0 after a full cold boot) was running at the time of writing.
+**Built:** `OMRS_DEMO_PATIENTS` (default `off`) selects a late, single-property Initializer overlay
+at the **distribution source**, because the entrypoint re-copies the live config tree on every
+boot. DH-003 replaced the earlier whole-file overlay without changing its behavior. An isolated
+empty-volume boot with this set to `off` produced zero patients.
 
-**Split into two knobs deliberately.** The concept-content knob is NOT built yet, and its default is
-"as shipped": turning the demo concept tree off may remove the `BasicLabTests` vocabulary DH-006's
-prenatal panel maps to. Building it belongs to DH-003, and the seam is identified — a
-`referenceapplication-demo` overlay directory across 37 Initializer domains.
+**Split into two knobs deliberately and completed at DH-003.** `OMRS_DEMO_CONTENT` defaults to
+`on` (upstream as shipped), because the demo tree includes `BasicLabTests` vocabulary DH-006 may
+need. `off` selects a local backend build target that removes only the distro's
+`referenceapplication-demo` source directories. The exact pinned upstream image remains the base,
+and the final container still runs as UID 1001. The empty-volume `off` path copied zero demo
+directories and reached healthy. Neither switch deletes rows from an existing database.
 
 **Below is the original entry, kept for the reasoning.** ⚠️ Its framing as a decision to be made is
-superseded; only the concept-content default remains open.
+superseded; both switches now exist, while clinical approval of vocabulary remains separate.
 
 <details>
 <summary>Original BLOCKER-2 (superseded)</summary>
@@ -302,8 +314,8 @@ single-page app himself and reported it working. That was the one criterion an a
 close.
 
 **Precision about what his run covered:** he confirmed registration works. He did **not** report
-on the SPA's display language, so the French-locale question below is still open — it is a DH-003
-item either way.
+on the SPA's display language. DH-003 later verified the French frontend/backend configuration,
+but the human-visible browser observation remains explicitly unreported.
 
 **Acceptance criteria, individually:**
 
@@ -396,15 +408,34 @@ direction. **Present quoted source with file paths — a conclusion alone is not
 mid-window, back-dated records, failure mode when wrong) for human review **before** building it.
 **Acceptance:** ADR-005 updated from `OPEN` to a decision, with evidence, reviewed by Liban.
 
-### DH-003 · OpenMRS maternity config as code · P0 · 📋 READY (DH-002 complete)
-Initializer config: French locale list + default, Maternité ward, bed types (delivery /
-postpartum), additive-only bed seed driven by `MATERNITY_*_BEDS` (🔒 ADR-007). Confirm whether
-Initializer covers bed domains; if not, an idempotent REST seed — and record which, in
-`ARCHITECTURE.md` §4.
-**Acceptance:** fresh boot produces the ward and beds with no admin clicking; changing a count in
-`.env` + restart adds beds; **lowering a count deletes nothing**.
+### DH-003 · OpenMRS maternity config as code · P0 · ✅ DONE 2026-08-13
 
-### DH-004 · ANC + partograph forms · P0 · ⏸ (needs DH-003) · **Human Decision Required: Yes**
+Initializer 2.12.0 handles the French global properties and deterministic `Maternité` admission
+location, but its exact source contains no bed or bed-type domain. Bedmanagement 7.2.0's native
+REST resources therefore back a short-lived, non-root seed job. Its implementation has no update,
+retire, void, or delete call: existing objects must match or deployment stops for review.
+
+**Acceptance evidence:**
+
+| Criterion | Result |
+|---|---|
+| Fresh boot, no admin clicking | ✅ isolated empty-volume project reached healthy in ~4 minutes with demo patients/content off; ward, both types, and one test bed of each type existed; seed exited 0 |
+| Same counts are idempotent | ✅ `2/2` rerun created `0/0` |
+| Raising counts only adds the delta | ✅ `2/2 → 3/4` created `1/2` |
+| Lowering deletes nothing | ✅ `3/4 → 1/1`, then committed `0/0`, created zero and retained all 3 delivery + 4 postpartum beds |
+| French backend configuration | ✅ `default_locale=fr`, `reporting.defaultLocale=fr`, allowed list begins with `fr` |
+| Demo controls remain independent | ✅ fresh `OMRS_DEMO_PATIENTS=off`, `OMRS_DEMO_CONTENT=off` boot had zero patients and zero copied `referenceapplication-demo` directories |
+| Runtime identity / safety | ✅ backend target and process uid 1001; seed uid 65534, read-only root, all capabilities dropped; conflicts fail without writes |
+
+The exact pinned upstream backend is the base of local `on`/`off` build targets because some
+Initializer loaders ignore its filename-exclusion API. `off` affects what a new/restarted image
+loads; it deliberately does not delete content already imported into a database. The scratch
+project and its volumes were removed after verification. The existing local throwaway stack now
+contains the 3+4 lifecycle-test beds; committed counts remain explicit zero placeholders pending
+real facility numbers (ADR-007). A human has not yet reported whether the SPA visibly opens in
+French, so that browser observation remains unverified rather than being inferred from config.
+
+### DH-004 · ANC + partograph forms · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
 Data-entry only. 🔒 No alert lines, no action lines, no prolonged-labour flagging (ADR-006).
 Fields from unmodified WHO/OpenMRS reference defaults, marked *needs sign-off from clinical lead*.
 **Cannot be marked DONE without a recorded human response**, even when technically complete.
@@ -466,7 +497,7 @@ performed restore remain mandatory.
 See BLOCKER-4. This cannot be sized or changed until Liban confirms whether the analyzer is in
 facility scope; any test/mapping change then requires laboratory/clinical confirmation.
 
-### DH-006 · Prenatal panel order set + LOINC mappings · P0 · ⏸ (needs DH-005) · **Human Decision Required: Yes**
+### DH-006 · Prenatal panel order set + LOINC mappings · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
 the clinical lead has time.
 
@@ -495,7 +526,7 @@ still unbuilt and must not be inferred from a healthy identity-provider containe
 token. These are the already-verified committed values. Revisit after observed pilot workflow;
 changing them remains a human workflow/security decision.
 
-### DH-008 · SSO wiring · P0 · ⏸ (needs DH-003, DH-005, DH-007)
+### DH-008 · SSO wiring · P0 · 📋 READY (DH-003, DH-005, DH-007 complete)
 ✅ **Re-estimate WITHDRAWN at DH-007 — the risk was mine, not real.** I briefly raised this ticket
 to "two federation protocols" after seeing only `org.itech.login.saml.*` keys in OpenELIS's shipped
 `common.properties`. Checking the deployed webapp instead of the config file shows OIDC is fully
@@ -631,7 +662,8 @@ Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed mes
 - Read `DECISIONS.md` before touching anything. ADR-005 is accepted and load-bearing; ADR-003,
   ADR-006, ADR-007 are pinned and not to be "simplified".
 - **Step 1 has now genuinely run.** API verification and Liban's SPA registration are separate
-  evidence and both are complete; the unreported French-locale observation belongs to DH-003.
+  evidence and both are complete; DH-003 verified French configuration, while the human-visible
+  SPA language observation remains explicitly unreported.
 - `docker compose config` passing still means only that the syntax parses. Every one of the five
   findings above survived that check.
 - Digests are recorded from a real pull (ARCHITECTURE §12). **Never fabricate a digest.**

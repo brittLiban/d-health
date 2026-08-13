@@ -17,6 +17,11 @@ The **DH-007 Keycloak foundation also runs and is runtime-verified**: realm impo
 roles, clients, environment-resolved secrets, readiness, and restart persistence. Application SSO
 is still absent; DH-008 must wire and demonstrate one login across both applications.
 
+**DH-003 now runs and is empty-volume verified:** French backend properties, the `Maternité`
+admission ward, both decided bed types, independent demo-patient/content controls, and a strictly
+additive bed seed. Real bed counts remain zero placeholders pending facility input; the current
+throwaway stack retains 3 delivery + 4 postpartum beds created only for lifecycle verification.
+
 **DH-010 now runs as well:** the adapter's transport-neutral safety skeleton migrated its real
 PostgreSQL database and is healthy with a durable unique ledger, dead-letter table, private audit
 volume, transient-only retry policy, and dependency-aware readiness. It does not move FHIR data yet.
@@ -35,9 +40,10 @@ claimed; the webapp needs a Docker secret or its context dies while Tomcat still
 the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
 
 **The honest boundary:** substantial buildable work remains. No OpenELIS login has been performed;
-its frontend is unexercised until Caddy (DH-016); SSO, maternity configuration, adapter transport,
-notifications, complete backup/restore, and public TLS remain incomplete. Human decisions are
-collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
+its frontend is unexercised until Caddy (DH-016); SSO, maternity clinical forms, adapter transport,
+notifications, complete backup/restore, and public TLS remain incomplete. The maternity ward/bed
+foundation itself is complete. Human decisions are collected under **NEEDS LIBAN** in
+`PROJECT_STATE.md`.
 
 ---
 
@@ -49,6 +55,7 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4; configured admin password works and `Admin123` is refused after the 2026-08-13 live-volume rotation |
 | OpenMRS frontend | **running** — container healthy; Liban registered a test patient in the SPA |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
+| OpenMRS maternity config | **one-shot job exited 0** — French backend metadata, admission ward, both bed types, additive-only bed lifecycle verified; committed counts are `0/0` placeholders |
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
 | OpenELIS webapp | **running with a configuration warning** — serves HTTPS 8443; no OpenELIS login performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
@@ -63,9 +70,9 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 registered via the API, one by Liban in the SPA). It is a throwaway verification stack and must
 never be confused with a clean instance.
 
-**Build steps 1 and 3 are done; the Keycloak half of step 4 is built and verified.** Step 2
-(DH-003) has not started but its demo-patient blocker is resolved. SSO and the remaining steps are
-not complete.
+**Build steps 1 and 3 are done; the DH-003 maternity foundation and Keycloak provider are built
+and verified.** The clinical forms in the larger build step 2 remain DH-004 and require human
+sign-off. SSO and the remaining steps are not complete.
 
 ---
 
@@ -73,10 +80,10 @@ not complete.
 
 | Artefact | State | What "unverified" still means here |
 |---|---|---|
-| `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, the `${VAR:?}` guards and the backend↔db handshake are all now exercised. The new backend healthcheck's *cold-start* behaviour has been observed on one warm boot only. |
+| `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, `${VAR:?}` guards, backend↔db handshake, DH-003 dependency gate, and normal one-command startup are exercised. The OpenMRS healthcheck now also gated a genuine empty-volume DH-003 boot. |
 | `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is wired and **verified on an empty volume** (DH-019). The old local volume was rotated to it on 2026-08-13. Local `.env` permissions were corrected from `0664` to `0600`; the README now requires that mode. |
 | Image digests | **Pinned from real pulls as each component landed** | Dates and exact values are recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
-| O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. The French default locale was **not** reported on either way — still open, and a DH-003 concern. |
+| O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. French is configured and verified in frontend env + backend properties, but the visible browser language was **not** reported either way. |
 | OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
 | Keycloak realm | **Runtime verified** | Provider foundation only. Pilot session lifetimes are approved (ADR-013); OpenMRS/OpenELIS SSO wiring is DH-008. |
@@ -124,10 +131,10 @@ the host. Decide it deliberately there rather than by habit.
 
 ### BLOCKER-2 — The O3 distro creates 50 fictional demo patients · ✅ RESOLVED BY DECISION 2026-08-12
 
-`OMRS_DEMO_PATIENTS` now selects an explicit `off` (default) or `on` Initializer overlay at the
-distribution source. This is separate from the inert `OMRS_ADD_DEMO_DATA` variable. See
-`PROJECT_STATE.md` for the mechanism and the remaining separate demo-concept-content work in
-DH-003.
+`OMRS_DEMO_PATIENTS` now selects an explicit `off` (default) or `on` late Initializer overlay at
+the distribution source. This is separate from the inert `OMRS_ADD_DEMO_DATA` variable and from
+`OMRS_DEMO_CONTENT=on|off`. Both controls passed DH-003's empty-volume test; neither deletes data
+already stored in an initialized database.
 
 ### (Not numbered) — ADR-005 · ✅ ACCEPTED 2026-08-12 · adapter skeleton unblocked
 
@@ -169,8 +176,8 @@ sprint spec, not being useful.**
 
 ## 6. What is genuinely missing
 
-OpenMRS maternity configuration (locales, ward, beds, ANC and partograph forms); prenatal panel;
-SSO wiring for both applications; adapter order/result transport; WhatsApp notifier; the
+OpenMRS ANC and partograph forms; prenatal panel; SSO wiring for both applications; adapter
+order/result transport; WhatsApp notifier; the
 remaining backup layers **and a performed restore drill**; Caddy/TLS; the golden demonstration;
 and a README complete enough to hand the stack to another operator.
 

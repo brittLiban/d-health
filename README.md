@@ -173,15 +173,15 @@ public route before TLS exists.
 
 **What has been verified, and by whom.** The REST/FHIR and persistence checks below were exercised
 with `curl` on 2026-08-11. Liban then opened the single-page app and registered a test patient,
-closing DH-002. He did not report whether the UI opened in French; that remains a DH-003 check.
+closing DH-002. DH-003 later verified French in both frontend environment and backend properties;
+Liban has not yet reported whether the rendered UI visibly opens in French.
 
 1. **Log in.** Open <http://127.0.0.1:8080/openmrs/spa> with `admin` and the password configured
    before that database's first boot. Existing pre-DH-019 volumes retain their existing password.
 2. **Register a test patient**, then search for them and open the chart.
-3. **Check the French default.** The frontend is configured with `SPA_DEFAULT_LOCALE=fr`. Note
-   that the *backend* still reports `locale: "en"` — its allowed-locale list and default are set
-   separately, in build step 2 (DH-003). If the SPA does not open in French, that is a DH-003
-   finding, not a bug in step 1.
+3. **Check the French default.** The frontend has `SPA_DEFAULT_LOCALE=fr`; DH-003 also sets
+   backend `default_locale` and `reporting.defaultLocale` to `fr`, with `fr` first in the allowed
+   list. The configuration is verified; the visible browser result still needs your look.
 4. **Confirm persistence:**
    ```bash
    docker compose down          # NEVER `down -v` — that deletes the volumes and the patient
@@ -207,13 +207,32 @@ The actual control is `OMRS_DEMO_PATIENTS=off|on`, implemented at the distributi
 source. It defaults to `off`, the only appropriate value for an instance that may hold real patient
 records. `on` deliberately creates 50 fictional people and is for training/demo instances only.
 
-This setting is first-boot-only. Changing it against an initialized database does not remove or
-add patients safely. The original local verification volume predates the switch and still contains
-50 fictional patients; it is a throwaway test stack, not a clean pilot database.
+Choose this before first boot. The module zeroes its property after firing and Initializer leaves
+an unchanged file alone, but switching an existing database from `off` to `on` changes that file's
+checksum and can inject 50 fictional patients. Switching to `off` never removes existing patients.
+The original local verification volume predates the switch and still contains 50 fictional
+patients; it is a throwaway test stack, not a clean pilot database.
+
+`OMRS_DEMO_CONTENT=on|off` is separate. Its default `on` preserves the O3 reference distribution
+as shipped, including `BasicLabTests` and other vocabulary that later mapping may need. `off`
+selects a locally built backend target whose exact digest-pinned upstream base omits only the
+`referenceapplication-demo` source directories. It does not delete concepts or other metadata
+already imported into an existing database, and it is not a substitute for clinical sign-off.
+
+### Maternity ward and bed counts
+
+`Maternité`, the delivery/postpartum bed types, and the backend French properties are loaded
+without admin clicking. Set `MATERNITY_DELIVERY_BEDS` and `MATERNITY_POSTPARTUM_BEDS` in `.env`,
+then run `docker compose up -d`. The committed `0/0` values are deliberate placeholders pending
+the birth centre's real counts.
+
+The seed is strictly additive (ADR-007): raising a count adds missing beds; lowering it does
+not remove, retire, move, or edit anything. If existing ward/type/bed metadata conflicts with the
+committed definition, the setup job exits non-zero and the frontend dependency gate stays closed.
 
 ## Not yet present
 
-OpenMRS maternity configuration (ward, beds, ANC and partograph forms), the prenatal order set,
+OpenMRS ANC and partograph forms, the prenatal order set,
 single sign-on wiring, adapter order/result transport, WhatsApp notifications, the remaining
 backup layers **and a tested restore**, and Caddy with HTTPS. Sequence and status:
 [`PROJECT_STATE.md`](PROJECT_STATE.md).

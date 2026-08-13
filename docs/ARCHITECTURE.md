@@ -1,8 +1,8 @@
 # Daher Health — v1 Pilot Architecture
 
-**Status:** Build steps 1 and 3, the Keycloak foundation, adapter safety skeleton, local backup
-path, and PostgreSQL tenant isolation are built and runtime-verified. See `CURRENT_STATE.md` for
-the exact verification boundary.
+**Status:** DH-003's maternity foundation, build steps 1 and 3, the Keycloak provider, adapter
+safety skeleton, local backup path, and PostgreSQL tenant isolation are built and runtime-verified.
+See `CURRENT_STATE.md` for the exact verification boundary.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-13 (Africa/Djibouti)
 
@@ -57,9 +57,9 @@ OpenMRS backend, OpenMRS frontend, OpenMRS gateway, MariaDB, OpenELIS webapp, Op
 OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and the backup sidecar. The current foundation
 runs ten: Caddy is not built, and backup is an opt-in profile until production credentials exist.
 
-Compose also contains short-lived setup jobs: OpenELIS certificate provisioning and the DH-020
-PostgreSQL tenant-grant hardening job. They must exit 0 before their dependent services start; they
-do not remain running or add steady-state resource use.
+Compose also contains short-lived setup jobs: OpenMRS maternity seeding, OpenELIS certificate
+provisioning, and DH-020 PostgreSQL tenant-grant hardening. They must exit 0 before their dependent
+services start; they do not remain running or add steady-state resource use.
 
 **Corrected at build step 1:** O3 ships a fourth container, an nginx **gateway** that joins the SPA
 and the API on a single origin. Caddy proxies *to* it rather than replacing it — O3's frontend
@@ -176,8 +176,10 @@ only reachable if every piece of configuration loads itself on first boot. Mecha
 | Config | Mechanism | Lives in |
 |---|---|---|
 | OpenMRS global properties, locales, concepts, forms, roles/privileges, locations | **`openmrs-module-initializer`** — reads a config tree at startup, idempotently | `openmrs-config/` |
-| OpenMRS O3 frontend behaviour (default locale, ward app config) | frontend `config.json` mounted into the frontend container | `openmrs-config/frontend/` |
-| Wards, bed types, beds | `bedmanagement` module. **Open question:** Initializer's coverage of bed domains needs verification. If beds are not an Initializer domain, this becomes a first-boot REST seed script, still code, still committed, still idempotent — just a different mechanism. I'll confirm at build time and record the answer here. | `openmrs-config/` or `openmrs-config/seed/` |
+| OpenMRS O3 frontend behavior | `SPA_DEFAULT_LOCALE=fr`; the pinned distro already includes `esm-ward-app` and `esm-bed-management-app` | `docker-compose.yml` + pinned frontend image |
+| Maternity ward | Initializer 2.12.0 location CSV, deterministic UUID, admission-location tag | `openmrs-config/initializer/locations/` |
+| Bed types and beds | Initializer 2.12.0 has no bed domains. A short-lived, non-root job uses bedmanagement 7.2.0 REST after backend health; create-only, conflict-failing, additive-only (ADR-007) | `openmrs-config/seed/` |
+| O3 demo content | Local `on`/`off` backend build targets share the exact digest-pinned upstream base. `off` removes only `referenceapplication-demo` source directories because not every Initializer loader honors filename exclusions | `openmrs-config/Dockerfile` |
 | Keycloak realm, clients, roles, French login theme | **Built and runtime-verified at DH-007.** `--import-realm` loads committed JSON; environment placeholders keep client secrets out of Git. A restart skips the existing realm without changing it. | `keycloak/realm-config/` |
 | OpenELIS lab tests, LOINC mappings, "accept external orders" | OpenELIS stores these in its DB; upstream documents them as admin-UI steps. I'll capture them as a committed SQL/REST seed applied on first boot so they are reproducible. | `openelis-config/` |
 | Adapter behaviour | environment variables only | `.env` |
@@ -336,6 +338,13 @@ documented in the runbook rather than a silent destructive side effect of an `.e
 ⚠️ The committed defaults are **placeholders, not the facility's real numbers** — they are marked as
 such in `.env.example` and in the clinical sign-off checklist. Real counts from the birth centre
 replace them before go-live.
+
+**Implemented and verified at DH-003.** Initializer creates the deterministic `Maternité`
+admission ward and French backend properties. Initializer 2.12.0 has no bed or bed-type domain, so
+the `openmrs-maternity-config` job uses bedmanagement 7.2.0 REST after backend readiness. The job
+runs non-root with a read-only filesystem and dropped capabilities. It exposes no update/delete
+path: mismatched existing metadata stops startup. An isolated empty-volume boot and the full
+same/increase/lower/zero lifecycle passed; see `PROJECT_STATE.md` for exact counts.
 
 ### ANC forms — buildable as specified
 
@@ -537,7 +546,7 @@ The sidecar image itself is built from committed source rather than pulled from 
 
 | Component | Tag | Why |
 |---|---|---|
-| OpenMRS O3 backend | `openmrs/openmrs-reference-application-3-backend:3.7.x` + digest | Current released O3 line. Upstream publishes only branch tags here, hence the digest pin. |
+| OpenMRS O3 backend | local `daher-health/openmrs-backend:3.7-{on,off}`; exact `openmrs/openmrs-reference-application-3-backend:3.7.x` digest base | Current released O3 line. Two minimal targets preserve or omit the demo overlay while retaining upstream UID 1001 and startup contract. |
 | OpenMRS O3 frontend | `openmrs/openmrs-reference-application-3-frontend:3.7.x` + digest | Must match the backend line |
 | OpenMRS O3 gateway | `openmrs/openmrs-reference-application-3-gateway:3.7.x` + digest | nginx joining the SPA and API on one origin; upstream's tested routing |
 | MariaDB | `mariadb:10.11.18` | **Corrected from 11.4 at build step 1.** The OpenMRS reference distribution tests against the 10.11 line; following upstream's tested pairing beats picking the newer LTS on my own judgement |
@@ -594,8 +603,8 @@ implementation or pilot acceptance:
 | Real maternity bed counts | Placeholder values in `.env`; changing them is an `.env` edit + restart (§7) | Go-live |
 | WhatsApp Cloud API / BSP credentials | Building against mock; swap is `.env`-only. Line item stays marked **incomplete** until real credentials run end-to-end (§8) | Go-live |
 | `labonfhir` vs. hand-rolled transport | **Resolved for v1:** custom adapter; revisit after the golden flow (§6) | After golden flow |
-| Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
-| Demo patients | **Resolved:** `OMRS_DEMO_PATIENTS=off|on`, default `off`, selects the distribution-source global-property overlay. Demo concept content remains a separate DH-003 seam because removing it may remove lab vocabulary | DH-003 |
+| Initializer coverage of bed domains | **Resolved at DH-003:** no bed domains in 2.12.0; verified additive REST seed (§4, §7) | Closed |
+| Demo patients/content | **Resolved and empty-volume verified:** `OMRS_DEMO_PATIENTS=off|on` (default `off`) is independent of `OMRS_DEMO_CONTENT=on|off` (default upstream/as-shipped). `off` never deletes existing DB content | Closed; clinical vocabulary still needs sign-off |
 | Keycloak session lifetimes | **Resolved for pilot (ADR-013):** 1h idle / 10h maximum / 5m token | Revisit after observed pilot workflow |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
 | Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |

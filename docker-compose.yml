@@ -62,7 +62,10 @@ services:
   # Not publicly routed. Reached through the gateway (and later, Caddy).
   # ---------------------------------------------------------------------------
   openmrs-backend:
-    image: openmrs/openmrs-reference-application-3-backend:3.7.x@sha256:440bf92f4749faa38ca48a3e09f6651dee016089f0cbf6031dc5b1a979000ed7
+    image: daher-health/openmrs-backend:3.7-${OMRS_DEMO_CONTENT:-on}
+    build:
+      context: ./openmrs-config
+      target: ${OMRS_DEMO_CONTENT:-on}
     restart: unless-stopped
     depends_on:
       openmrs-db:
@@ -99,24 +102,29 @@ services:
       # patients appeared on a boot with it set to false, but that is the default
       # behaviour, not this switch working.
       OMRS_CONFIG_ADD_DEMO_DATA: ${OMRS_ADD_DEMO_DATA:-false}
+      # Initializer 2.12 has no bed or bed-type domains. Some loaders also
+      # ignore its filename-exclusion API, so OMRS_DEMO_CONTENT selects a local
+      # image build target rather than pretending that API covers every domain.
     volumes:
       - openmrs-data:/openmrs/data
+      - ./openmrs-config/initializer/globalproperties:/openmrs/distribution/openmrs_config/globalproperties/zz-daher-health:ro
+      - ./openmrs-config/initializer/locations:/openmrs/distribution/openmrs_config/locations/zz-daher-health:ro
+      - ./openmrs-config/demo/patients.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/distribution/openmrs_config/globalproperties/zz-daher-patient-control/patients.xml:ro
       # ---- Demo patients: on/off switch (BLOCKER-2) --------------------------
       # The O3 distro creates 50 fictional patients on first boot. It is driven by
       # ONE global property, seeded from the distro's own Initializer overlay at
-      # configuration/globalproperties/referenceapplication-demo/. We select which
-      # version of that file the container sees.
+      # configuration/globalproperties/referenceapplication-demo/. This separate,
+      # late-loading overlay sets only that property, after upstream metadata.
       #
-      # Why replace the file rather than delete it: it also carries six unrelated
-      # properties (queue concept sets, cause-of-death, attachment extensions).
-      # Deleting it to stop demo patients would silently break those. Our two
-      # copies are byte-identical to upstream's except for the single count.
+      # Why a separate file: upstream's file also carries unrelated properties
+      # (queue concept sets, cause-of-death, attachment extensions). Replacing it
+      # merely to control patient creation couples two independent settings. The
+      # unique filename also survives OMRS_DEMO_CONTENT=off.
       #
-      # ⚠️ FIRST BOOT ONLY. The module zeroes the property after it fires, so this
-      # takes effect on an empty schema and nowhere else. Flipping it to `on`
-      # against a database that already holds real patients would inject 50
-      # fictional ones — which is why the default is `off` and why `on` is
-      # something you type deliberately.
+      # ⚠️ CHOOSE BEFORE FIRST BOOT. The module zeroes the property after it fires,
+      # and Initializer leaves an unchanged file alone. Flipping `off` to `on`
+      # changes the file checksum and can inject 50 fictional patients into an
+      # existing database — why the default is `off` and `on` is deliberate.
       #
       # MOUNTED AT THE DISTRIBUTION SOURCE, NOT THE LIVE CONFIG DIRECTORY. The
       # entrypoint deletes and re-copies /openmrs/data/configuration from
@@ -125,7 +133,6 @@ services:
       # copy fail with "Permission denied" and crash-looped the container — found
       # by doing exactly that. Mounting the source is read-only by nature, so the
       # copy succeeds and carries our version forward.
-      - ./openmrs-config/demo/globalproperties-core_demo.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/distribution/openmrs_config/globalproperties/referenceapplication-demo/globalproperties-core_demo.xml:ro
     # Readiness, not liveness. The previous probe (`curl -f http://localhost:8080/openmrs`)
     # reported HEALTHY 8 seconds into the first boot, while Liquibase was still running and
     # the gateway was returning 502 — measured at DH-002. Two reasons it lied:
@@ -162,6 +169,31 @@ services:
         # or hand-editing someone else's nginx config — same reasoning as ADR-010.
         aliases: [backend]
 
+  # Initializer 2.12 has no bed or bed-type domain. This short-lived job uses
+  # bedmanagement 7.2.0's REST resources after the backend is genuinely ready.
+  # It can create only: conflicts fail, and no update/delete operation exists.
+  openmrs-maternity-config:
+    image: python:3.13.14-slim-bookworm@sha256:67a1e1f215ccda113cfc024e8639049257e88f273898f595b61476d128d387e8
+    restart: "no"
+    read_only: true
+    user: "65534:65534"
+    depends_on:
+      openmrs-backend:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      OPENMRS_API_URL: http://openmrs-backend:8080/openmrs/ws/rest/v1/
+      OPENMRS_ADMIN_PASSWORD: ${OMRS_ADMIN_PASSWORD:?set OMRS_ADMIN_PASSWORD in .env}
+      MATERNITY_DELIVERY_BEDS: ${MATERNITY_DELIVERY_BEDS:-0}
+      MATERNITY_POSTPARTUM_BEDS: ${MATERNITY_POSTPARTUM_BEDS:-0}
+    volumes:
+      - ./openmrs-config/seed/seed_maternity.py:/opt/daher/seed_maternity.py:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    command: ["python", "/opt/daher/seed_maternity.py"]
+    cap_drop: [ALL]
+    networks: [internal]
+
   # ---------------------------------------------------------------------------
   # OpenMRS frontend — nginx serving the O3 single-page application.
   #
@@ -174,7 +206,10 @@ services:
     image: openmrs/openmrs-reference-application-3-frontend:3.7.x@sha256:34352f481bf7e72b62406843925479042463fbbd7c8c3f7f5b9cda20b8390117
     restart: unless-stopped
     depends_on:
-      - openmrs-backend
+      openmrs-backend:
+        condition: service_healthy
+      openmrs-maternity-config:
+        condition: service_completed_successfully
     environment:
       <<: *common-env
       SPA_PATH: /openmrs/spa
