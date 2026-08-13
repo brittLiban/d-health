@@ -371,7 +371,20 @@ split — a working realm and a working OpenMRS that don't authenticate against 
 exact failure this ticket exists to prevent. Includes the documented break-glass local admin.
 **Acceptance:** one login, both apps, no second prompt.
 
-### DH-014 · Backup, both engines · P0 🔒 · ⏸ (needs DH-005)
+### DH-014 · Backup, both engines · P0 🔒 · 🔨 PARTLY VERIFIED 2026-08-12
+`backup/backup.sh` written and syntax-checked. **The dump layer is genuinely exercised**, not just
+written — run against the live databases:
+
+| Dump | Result |
+|---|---|
+| MariaDB `openmrs` | ✅ 15.9 MB, and it **contains the data**: test identifier `10001MJ` present, with real `patient` and `person_name` INSERTs |
+| PostgreSQL `clinlims` | ✅ 1.28 MB |
+| PostgreSQL `keycloak` / `adapter` | ✅ ~1 KB each — correct, both are empty until DH-007/DH-010 |
+
+**NOT yet done:** the script has never run end-to-end (encryption, S3 upload, volume tarring, the
+sidecar container and its schedule are all unexercised), and **no restore has been attempted**.
+Per AGENTS.md the pinned item is "backup **plus a performed restore drill**" — this is neither
+finished nor a substitute for DH-015.
 `mariadb-dump` + `pg_dump` (all three DBs) + adapter audit volume + OpenMRS data volume +
 Keycloak realm export → encrypted → S3-compatible. **Scheduled deliberately here, in parallel
 with SSO, not after the adapter** — it only needs databases, and putting it last is how pinned
