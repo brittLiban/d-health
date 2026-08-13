@@ -1,6 +1,6 @@
 # Current State — Daher Health
 
-**Assessed:** 2026-08-11 (was 2026-08-10) · **Target:** pilot-ready by 2026-09-01 (21 days)
+**Assessed:** 2026-08-12 · **Target:** pilot-ready by 2026-09-01 (20 days)
 **Method:** inspection of the actual repository and running environment, not the plan.
 
 ---
@@ -35,16 +35,23 @@ than merely written.
 | OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4, admin login works |
 | OpenMRS frontend | **running** — container healthy; the SPA has **not** been exercised in a browser |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
-| PostgreSQL | not written |
-| OpenELIS | not written |
-| Keycloak | not written |
+| PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases |
+| OpenELIS webapp | **running** — serves HTTPS 8443; no OpenELIS login performed yet |
+| OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
+| OpenELIS frontend | running, **not exercised** — it has no route until Caddy (DH-016) |
+| Keycloak | not written — but its **database already exists** (DH-005), so DH-007 is unblocked |
 | Adapter | not written |
 | WhatsApp notifier | not written |
 | Backup | not written |
 | Caddy | not written |
 
-⚠️ **This local stack contains 50 fictional demo patients** plus one deliberate test patient. It
-is a throwaway verification stack and must never be confused with a clean instance.
+⚠️ **This local stack contains 50 fictional demo patients** plus two deliberate test patients (one
+registered via the API, one by Liban in the SPA). It is a throwaway verification stack and must
+never be confused with a clean instance.
+
+**Build steps 1 and 3 of 8 are done.** Step 2 (DH-003) is deliberately not started — it depends on
+BLOCKER-2, which is a human decision. Steps 4–8 remain unwritten, though DH-007 (Keycloak) and
+DH-014 (backup) are now unblocked and need no decision.
 
 ---
 
