@@ -60,7 +60,7 @@ exists. Each links to the detail rather than repeating it.
 
 | # | Decision | Why it isn't mine | Blocks |
 |---|---|---|---|
-| 1 | **The 50 fictional demo patients** — the distro creates them on first boot, and `OMRS_ADD_DEMO_DATA=false` does not stop it. Keep the distro's config as shipped, or restrict Initializer/OCL to the non-demo set? | Concept-dictionary + patient-data surface. Stripping the `-demo` tree is the "obviously right" tidy-up AGENTS.md §5 exists to stop, and it may remove the lab-test concepts DH-006 needs | BLOCKER-2 → DH-003, and the pilot VM's first boot |
+| ~~1~~ | ~~**The 50 fictional demo patients**~~ — ✅ **RESOLVED 2026-08-12.** Answered with "make it an option": `OMRS_DEMO_PATIENTS`, default `off`. The demo *concept* content becomes a second knob in DH-003, default as-shipped — no decision needed from you unless you want a different default | — | Nothing |
 | 2 | **Poll interval for the adapter** — how long may a prenatal order sit before the laboratory sees it? | A clinical-workflow question, not a technical one | `WATERMARK-DESIGN.md` §9.1 → DH-010 |
 | 3 | **Does voiding an order need to reach the laboratory?** If a voided order never advances `meta.lastUpdated`, the LIS keeps working an order the EMR considers cancelled | Patient-safety behaviour, and it may need a reconciliation sweep rather than a watermark | `WATERMARK-DESIGN.md` §6 → DH-010 |
 | 4 | **Revisit `labonfhir` (ADR-004)?** It was deferred partly because we'd own the trigger either way. Owning it now demonstrably means *polling* | A recorded decision; ADRs are not re-litigated by an agent | ADR-005 review → DH-010 |
@@ -93,7 +93,28 @@ and a Claude Code restart to take effect — done 2026-08-10.
 **Note for the pilot VM:** the same choice recurs there with higher stakes. `docker` group
 membership is effectively root on the host. Decide it deliberately, not by habit.
 
-### BLOCKER-2 — The O3 distro loads its **demo** concept configuration on boot · **Human Decision Required: Yes**
+### BLOCKER-2 — Demo data · ✅ RESOLVED BY DECISION 2026-08-12 — made a switch, not a choice
+
+**Liban's response, recorded verbatim in effect:** *"When spinning up different instances, give me
+the option to be able to include demo data or not."* He rejected the either/or I presented and asked
+for a knob — consistent with ADR-007's treatment of bed counts.
+
+**Built:** `OMRS_DEMO_PATIENTS` (default `off`) in `.env`, selecting which version of the distro's
+`globalproperties-core_demo.xml` the container sees. Mounted at the **distribution source**, because
+the entrypoint re-copies the live config tree on every boot — mounting the destination crash-loops
+the container. Verified on an empty volume: 0 permission errors, 0 restarts, live config reads 0.
+Final acceptance (patient count 0 after a full cold boot) was running at the time of writing.
+
+**Split into two knobs deliberately.** The concept-content knob is NOT built yet, and its default is
+"as shipped": turning the demo concept tree off may remove the `BasicLabTests` vocabulary DH-006's
+prenatal panel maps to. Building it belongs to DH-003, and the seam is identified — a
+`referenceapplication-demo` overlay directory across 37 Initializer domains.
+
+**Below is the original entry, kept for the reasoning.** ⚠️ Its framing as a decision to be made is
+superseded; only the concept-content default remains open.
+
+<details>
+<summary>Original BLOCKER-2 (superseded)</summary>
 
 **Ticket:** DH-003 (surfaced during DH-002; does **not** block DH-002)
 **Raised:** 2026-08-10
@@ -152,12 +173,10 @@ outside DH-002, and one of them touches patient tables. Setting the global prope
 DH-003's Initializer configuration, where it applies from first boot — which is the only moment
 that helps, since the property self-clears after firing.
 
-**Needs a decision before DH-003:**
-1. Keep the distro's configuration as shipped, or restrict Initializer/OCL to the non-demo
-   `referenceapplication` set (weighing that DH-006's prenatal panel may need `BasicLabTests`).
-2. How demo patient creation is suppressed on the pilot: global property via Initializer, removing
-   the module from the distro, or both — and how that is **verified** on a fresh boot rather than
-   assumed.
+**Both original questions are now answered:** (2) is built and verified as `OMRS_DEMO_PATIENTS`;
+(1) becomes a second knob in DH-003 rather than a decision.
+
+</details>
 
 _No blockers open against DH-002._
 
