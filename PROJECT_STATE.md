@@ -46,17 +46,18 @@ stack until production encryption/off-site settings are supplied; DH-015 remains
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | DH-003 (maternity configuration), **DH-011** (OpenMRS order path) |
+| 📋 Ready | DH-003 (maternity configuration), **DH-020** (Postgres hardening) |
+| 🛑 Blocked on human decisions | **DH-011** (first-sync scope, requester identity, cancellation contract) |
 | ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-012, DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
 
 Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
-1. **DH-011 OpenMRS order path.** DH-010's ledger, dead-letter, retry, audit, migration, and health
-   foundation is runtime-verified. Implement the accepted 15-second inclusive-watermark poller and
-   `replaces` discontinuation handling without crossing into the DH-012 result path.
-2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
+1. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
+   first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
+   implement an apparent default; see the evidence and options below.
+2. **Unblocked technical work:** DH-003, DH-020, and the remaining DH-014 backup layers. DH-014 is pinned P0
    and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
@@ -81,6 +82,9 @@ exists. Each links to the detail rather than repeating it.
 | 7 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
 | 8 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
 | 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
+| 10 | **DH-011 first-sync boundary** — import every historical order, only orders created after activation, or explicitly selected existing active orders plus new orders | This decides which patient orders enter the laboratory; it is clinical/scope surface, not a scheduler default | DH-011 |
+| 11 | **OpenELIS requester identity for routed orders** — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
+| 12 | **Cancellation contract once an order reaches OpenELIS** — revoke while retaining history, delete only while unaccepted, or leave it for explicit manual handling | Each choice changes laboratory workflow and audit/history. Upstream does not provide a completed reference behavior | DH-011 |
 
 **ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
 interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
@@ -192,6 +196,39 @@ that helps, since the property self-clears after firing.
 </details>
 
 _No blockers open against DH-002._
+
+### BLOCKER-3 — DH-011 activation and cancellation contract · 🛑 OPEN · **Human Decision Required: Yes**
+
+**Ticket:** DH-011
+
+**Problem:** ADR-005 fully specifies how an existing watermark advances, but not how the first
+watermark is established. Starting from the oldest available order can route historical orders;
+starting at activation time can omit orders that are still active. Selecting either behavior
+changes which patient orders enter the laboratory.
+
+The target contract has two additional human gates. OpenELIS requires an attributable requester,
+while this deployment still carries upstream's sample clinician placeholder. For discontinuation,
+ADR-005 proves the adapter will see a new `ServiceRequest.replaces`, but it does not decide the
+laboratory-side state transition after the original order has been received.
+
+**Primary evidence checked 2026-08-13:** deployed OpenELIS 3.2.1.11 bytecode and its exact source
+tag (`e2a6bdf7`) show the incoming workflow is Task/ServiceRequest based and resolves requester and
+test mappings. The official Ozone `eip-openelis-openmrs` source inspected at `7f994594` labels panel
+support and discontinuation unsupported. Its current cancellation path deletes only a still-
+`REQUESTED` Task/ServiceRequest and carries a TODO that it should revoke rather than delete. That
+is evidence of an unresolved upstream contract, not permission to choose one here.
+
+**Options requiring Liban/clinical workflow confirmation:**
+
+1. First sync: all historical orders; activation-time-forward only; or explicitly selected existing
+   active orders followed by all new events.
+2. Requester: supply the real facility requester identity before routing; the upstream sample may
+   be used only if Liban explicitly authorizes it for this throwaway test stack.
+3. Cancellation: retain and mark revoked; delete only before acceptance and require manual handling
+   afterward; or never mutate the lab order automatically and raise an operator-visible exception.
+
+No poller or clinical order was activated. DH-011 remains blocked; DH-010's safety skeleton remains
+healthy and unchanged.
 
 ---
 
@@ -477,7 +514,11 @@ and named uniqueness constraints inspected; operational rows remained 0; process
 audit file is mode `0600`; and the read-only root filesystem rejected a write. A restart returned
 healthy without reapplying the migration. No FHIR message was moved—that is DH-011/012.
 
-### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 📋 READY (DH-010 complete)
+### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED (BLOCKER-3)
+The accepted 15-second inclusive watermark remains the implementation design. Activation is blocked
+on the first-sync boundary, a real OpenELIS requester identity, and the cancellation state contract;
+see BLOCKER-3. DH-006's signed-off test mappings are also required before an end-to-end pilot order
+can be claimed. No transport code has been added and no order has been sent.
 ### DH-012 · Adapter: result path OpenELIS → OpenMRS · P0 · ⏸ (needs DH-011)
 Record observed `ServiceRequest` / `DiagnosticReport` shapes here → triggers the ADR-004 revisit.
 

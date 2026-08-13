@@ -135,6 +135,14 @@ full HAPI server that advertises `Subscription`, but delivery and corrected-resu
 must be demonstrated before trusting the result path. DH-010 built and runtime-verified the safety
 foundation; the watermark and poller themselves remain DH-011.
 
+### BLOCKER-3 — DH-011 activation and cancellation contract · 🛑 OPEN
+
+The polling algorithm is accepted, but three clinical/scope choices are not: the first-sync
+boundary, the real requester identity attached to orders in OpenELIS, and the laboratory-side
+state transition for a `ServiceRequest.replaces` discontinuation. Upstream's reference bridge
+explicitly leaves panel support and discontinuation incomplete. These choices are recorded under
+**NEEDS LIBAN** in `PROJECT_STATE.md`; no default was inferred and no order transport was activated.
+
 ---
 
 ## 5. Known placeholders — deliberate, not gaps to fill
