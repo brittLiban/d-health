@@ -100,6 +100,23 @@ services:
       OMRS_CONFIG_ADD_DEMO_DATA: ${OMRS_ADD_DEMO_DATA:-false}
     volumes:
       - openmrs-data:/openmrs/data
+      # ---- Demo patients: on/off switch (BLOCKER-2) --------------------------
+      # The O3 distro creates 50 fictional patients on first boot. It is driven by
+      # ONE global property, seeded from the distro's own Initializer overlay at
+      # configuration/globalproperties/referenceapplication-demo/. We select which
+      # version of that file the container sees.
+      #
+      # Why replace the file rather than delete it: it also carries six unrelated
+      # properties (queue concept sets, cause-of-death, attachment extensions).
+      # Deleting it to stop demo patients would silently break those. Our two
+      # copies are byte-identical to upstream's except for the single count.
+      #
+      # ⚠️ FIRST BOOT ONLY. The module zeroes the property after it fires, so this
+      # takes effect on an empty schema and nowhere else. Flipping it to `on`
+      # against a database that already holds real patients would inject 50
+      # fictional ones — which is why the default is `off` and why `on` is
+      # something you type deliberately.
+      - ./openmrs-config/demo/globalproperties-core_demo.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/data/configuration/globalproperties/referenceapplication-demo/globalproperties-core_demo.xml:ro
     # Readiness, not liveness. The previous probe (`curl -f http://localhost:8080/openmrs`)
     # reported HEALTHY 8 seconds into the first boot, while Liquibase was still running and
     # the gateway was returning 502 — measured at DH-002. Two reasons it lied:
