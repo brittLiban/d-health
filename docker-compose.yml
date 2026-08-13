@@ -2,7 +2,7 @@
 #
 # Built incrementally, one service group at a time (see docs/ARCHITECTURE.md §13).
 # Includes steps 1 (OpenMRS), 3 (OpenELIS), 4a (Keycloak), DH-010 adapter
-# safety skeleton, DH-014 backup, and DH-020 database hardening.
+# safety skeleton, DH-014 backup (opt-in profile), and DH-020 database hardening.
 #
 # Every image is pinned. No `:latest` anywhere. Where an upstream publishes only a
 # moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
@@ -584,6 +584,11 @@ services:
     image: daher-health/backup:0.1.0
     build:
       context: ./backup
+    # The scheduler must not enter a restart loop on a workstation whose .env
+    # deliberately lacks the still-unapproved off-site destination/key. Start
+    # it explicitly with `--profile backup` only after DH-014's production
+    # settings exist. A performed restore remains the separate DH-015 gate.
+    profiles: [backup]
     restart: unless-stopped
     depends_on:
       openmrs-db:

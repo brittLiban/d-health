@@ -9,8 +9,10 @@ one `docker-compose.yml`.
 >
 > **Step 1 (MariaDB + OpenMRS O3)** is API-verified and Liban registered a test patient in the SPA.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
-> verified; its UI has not been exercised. **DH-007 Keycloak** is running with the French-first
-> realm, roles, clients, secret interpolation, readiness, and restart persistence verified.
+> verified; its UI has not been exercised, and an upstream Horiba analyzer test import is blocked
+> pending confirmation that the device is in facility scope. **DH-007 Keycloak** is running with
+> the French-first realm, roles, clients, secret interpolation, readiness, and restart persistence
+> verified.
 > **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
 > volume verified; it does not move FHIR messages yet. One-login SSO and the clinical/integration
 > steps remain incomplete.
@@ -75,6 +77,7 @@ language, not a localisation afterthought.
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 ```
 
 Then edit `.env` and fill in every value marked `CHANGE ME`. Generate passwords rather than
@@ -86,6 +89,8 @@ openssl rand -base64 30
 
 **`.env` is gitignored and must never be committed.** `.env.example` carries placeholders only,
 and every variable is documented there with a comment the moment it is introduced.
+Keep `.env` mode `0600`: it contains database, application, and OIDC client credentials. The
+2026-08-13 quality audit found the local file at `0664` and corrected it to `0600`.
 
 The compose file uses `${VAR:?}` guards, so a missing required value fails loudly at startup
 instead of silently falling back to a default password.
@@ -108,6 +113,18 @@ OpenMRS.
 docker compose up -d
 docker compose logs -f openmrs-backend
 ```
+
+This starts the currently configured foundation, not the backup scheduler. Backup is deliberately
+behind the `backup` profile until its encryption key and approved off-site destination exist:
+
+```bash
+docker compose --profile backup up -d backup
+```
+
+Do not enable that profile merely to make the container list look complete. DH-014 still requires
+production key escrow and approved off-site settings, and DH-015 still requires a performed restore.
+Once those settings are provisioned, set `COMPOSE_PROFILES=backup` in `.env`; the normal
+one-command `docker compose up -d` then includes the scheduler.
 
 ### ⏱ The first boot takes about 50 minutes. This is normal. Do not restart it.
 

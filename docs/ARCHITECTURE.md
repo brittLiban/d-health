@@ -1,10 +1,10 @@
 # Daher Health — v1 Pilot Architecture
 
-**Status:** Decisions recorded 2026-08-10 (§0). **Build step 1 built and verified 2026-08-11**
-(DH-002) — §12 now carries real pulled digests, and §15 carries two items that only appeared once
-the stack actually ran.
+**Status:** Build steps 1 and 3, the Keycloak foundation, adapter safety skeleton, local backup
+path, and PostgreSQL tenant isolation are built and runtime-verified. See `CURRENT_STATE.md` for
+the exact verification boundary.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-13 (Africa/Djibouti)
 
 ---
 
@@ -52,9 +52,10 @@ template — see §8) and the encrypted nightly backup to object storage (§9).
 
 ## 2. Service topology
 
-Twelve long-running containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
-OpenMRS gateway, MariaDB, OpenELIS webapp, OpenELIS FHIR, OpenELIS frontend, PostgreSQL, Keycloak,
-the adapter, and the backup sidecar.
+The target topology has twelve long-running containers in one `docker-compose.yml`: Caddy,
+OpenMRS backend, OpenMRS frontend, OpenMRS gateway, MariaDB, OpenELIS webapp, OpenELIS FHIR,
+OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and the backup sidecar. The current foundation
+runs ten: Caddy is not built, and backup is an opt-in profile until production credentials exist.
 
 Compose also contains short-lived setup jobs: OpenELIS certificate provisioning and the DH-020
 PostgreSQL tenant-grant hardening job. They must exit 0 before their dependent services start; they
@@ -456,6 +457,12 @@ archive read-back—passed. Off-site upload was explicitly disabled so no data l
 unverified and still requires an approved destination. The test archive was removed because its
 ephemeral key was not retained. No restore has been performed.
 
+The scheduler is behind Compose's `backup` profile. This keeps the documented default
+`docker compose up -d` usable before the required key/destination exist instead of creating a
+credential-failure restart loop. Enabling the profile is part of provisioning the approved backup:
+set `COMPOSE_PROFILES=backup` in `.env` after the required settings exist. The normal
+`docker compose up -d` then remains the one-command deployment path.
+
 ---
 
 ## 11. Clinical content — sign-off boundary
@@ -592,6 +599,7 @@ implementation or pilot acceptance:
 | Keycloak session lifetimes | **Resolved for pilot (ADR-013):** 1h idle / 10h maximum / 5m token | Revisit after observed pilot workflow |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
 | Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |
+| Horiba Pentra60 analyzer test import | Upstream `horiba-pentra60-cbc.csv` repeatedly aborts on the existing unique test description `LYM#(Whole Blood)`. Endpoints remain reachable, but the analyzer configuration is not verified. **Human Decision Required: Yes** — confirm whether this analyzer is in facility scope before changing laboratory tests | DH-023 / laboratory configuration |
 
 **Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
 to keep the surface area small enough to be stable by then. Anything that grows the container count

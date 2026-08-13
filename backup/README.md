@@ -6,6 +6,17 @@ database engines, the live Keycloak realm, OpenMRS data, and the adapter audit v
 one encrypted archive to the `backup-data` volume and optionally uploads it to approved
 S3-compatible storage.
 
+The scheduler is in Compose's opt-in `backup` profile so an unconfigured default
+`docker compose up -d` cannot create a credential-failure restart loop. After the production
+encryption key and approved off-site destination are configured, start it with:
+
+```bash
+docker compose --profile backup up -d backup
+```
+
+For the pilot deployment, set `COMPOSE_PROFILES=backup` in `.env` after those settings exist. The
+normal `docker compose up -d` then starts the complete configured stack in one command.
+
 `BACKUP_REQUIRE_OFFSITE=true` is the pilot default. A missing or failed upload marks the run
 `FAILED` even when an encrypted local archive exists. Set it to `false` only for explicit local
 verification; that does not satisfy the off-site requirement.

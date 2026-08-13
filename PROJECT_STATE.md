@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton and tenant isolation runtime-verified
+**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton, local backup path, and tenant isolation runtime-verified
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -10,17 +10,18 @@ Single agent, one ticket at a time. Update this file before ending a session.
 ## Current phase
 
 **Step 1** (MariaDB + OpenMRS O3) boots and works — verified through REST and FHIR, and by Liban
-himself in the SPA. **Step 3** (PostgreSQL + OpenELIS) is built and verified: three co-tenant
-databases, 375 base tables in the fully migrated OpenELIS `clinlims` schema, webapp on HTTPS, and a
-FHIR server answering `metadata` over mutual TLS. **DH-019** closed the published-default admin
-password.
+himself in the SPA. **Step 3** (PostgreSQL + OpenELIS) has its runtime foundation verified: three
+co-tenant databases, 375 base tables in the fully migrated OpenELIS `clinlims` schema, webapp on
+HTTPS, and a FHIR server answering `metadata` over mutual TLS. **DH-019** closed the published
+default admin password. BLOCKER-4 records an upstream analyzer configuration import that is not
+verified.
 
 **DH-007** (Keycloak foundation) is built and runtime-verified: the `daher` realm imports with
 French as default; roles and all three clients exist; environment placeholders resolve to the
 expected client secrets; no staff users are committed; and restart returns healthy without
 re-importing the existing realm. **This is not SSO** — application wiring remains DH-008.
 
-Both steps together surfaced ten findings that `docker compose config` could never have caught
+The running stack surfaced multiple findings that `docker compose config` could never have caught
 (`CURRENT_STATE.md` §3a and DH-005's ticket entry). Buildable work remains alongside the decisions
 gathered under **NEEDS LIBAN** below.
 
@@ -38,16 +39,27 @@ two-container `daher-demotest` password-verification stack was found and stopped
 its containers or volumes. The backup scheduler remains intentionally absent from the running
 stack until production encryption/off-site settings are supplied; DH-015 remains unperformed.
 
+**Deep quality verification 2026-08-13:** both local images rebuilt; adapter dependency consistency,
+Ruff lint/format, and all 14 tests passed. OpenMRS REST/FHIR and configured admin authentication,
+OpenELIS HTTPS/FHIR mutual TLS/frontend, Keycloak discovery/realm, adapter readiness, all nine
+PostgreSQL role/database cases, all container timezones, and aggregate database state passed.
+Every running/setup container had zero restarts and zero OOM kills. A fresh local-only encrypted
+backup captured all seven required components and passed decrypt/manifest/schema/data read-back;
+its archive and status marker were removed because the ephemeral key was not retained. This was
+not an off-site test or restore. The audit also corrected the local `.env` from mode `0664` to
+`0600`, rotated the old live OpenMRS volume away from `Admin123`, completed DH-022, and raised
+BLOCKER-4 for the reproducible OpenELIS analyzer import conflict.
+
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (verified on an empty volume), **DH-020** |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
 | 📋 Ready | DH-003 (maternity configuration) |
-| 🛑 Blocked on human decisions | **DH-011** (first-sync scope, requester identity, cancellation contract) |
+| 🛑 Blocked on human decisions | **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
 | ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-012, DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
@@ -59,6 +71,8 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
    implement an apparent default; see the evidence and options below.
 2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
    and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
+3. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
+   a Horiba Pentra60; the upstream import is failing, but altering lab mappings is not an agent call.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
 `docker compose down -v` — that destroys the volumes and the evidence.
@@ -85,6 +99,7 @@ exists. Each links to the detail rather than repeating it.
 | 10 | **DH-011 first-sync boundary** — import every historical order, only orders created after activation, or explicitly selected existing active orders plus new orders | This decides which patient orders enter the laboratory; it is clinical/scope surface, not a scheduler default | DH-011 |
 | 11 | **OpenELIS requester identity for routed orders** — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
 | 12 | **Cancellation contract once an order reaches OpenELIS** — revoke while retaining history, delete only while unaccepted, or leave it for explicit manual handling | Each choice changes laboratory workflow and audit/history. Upstream does not provide a completed reference behavior | DH-011 |
+| 13 | **Horiba Pentra60 analyzer scope** — does the birth centre laboratory use or plan to use this analyzer? Its upstream CBC test import currently aborts on a unique-description conflict | Disabling it or changing its test names/mappings changes laboratory configuration. The audit cannot infer facility equipment or clinical mappings | DH-023 / DH-006 |
 
 **ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
 interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
@@ -229,6 +244,26 @@ is evidence of an unresolved upstream contract, not permission to choose one her
 
 No poller or clinical order was activated. DH-011 remains blocked; DH-010's safety skeleton remains
 healthy and unchanged.
+
+### BLOCKER-4 — OpenELIS Horiba Pentra60 analyzer import · 🛑 OPEN · **Human Decision Required: Yes**
+
+**Ticket:** DH-023
+
+**Problem:** on every observed OpenELIS webapp boot, upstream's `horiba-pentra60-cbc.csv` import
+attempts to update several test rows to the already-existing unique description
+`LYM#(Whole Blood)`. PostgreSQL rejects the update on `test_desc_uk`, the transaction aborts, and
+OpenELIS logs failed test-editor bridging for subsequent tests. Four occurrences were observed
+across 2026-08-11 and 2026-08-13. The live table has zero duplicate descriptions and the web/FHIR
+endpoints still answer, so uniqueness is preserved; the analyzer configuration is not verified.
+
+**Decision needed:** confirm whether the facility uses or plans to use the Horiba Pentra60.
+
+- If yes, the laboratory/clinical lead must confirm the intended test identities/mappings before
+  an upstream-compatible import fix is attempted and the analyzer workflow must be demonstrated.
+- If no, explicitly authorize excluding that analyzer configuration from this deployment; do not
+  infer that unused-looking clinical configuration may be removed.
+
+No test, mapping, or analyzer configuration was changed during the audit.
 
 ---
 
@@ -419,6 +454,18 @@ and its passwords are the published `kspass`/`tspass`. Acceptable only while not
 Docker network speaks to 8443. Interacts with ADR-005 Q5: the adapter authenticates with a client
 certificate from this same keystore, so replacing it is a coordinated change, not a drop-in.
 
+### DH-022 · Keep unconfigured backup out of the default Compose path · P0 · ✅ DONE 2026-08-13
+The documented `docker compose up -d` previously selected `backup` even when the required
+encryption/off-site variables were absent, producing a credential-failure restart loop that
+contradicted `CURRENT_STATE.md`. The scheduler now uses Compose's opt-in `backup` profile. Default
+foundation startup remains clean; operators enable it explicitly only after approved settings
+exist. This does not weaken the pinned gate: DH-014 production off-site verification and DH-015's
+performed restore remain mandatory.
+
+### DH-023 · Resolve OpenELIS Horiba analyzer import conflict · priority pending scope · 🛑 BLOCKED
+See BLOCKER-4. This cannot be sized or changed until Liban confirms whether the analyzer is in
+facility scope; any test/mapping change then requires laboratory/clinical confirmation.
+
 ### DH-006 · Prenatal panel order set + LOINC mappings · P0 · ⏸ (needs DH-005) · **Human Decision Required: Yes**
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
 the clinical lead has time.
@@ -574,6 +621,9 @@ Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed mes
 | 3 | `OMRS_CONFIG_ADD_DEMO_DATA` inert in this image | Documented, not removed |
 | 4 | 50 fictional demo patients created on first boot | **Resolved** — `OMRS_DEMO_PATIENTS=off|on`, default `off`; old verification volume still contains them |
 | 5 | Admin password defaults to the published `Admin123` | **Fixed and empty-volume verified — DH-019** |
+| 6 | The old throwaway volume still accepted `Admin123` after DH-019 landed | **Fixed in live state 2026-08-13** — rotated through the OpenMRS API; current configured password passes and default is refused |
+| 7 | Default `docker compose up -d` selected an unconfigured backup scheduler and would restart-loop | **Fixed — DH-022**; backup is an explicit profile until production settings exist |
+| 8 | OpenELIS Horiba Pentra60 test import aborts on a unique-description conflict | **BLOCKED — DH-023 / BLOCKER-4; Human Decision Required: Yes** |
 
 ## Notes for next session
 

@@ -7,7 +7,7 @@
 
 ## 1. Honest summary
 
-**Build steps 1 and 3 now run, and running them produced ten findings the syntax check could not.**
+**Build steps 1 and 3 now run, and running them produced multiple findings the syntax check could not.**
 Step 1 (MariaDB + OpenMRS O3) is verified through REST and FHIR **and by Liban himself in the SPA**.
 Step 3 (PostgreSQL + OpenELIS) is verified: three co-tenant databases, 375 base tables in the
 fully migrated OpenELIS `clinlims` schema, the webapp on HTTPS, and a FHIR server answering over
@@ -46,17 +46,17 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | Service | State |
 |---|---|
 | MariaDB | **running, healthy, verified** — 10.11.18, digest-pinned |
-| OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4, admin login works |
+| OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4; configured admin password works and `Admin123` is refused after the 2026-08-13 live-volume rotation |
 | OpenMRS frontend | **running** — container healthy; Liban registered a test patient in the SPA |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
-| OpenELIS webapp | **running** — serves HTTPS 8443; no OpenELIS login performed yet |
+| OpenELIS webapp | **running with a configuration warning** — serves HTTPS 8443; no OpenELIS login performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
 | Adapter | **running, healthy, DH-010 verified** — ledger/dead-letter/retry/audit foundation only; no FHIR transport yet |
 | WhatsApp notifier | not written |
-| Backup | **not running in the current stack** — the local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
+| Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
 
 ⚠️ **This local stack contains 50 fictional demo patients** plus two deliberate test patients (one
@@ -74,7 +74,7 @@ not complete.
 | Artefact | State | What "unverified" still means here |
 |---|---|---|
 | `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, the `${VAR:?}` guards and the backend↔db handshake are all now exercised. The new backend healthcheck's *cold-start* behaviour has been observed on one warm boot only. |
-| `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is now wired and **verified on an empty volume** (DH-019). The OpenELIS block is wired and booted. |
+| `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is wired and **verified on an empty volume** (DH-019). The old local volume was rotated to it on 2026-08-13. Local `.env` permissions were corrected from `0664` to `0600`; the README now requires that mode. |
 | Image digests | **Pinned from real pulls as each component landed** | Dates and exact values are recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. The French default locale was **not** reported on either way — still open, and a DH-003 concern. |
 | OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
@@ -92,6 +92,8 @@ not complete.
 | 4 | **50 fictional demo patients created on first boot** | `SELECT COUNT(*) FROM patient` = 51 after boot; `referencedemodata-2.6.1.omod`; global property `referencedemodata.createDemoPatientsOnNextStartup` | **Resolved by decision** — explicit `OMRS_DEMO_PATIENTS=off|on` distribution-source overlay, default `off` |
 | 5 | Cold boot ≈ 49 min, dominated by 23 OCL concept-package imports | Deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z | Documented; healthcheck timings derived from it |
 | 6 | No OpenMRS admin password variable; image defaults to the published `Admin123`, applied **first boot only** | `OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in `startup-init.sh` | **Fixed and verified on an empty volume — DH-019** |
+| 7 | Existing throwaway OpenMRS volume still accepted `Admin123` because its container/DB predated DH-019 | Authenticated session probes against both configured and published passwords | **Fixed in live state 2026-08-13** — rotated through OpenMRS's password API; container recreated with current Compose env; configured secret passes and default is refused |
+| 8 | OpenELIS startup repeatedly aborts `horiba-pentra60-cbc.csv` processing while attempting to give several tests the existing unique description `LYM#(Whole Blood)` | Four boots across 2026-08-11/13; `test_desc_uk` violations followed by failed test-editor bridging. Live table has zero duplicate descriptions, so the transaction rollback protects uniqueness but the analyzer import is incomplete | **BLOCKER-4 — Human Decision Required: Yes.** Do not alter laboratory tests until Liban confirms whether that analyzer is in facility scope |
 
 Three upstream oddities observed and deliberately not chased, recorded so they are not later
 mistaken for new breakage: `AddressConfigurationLoader` logs an ERROR that the distro's own
@@ -142,6 +144,12 @@ boundary, the real requester identity attached to orders in OpenELIS, and the la
 state transition for a `ServiceRequest.replaces` discontinuation. Upstream's reference bridge
 explicitly leaves panel support and discontinuation incomplete. These choices are recorded under
 **NEEDS LIBAN** in `PROJECT_STATE.md`; no default was inferred and no order transport was activated.
+
+### BLOCKER-4 — OpenELIS Horiba Pentra60 analyzer import · 🛑 OPEN
+
+The webapp remains reachable, but its upstream analyzer CSV is not importing cleanly. Whether that
+analyzer and its test mappings belong in this facility is laboratory/clinical scope; the audit did
+not disable, rename, or repair any tests. Exact evidence and options are in `PROJECT_STATE.md`.
 
 ---
 
