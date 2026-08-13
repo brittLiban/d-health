@@ -36,9 +36,13 @@ different machines. Any window computed from local time can silently exclude rec
 clock skew. Every bound comes from values the server itself emitted.
 
 Observed on a real order (`ORD-96`): `meta.lastUpdated` equals both `date_created` and
-`date_activated`. The `orders` table has **no `date_changed` column** — orders are not mutated in
-place; revisions and discontinuations are new rows with new timestamps, so they surface as new
-records rather than as invisible edits.
+`date_activated`. The `orders` table has **no `date_changed` column**.
+
+⚠️ **Do not read that as "orders are immutable"** — an earlier draft of this document did, and it
+was wrong. There is no `date_changed`, but there *is* `date_stopped`, and discontinuing an order
+writes it and flips the FHIR status from `active` to `completed` **without advancing
+`meta.lastUpdated`**. The absence of a `date_changed` column is not the same as the absence of
+mutation; it just means the mutation is invisible to a timestamp watermark. See §6.
 
 ## 3. How it advances
 
@@ -111,15 +115,72 @@ What we know:
 - **Results are not yet characterised.** The `DiagnosticReport`/`Observation` leg comes from
   OpenELIS (DH-009b) and has not been observed at all.
 
-**Unresolved, deliberately not guessed:** whether **voiding** an order advances its
-`meta.lastUpdated`. If it does not, an order already synced to the laboratory could be voided in
-OpenMRS with the poller never learning — the LIS would keep working an order the EMR considers
-cancelled. Attempting `DELETE /ws/rest/v1/order/{uuid}` returned **HTTP 500** (OpenMRS wants a
-discontinue order, not a delete), so this was left untested rather than half-tested.
+### RESOLVED 2026-08-13 — tested properly, and the answer is a hard design constraint
 
-**This is the sharpest open question in this document and it is clinical, not technical.** It needs
-answering in DH-010 before the order leg is trusted, and it may need a periodic reconciliation
-sweep rather than a pure watermark.
+The earlier version of this section left cancellation "unresolved" on the strength of a
+`DELETE /ws/rest/v1/order/{uuid}` returning HTTP 500. **That was testing the wrong verb** — OpenMRS
+wants a discontinue *order*, not a delete — so it was evidence of nothing. Retested by issuing a
+real discontinuation (`POST /order` with `action: DISCONTINUE` and `previousOrder`), and the result
+splits into one bad half and one good half:
+
+**❌ The original order IS mutated in place, and its `meta.lastUpdated` does NOT advance.**
+
+| | before | after discontinuation |
+|---|---|---|
+| `orders.date_stopped` (DB) | `NULL` | `2026-08-13 04:55:23` |
+| FHIR `status` | `active` | `completed` |
+| **FHIR `meta.lastUpdated`** | `2026-08-11T14:33:33+03:00` | **`2026-08-11T14:33:33+03:00` — unchanged** |
+
+So §2's "orders are never mutated in place" was **too strong**. They are: stopping one writes
+`date_stopped` and flips the FHIR status, invisibly to a timestamp watermark. **Re-polling the
+original order would never reveal that it was cancelled.** This is exactly the silent-loss shape
+this document exists to prevent, and it is now confirmed rather than hypothetical.
+
+**✅ But the discontinuation itself arrives as a new, visible resource that points at its target.**
+
+The `DISCONTINUE` action creates a new row (`ORD-97`) with a fresh `meta.lastUpdated`, and its FHIR
+`ServiceRequest` carries an explicit back-reference:
+
+```json
+"status": "unknown",
+"replaces": [{"reference": "ServiceRequest/23ff7a38-…", "type": "ServiceRequest"}]
+```
+
+**Confirmed reachable by the poller**: a bare `_lastUpdated=ge…` search returns it. There is **no
+implicit status filter** on this server — `?status=active` is rejected with **HTTP 400** because
+`status` is not a supported search parameter for `ServiceRequest` in `fhir2` at all, so there is no
+hidden default quietly excluding cancelled resources before the timestamp comparison. (That was a
+real risk worth eliminating: it would have produced the same silent-loss symptom from a completely
+different cause.)
+
+### What this obliges the adapter to do
+
+1. **Never treat an order's state as fixed once synced**, and never rely on re-seeing the original
+   resource to learn it changed. The original will never come back through the watermark.
+2. **Process `replaces`.** A ServiceRequest carrying `replaces` is a cancellation of the referenced
+   order and must be forwarded to the laboratory as such.
+3. **Do not filter on `status` when deciding what to process.** The cancellation arrives as
+   `status: unknown`, which a naive "only handle active orders" rule would drop on the floor — the
+   single most likely way to reintroduce this bug while believing you are being careful.
+
+**Net effect on the design: the watermark survives, and no reconciliation sweep is needed for
+cancellation specifically.** §8's nightly reconciliation stays, because it still covers the general
+skipping case — but it is no longer compensating for a known hole.
+
+### ⚠️ Still genuinely open, and higher-stakes: corrected RESULTS
+
+Everything above characterises **orders**. It says nothing about results, and results are the more
+dangerous direction: if a lab technician enters a value and then corrects it — wrong figure
+transcribed, wrong patient selected — does OpenELIS represent that as a new
+`DiagnosticReport`/`Observation` version with a fresh `lastUpdated`, or as an in-place amendment
+that slips past the watermark exactly as a stopped order does?
+
+**A corrected result that fails to propagate leaves a stale, wrong lab value in a mother's chart.**
+That is worse than a stale order, because the order at least fails visibly at the laboratory.
+
+**This is the first thing DH-009b must test**, with the same discipline: enter a result, amend it,
+and watch what the FHIR API actually reports. Do not assume the order-leg answer generalises — it
+already failed to generalise once, within the order leg itself.
 
 ## 7. Timezone — a stated constraint, with a test
 
@@ -129,7 +190,12 @@ that: **it never parses, normalises, or re-formats the timestamp — it stores t
 sent and sends it back.**
 
 The constraint this creates: every component must run `TZ=Africa/Djibouti`. An adapter container
-left on UTC would shift its window by three hours. That is one `.env` variable away from being
+left on UTC would shift its window by three hours.
+
+One edge case this design does **not** have to handle: Djibouti does not observe daylight saving,
+so the offset is a fixed +03:00 year-round. The startup assertion compares against a constant and
+never has to reason about an offset that changes twice a year — worth stating explicitly so nobody
+later "fixes" it by adding DST handling that introduces the bug it was meant to prevent. That is one `.env` variable away from being
 wrong, so it is asserted rather than trusted:
 
 > **Startup assertion.** On boot the adapter compares its own timezone against the offset in a
