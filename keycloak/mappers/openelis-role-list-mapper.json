@@ -1,0 +1,11 @@
+{
+  "name": "role list",
+  "protocol": "saml",
+  "protocolMapper": "saml-role-list-mapper",
+  "consentRequired": false,
+  "config": {
+    "single": "false",
+    "attribute.nameformat": "Basic",
+    "attribute.name": "Role"
+  }
+}

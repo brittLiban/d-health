@@ -1,8 +1,10 @@
 # Daher Health — v1 Pilot Architecture
 
 **Status:** DH-003's maternity foundation, build steps 1 and 3, the Keycloak provider, adapter
-safety skeleton, local backup path, and PostgreSQL tenant isolation are built and runtime-verified.
-See `CURRENT_STATE.md` for the exact verification boundary.
+safety skeleton, local backup path, PostgreSQL tenant isolation, and DH-008's fail-closed SSO
+plumbing are built and runtime-verified. SSO activation and the one-login demonstration remain
+blocked on the staff-to-native-role authorization matrix. See `CURRENT_STATE.md` for the exact
+verification boundary.
 **Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
 **Last updated:** 2026-08-13 (Africa/Djibouti)
 
@@ -58,11 +60,12 @@ OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and the backup sidecar. Th
 runs ten: Caddy is not built, and backup is an opt-in profile until production credentials exist.
 
 Compose also contains short-lived setup jobs: the OpenMRS demo-metadata preflight and maternity
-seed, OpenELIS certificate provisioning, DH-020 PostgreSQL tenant-grant hardening, and DH-024
-OpenELIS admin-password rotation. They must exit 0 before their dependent services start; they do
-not remain running or add steady-state resource use. The password job intentionally runs after the
-webapp's first healthy login redirect because the webapp bootstrap rewrites its bundled admin hash;
-the frontend remains gated until rotation and in-database verification finish.
+seed, OpenELIS certificate provisioning, DH-020 PostgreSQL tenant-grant hardening, DH-024 OpenELIS
+admin-password rotation, and DH-008 Keycloak client reconciliation. They must exit 0 before their
+dependent services start; they do not remain running or add steady-state resource use. The password
+job intentionally runs after the webapp's first healthy login redirect because the webapp bootstrap
+rewrites its bundled admin hash; the frontend remains gated until rotation and in-database
+verification finish.
 
 **Corrected at build step 1:** O3 ships a fourth container, an nginx **gateway** that joins the SPA
 and the API on a single origin. Caddy proxies *to* it rather than replacing it — O3's frontend
@@ -189,7 +192,8 @@ only reachable if every piece of configuration loads itself on first boot. Mecha
 | Maternity ward | Initializer 2.12.0 location CSV, deterministic UUID, admission-location tag | `openmrs-config/initializer/locations/` |
 | Bed types and beds | Initializer 2.12.0 has no bed domains. A short-lived, non-root job uses bedmanagement 7.2.0 REST after backend health; create-only, conflict-failing, additive-only (ADR-007) | `openmrs-config/seed/` |
 | O3 demo content | Local `on`/`off` backend build targets share the exact digest-pinned upstream base. `off` removes only `referenceapplication-demo` source directories because not every Initializer loader honors filename exclusions. An opt-in patient preflight requires its metadata to exist from an earlier content-on/patients-off boot | `openmrs-config/Dockerfile`, `openmrs-config/validate-demo-readiness.sh` |
-| Keycloak realm, clients, roles, French login theme | **Built and runtime-verified at DH-007.** `--import-realm` loads committed JSON; environment placeholders keep client secrets out of Git. A restart skips the existing realm without changing it. | `keycloak/realm-config/` |
+| Keycloak realm, clients, roles, French login theme | **Built and runtime-verified at DH-007/DH-008.** `--import-realm` loads committed JSON for a fresh database; because it skips an existing realm, an idempotent one-shot reconciles both application clients without deleting clients, roles, or users. Environment placeholders keep secrets out of Git. | `keycloak/realm-config/`, `keycloak/reconcile-sso.sh`, `keycloak/mappers/` |
+| OpenMRS SSO module/config | Official OAuth2 Login 1.5.0 is built from exact tag commit `2770233627343a53719ec981e997d94b1d90b7ad`, then atomically installed into fresh or existing data volumes. A mode-`0600` runtime file enables or disables it. | `openmrs-config/Dockerfile`, `openmrs-config/configure-sso.sh` |
 | OpenELIS lab tests, LOINC mappings, "accept external orders" | OpenELIS stores these in its DB; upstream documents them as admin-UI steps. I'll capture them as a committed SQL/REST seed applied on first boot so they are reproducible. | `openelis-config/` |
 | OpenELIS local admin password | Upstream ignores `DEFAULT_PW` and bootstraps a published hash. A post-webapp one-shot bcrypts `${OE_ADMIN_PASSWORD}`, updates exactly one admin row, verifies it, and gates the frontend | `openelis-config/postgres-init/set-admin-password.sh` |
 | Adapter behaviour | environment variables only | `.env` |
@@ -201,40 +205,39 @@ cannot be automated, it goes in `README.md` as an explicit numbered post-deploy 
 
 ## 5. Identity and SSO
 
-Keycloak is the single identity provider. Realm `daher`, clients `openmrs` and `openelis`, both
-OIDC confidential clients with secrets injected from `.env`.
+Keycloak is the single identity provider in realm `daher` (ADR-014). Protocol choice is
+constrained by the exact application builds in this deployment, not by a preference for protocol
+uniformity:
 
-**DH-007 status:** the provider foundation is running and verified: the French-first realm,
-roles, browser clients, adapter service account, environment-resolved secrets, empty user list,
-successful adapter client-credentials grant, readiness probe, and restart persistence. This is
-not SSO: neither application authenticates
-against the realm until DH-008 is implemented and the one-login flow is demonstrated.
-
-- **OpenMRS** authenticates via its OAuth2/OIDC support (`oauth2.properties`, as the HIS distro
-  does). OpenMRS roles are mapped from Keycloak realm roles.
-- **OpenELIS** authenticates via OIDC against the same realm — **re-confirmed at DH-007 by
-  inspecting the deployed webapp**, after an intermediate correction wrongly cast doubt on it.
-
-  The app supports four selectable login modes: `org.itech.login.basic`, `.certificate`, `.form`,
-  `.oauth` (OIDC) and `.saml`. OIDC is real, not vestigial: the WAR bundles
-  `spring-security-oauth2-client-6.2.8.jar`, and `SecurityConfig.class` reads
-  `org.itech.login.oauth.clientID`, `.clientSecret` and `.config`, with the `openid` scope.
-
-  ⚠️ **Note for whoever configures it:** the *shipped* `common.properties` contains only the
-  `org.itech.login.saml.*` keys, so reading that file alone suggests SAML is the only option. It is
-  not — the OIDC keys simply have to be added. An earlier revision of this section drew exactly
-  that wrong conclusion and raised DH-008's estimate on the back of it.
+- **OpenMRS uses OIDC.** O3 3.7.x does not ship an OIDC login module, so the derived image builds
+  official `openmrs-module-oauth2login` 1.5.0 from its exact release commit. Its `roles` claim must
+  contain exact OpenMRS role names; its `provider` claim is hard-coded to `false` until Liban
+  approves which staff classes are providers.
+- **OpenELIS uses SAML.** OpenELIS 3.2.1.11 exposes OIDC configuration, but exact source and runtime
+  bytecode show its OAuth success path is wired to `CustomFormAuthenticationSuccessHandler`. That
+  handler accepts `UserDetails`, while an OIDC login supplies an `OidcUser`; it consequently clears
+  authentication and returns to `LoginPage`. The SAML path is wired to
+  `CustomSSOAuthenticationSuccessHandler`, the working upstream path. It consumes a case-sensitive
+  `Role` attribute containing exact OpenELIS native role names.
 - **The adapter is not a user.** It gets its own Keycloak service account (client credentials
   grant), so its writes into OpenMRS are attributable to a named machine identity in the audit
   trail rather than borrowing a clinician's account.
 - **Keycloak login theme is French by default**, English selectable.
 
+**DH-008 status:** the realm/client definitions, existing-realm reconciliation, pinned OpenMRS
+module, disabled-mode persistence behavior, local-login preservation, and both protocol metadata
+paths are built and runtime-verified. `SSO_ENABLED=false` is the deliberate default. Activation and
+the acceptance demonstration—one Keycloak login, both applications, no second prompt—are blocked
+until Liban approves the mapping from `clinician`, `lab-tech`, and `sys-admin` to each application's
+native roles and the OpenMRS-provider rule. No mapping was inferred.
+
 The committed 1-hour idle, 10-hour maximum, and 5-minute access-token lifetimes were approved by
 Liban for the pilot (ADR-013). They remain a human workflow/security decision if later changed.
 
-Break-glass: a local OpenMRS admin account remains valid so the system is not unusable if Keycloak
-fails to start. This is a deliberate tradeoff (one credential outside SSO) and is documented in the
-runbook with instructions to rotate it after any use.
+Break-glass: local form login remains enabled in both applications. Set `SSO_ENABLED=false`, run
+`docker compose up -d`, and verify local administration before diagnosing Keycloak. OpenMRS's
+runtime wrapper then stores only `oauth2.enabled=false`—not the client secret—in its mode-`0600`
+properties file. Rotate a local credential after emergency use.
 
 ---
 
@@ -556,7 +559,7 @@ The sidecar image itself is built from committed source rather than pulled from 
 
 | Component | Tag | Why |
 |---|---|---|
-| OpenMRS O3 backend | local `daher-health/openmrs-backend:3.7-{on,off}`; exact `openmrs/openmrs-reference-application-3-backend:3.7.x` digest base | Current released O3 line. The local base removes only upstream's competing demo-patient trigger so the mounted `on/off` file is its sole writer; the two targets otherwise preserve or omit demo content while retaining upstream UID 1001 and startup contract. |
+| OpenMRS O3 backend | local `daher-health/openmrs-backend:3.7-{on,off}`; exact `openmrs/openmrs-reference-application-3-backend:3.7.x` digest base; Maven builder `3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82` | Current released O3 line. The local base removes only upstream's competing demo-patient trigger and adds official OAuth2 Login 1.5.0 from exact commit `2770233627343a53719ec981e997d94b1d90b7ad`; the two targets otherwise preserve or omit demo content while retaining upstream UID 1001 and startup contract. |
 | OpenMRS O3 frontend | `openmrs/openmrs-reference-application-3-frontend:3.7.x` + digest | Must match the backend line |
 | OpenMRS O3 gateway | `openmrs/openmrs-reference-application-3-gateway:3.7.x` + digest | nginx joining the SPA and API on one origin; upstream's tested routing |
 | MariaDB | `mariadb:10.11.18` | **Corrected from 11.4 at build step 1.** The OpenMRS reference distribution tests against the 10.11 line; following upstream's tested pairing beats picking the newer LTS on my own judgement |

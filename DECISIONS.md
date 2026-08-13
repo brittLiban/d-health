@@ -486,5 +486,46 @@ approval requires no configuration mutation. Revisit them after observed pilot w
 shared-terminal operating procedure are available. Changing them later is a human workflow and
 security decision, not an inert tuning change.
 
-**Consequence.** DH-007 is complete. This accepts the identity-provider foundation only; DH-008
-must still wire and demonstrate one login across OpenMRS and OpenELIS.
+**Consequence at acceptance.** DH-007 was complete and DH-008 still had to wire and demonstrate
+one login across OpenMRS and OpenELIS. ADR-014 records the later protocol evidence and current
+fail-closed boundary.
+
+---
+
+## ADR-014 — One Keycloak realm, OpenMRS OIDC and OpenELIS SAML
+
+**Date:** 2026-08-13 · **Status:** ACCEPTED (technical protocol constraint)
+
+**Context.** The original plan used OIDC for both applications. OpenELIS 3.2.1.11 contains OIDC
+client libraries and configuration keys, but presence is not a working login. Exact source at tag
+commit `e2a6bdf7` wires OAuth success to `CustomFormAuthenticationSuccessHandler`; that handler
+accepts `UserDetails`, while OIDC supplies an `OidcUser`. Login information remains null, the
+handler clears authentication, and the user returns to `LoginPage`. Its SAML path instead uses
+`CustomSSOAuthenticationSuccessHandler`, which is designed for the federated principal and is the
+working upstream path.
+
+The O3 3.7.x backend does not include an OIDC login module. Official OpenMRS OAuth2 Login 1.5.0
+(tag commit `2770233627343a53719ec981e997d94b1d90b7ad`) supports this stack's OpenMRS Platform
+version and consumes the exact role/provider claims needed by OpenMRS.
+
+**Decision.** Keep Keycloak as the one identity provider and one browser session, but use the
+working protocol for each deployed application:
+
+- OpenMRS authenticates with OIDC through the exact official OAuth2 Login 1.5.0 release;
+- OpenELIS authenticates with SAML through its native SSO success handler; and
+- local form authentication remains available for break-glass operation.
+
+`SSO_ENABLED` defaults to `false`. Disabled OpenMRS configuration persists no client secret, and
+both local login paths remain usable. Keycloak realm import covers fresh databases; a non-deleting,
+idempotent reconciliation job applies the same client definitions to existing realms.
+
+**Authorization gate — Human Decision Required: Yes.** This ADR does not authorize a role map.
+Keycloak's `clinician`, `lab-tech`, and `sys-admin` labels must be mapped explicitly to native roles
+in both applications, and the OpenMRS-provider rule must be decided by Liban. These choices grant
+clinical/laboratory access and affect attribution. Until BLOCKER-5 is resolved, the provider claim
+is hard-coded false, SSO stays off, and the one-login acceptance criterion remains unverified.
+
+**Consequence.** Protocol uniformity is traded for a path supported by the exact deployed builds.
+Both protocol paths and the realm lifecycle are configuration as code, but DH-008 is not `DONE`
+until the approved authorization matrix is applied and one login across both applications is
+demonstrated.

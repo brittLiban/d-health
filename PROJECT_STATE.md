@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** DH-024 fresh-deployment hardening verified; steps 1 and 3 running; SSO next
+**Updated:** 2026-08-13 · **Phase:** DH-008 protocol plumbing verified; SSO activation blocked on authorization mapping
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -16,10 +16,13 @@ HTTPS, and a FHIR server answering `metadata` over mutual TLS. **DH-019** closed
 default admin password. BLOCKER-4 records an upstream analyzer configuration import that is not
 verified.
 
-**DH-007** (Keycloak foundation) is built and runtime-verified: the `daher` realm imports with
-French as default; roles and all three clients exist; environment placeholders resolve to the
-expected client secrets; no staff users are committed; and restart returns healthy without
-re-importing the existing realm. **This is not SSO** — application wiring remains DH-008.
+**DH-008's fail-closed protocol plumbing is built and runtime-verified.** OpenMRS has official
+OAuth2 Login 1.5.0 built from its exact release commit and installed into both fresh and existing
+data volumes; OpenELIS uses its working upstream SAML path. Keycloak fresh definitions and the
+existing-realm reconciliation agree on OpenMRS OIDC and OpenELIS SAML. The reconciliation passed
+twice and the normal stack is healthy with `SSO_ENABLED=false`, preserving local logins. Activation
+and the one-login demonstration are blocked by BLOCKER-5: native application-role mapping and the
+OpenMRS-provider rule require Liban's approval.
 
 The running stack surfaced multiple findings that `docker compose config` could never have caught
 (`CURRENT_STATE.md` §3a and DH-005's ticket entry). Buildable work remains alongside the decisions
@@ -77,6 +80,19 @@ three `pg_restore --list` reads, MariaDB patient DDL/data checks, Keycloak JSON 
 volume archive reads; the ephemeral-key archive/status were removed. This is not off-site or a
 restore, so DH-014/DH-015 remain open at their existing boundary.
 
+**DH-008 deep verification 2026-08-13:** both OpenMRS backend targets built with official OAuth2
+Login 1.5.0 from the exact release commit. The live persistent volume received the byte-identical
+OMOD; OpenMRS REST reported it registered and stopped in fail-closed mode, configured local admin
+authentication and FHIR passed, and `Admin123` remained refused. OpenELIS configured CSRF/form
+login passed, `adminADMIN!` remained refused, and mutual-TLS FHIR metadata passed. OIDC discovery,
+SAML metadata, both OpenELIS HTTP paths, and adapter readiness answered. Keycloak existing-realm
+reconciliation passed repeatedly, an isolated networkless H2 import proved the fresh realm JSON,
+and a final clean Keycloak recreation imported/skipped normally with zero restarts. The complete
+project container set finished at zero restarts/OOM kills and every setup job at exit 0. Adapter
+dependency/Ruff/14 tests and maternity Ruff/5 safety tests passed; Compose variants, shell, JSON,
+XML, Git, image-tag policy, whitespace, and relative Markdown links passed. SSO activation itself
+was deliberately not attempted because BLOCKER-5 is unresolved.
+
 ## Ticket status
 
 | Status | Tickets |
@@ -85,21 +101,26 @@ restore, so DH-014/DH-015 remain open at their existing boundary.
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | **DH-008** (SSO wiring; prerequisites now complete) |
+| 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5) |
+| 📋 Ready | **DH-016** (Caddy/TLS plumbing; real DNS/domain required for public verification) |
 | 🛑 Blocked on human decisions | **DH-004** (clinical form fields/sign-off), **DH-006** (prenatal panel/sign-off), **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
-| ⏸ Waiting on dependencies | DH-012, DH-013, DH-015, DH-016, DH-018 |
+| ⏸ Waiting on dependencies | DH-012, DH-013, DH-015, DH-018 |
 
 ## ▶ START HERE (next session)
 
 Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
-1. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
+1. **Resolve BLOCKER-5 before activating SSO.** Approve the mapping from `clinician`, `lab-tech`,
+   and `sys-admin` to exact native roles in each application, plus which staff are OpenMRS
+   providers. Do not enable SSO or infer privileges before that matrix is explicit.
+2. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
    first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
    implement an apparent default; see the evidence and options below.
-2. **Unblocked technical work:** DH-008 SSO wiring is now ready. Continue the remaining DH-014
-   backup layers when the production encryption/off-site settings exist; DH-015's performed
-   restore remains a pinned P0 gate.
-3. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
+3. **Unblocked technical work:** DH-016's Caddy configuration can now be built; public certificate
+   issuance still needs the real domain and DNS. Continue DH-014's remaining backup layers when
+   the production encryption/off-site settings exist; DH-015's performed restore remains a pinned
+   P0 gate.
+4. **Resolve BLOCKER-4 before changing OpenELIS analyzer tests.** Confirm whether the facility uses
    a Horiba Pentra60; the upstream import is failing, but altering lab mappings is not an agent call.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
@@ -128,6 +149,8 @@ exists. Each links to the detail rather than repeating it.
 | 11 | **OpenELIS requester identity for routed orders** — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
 | 12 | **Cancellation contract once an order reaches OpenELIS** — revoke while retaining history, delete only while unaccepted, or leave it for explicit manual handling | Each choice changes laboratory workflow and audit/history. Upstream does not provide a completed reference behavior | DH-011 |
 | 13 | **Horiba Pentra60 analyzer scope** — does the birth centre laboratory use or plan to use this analyzer? Its upstream CBC test import currently aborts on a unique-description conflict | Disabling it or changing its test names/mappings changes laboratory configuration. The audit cannot infer facility equipment or clinical mappings | DH-023 / DH-006 |
+| 14 | **SSO authorization matrix** — map `clinician`, `lab-tech`, and `sys-admin` to exact OpenMRS and OpenELIS native roles, and decide which staff classes are OpenMRS providers | These mappings grant access to clinical records and laboratory functions and change clinical attribution. An agent may not infer them from role labels | DH-008 / BLOCKER-5 |
+| 15 | **Pilot domain and DNS** — provide/control the real `BASE_DOMAIN` and point `emr`, `lab`, and `id` records at the pilot VM | Public certificate issuance cannot be demonstrated against `localhost` or invented facility DNS | DH-016 public verification |
 
 **ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
 interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
@@ -293,6 +316,27 @@ endpoints still answer, so uniqueness is preserved; the analyzer configuration i
   infer that unused-looking clinical configuration may be removed.
 
 No test, mapping, or analyzer configuration was changed during the audit.
+
+### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN · **Human Decision Required: Yes**
+
+**Ticket:** DH-008
+
+**Problem:** Keycloak currently has high-level realm roles `clinician`, `lab-tech`, and
+`sys-admin`, but the applications do not authorize those labels. OpenMRS OAuth2 Login consumes
+exact OpenMRS role names and separately decides whether to create a Provider. OpenELIS SAML
+consumes exact OpenELIS role names from its case-sensitive `Role` assertion attribute. Mapping a
+staff category to either set grants access to patient records or laboratory functions and affects
+clinical attribution.
+
+**Decision needed:** provide an explicit matrix for each realm role:
+
+1. exact OpenMRS native role name(s), if any;
+2. whether members should be created as OpenMRS providers; and
+3. exact OpenELIS native role name(s), if any.
+
+No role equivalence was inferred. Until the matrix is approved, the Keycloak `provider` claim is
+hard-coded false, SSO defaults disabled, both local login paths remain available, and the one-login
+acceptance test is deliberately unperformed.
 
 ---
 
@@ -557,8 +601,9 @@ the clinical lead has time.
 ### DH-007 · Keycloak + realm import · P0 · ✅ DONE 2026-08-13
 Keycloak 26.7.1 is digest-pinned and running in production mode against its PostgreSQL co-tenant.
 The committed `daher` realm imports automatically with French as default and English selectable;
-roles `clinician`, `lab-tech`, and `sys-admin`; confidential browser clients for OpenMRS and
-OpenELIS; and a non-browser adapter service account. No staff users are committed.
+roles `clinician`, `lab-tech`, and `sys-admin`; application browser clients; and a non-browser
+adapter service account. No staff users are committed. DH-008 subsequently changed OpenELIS from
+OIDC to SAML after exact application-path verification.
 
 **Runtime verification, not syntax claims:**
 
@@ -572,25 +617,48 @@ OpenELIS; and a non-browser adapter service account. No staff users are committe
   `Import finished successfully`; and
 - the pulled image digest matches the digest committed in compose and ARCHITECTURE §12.
 
-**Not DH-008:** neither OpenMRS nor OpenELIS authenticates through Keycloak yet. One-login SSO is
-still unbuilt and must not be inferred from a healthy identity-provider container.
+**DH-007 boundary:** this verified only the provider foundation. DH-008's protocol plumbing and
+application configuration are recorded separately below.
 
 **Session lifetimes approved by Liban 2026-08-12 (ADR-013):** 1h idle / 10h maximum / 5m access
 token. These are the already-verified committed values. Revisit after observed pilot workflow;
 changing them remains a human workflow/security decision.
 
-### DH-008 · SSO wiring · P0 · 📋 READY (DH-003, DH-005, DH-007 complete)
-✅ **Re-estimate WITHDRAWN at DH-007 — the risk was mine, not real.** I briefly raised this ticket
-to "two federation protocols" after seeing only `org.itech.login.saml.*` keys in OpenELIS's shipped
-`common.properties`. Checking the deployed webapp instead of the config file shows OIDC is fully
-supported (`spring-security-oauth2-client-6.2.8.jar`; `SecurityConfig` reads
-`org.itech.login.oauth.clientID` / `.clientSecret` / `.config`, scope `openid`). **One protocol,
-OIDC, for both apps — as originally planned.** The keys just have to be added to
-`common.properties`, which ships without them. DH-008 returns to its original estimate.
-**Requires joint understanding of: Keycloak realm config, OpenMRS auth, OpenELIS auth.** Not
-split — a working realm and a working OpenMRS that don't authenticate against each other is the
-exact failure this ticket exists to prevent. Includes the documented break-glass local admin.
-**Acceptance:** one login, both apps, no second prompt.
+### DH-008 · SSO wiring · P0 · 🟢 PLUMBING BUILT + VERIFIED · 🛑 ACTIVATION BLOCKED (BLOCKER-5)
+
+The prior OIDC-for-both conclusion was wrong. The deployed OpenELIS 3.2.1.11 WAR does contain an
+OIDC client and configuration keys, but exact source at tag commit `e2a6bdf7` shows the OAuth path
+uses `CustomFormAuthenticationSuccessHandler`. It accepts `UserDetails`; an OIDC login supplies an
+`OidcUser`, so login information remains null, authentication is cleared, and the handler returns
+to `LoginPage`. SAML uses `CustomSSOAuthenticationSuccessHandler`, the native working path also
+used upstream. This is a demonstrated implementation defect, not an inference from missing keys.
+
+**Built:**
+
+- OpenMRS OIDC through official OAuth2 Login 1.5.0, built from exact tag commit
+  `2770233627343a53719ec981e997d94b1d90b7ad` in a digest-pinned Maven image;
+- atomic installation of that OMOD into both fresh and already-populated OpenMRS data volumes;
+- mode-`0600` runtime configuration that stores only `oauth2.enabled=false` when SSO is off;
+- OpenELIS SAML configuration against the same `daher` realm while retaining form login;
+- fresh-realm OpenMRS OIDC and OpenELIS SAML clients; and
+- an idempotent, non-deleting `keycloak-sso-config` job, because `--import-realm` deliberately
+  skips an existing realm.
+
+**Runtime verification 2026-08-13:** both OpenMRS targets built successfully and the exact module appeared in
+the live persistent volume byte-for-byte; REST reported version 1.5.0 registered and stopped while
+the local admin still authenticated. Keycloak recovered through a clean realm-import startup,
+reconciliation passed twice consecutively, and live inspection showed exactly the expected client
+protocols and unique mapper names. A network-isolated ephemeral Keycloak import also proved the
+fresh-realm JSON. The normal one-command stack returned healthy/running with SSO disabled. The
+mapper fragments were deliberately moved outside the realm import directory after a runtime test
+proved Keycloak otherwise tries to parse them as complete realms.
+
+**Not claimed:** the acceptance criterion remains one Keycloak login, both applications, no second
+prompt. OpenMRS consumes exact native role names and separately auto-creates a provider unless the
+`provider` claim is false; OpenELIS SAML consumes exact native roles from `Role`. Mapping the three
+realm roles to those privileges changes access to clinical records and laboratory functions.
+`provider` is therefore hard-coded false, `SSO_ENABLED` defaults false, and activation is blocked
+until Liban approves the authorization matrix in BLOCKER-5.
 
 ### DH-014 · Backup, both engines · P0 🔒 · 🔨 LOCAL PATH VERIFIED 2026-08-13 — off-site unverified
 The scheduled sidecar is built from a digest-pinned PostgreSQL 14.4 base and includes matching
@@ -664,9 +732,11 @@ French default + English templates; content-free ("results are ready", never val
 a module inside the adapter (ADR-002). **Status on completion of the mock work is `BLOCKED`, not
 `DONE`** (ADR-003).
 
-### DH-016 · Caddy, TLS, subdomains · P0 · ⏸ (needs DH-008)
-Last, deliberately — not fighting certificates while debugging applications. Removes the
-loopback port from step 1.
+### DH-016 · Caddy, TLS, subdomains · P0 · 📋 READY (DH-008 plumbing complete)
+Configuration can now be built without changing SSO authorization. Public certificate issuance and
+the real browser-origin verification require the facility's actual domain and DNS. This removes
+the loopback port from step 1 and provides the secure origins required for DH-008's eventual
+one-login demonstration after BLOCKER-5 is resolved.
 
 ### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · 🔨 IN PROGRESS
 Started 2026-08-10 — covers project purpose, status warning, doc map, prerequisites, `.env` setup,

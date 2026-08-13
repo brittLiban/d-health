@@ -13,5 +13,10 @@
             <property>locale.allowed.list</property>
             <value>fr, en, en_GB, es, he, km, ar, vi, pt, zh, id, ro, ka, it</value>
         </globalProperty>
+        <!-- OAuth2 Login returns to O3's location-selection route. -->
+        <globalProperty>
+            <property>oauth2login.redirectUriAfterLogin</property>
+            <value>/spa/login/location</value>
+        </globalProperty>
     </globalProperties>
 </config>

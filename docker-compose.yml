@@ -99,6 +99,8 @@ services:
         condition: service_healthy
       openmrs-demo-preflight:
         condition: service_completed_successfully
+      keycloak-sso-config:
+        condition: service_completed_successfully
     environment:
       <<: *common-env
       OMRS_CONFIG_MODULE_WEB_ADMIN: "true"
@@ -131,6 +133,13 @@ services:
       # patients appeared on a boot with it set to false, but that is the default
       # behaviour, not this switch working.
       OMRS_CONFIG_ADD_DEMO_DATA: ${OMRS_ADD_DEMO_DATA:-false}
+      # DH-008 is deliberately fail-closed until Liban approves the application
+      # role/provider mapping. The OMOD remains installed while false, but its
+      # activator unloads it and the local break-glass login stays available.
+      SSO_ENABLED: ${SSO_ENABLED:-false}
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}
+      KEYCLOAK_INTERNAL_URL: http://keycloak.openelis.org:8080
+      KEYCLOAK_OPENMRS_CLIENT_SECRET: ${KEYCLOAK_OPENMRS_CLIENT_SECRET:?set in .env}
       # Initializer 2.12 has no bed or bed-type domains. Some loaders also
       # ignore its filename-exclusion API, so OMRS_DEMO_CONTENT selects a local
       # image build target rather than pretending that API covers every domain.
@@ -480,6 +489,8 @@ services:
         condition: service_completed_successfully
       openelis-certs:
         condition: service_completed_successfully
+      keycloak-sso-config:
+        condition: service_completed_successfully
     environment:
       <<: *common-env
       CATALINA_OPTS: >-
@@ -490,6 +501,12 @@ services:
         -Doe.ssl.truststorepath=/etc/openelis-global/truststore
         -Doe.ssl.keystorepassword=${OE_KEYSTORE_PASSWORD:-kspass}
         -Doe.ssl.truststorepassword=${OE_TRUSTSTORE_PASSWORD:-tspass}
+        -Dorg.itech.login.form=true
+        -Dorg.itech.login.saml=${SSO_ENABLED:-false}
+        -Dorg.itech.login.saml.loginpage=false
+        -Dorg.itech.login.saml.registrationId=keycloak
+        -Dorg.itech.login.saml.entityId=openelis
+        -Dorg.itech.login.saml.metadatalocation=http://keycloak.openelis.org:8080/realms/daher/protocol/saml/descriptor
     volumes:
       - openelis-keystore:/etc/openelis-global
       - openelis-plugins:/var/lib/openelis-global/plugins
@@ -573,15 +590,14 @@ services:
         aliases: [frontend.openelis.org]
 
   # ===========================================================================
-  # BUILD STEP 4a — Keycloak (DH-007)
+  # BUILD STEP 4 — Keycloak provider + fail-closed SSO plumbing (DH-007/DH-008)
   #
   # Its database already exists: created as a co-tenant of OpenELIS's PostgreSQL
   # at DH-005 (ADR-001), because initdb.d only runs once and waiting until now
   # would have meant no database to connect to.
   #
-  # SSO wiring itself is DH-008, deliberately a separate ticket — a working realm
-  # and a working OpenMRS that do not authenticate against each other is the exact
-  # failure that ticket exists to prevent.
+  # DH-008's protocol/client plumbing is present but defaults disabled until
+  # BLOCKER-5's native authorization matrix receives human approval.
   # ---------------------------------------------------------------------------
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
@@ -604,6 +620,9 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
       KC_HOSTNAME_STRICT: "false"
+      # Until Caddy lands, the default is reachable by verification clients on
+      # the internal Docker network. DH-016 sets the public https://id.* URL.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
@@ -611,7 +630,6 @@ services:
       # secrets out of the repository.
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       KEYCLOAK_OPENMRS_CLIENT_SECRET: ${KEYCLOAK_OPENMRS_CLIENT_SECRET:?set in .env}
-      KEYCLOAK_OPENELIS_CLIENT_SECRET: ${KEYCLOAK_OPENELIS_CLIENT_SECRET:?set in .env}
       KEYCLOAK_ADAPTER_CLIENT_SECRET: ${KEYCLOAK_ADAPTER_CLIENT_SECRET:?set in .env}
     volumes:
       - ./keycloak/realm-config:/opt/keycloak/data/import:ro
@@ -635,6 +653,37 @@ services:
     networks:
       internal:
         aliases: [keycloak.openelis.org]
+
+  # `--import-realm` correctly refuses to overwrite an existing realm. That is
+  # safe persistence behavior, but it also means DH-008's client changes would
+  # otherwise apply only to fresh databases. This one-shot reconciles the two
+  # application clients in place without deleting clients, roles, or users.
+  keycloak-sso-config:
+    image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
+    restart: "no"
+    read_only: true
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/daher/reconcile-sso.sh"]
+    environment:
+      <<: *common-env
+      KEYCLOAK_INTERNAL_URL: http://keycloak.openelis.org:8080
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      KEYCLOAK_OPENMRS_CLIENT_SECRET: ${KEYCLOAK_OPENMRS_CLIENT_SECRET:?set in .env}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      OPENMRS_PUBLIC_URL: ${OPENMRS_PUBLIC_URL:-https://emr.${BASE_DOMAIN:-localhost}}
+      OPENELIS_PUBLIC_URL: ${OPENELIS_PUBLIC_URL:-https://lab.${BASE_DOMAIN:-localhost}}
+    volumes:
+      - ./keycloak/reconcile-sso.sh:/opt/daher/reconcile-sso.sh:ro
+      # Mapper fragments must stay outside Keycloak's realm import directory:
+      # they are partial client resources, not RealmRepresentation documents.
+      - ./keycloak/mappers:/opt/daher/mappers:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: [ALL]
+    networks: [internal]
 
   # ===========================================================================
   # ADAPTER SAFETY SKELETON (DH-010)

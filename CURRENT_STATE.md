@@ -13,9 +13,11 @@ Step 3 (PostgreSQL + OpenELIS) is verified: three co-tenant databases, 375 base 
 fully migrated OpenELIS `clinlims` schema, the webapp on HTTPS, and a FHIR server answering over
 mutual TLS. Every image is digest-pinned.
 
-The **DH-007 Keycloak foundation also runs and is runtime-verified**: realm import, French default,
-roles, clients, environment-resolved secrets, readiness, and restart persistence. Application SSO
-is still absent; DH-008 must wire and demonstrate one login across both applications.
+The **DH-008 fail-closed SSO plumbing also runs and is runtime-verified**: the existing Keycloak
+realm reconciles idempotently to OpenMRS OIDC and OpenELIS SAML; official OpenMRS OAuth2 Login
+1.5.0 is installed in the persistent volume; and disabled mode preserves local authentication
+without persisting its client secret. SSO is not active and its one-login acceptance demonstration
+is not complete: native role/provider mapping is a human authorization decision (BLOCKER-5).
 
 **DH-003 now runs and is empty-volume verified:** French backend properties, the `Maternité`
 admission ward, both decided bed types, independent demo-patient/content controls, and a strictly
@@ -36,6 +38,14 @@ OpenELIS's documented `DEFAULT_PW` is ignored, so a verified post-bootstrap bcry
 gates the frontend. Both current and empty-volume OpenELIS login tests accept the configured secret
 and refuse `adminADMIN!`.
 
+**DH-008's 2026-08-13 quality pass corrected two false-green paths before documentation was
+updated.** Keycloak initially tried to import partial mapper JSON as complete realms; the fragments
+now live outside the import directory. The OpenMRS OMOD initially existed only in the image
+distribution layer and therefore did not reach an existing data volume; the runtime wrapper now
+installs the exact release atomically. Existing-realm reconciliation is idempotent, fresh realm
+import passed in an isolated database, all service endpoint/authentication checks passed, and the
+final stack has zero restarts/OOM kills. SSO remains intentionally disabled pending BLOCKER-5.
+
 **What running it cost, and what it exposed** (details in §3a):
 
 1. The gateway could not reach the backend at all — it hard-codes upstream hostnames.
@@ -50,10 +60,10 @@ claimed; the webapp needs a Docker secret or its context dies while Tomcat still
 the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
 
 **The honest boundary:** substantial buildable work remains. OpenELIS local-admin authentication is
-form-verified, but its human browser workflow is unexercised until Caddy (DH-016); SSO, maternity clinical forms, adapter transport,
-notifications, complete backup/restore, and public TLS remain incomplete. The maternity ward/bed
-foundation itself is complete. Human decisions are collected under **NEEDS LIBAN** in
-`PROJECT_STATE.md`.
+form-verified, but its human browser workflow is unexercised until Caddy (DH-016); SSO activation
+and one-login proof, maternity clinical forms, adapter transport, notifications, complete
+backup/restore, and public TLS remain incomplete. The maternity ward/bed foundation itself is
+complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 
 ---
 
@@ -62,17 +72,18 @@ foundation itself is complete. Human decisions are collected under **NEEDS LIBAN
 | Service | State |
 |---|---|
 | MariaDB | **running, healthy, verified** — 10.11.18, digest-pinned |
-| OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4; configured admin password works and `Admin123` is refused after the 2026-08-13 live-volume rotation |
+| OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4; configured admin password works; official OAuth2 Login 1.5.0 is registered and deliberately stopped by `SSO_ENABLED=false` |
 | OpenMRS frontend | **running** — container healthy; Liban registered a test patient in the SPA |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
 | OpenMRS demo preflight | **one-shot job exited 0** — default patients-off path is inert; opt-in mode requires initialized `OpenMRS ID` metadata before backend startup |
 | OpenMRS maternity config | **one-shot job exited 0** — French backend metadata, admission ward, both bed types, additive-only bed lifecycle verified; committed counts are `0/0` placeholders |
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
-| OpenELIS webapp | **running, healthy, with a configuration warning** — serves HTTPS 8443; configured admin form login passes and `adminADMIN!` is refused; no browser workflow performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
+| OpenELIS webapp | **running, healthy, with a configuration warning** — serves HTTPS 8443; configured admin form login passes and `adminADMIN!` is refused; SAML properties are present but disabled; no browser workflow performed; upstream Horiba Pentra60 test import aborts on a duplicate target description (BLOCKER-4) |
 | OpenELIS admin password | **one-shot job exited 0** — runs after genuine webapp readiness, updates exactly one admin bcrypt hash, verifies it, and gates the frontend |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
-| Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
+| Keycloak | **running, healthy, realm + DH-008 clients verified** — OpenMRS OIDC, OpenELIS SAML; existing-realm reconciliation passed twice; pilot session lifetimes approved (ADR-013) |
+| Keycloak SSO config | **one-shot job exited 0** — non-deleting client/mapper reconciliation; idempotency exercised twice |
 | Adapter | **running, healthy, DH-010 verified** — ledger/dead-letter/retry/audit foundation only; no FHIR transport yet |
 | WhatsApp notifier | not written |
 | Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
@@ -83,9 +94,10 @@ registered via the API, one by Liban in the SPA). It is a throwaway verification
 never be confused with a clean instance. The second 50-row batch was the evidence that exposed
 DH-024's competing-property bug; no patient rows were deleted during the repair.
 
-**Build steps 1 and 3 are done; the DH-003 maternity foundation and Keycloak provider are built
-and verified.** The clinical forms in the larger build step 2 remain DH-004 and require human
-sign-off. SSO and the remaining steps are not complete.
+**Build steps 1 and 3 are done; the DH-003 maternity foundation, Keycloak provider, and DH-008
+protocol plumbing are built and verified.** The clinical forms in the larger build step 2 remain
+DH-004 and require human sign-off. SSO activation/one-login proof and the remaining steps are not
+complete.
 
 ---
 
@@ -99,7 +111,7 @@ sign-off. SSO and the remaining steps are not complete.
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. French is configured and verified in frontend env + backend properties, but the visible browser language was **not** reported either way. |
 | OpenELIS UI | **Authentication form exercised; browser workflow not exercised** | Configured admin login succeeds and the published default is refused on current and empty volumes. Its frontend still has no host route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
-| Keycloak realm | **Runtime verified** | Provider foundation only. Pilot session lifetimes are approved (ADR-013); OpenMRS/OpenELIS SSO wiring is DH-008. |
+| SSO | **Plumbing runtime-verified; activation unverified** | OpenMRS OIDC module is registered/stopped in disabled mode; OpenELIS is configured for SAML; Keycloak client reconciliation is idempotent. BLOCKER-5 prevents role mapping, activation, and one-login proof. |
 | `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
 
 ## 3a. What running it actually exposed
@@ -179,6 +191,13 @@ The webapp remains reachable, but its upstream analyzer CSV is not importing cle
 analyzer and its test mappings belong in this facility is laboratory/clinical scope; the audit did
 not disable, rename, or repair any tests. Exact evidence and options are in `PROJECT_STATE.md`.
 
+### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN
+
+The protocol/client plumbing is verified, but `clinician`, `lab-tech`, and `sys-admin` still need
+explicit mappings to native roles in each application, plus an OpenMRS-provider decision. Those
+choices grant clinical/laboratory access and affect attribution, so SSO remains fail-closed off.
+Exact evidence and the requested matrix are in `PROJECT_STATE.md`.
+
 ---
 
 ## 5. Known placeholders — deliberate, not gaps to fill
@@ -197,7 +216,7 @@ sprint spec, not being useful.**
 
 ## 6. What is genuinely missing
 
-OpenMRS ANC and partograph forms; prenatal panel; SSO wiring for both applications; adapter
+OpenMRS ANC and partograph forms; prenatal panel; SSO authorization mapping, activation, and proof; adapter
 order/result transport; WhatsApp notifier; the
 remaining backup layers **and a performed restore drill**; Caddy/TLS; the golden demonstration;
 and a README complete enough to hand the stack to another operator.
@@ -209,7 +228,7 @@ and a README complete enough to hand the stack to another operator.
 | Risk | Severity | Why | Mitigation |
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
-| SSO across two apps | High | The classic multi-day sink: realm import, redirect URIs, role mapping, two different OIDC implementations. Cannot be verified piecemeal. | Ticketed as one joint ticket (DH-008), not split. Start it early. |
+| SSO across two apps | High | Protocol/client plumbing is verified, but role/provider mapping grants clinical access and cannot be inferred. Public-origin cookies also need DH-016 HTTPS. | Keep fail-closed off; obtain BLOCKER-5's explicit authorization matrix, then activate and demonstrate the full two-app session after Caddy. |
 | OpenMRS order polling safety | Medium | The accepted scheduler, watermark, ledger, and restart semantics are safety-relevant code — days, not hours. | ADR-005/DH-009 and DH-010's safety foundation are complete; implement and test the accepted poller in DH-011. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |

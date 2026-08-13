@@ -15,26 +15,29 @@ Client secrets are `${PLACEHOLDER}` values resolved from the container's environ
 time. That is what makes the file safe to commit. **If a literal secret ever appears in it, treat
 it as leaked and rotate it.**
 
-Verified at DH-007: all three imported client secrets matched their corresponding container
-environment values. The check compared values in-process and printed only match/mismatch status;
-no secret value was written to logs or documentation.
+Verified at DH-007: the imported client secrets matched their corresponding container environment
+values. DH-008 removed the no-longer-applicable OpenELIS OIDC secret when that client moved to
+SAML. The check compared values in-process and printed only match/mismatch status; no secret value
+was written to logs or documentation.
 
-Set in `.env`: `KEYCLOAK_OPENMRS_CLIENT_SECRET`, `KEYCLOAK_OPENELIS_CLIENT_SECRET`,
-`KEYCLOAK_ADAPTER_CLIENT_SECRET`, plus `KEYCLOAK_ADMIN_PASSWORD` and `BASE_DOMAIN`.
+Set in `.env`: `KEYCLOAK_OPENMRS_CLIENT_SECRET`, `KEYCLOAK_ADAPTER_CLIENT_SECRET`,
+`KEYCLOAK_ADMIN_PASSWORD`, and `BASE_DOMAIN`. OpenELIS uses SAML and therefore has no committed or
+environment-provided client secret.
 
 ## Decisions encoded here
 
 **French is the default locale** (`defaultLocale: fr`, English selectable). Djibouti's working
 medical and administrative language — a project non-negotiable, not a localisation afterthought.
 
-**Both applications use OIDC.** OpenELIS also supports SAML, but OIDC was confirmed supported at
-DH-007 by inspecting the deployed webapp (`spring-security-oauth2-client-6.2.8.jar`;
-`SecurityConfig` reads `org.itech.login.oauth.clientID` / `.clientSecret` / `.config`). One protocol
-for both apps is deliberate — two would double the surface that has to keep working across upgrades.
+**The applications use different federation protocols against one Keycloak realm.** OpenMRS uses
+OIDC through official OAuth2 Login 1.5.0. OpenELIS uses SAML. This is not aesthetic preference:
+exact OpenELIS 3.2.1.11 source shows its OIDC success path calls a form handler that does not accept
+an `OidcUser`, clears authentication, and redirects back to `LoginPage`. Its SAML path calls the
+working SSO handler and consumes the upstream-native `Role` attribute.
 
-⚠️ Note for DH-008: OpenELIS's shipped `common.properties` contains only the
-`org.itech.login.saml.*` keys. The OIDC keys must be **added**. Reading that file alone will suggest
-SAML is the only option; it is not.
+The role mapper fragments live in `../mappers/`, deliberately outside this directory. Keycloak
+interprets every JSON file under `/opt/keycloak/data/import` as a complete realm; placing a partial
+mapper document here makes startup fail with `Unrecognized field "name" (RealmRepresentation)`.
 
 **The adapter is not a user.** It gets a service account (client credentials) so its writes into
 OpenMRS are attributable to a named machine identity in the audit trail rather than borrowing a
@@ -52,6 +55,13 @@ SSO, so that Keycloak failing does not lock the clinic out of its own records.
 approved by Liban for the pilot (ADR-013). They balance continuity during labour with exposure on
 a shared ward terminal. Revisit after observing pilot workflow; do not silently tune them as inert
 technical constants.
+
+## Fresh import and existing-realm reconciliation
+
+`--import-realm` uses `IGNORE_EXISTING`; it does not apply client changes to an already populated
+Keycloak database. The `keycloak-sso-config` one-shot therefore updates the two application clients
+in place and reconciles the named protocol mappers without deleting clients, roles, or users. It
+runs before either application and is safe to repeat.
 
 ## Verifying an import actually worked
 
@@ -72,13 +82,16 @@ Verified against the running stack on 2026-08-13:
 - the `daher` realm imported successfully after the invalid JSON comment fields were removed;
 - default locale is `fr`, with `fr` and `en` supported;
 - realm roles `clinician`, `lab-tech`, and `sys-admin` exist;
-- `openmrs` and `openelis` are browser-flow clients;
+- `openmrs` is an OIDC browser-flow client and `openelis` is a SAML browser-flow client;
 - `adapter` has service accounts enabled and browser/direct grants disabled;
 - the adapter client completed a real client-credentials grant against the local token endpoint;
 - the realm contains no committed staff users;
-- all three client-secret placeholders resolved to the expected environment values; and
+- the then-configured client-secret placeholders resolved to the expected environment values; and
 - after restarting only Keycloak, readiness returned healthy and import correctly reported
   `Realm 'daher' already exists. Import skipped` followed by `Import finished successfully`.
 
-This verifies the identity-provider foundation only. OpenMRS and OpenELIS do not use it until
-DH-008 wires and demonstrates one-login SSO across both applications.
+DH-008 later verified the reconciliation repeatedly, the exact live client protocols and unique
+mapper names, a clean realm-import restart, and a fresh network-isolated import into an ephemeral
+H2 database. Application activation remains off until the native-role mapping and OpenMRS-provider
+rule receive human approval; the one-login acceptance demonstration has therefore not yet been
+claimed.

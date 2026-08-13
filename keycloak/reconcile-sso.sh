@@ -1,0 +1,128 @@
+#!/bin/bash
+set -euo pipefail
+
+realm=daher
+server=${KEYCLOAK_INTERNAL_URL:-http://keycloak.openelis.org:8080}
+config=/tmp/kcadm.config
+kcadm=/opt/keycloak/bin/kcadm.sh
+
+: "${KEYCLOAK_ADMIN_USER:?set KEYCLOAK_ADMIN_USER}"
+: "${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}"
+: "${KEYCLOAK_OPENMRS_CLIENT_SECRET:?set KEYCLOAK_OPENMRS_CLIENT_SECRET}"
+: "${BASE_DOMAIN:?set BASE_DOMAIN}"
+
+openmrs_public_url=${OPENMRS_PUBLIC_URL:-https://emr.${BASE_DOMAIN}}
+openelis_public_url=${OPENELIS_PUBLIC_URL:-https://lab.${BASE_DOMAIN}}
+
+for value in "$BASE_DOMAIN" "$openmrs_public_url" "$openelis_public_url"; do
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9:./_-]*$ ]]; then
+        echo "Unsafe URL/domain value in SSO configuration" >&2
+        exit 1
+    fi
+done
+
+trap 'rm -f "$config"' EXIT
+
+"$kcadm" config credentials --config "$config" --server "$server" \
+    --realm master --user "$KEYCLOAK_ADMIN_USER" \
+    --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+
+client_uuid() {
+    local client_id=$1
+    local -a ids=()
+    mapfile -t ids < <("$kcadm" get clients --config "$config" -r "$realm" \
+        -q "clientId=$client_id" -F id --format csv --noquotes)
+    if [[ ${#ids[@]} -ne 1 || -z "${ids[0]}" ]]; then
+        echo "Expected exactly one Keycloak client named $client_id" >&2
+        exit 1
+    fi
+    printf '%s' "${ids[0]}"
+}
+
+reconcile_mapper() {
+    local client_id=$1
+    local mapper_name=$2
+    local mapper_file=$3
+    local id name mapper_id
+    local -a mapper_ids=()
+
+    while IFS=, read -r id name; do
+        if [[ "$name" = "$mapper_name" ]]; then
+            mapper_ids+=("$id")
+        fi
+    done < <("$kcadm" get "clients/$client_id/protocol-mappers/models" \
+        --config "$config" -r "$realm" -F id,name --format csv --noquotes)
+
+    if [[ ${#mapper_ids[@]} -gt 1 ]]; then
+        echo "Duplicate Keycloak mapper: $mapper_name" >&2
+        exit 1
+    fi
+
+    mapper_id=${mapper_ids[0]:-}
+    if [[ -n "$mapper_id" ]]; then
+        "$kcadm" update "clients/$client_id/protocol-mappers/models/$mapper_id" \
+            --config "$config" -r "$realm" -f "$mapper_file" \
+            -s "id=$mapper_id" >/dev/null
+    else
+        "$kcadm" create "clients/$client_id/protocol-mappers/models" \
+            --config "$config" -r "$realm" -f "$mapper_file" >/dev/null
+    fi
+}
+
+openmrs_id=$(client_uuid openmrs)
+"$kcadm" update "clients/$openmrs_id" --config "$config" -r "$realm" \
+    -s protocol=openid-connect \
+    -s enabled=true \
+    -s publicClient=false \
+    -s bearerOnly=false \
+    -s standardFlowEnabled=true \
+    -s directAccessGrantsEnabled=false \
+    -s serviceAccountsEnabled=false \
+    -s "secret=$KEYCLOAK_OPENMRS_CLIENT_SECRET" \
+    -s "rootUrl=$openmrs_public_url" \
+    -s "baseUrl=$openmrs_public_url" \
+    -s "redirectUris=[\"$openmrs_public_url/*\",\"http://127.0.0.1:8080/*\",\"http://openmrs-gateway/*\"]" \
+    -s "webOrigins=[\"$openmrs_public_url\",\"http://127.0.0.1:8080\",\"http://openmrs-gateway\"]" \
+    -s 'attributes."post.logout.redirect.uris"=+' >/dev/null
+
+reconcile_mapper "$openmrs_id" "client roles" \
+    /opt/daher/mappers/openmrs-client-roles-mapper.json
+reconcile_mapper "$openmrs_id" "provider disabled until approved" \
+    /opt/daher/mappers/openmrs-provider-disabled-mapper.json
+
+openelis_id=$(client_uuid openelis)
+"$kcadm" update "clients/$openelis_id" --config "$config" -r "$realm" \
+    -s protocol=saml \
+    -s enabled=true \
+    -s publicClient=false \
+    -s bearerOnly=false \
+    -s standardFlowEnabled=true \
+    -s directAccessGrantsEnabled=false \
+    -s serviceAccountsEnabled=false \
+    -s "rootUrl=$openelis_public_url" \
+    -s "baseUrl=$openelis_public_url" \
+    -s "redirectUris=[\"$openelis_public_url/*\",\"https://oe.openelis.org:8443/OpenELIS-Global/*\"]" \
+    -s "webOrigins=[\"$openelis_public_url\"]" \
+    -s 'attributes."saml.assertion.signature"=false' \
+    -s 'attributes."saml.force.post.binding"=true' \
+    -s 'attributes."saml.encrypt"=false' \
+    -s 'attributes."saml.server.signature"=true' \
+    -s 'attributes."saml.server.signature.keyinfo.ext"=false' \
+    -s 'attributes."saml.signature.algorithm"=RSA_SHA256' \
+    -s 'attributes."saml_force_name_id_format"=false' \
+    -s 'attributes."saml.client.signature"=false' \
+    -s 'attributes."saml.authnstatement"=true' \
+    -s 'attributes."saml_name_id_format"=username' >/dev/null
+
+reconcile_mapper "$openelis_id" "role list" \
+    /opt/daher/mappers/openelis-role-list-mapper.json
+
+openmrs_protocol=$("$kcadm" get "clients/$openmrs_id" --config "$config" -r "$realm" \
+    -F protocol --format csv --noquotes)
+openelis_protocol=$("$kcadm" get "clients/$openelis_id" --config "$config" -r "$realm" \
+    -F protocol --format csv --noquotes)
+
+[[ "$openmrs_protocol" = openid-connect ]]
+[[ "$openelis_protocol" = saml ]]
+
+echo "Keycloak SSO clients reconciled: OpenMRS OIDC, OpenELIS SAML"

@@ -11,12 +11,12 @@ one `docker-compose.yml`.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
 > verified; configured admin authentication is form-verified, but its browser workflow has not
 > been exercised, and an upstream Horiba analyzer test import is blocked
-> pending confirmation that the device is in facility scope. **DH-007 Keycloak** is running with
-> the French-first realm, roles, clients, secret interpolation, readiness, and restart persistence
-> verified.
+> pending confirmation that the device is in facility scope. **DH-008 SSO protocol plumbing** is
+> running fail-closed: Keycloak has verified OpenMRS OIDC and OpenELIS SAML clients, but staff-role
+> mapping is a human authorization decision and SSO remains disabled.
 > **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
-> volume verified; it does not move FHIR messages yet. One-login SSO and the clinical/integration
-> steps remain incomplete.
+> volume verified; it does not move FHIR messages yet. One-login SSO proof and the
+> clinical/integration steps remain incomplete.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -113,6 +113,28 @@ DH-019 now passes required `OMRS_ADMIN_PASSWORD` through
 an empty volume: the configured password authenticated and `Admin123` was refused. On a database
 created before DH-019 landed, `.env` cannot rotate the existing account—change it manually in
 OpenMRS.
+
+### SSO is fail-closed until the authorization matrix is approved
+
+`SSO_ENABLED=false` is deliberate. The technical path is built and exercised: OpenMRS uses OIDC
+through official OAuth2 Login 1.5.0; OpenELIS uses its native SAML path (ADR-014); and the one-shot
+Keycloak client reconciliation works for existing databases as well as fresh imports. The applications
+consume their own exact native role names, not the high-level Keycloak labels. Mapping
+`clinician`, `lab-tech`, and `sys-admin`, and deciding who is an OpenMRS provider, grants access to
+clinical records and laboratory functions. That matrix is BLOCKER-5 and requires Liban's approval.
+
+For break-glass/local authentication, keep or set:
+
+```bash
+SSO_ENABLED=false
+docker compose up -d
+```
+
+Then verify the configured local administrator before investigating Keycloak. With SSO disabled,
+the OpenMRS runtime file contains only `oauth2.enabled=false` and is mode `0600`; the OIDC client
+secret is not persisted there. Rotate a local credential after emergency use. Do not set
+`SSO_ENABLED=true` until BLOCKER-5 is resolved and DH-016 provides the public HTTPS origins needed
+for the browser session demonstration.
 
 ## Running the current foundation
 
@@ -252,7 +274,7 @@ committed definition, the setup job exits non-zero and the frontend dependency g
 ## Not yet present
 
 OpenMRS ANC and partograph forms, the prenatal order set,
-single sign-on wiring, adapter order/result transport, WhatsApp notifications, the remaining
+single sign-on authorization/activation and one-login proof, adapter order/result transport, WhatsApp notifications, the remaining
 backup layers **and a tested restore**, and Caddy with HTTPS. Sequence and status:
 [`PROJECT_STATE.md`](PROJECT_STATE.md).
 

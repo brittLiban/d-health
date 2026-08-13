@@ -13,4 +13,4 @@ if grep -Fq '<value>50</value>' "$patient_control"; then
     exit 1
 fi
 
-exec /openmrs/startup.sh
+exec /openmrs/configure-sso.sh

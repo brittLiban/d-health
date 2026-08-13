@@ -54,36 +54,91 @@
       "secret": "${KEYCLOAK_OPENMRS_CLIENT_SECRET}",
       "redirectUris": [
         "https://emr.${BASE_DOMAIN}/*",
-        "http://127.0.0.1:8080/*"
+        "http://127.0.0.1:8080/*",
+        "http://openmrs-gateway/*"
       ],
       "webOrigins": [
         "https://emr.${BASE_DOMAIN}",
-        "http://127.0.0.1:8080"
+        "http://127.0.0.1:8080",
+        "http://openmrs-gateway"
       ],
       "attributes": {
         "post.logout.redirect.uris": "+"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "client roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "user.attribute": "foo",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "provider disabled until approved",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.value": "false",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "provider",
+            "jsonType.label": "String"
+          }
+        }
+      ]
     },
     {
       "clientId": "openelis",
       "name": "OpenELIS Laboratory",
       "enabled": true,
-      "protocol": "openid-connect",
+      "protocol": "saml",
       "publicClient": false,
       "bearerOnly": false,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "secret": "${KEYCLOAK_OPENELIS_CLIENT_SECRET}",
       "redirectUris": [
-        "https://lab.${BASE_DOMAIN}/*"
+        "https://lab.${BASE_DOMAIN}/*",
+        "https://oe.openelis.org:8443/OpenELIS-Global/*"
       ],
       "webOrigins": [
         "https://lab.${BASE_DOMAIN}"
       ],
       "attributes": {
-        "post.logout.redirect.uris": "+"
-      }
+        "saml.assertion.signature": "false",
+        "saml.force.post.binding": "true",
+        "saml.encrypt": "false",
+        "saml.server.signature": "true",
+        "saml.server.signature.keyinfo.ext": "false",
+        "saml.signature.algorithm": "RSA_SHA256",
+        "saml_force_name_id_format": "false",
+        "saml.client.signature": "false",
+        "saml.authnstatement": "true",
+        "saml_name_id_format": "username"
+      },
+      "protocolMappers": [
+        {
+          "name": "role list",
+          "protocol": "saml",
+          "protocolMapper": "saml-role-list-mapper",
+          "consentRequired": false,
+          "config": {
+            "single": "false",
+            "attribute.nameformat": "Basic",
+            "attribute.name": "Role"
+          }
+        }
+      ]
     },
     {
       "clientId": "adapter",
