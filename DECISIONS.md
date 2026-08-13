@@ -257,6 +257,53 @@ Full watermark design — keying, advancement, restart mid-window, back-dating, 
 mode — is in [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md), **written before any code, as
 this ADR requires.** Nothing has been built.
 
+#### Q6 — `labonfhir` spike (2026-08-13), feeding the ADR-004 revisit
+
+Requested as a spike, not a re-litigation: does `labonfhir` actually fit, and does it avoid this
+problem or merely relocate it? Four findings, all checkable.
+
+**1. It is NOT in the distribution we deploy.** `/openmrs/distribution/openmrs-distro.properties`
+declares `omod.fhir2=4.2.0` and nothing else FHIR-related; `/openmrs/data/modules/` contains
+`fhir2-4.2.0.omod` alone. ADR-004 described `labonfhir` as "used by the official OpenMRS HIS
+distribution" — true, but that is the **HIS/Ozone** distro, not the **reference application** we
+run. Adopting it means adding a module our distro does not ship, which is a different risk from
+"enable what is already there."
+
+**2. Version gap, and it is not small.** `labonfhir` master (1.5.4-SNAPSHOT) builds against
+**`fhir2Version` 2.2.0**. We run **fhir2 4.2.0** — two major versions ahead. Its
+`require_version` of 2.6.0 is the *platform* and we satisfy that (we are on 2.7.x). Runtime
+compatibility with fhir2 4.2.0 is **unverified and looks like the main risk**; nobody should assume
+it works because the module is popular.
+
+**3. Maintenance: real but not brisk.** Last release 1.5.3 on **2025-09-11** — roughly eleven
+months before this spike, not "recent". Development is genuine (a Sept 2025 commit is literally
+"filter out demo data", so they hit our BLOCKER-2 too), but this is not a fast-moving dependency
+that will rush out fhir2 4.x support.
+
+**4. The important one — it does BOTH, and only the half we cannot do ourselves is event-driven:**
+
+| `labonfhir` source | Mechanism | Direction |
+|---|---|---|
+| `api/event/OrderCreationListener.java`, `EncounterCreationListener.java`, `LabCreationListener.java` | **In-process event listeners** | Order out → LIS |
+| `api/scheduler/FetchTaskUpdates.java`, `RetryFailedTasks.java` | **Scheduled tasks — polling** | Results back ← LIS |
+
+So `labonfhir` **does not avoid polling**; it polls for result updates exactly as our design would.
+What it genuinely solves is the *order* trigger, because it runs **inside** OpenMRS and can use the
+in-process event listeners that Q2 showed are unreachable from a separate container.
+
+**Honest framing of the trade, for the ADR-004 revisit — not a decision:**
+
+- Adopting it **would** remove our polling on the order leg (the stronger half of our design) and
+  replace it with upstream's event listeners.
+- It **would not** remove polling on the result leg — it relocates that watermark logic into a
+  dependency we do not control, cannot audit as easily, and which is built against a two-major-
+  version-older `fhir2`.
+- The audit ledger, dead-letter handling and notification trigger remain ours under either choice,
+  exactly as ADR-004 reasoned.
+
+Nothing here overturns ADR-004. It sharpens what the choice actually costs, which is what the
+revisit was for.
+
 ---
 
 ## ADR-006 — Partograph ships as data entry only; no decision support

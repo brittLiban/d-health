@@ -222,8 +222,8 @@ loss, and it is the check that lets anyone claim results are not being lost.
 1. **Poll interval.** Not chosen here — it is a clinical-workflow question (how long may a
    prenatal order sit before the laboratory sees it?), not a technical one.
 2. **Void/discontinue visibility** (§6) — the sharpest open item.
-3. **Whether `labonfhir` reopens.** ADR-004 deferred it on the reasoning that the trigger was ours
-   to own either way. Now that owning the trigger is demonstrably *polling*, that trade has changed
-   — `labonfhir` runs inside OpenMRS and does not need one. This does not reverse ADR-004, but it
-   is new information bearing directly on it, and it should be weighed before adapter work starts
-   rather than after.
+3. **Whether `labonfhir` reopens.** Spiked 2026-08-13 — see ADR-005 Q6. Short version: it solves
+   the *order* trigger (in-process event listeners, which a separate container cannot use) but
+   **still polls for results** (`api/scheduler/FetchTaskUpdates.java`). So adopting it removes half
+   this document, not all of it, and relocates the other half into a dependency built against
+   `fhir2` **2.2.0** while we run **4.2.0**. Still a genuine choice; now a costed one.
