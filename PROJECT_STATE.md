@@ -361,6 +361,11 @@ the clinical lead has time.
 French login theme, adapter service account.
 
 ### DH-008 · SSO wiring · P0 · ⏸ (needs DH-003, DH-005, DH-007)
+⚠️ **Re-estimated at DH-005.** OpenELIS's shipped config exposes **SAML**, not OIDC as
+`ARCHITECTURE.md` §5 previously claimed. If that holds, the realm carries an OIDC client *and* a
+SAML client, and this ticket is two federation protocols rather than one — already the schedule's
+biggest single risk. **Confirm the protocol before DH-007 writes the realm JSON**, since that is
+where the work lands.
 **Requires joint understanding of: Keycloak realm config, OpenMRS auth, OpenELIS auth.** Not
 split — a working realm and a working OpenMRS that don't authenticate against each other is the
 exact failure this ticket exists to prevent. Includes the documented break-glass local admin.

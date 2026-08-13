@@ -183,7 +183,17 @@ OIDC confidential clients with secrets injected from `.env`.
 
 - **OpenMRS** authenticates via its OAuth2/OIDC support (`oauth2.properties`, as the HIS distro
   does). OpenMRS roles are mapped from Keycloak realm roles.
-- **OpenELIS** authenticates via its OIDC integration against the same realm.
+- **OpenELIS** — ⚠️ **corrected at DH-005: the shipped configuration exposes SAML, not OIDC.**
+  `openelis-config/properties/common.properties` carries only `org.itech.login.saml.*` keys
+  (`registrationId=keycloak`, `entityId=OpenELIS-Global_saml`, and a
+  `.../protocol/saml/descriptor` metadata URL). No OIDC keys are present in it.
+
+  **This is not fatal, but it changes DH-008's shape and its estimate.** The realm likely needs
+  *two* client definitions — an OIDC client for OpenMRS and a SAML client for OpenELIS — and
+  "one login, both apps" then depends on two different federation protocols against one realm.
+  Whether OpenELIS also supports OIDC is **unconfirmed**; nobody should assume it does because
+  this document previously said so. Verify before building DH-007's realm JSON, because the realm
+  is where the cost lands.
 - **The adapter is not a user.** It gets its own Keycloak service account (client credentials
   grant), so its writes into OpenMRS are attributable to a named machine identity in the audit
   trail rather than borrowing a clinician's account.
