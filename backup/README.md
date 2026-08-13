@@ -1,6 +1,7 @@
 # Backup sidecar (DH-014)
 
-The sidecar runs `/usr/local/bin/daher-backup` once nightly at `BACKUP_HOUR_UTC`. It covers both
+When started with production encryption and off-site settings, the sidecar runs
+`/usr/local/bin/daher-backup` once nightly at `BACKUP_HOUR_UTC`. It covers both
 database engines, the live Keycloak realm, OpenMRS data, and the adapter audit volume, then writes
 one encrypted archive to the `backup-data` volume and optionally uploads it to approved
 S3-compatible storage.

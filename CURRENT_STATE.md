@@ -7,10 +7,11 @@
 
 ## 1. Honest summary
 
-**Build steps 1 and 3 now run, and running them produced nine defects the syntax check could not.**
+**Build steps 1 and 3 now run, and running them produced ten findings the syntax check could not.**
 Step 1 (MariaDB + OpenMRS O3) is verified through REST and FHIR **and by Liban himself in the SPA**.
-Step 3 (PostgreSQL + OpenELIS) is verified: three co-tenant databases, a 167-table OpenELIS schema,
-the webapp on HTTPS, and a FHIR server answering over mutual TLS. Every image is digest-pinned.
+Step 3 (PostgreSQL + OpenELIS) is verified: three co-tenant databases, 375 base tables in the
+fully migrated OpenELIS `clinlims` schema, the webapp on HTTPS, and a FHIR server answering over
+mutual TLS. Every image is digest-pinned.
 
 The **DH-007 Keycloak foundation also runs and is runtime-verified**: realm import, French default,
 roles, clients, environment-resolved secrets, readiness, and restart persistence. Application SSO
@@ -51,11 +52,11 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases |
 | OpenELIS webapp | **running** — serves HTTPS 8443; no OpenELIS login performed yet |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
-| OpenELIS frontend | running, **not exercised** — it has no route until Caddy (DH-016) |
+| OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
 | Adapter | **running, healthy, DH-010 verified** — ledger/dead-letter/retry/audit foundation only; no FHIR transport yet |
 | WhatsApp notifier | not written |
-| Backup | **local path verified end-to-end** — both engines, realm, volumes, manifest, encryption, scheduler; off-site upload unverified; no retained test archive; no restore performed |
+| Backup | **not running in the current stack** — the local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
 
 ⚠️ **This local stack contains 50 fictional demo patients** plus two deliberate test patients (one
@@ -74,7 +75,7 @@ not complete.
 |---|---|---|
 | `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, the `${VAR:?}` guards and the backend↔db handshake are all now exercised. The new backend healthcheck's *cold-start* behaviour has been observed on one warm boot only. |
 | `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is now wired and **verified on an empty volume** (DH-019). The OpenELIS block is wired and booted. |
-| Image digests | **Pinned from a real pull, 2026-08-11** | Recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
+| Image digests | **Pinned from real pulls as each component landed** | Dates and exact values are recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. The French default locale was **not** reported on either way — still open, and a DH-003 concern. |
 | OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
@@ -92,11 +93,15 @@ not complete.
 | 5 | Cold boot ≈ 49 min, dominated by 23 OCL concept-package imports | Deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z | Documented; healthcheck timings derived from it |
 | 6 | No OpenMRS admin password variable; image defaults to the published `Admin123`, applied **first boot only** | `OMRS_ADMIN_USER_PASSWORD=${OMRS_ADMIN_USER_PASSWORD:-Admin123}` in `startup-init.sh` | **Fixed and verified on an empty volume — DH-019** |
 
-Two upstream oddities observed and deliberately not chased, recorded so they are not later
+Three upstream oddities observed and deliberately not chased, recorded so they are not later
 mistaken for new breakage: `AddressConfigurationLoader` logs an ERROR that the distro's own
 `addressConfiguration.xml` "appears invalid" and skips it; and the gateway config carries a
 `/grafana → grafana:3000` block for a service this stack does not run (relevant at DH-016 — it
-should not be exposed publicly).
+should not be exposed publicly). During OpenELIS FHIR startup, PostgreSQL also logs failed
+compatibility/pre-migration probes (`aurora_version()` and relations not yet created). The FHIR
+service then continues normal scheduler passes and its live mutual-TLS metadata request returns
+HTTP 200; treat the messages as this known non-blocking startup behaviour only while that endpoint
+continues to pass.
 
 ---
 
@@ -161,7 +166,7 @@ and a README complete enough to hand the stack to another operator.
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
 | SSO across two apps | High | The classic multi-day sink: realm import, redirect URIs, role mapping, two different OIDC implementations. Cannot be verified piecemeal. | Ticketed as one joint ticket (DH-008), not split. Start it early. |
-| OpenMRS order polling safety | Medium | The accepted scheduler, watermark, ledger, and restart semantics are safety-relevant code — days, not hours. | ADR-005/DH-009 are complete; implement and test the accepted design in DH-010/011. |
+| OpenMRS order polling safety | Medium | The accepted scheduler, watermark, ledger, and restart semantics are safety-relevant code — days, not hours. | ADR-005/DH-009 and DH-010's safety foundation are complete; implement and test the accepted poller in DH-011. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |
 | Clinical sign-off not obtained | **High** | Gates *clinically live*, not pilot-ready — but a pilot with no sign-off path is a pilot that cannot proceed to use. | Get the order set and partograph fields in front of the clinical lead as soon as they are drafted, in week 1, not week 3. |

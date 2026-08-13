@@ -11,21 +11,32 @@ Single agent, one ticket at a time. Update this file before ending a session.
 
 **Step 1** (MariaDB + OpenMRS O3) boots and works — verified through REST and FHIR, and by Liban
 himself in the SPA. **Step 3** (PostgreSQL + OpenELIS) is built and verified: three co-tenant
-databases, 167-table OpenELIS schema, webapp on HTTPS, and a FHIR server answering `metadata` over
-mutual TLS. **DH-019** closed the published-default admin password.
+databases, 375 base tables in the fully migrated OpenELIS `clinlims` schema, webapp on HTTPS, and a
+FHIR server answering `metadata` over mutual TLS. **DH-019** closed the published-default admin
+password.
 
 **DH-007** (Keycloak foundation) is built and runtime-verified: the `daher` realm imports with
 French as default; roles and all three clients exist; environment placeholders resolve to the
 expected client secrets; no staff users are committed; and restart returns healthy without
 re-importing the existing realm. **This is not SSO** — application wiring remains DH-008.
 
-Both steps together surfaced nine defects that `docker compose config` could never have caught
+Both steps together surfaced ten findings that `docker compose config` could never have caught
 (`CURRENT_STATE.md` §3a and DH-005's ticket entry). Buildable work remains alongside the decisions
 gathered under **NEEDS LIBAN** below.
 
 Step 2 (DH-003, maternity config) has not started. Its demo-patient dependency is resolved; it is
 now technically ready, with real bed counts still a facility placeholder rather than something an
 agent may invent.
+
+**Quality verification 2026-08-13:** the current Compose stack passed config validation; all ten
+long-running project services had zero restarts and zero OOM kills; OpenMRS REST/FHIR, OpenELIS
+webapp, OpenELIS FHIR mutual TLS, the OpenELIS frontend's internal HTTP endpoint, Keycloak, and the
+adapter readiness path answered. The adapter test image again passed dependency consistency, Ruff,
+and all 14 tests. Shell syntax, realm JSON, OpenMRS XML, Git integrity/whitespace, tracked-secret
+patterns, image-tag policy, and every relative Markdown link passed static checks. A completed
+two-container `daher-demotest` password-verification stack was found and stopped without deleting
+its containers or volumes. The backup scheduler remains intentionally absent from the running
+stack until production encryption/off-site settings are supplied; DH-015 remains unperformed.
 
 ## Ticket status
 
@@ -333,7 +344,7 @@ Five services added, all digest-pinned. Verified by running, not by `compose con
 |---|---|
 | Three databases as co-tenants (ADR-001) | ✅ `clinlims`, `keycloak`, `adapter`, correct owners |
 | Tenant isolation | ✅ keycloak cannot reach `adapter`; adapter cannot read OpenELIS clinical data. ⚠️ one gap left open on purpose — DH-020 |
-| OpenELIS schema provisioned | ✅ 167 tables in the `clinlims` schema |
+| OpenELIS schema provisioned | ✅ 375 base tables in the fully migrated `clinlims` schema (live recount 2026-08-13) |
 | Webapp serving | ✅ HTTPS 8443 (its HTTP connector does not listen) |
 | FHIR server serving | ✅ `GET /fhir/metadata` → 200, **over mutual TLS** |
 | Frontend container | ✅ running, **not yet exercised** — it had no route until Caddy (DH-016) |
