@@ -2,7 +2,7 @@
 #
 # Built incrementally, one service group at a time (see docs/ARCHITECTURE.md §13).
 # Includes steps 1 (OpenMRS), 3 (OpenELIS), 4a (Keycloak), DH-010 adapter
-# safety skeleton, and DH-014 backup.
+# safety skeleton, DH-014 backup, and DH-020 database hardening.
 #
 # Every image is pinned. No `:latest` anywhere. Where an upstream publishes only a
 # moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
@@ -316,6 +316,10 @@ services:
     volumes:
       - openelis-db-data:/var/lib/postgresql/data
       - ./openelis-config/postgres-init/zz-daher-extra-databases.sh:/docker-entrypoint-initdb.d/zz-daher-extra-databases.sh:ro
+      # Shared by the zz- init hook and the existing-volume one-shot below. It
+      # is intentionally outside initdb.d so the entrypoint does not execute it
+      # independently before the tenant roles/databases exist.
+      - ./openelis-config/postgres-init/harden-tenancy.sh:/usr/local/bin/harden-tenancy:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U clinlims -d clinlims"]
       interval: 10s
@@ -330,6 +334,36 @@ services:
         # places that are not — so the alias is belt and braces, and costs nothing.
         aliases: [db.openelis.org]
 
+  # Database-level tenant isolation for both fresh and existing volumes
+  # (DH-020). This deliberately leaves OpenELIS's schema grants untouched: a
+  # role that cannot CONNECT to clinlims cannot exploit its permissive public
+  # schema, while upstream migrations retain their expected schema behavior.
+  openelis-db-hardening:
+    image: postgres:14.4@sha256:9ceb24f8c5f15c053d973a3610866f473690875dc13eb3282b45302189321040
+    restart: "no"
+    depends_on:
+      openelis-db:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      PGHOST: openelis-db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${OE_POSTGRES_PASSWORD:?set OE_POSTGRES_PASSWORD in .env}
+      OE_DB_NAME: clinlims
+      OE_DB_OWNER: clinlims
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-adapter}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+    entrypoint: ["/usr/local/bin/harden-tenancy"]
+    read_only: true
+    volumes:
+      - ./openelis-config/postgres-init/harden-tenancy.sh:/usr/local/bin/harden-tenancy:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    networks: [internal]
+
   # ---------------------------------------------------------------------------
   # OpenELIS webapp (Tomcat). Not publicly routed; Caddy reaches it at DH-016.
   # ---------------------------------------------------------------------------
@@ -339,6 +373,8 @@ services:
     depends_on:
       openelis-db:
         condition: service_healthy
+      openelis-db-hardening:
+        condition: service_completed_successfully
       openelis-certs:
         condition: service_completed_successfully
     environment:
@@ -381,6 +417,8 @@ services:
     depends_on:
       openelis-db:
         condition: service_healthy
+      openelis-db-hardening:
+        condition: service_completed_successfully
       openelis-certs:
         condition: service_completed_successfully
     environment:
@@ -442,6 +480,8 @@ services:
     depends_on:
       openelis-db:
         condition: service_healthy
+      openelis-db-hardening:
+        condition: service_completed_successfully
     # `start` (not `start-dev`): dev mode disables HTTPS enforcement and uses an
     # in-memory cache, neither of which should be one flag away on a clinical box.
     # Caddy terminates TLS at DH-016, so proxy=edge with http enabled internally.
@@ -505,6 +545,8 @@ services:
     depends_on:
       openelis-db:
         condition: service_healthy
+      openelis-db-hardening:
+        condition: service_completed_successfully
     environment:
       <<: *common-env
       ADAPTER_DB_HOST: openelis-db

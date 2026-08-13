@@ -49,7 +49,7 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | OpenMRS backend | **running** — boots, migrates, serves REST + FHIR R4, admin login works |
 | OpenMRS frontend | **running** — container healthy; Liban registered a test patient in the SPA |
 | OpenMRS gateway | **running** — routes to backend and frontend after the alias fix |
-| PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases |
+| PostgreSQL | **running, healthy, verified** — 14.4 (OpenELIS's image), 3 co-tenant databases; DH-020 denies all cross-tenant connections |
 | OpenELIS webapp | **running** — serves HTTPS 8443; no OpenELIS login performed yet |
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |

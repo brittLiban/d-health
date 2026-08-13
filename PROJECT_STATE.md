@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton runtime-verified
+**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton and tenant isolation runtime-verified
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -42,11 +42,11 @@ stack until production encryption/off-site settings are supplied; DH-015 remains
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (verified on an empty volume) |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (verified on an empty volume), **DH-020** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
-| 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
+| 🆕 Raised while building | DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | DH-003 (maternity configuration), **DH-020** (Postgres hardening) |
+| 📋 Ready | DH-003 (maternity configuration) |
 | 🛑 Blocked on human decisions | **DH-011** (first-sync scope, requester identity, cancellation contract) |
 | ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-012, DH-013, DH-015, DH-016, DH-018 |
 
@@ -57,7 +57,7 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 1. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
    first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
    implement an apparent default; see the evidence and options below.
-2. **Unblocked technical work:** DH-003, DH-020, and the remaining DH-014 backup layers. DH-014 is pinned P0
+2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
    and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
@@ -380,7 +380,7 @@ Five services added, all digest-pinned. Verified by running, not by `compose con
 | Check | Result |
 |---|---|
 | Three databases as co-tenants (ADR-001) | ✅ `clinlims`, `keycloak`, `adapter`, correct owners |
-| Tenant isolation | ✅ keycloak cannot reach `adapter`; adapter cannot read OpenELIS clinical data. ⚠️ one gap left open on purpose — DH-020 |
+| Tenant isolation | ✅ DH-020: each application role can connect only to its own database; all six cross-tenant attempts are denied |
 | OpenELIS schema provisioned | ✅ 375 base tables in the fully migrated `clinlims` schema (live recount 2026-08-13) |
 | Webapp serving | ✅ HTTPS 8443 (its HTTP connector does not listen) |
 | FHIR server serving | ✅ `GET /fhir/metadata` → 200, **over mutual TLS** |
@@ -398,13 +398,19 @@ Five services added, all digest-pinned. Verified by running, not by `compose con
 **Not done here:** the frontend is unexercised, and no OpenELIS login has been performed. Both need
 either Caddy (DH-016) or a temporary port, and neither is required by this ticket.
 
-### DH-020 · Restrict PUBLIC on the OpenELIS database · P1 · 📋 READY
-Raised at DH-005. The `adapter` role can connect to `clinlims` and create objects in its `public`
-schema, because PostgreSQL grants that to `PUBLIC` by default and our init hook only revokes on the
-two databases it creates. **It cannot read clinical data** (`permission denied for schema clinlims`),
-so this is hardening, not an exposure. Left alone deliberately: OpenELIS keeps 3 objects in that
-schema, revoking risks breaking the laboratory system, and doing it unsupervised as a side effect of
-another ticket is the wrong way to touch a clinical database.
+### DH-020 · Restrict PUBLIC on the OpenELIS database · P1 · ✅ DONE 2026-08-13
+Raised at DH-005 after the `adapter` role could connect to `clinlims` through PostgreSQL's default
+database grant. The fix revokes database-level `PUBLIC` privileges on all three tenant databases
+and restores explicit privileges only to each owner. It deliberately does **not** change OpenELIS's
+schema grants: a role denied `CONNECT` cannot exploit the permissive `public` schema, while upstream
+migrations retain their expected schema behavior.
+
+Fresh volumes call the shared script from `initdb.d`; an idempotent, digest-pinned one-shot Compose
+job applies the same grant state to existing volumes before OpenELIS, Keycloak, or the adapter may
+start. Runtime verification used the actual three application roles: all three own-database
+connections passed and all six cross-tenant connections were denied. After restarting every
+PostgreSQL client, OpenELIS HTTPS, OpenELIS FHIR mutual-TLS metadata, Keycloak readiness, and adapter
+readiness all passed. A second hardening run exited 0, proving restart idempotency.
 
 ### DH-021 · Replace the shipped keystore · P1 · 📋 READY
 Raised at DH-005. `itechuw/certgen` generates nothing — it ships **pre-built** keystores inside a

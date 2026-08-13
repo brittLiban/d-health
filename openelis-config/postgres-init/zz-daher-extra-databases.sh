@@ -67,25 +67,18 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
 SQL
 
 # Each tenant owns its own database. Co-tenancy is a deployment convenience
-# (ADR-001), not a trust boundary being relaxed.
-#
-# WHAT THIS ACTUALLY ACHIEVES — measured at DH-005, not assumed:
-#   ✅ keycloak cannot connect to `adapter`      ("permission denied for database")
-#   ✅ adapter cannot read OpenELIS clinical data ("permission denied for schema clinlims")
-#   ⚠️ adapter CAN still connect to `clinlims` and create objects in its `public`
-#      schema — PostgreSQL grants CONNECT and (in 14) CREATE-on-public to PUBLIC
-#      by default, and the REVOKEs below only cover the two databases we create.
-#
-# The gap is deliberately left open here rather than closed blind: OpenELIS keeps
-# 3 objects in that `public` schema, so revoking on `clinlims` risks breaking the
-# laboratory system in a way that would surface later, and OpenELIS's database is
-# not ours to harden as a side effect of creating two other databases.
-# Tracked as DH-020 for review. No clinical data is exposed by this gap.
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-SQL
-	REVOKE ALL ON DATABASE ${KEYCLOAK_DB_NAME} FROM PUBLIC;
-	REVOKE ALL ON DATABASE ${ADAPTER_DB_NAME}  FROM PUBLIC;
-	GRANT ALL PRIVILEGES ON DATABASE ${KEYCLOAK_DB_NAME} TO ${KEYCLOAK_DB_USER};
-	GRANT ALL PRIVILEGES ON DATABASE ${ADAPTER_DB_NAME}  TO ${ADAPTER_DB_USER};
-SQL
+# (ADR-001), not a trust boundary being relaxed. Keep the grant logic in one
+# script shared by fresh initialization and the Compose one-shot that upgrades
+# existing volumes (DH-020).
+PGHOST=/var/run/postgresql \
+PGUSER="$POSTGRES_USER" \
+PGPASSWORD="$POSTGRES_PASSWORD" \
+OE_DB_NAME="$POSTGRES_DB" \
+OE_DB_OWNER=clinlims \
+KEYCLOAK_DB_NAME="$KEYCLOAK_DB_NAME" \
+KEYCLOAK_DB_USER="$KEYCLOAK_DB_USER" \
+ADAPTER_DB_NAME="$ADAPTER_DB_NAME" \
+ADAPTER_DB_USER="$ADAPTER_DB_USER" \
+	/usr/local/bin/harden-tenancy
 
 echo "[daher] done: ${KEYCLOAK_DB_NAME} (owner ${KEYCLOAK_DB_USER}), ${ADAPTER_DB_NAME} (owner ${ADAPTER_DB_USER})"

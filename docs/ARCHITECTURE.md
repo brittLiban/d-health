@@ -52,9 +52,13 @@ template — see §8) and the encrypted nightly backup to object storage (§9).
 
 ## 2. Service topology
 
-Twelve containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
+Twelve long-running containers, one `docker-compose.yml`, one `.env`: Caddy, OpenMRS backend, OpenMRS frontend,
 OpenMRS gateway, MariaDB, OpenELIS webapp, OpenELIS FHIR, OpenELIS frontend, PostgreSQL, Keycloak,
 the adapter, and the backup sidecar.
+
+Compose also contains short-lived setup jobs: OpenELIS certificate provisioning and the DH-020
+PostgreSQL tenant-grant hardening job. They must exit 0 before their dependent services start; they
+do not remain running or add steady-state resource use.
 
 **Corrected at build step 1:** O3 ships a fourth container, an nginx **gateway** that joins the SPA
 and the API on a single origin. Caddy proxies *to* it rather than replacing it — O3's frontend
@@ -147,6 +151,12 @@ its *provisioning* is not.
 That is **two engines, two containers** — one more container than the brief, but the spirit of the
 brief (small footprint, no per-service DB sprawl) is preserved: Keycloak and the adapter are
 co-tenants of the Postgres instance OpenELIS already requires, rather than getting their own.
+
+**Tenant boundary, verified at DH-020:** PostgreSQL's default database-level `PUBLIC` grants are
+revoked on `clinlims`, `keycloak`, and `adapter`, with privileges restored explicitly to each
+database owner. All six cross-tenant role/database combinations are denied. The idempotent grant
+script runs from `initdb.d` on a fresh volume and as a one-shot Compose job for an existing volume;
+OpenELIS's own schema grants are deliberately left untouched.
 
 The rejected alternative was all-PostgreSQL: literal compliance with the brief, but running this
 module set on a database path essentially nobody runs in production, with failures likely to
@@ -508,15 +518,15 @@ ships the `mariadb` client binary, so the healthcheck commands in the compose fi
 The digest was read back from the pulled local image and is the image that passed realm import,
 secret interpolation, readiness, and restart verification.
 
-### Base digest pulled and pinned — DH-014 backup sidecar, 2026-08-13
+### Base digest pulled and pinned — DH-014 backup sidecar / DH-020 hardening job, 2026-08-13
 
 | Image | Digest |
 |---|---|
 | `postgres:14.4` | `sha256:9ceb24f8c5f15c053d973a3610866f473690875dc13eb3282b45302189321040` |
 
 The locally built `daher-health/backup:0.1.0` image uses this exact base so its `pg_dump` major and
-minor match OpenELIS PostgreSQL. The sidecar image itself is built from committed source rather
-than pulled from a registry.
+minor match OpenELIS PostgreSQL. The DH-020 one-shot uses the same pinned image directly for `psql`.
+The sidecar image itself is built from committed source rather than pulled from a registry.
 
 | Component | Tag | Why |
 |---|---|---|
