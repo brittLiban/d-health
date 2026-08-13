@@ -7,10 +7,10 @@
 
 ## 1. Honest summary
 
-**Step 1 now runs, and running it produced five defects that the syntax check could not.** The
-four images have been pulled and pinned by digest; MariaDB and OpenMRS O3 boot; the admin API
-authenticates; a test patient was registered, retrieved by name, by identifier, and through the
-FHIR R4 endpoint; and the data survived a `down`/`up` cycle.
+**Build steps 1 and 3 now run, and running them produced nine defects the syntax check could not.**
+Step 1 (MariaDB + OpenMRS O3) is verified through REST and FHIR **and by Liban himself in the SPA**.
+Step 3 (PostgreSQL + OpenELIS) is verified: three co-tenant databases, a 167-table OpenELIS schema,
+the webapp on HTTPS, and a FHIR server answering over mutual TLS. Every image is digest-pinned.
 
 **What running it cost, and what it exposed** (details in §3a):
 
@@ -21,9 +21,13 @@ FHIR R4 endpoint; and the data survived a `down`/`up` cycle.
    reached through a mechanism nobody had identified. See BLOCKER-2 in `PROJECT_STATE.md`.
 5. A cold boot takes **≈49 minutes**, nearly all of it importing 23 OCL concept packages.
 
-Verified by an agent, **not yet demonstrated to Liban** — DH-002 is not closed until he runs the
-steps himself. Steps 2–8 remain entirely unwritten. This is 1 of 8, now genuinely done rather
-than merely written.
+Step 3 added four more (DH-005's ticket entry): `certs` cannot be dropped as the architecture
+claimed; the webapp needs a Docker secret or its context dies while Tomcat still reports success;
+the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
+
+**The honest boundary:** everything buildable without a human decision has been built. What remains
+open are decisions, not effort — collected under **NEEDS LIBAN** in `PROJECT_STATE.md`. No OpenELIS
+login has been performed, and its frontend is unexercised until Caddy (DH-016).
 
 ---
 
@@ -60,9 +64,11 @@ DH-014 (backup) are now unblocked and need no decision.
 | Artefact | State | What "unverified" still means here |
 |---|---|---|
 | `docker-compose.yml` | **Booted and corrected** | Healthchecks, the `mariadb` CLI name, the `${VAR:?}` guards and the backend↔db handshake are all now exercised. The new backend healthcheck's *cold-start* behaviour has been observed on one warm boot only. |
-| `.env.example` | Used to boot | Two additions (`OMRS_ADMIN_PASSWORD`, corrected demo-data note) are documented but **not yet wired into compose** — DH-019. |
+| `.env.example` | Used to boot | `OMRS_ADMIN_PASSWORD` is now wired and **verified on an empty volume** (DH-019). The OpenELIS block is wired and booted. |
 | Image digests | **Pinned from a real pull, 2026-08-11** | Recorded in `docs/ARCHITECTURE.md` §12. Reproducible now. |
-| O3 SPA in a browser | **Not exercised** | Every check so far went through REST/FHIR with `curl`. The single-page app, the French default locale, and the registration form have **not** been opened by a human. This is the gap Liban's own run closes. |
+| O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. The French default locale was **not** reported on either way — still open, and a DH-003 concern. |
+| OpenELIS UI | **Not exercised** | No OpenELIS login has been performed. Its frontend has no route until Caddy (DH-016). |
+| OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
 | `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
 
 ## 3a. What running it actually exposed
@@ -105,10 +111,12 @@ Found at DH-002 by running the stack. `OMRS_ADD_DEMO_DATA=false` does not preven
 including the exact mechanism and what must be decided, is in `PROJECT_STATE.md`. Blocks the pilot
 instance, not local work.
 
-### (Not numbered) — `fhir2` Subscriptions vs. polling unresolved · blocks the adapter
+### (Not numbered) — ADR-005 evidence gathered, **awaiting Liban's review** · blocks the adapter
 
-See `DECISIONS.md` ADR-005, ticketed as DH-009. Not blocking today, but it gates DH-010 through
-DH-012, the longest pole after SSO. Resolve it early, not when the adapter is due.
+Both legs now have primary evidence (DH-009a, DH-009b) and they are asymmetric: OpenMRS cannot push
+(no `Subscription`, `event` module unreachable out of process) so the order leg polls; OpenELIS runs
+a full HAPI server that *does* advertise `Subscription`. `docs/WATERMARK-DESIGN.md` is written and
+built into nothing — ADR-005 forbids building before review. This now blocks on reading, not effort.
 
 ---
 
