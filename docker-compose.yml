@@ -363,7 +363,15 @@ services:
       FHIR_DATASOURCE_USERNAME: clinlims
       FHIR_DATASOURCE_PASSWORD: ${OE_DB_PASSWORD}
       FHIR_SERVER_ADRESS: http://fhir.openelis.org:8080/fhir/
-      JAVA_OPTS: >-
+      # Upstream's compose passes these as JAVA_OPTS. Verified at DH-005 that this
+      # does NOT work on this image: JAVA_OPTS is present in the container's
+      # environment, but `tr '\0' '\n' < /proc/1/cmdline` shows zero hapi.ssl
+      # flags on the JVM — the bitnami Tomcat startup replaces JAVA_OPTS before
+      # catalina.sh runs. Tomcat then sees the literal string and aborts:
+      #   Cannot obtain resource for specified location [${hapi.ssl.keystorepath}]
+      # and BOTH connectors stay down, so the FHIR server answers on no port at
+      # all while still logging "Server startup in ...". CATALINA_OPTS survives.
+      CATALINA_OPTS: >-
         -Dhapi.ssl.keystorepath=/etc/openelis-global/keystore
         -Dhapi.ssl.keystorepassword=${OE_KEYSTORE_PASSWORD:-kspass}
         -Dhapi.ssl.truststorepath=/etc/openelis-global/truststore

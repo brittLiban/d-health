@@ -183,10 +183,52 @@ Observed on a real order placed for this purpose (`ORD-96`, Haemoglobin, read ba
 - Timestamps are **whole-second** (`.000`); multiple records routinely share one second (7 patients
   shared `10:24:46`).
 
-#### Q4 — OpenELIS outbound direction: **not answerable yet**
+#### Q4 — OpenELIS outbound direction: **evidence gathered 2026-08-12 (DH-009b), after DH-005**
 
-OpenELIS is not deployed (DH-005), so nothing here was exercised against it. This half of ADR-005
-is untouched, and "polling is the answer" **must not be read as covering it**. Split out as DH-009b.
+Superseded within this same appendix: OpenELIS was deployed at DH-005, so this half became
+testable. It was originally recorded here as "not answerable yet".
+
+**The two legs are not symmetrical, and that is the headline.** OpenELIS's FHIR endpoint is a full
+**HAPI FHIR JPA server 6.6.0** (OpenMRS's `fhir2` is a module on HAPI 5.7.9). Its
+CapabilityStatement advertises **146 resource types**, and unlike OpenMRS it **does** include
+`Subscription`, with `create`, `update`, `delete`, `read`, `search-type`, `history` and `patch`.
+`DiagnosticReport`, `Observation`, `ServiceRequest` and `Task` carry the same full interaction set.
+
+Separately, OpenELIS ships its **own** outbound push mechanism, configured in `common.properties`
+(now committed at `openelis-config/properties/common.properties`):
+
+```
+org.openelisglobal.fhir.subscriber=
+org.openelisglobal.fhir.subscriber.resources=Task,Patient,ServiceRequest,DiagnosticReport,Observation,Specimen,Practitioner,Encounter
+org.openelisglobal.fhir.subscriber.backup.interval=5
+```
+
+So the result leg may not need polling at all: OpenELIS can push. **That is a materially different
+design from the order leg**, and it is the opposite of what the polling answer to Q1–Q3 might have
+led someone to assume for both directions.
+
+**⚠️ Limit of this evidence, stated plainly.** What is established is what the server *advertises*
+and what upstream *configures*. **No subscription has been created, and no delivery has been
+observed.** Proving delivery needs a receiving endpoint, which is adapter work (DH-010+), and
+ADR-005 forbids building that before this review. "Advertised" is not "works" — the gap between
+those two is exactly what this ADR was written to stop being papered over.
+
+#### Q5 — How the adapter must authenticate to OpenELIS (new, not in the original ADR)
+
+Found while verifying DH-005 and load-bearing for DH-011/DH-012: **the OpenELIS FHIR endpoint
+requires mutual TLS.** Port 8443 answers, but the server sends `Request CERT` during the handshake
+(`clientAuth="true"` in its `server.xml`), and the plain HTTP connector on 8080 is **commented out**
+in the shipped configuration. A request without a client certificate fails at the TLS layer, which
+looks like an unreachable host rather than an authentication failure — worth knowing before someone
+spends an afternoon on it.
+
+Verified working: extracting the client certificate and key from the shared keystore
+(`openssl pkcs12 -legacy`, which OpenSSL 3 needs for this file) and calling
+`GET https://fhir.openelis.org:8443/fhir/metadata` returns **HTTP 200** and a `CapabilityStatement`.
+
+Consequence for the adapter: it needs a client certificate and its own trust of that keystore, and
+that is a deployment concern (certificate distribution, rotation) not just a code concern. It also
+interacts with DH-021 — the shipped keystore's private key is public.
 
 #### Proposed resolution — for Liban's review, not yet adopted
 

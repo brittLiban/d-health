@@ -104,8 +104,19 @@ Tomcat backend (REST + FHIR R4 API, modules, database) plus a separate nginx con
 single-page frontend. Both are needed; they are versioned together.
 
 **Note the shape of OpenELIS:** likewise multi-container — the Tomcat webapp, a HAPI FHIR server
-that is the actual FHIR endpoint the adapter talks to, and a React frontend. Its upstream compose
-also ships a `certs` and `proxy` container; we drop both because Caddy terminates TLS for us.
+that is the actual FHIR endpoint the adapter talks to, and a React frontend.
+
+**Corrected at build step 3 (DH-005).** This section previously said we drop upstream's `certs`
+*and* `proxy` containers "because Caddy terminates TLS for us". That was half wrong. `proxy` is
+indeed dropped. **`certs` is kept**: it is not about public TLS, it supplies the internal
+keystore that the webapp's and FHIR server's own `server.xml` require in order to open their
+8443 connectors at all. Without it Tomcat aborts with `Error creating SSLContext`. Verified by
+running it, not reasoned about.
+
+**Consequence for §9 (Caddy):** neither OpenELIS component serves plain HTTP internally — the
+webapp answers only on 8443, and the FHIR server's 8080 connector is commented out in the shipped
+`server.xml`. Caddy must therefore proxy to **https** upstreams with certificate verification
+relaxed for the internal self-signed keystore, not to plain HTTP as the O3 gateway allows.
 
 ---
 
@@ -450,7 +461,21 @@ These are repository digests as reported by the registry at pull time, copied ve
 | `openmrs/…-3-frontend:3.7.x` | `sha256:34352f481bf7e72b62406843925479042463fbbd7c8c3f7f5b9cda20b8390117` |
 | `openmrs/…-3-gateway:3.7.x` | `sha256:e0f59c5e361bb092d0f5b36b32a1ac314aaabdd95db9047c8ca3309d0f2d7eb3` |
 
-All four tags existed as listed — no substitutions were needed. The O3 backend runs on Amazon
+All four tags existed as listed — no substitutions were needed.
+
+### Digests pulled and pinned — build step 3, 2026-08-12 (DH-005)
+
+| Image | Digest |
+|---|---|
+| `itechuw/openelis-global-2:3.2.1.11` | `sha256:c7c7200141baf4c496121db1a6712f9fcf0866654e6f91e150fa0e4bbfc5ecab` |
+| `itechuw/openelis-global-2-database:3.2.1.11` | `sha256:c7750aad1650a1dbc73f97240167bb778e9df23592e41c2c2232d47a4054c14f` |
+| `itechuw/openelis-global-2-fhir:3.2.1.11` | `sha256:e58bc63f2248b55670017b7854ca3dd17c69c2977c4b38b98c20068f8f8e2320` |
+| `itechuw/openelis-global-2-frontend:3.2.1.11` | `sha256:8054581aee1ef5b15e4a1ebc4fa8d96d7c5021ca36e580a7d78d2f2c7c78bb5a` |
+| `itechuw/certgen:main` | `sha256:e27a8194300ba73309e835a4070e9ce531687eb3ee604895de781f3061791635` |
+
+All four OpenELIS tags existed as this section predicted. `certgen` publishes only the moving tag
+`main`, so it carries a digest for the same reason the O3 images do. PostgreSQL is **14.4**, as
+predicted — confirmed from the running container, not from the tag. The O3 backend runs on Amazon
 Linux 2; the frontend and gateway on Alpine 3.24. All three ship `curl`, and the MariaDB image
 ships the `mariadb` client binary, so the healthcheck commands in the compose file resolve
 (verified by `docker run`, not assumed).

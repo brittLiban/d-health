@@ -42,6 +42,34 @@ it exposed five defects that `docker compose config` could never have caught —
 
 ---
 
+## ▶▶ NEEDS LIBAN — the decision list
+
+Everything an agent could not decide alone, in one place, roughly in the order it starts costing
+time. Nothing below is urgent for the local stack; several are hard gates before the pilot VM
+exists. Each links to the detail rather than repeating it.
+
+| # | Decision | Why it isn't mine | Blocks |
+|---|---|---|---|
+| 1 | **The 50 fictional demo patients** — the distro creates them on first boot, and `OMRS_ADD_DEMO_DATA=false` does not stop it. Keep the distro's config as shipped, or restrict Initializer/OCL to the non-demo set? | Concept-dictionary + patient-data surface. Stripping the `-demo` tree is the "obviously right" tidy-up AGENTS.md §5 exists to stop, and it may remove the lab-test concepts DH-006 needs | BLOCKER-2 → DH-003, and the pilot VM's first boot |
+| 2 | **Poll interval for the adapter** — how long may a prenatal order sit before the laboratory sees it? | A clinical-workflow question, not a technical one | `WATERMARK-DESIGN.md` §9.1 → DH-010 |
+| 3 | **Does voiding an order need to reach the laboratory?** If a voided order never advances `meta.lastUpdated`, the LIS keeps working an order the EMR considers cancelled | Patient-safety behaviour, and it may need a reconciliation sweep rather than a watermark | `WATERMARK-DESIGN.md` §6 → DH-010 |
+| 4 | **Revisit `labonfhir` (ADR-004)?** It was deferred partly because we'd own the trigger either way. Owning it now demonstrably means *polling* | A recorded decision; ADRs are not re-litigated by an agent | ADR-005 review → DH-010 |
+| 5 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / go-live |
+| 6 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
+| 7 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
+| 8 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
+
+**Read-and-approve, rather than decide:** ADR-005's evidence section in `DECISIONS.md`, then
+`docs/WATERMARK-DESIGN.md`. ADR-005 forbids building the poller until you have read it, so DH-010
+is parked on your review, not on effort.
+
+**Two security items I fixed without asking** (disabling exposure needs no permission; restoring it
+would): upstream's `mail.bcc`/`mail.from` default of a third-party gmail address is blanked, and
+every published default credential found so far is now guarded so it fails loudly instead of
+shipping — OpenMRS admin (DH-019), the OpenELIS DB roles, and OpenELIS's `DEFAULT_PW`.
+
+---
+
 ## Blockers
 
 ### BLOCKER-1 — Docker daemon unreachable · ✅ RESOLVED 2026-08-10
