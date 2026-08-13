@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from daher_adapter.models import DeadLetter, ProcessedMessage, utc_now
 
 Direction = Literal["openmrs_to_openelis", "openelis_to_openmrs"]
+LedgerState = Literal["processing", "completed", "dead_letter"]
 
 
 class LedgerStateError(RuntimeError):
@@ -57,7 +58,7 @@ class MessageIdentity:
 @dataclass(frozen=True, slots=True)
 class ClaimResult:
     claimed: bool
-    state: str
+    state: LedgerState
 
 
 class LedgerRepository:
@@ -81,14 +82,23 @@ class LedgerRepository:
                 return ClaimResult(claimed=True, state="processing")
             except IntegrityError:
                 session.rollback()
-                existing_state = session.scalar(
-                    select(ProcessedMessage.state).where(
-                        ProcessedMessage.source_event_id == identity.source_event_id
-                    )
-                )
+                existing_state = self.get_state(identity)
                 if existing_state is None:
                     raise
                 return ClaimResult(claimed=False, state=existing_state)
+
+    def get_state(self, identity: MessageIdentity) -> LedgerState | None:
+        with self._sessions() as session:
+            state = session.scalar(
+                select(ProcessedMessage.state).where(
+                    ProcessedMessage.source_event_id == identity.source_event_id
+                )
+            )
+        if state is None:
+            return None
+        if state not in {"processing", "completed", "dead_letter"}:
+            raise LedgerStateError(f"unsupported persisted ledger state {state!r}")
+        return cast(LedgerState, state)
 
     def mark_completed(
         self, identity: MessageIdentity, *, target_system: str, target_record_id: str

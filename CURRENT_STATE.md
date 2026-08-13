@@ -31,6 +31,14 @@ The unique claim protects concurrent delivery, but it does not by itself resolve
 outbound write and before `processing` becomes `completed`; DH-025 now makes that reconciliation
 an explicit P0 gate before DH-011 transport activation.
 
+**DH-025's recovery core now runs and is runtime-verified.** The adapter holds a PostgreSQL
+advisory fence for its full lifetime; a second process cannot enter recovery or future transport.
+Its stable opaque correlation and typed coordinator distinguish an existing target write, proven
+absence, and ambiguity; only proven absence may retry. Twenty-seven tests and a rollback-only live
+database probe cover concurrent claims and crashes on both sides of the write. The remaining gate
+is concrete: DH-011 must attach/query this correlation on the selected OpenELIS resource. No target
+resource or clinical message exists yet, so that binding is unverified rather than inferred.
+
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
 volume despite the local switch returning to `off`; the derived image now removes only upstream's
@@ -96,7 +104,7 @@ complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm + DH-008 clients verified** — OpenMRS OIDC, OpenELIS SAML; existing-realm reconciliation passed twice; pilot session lifetimes approved (ADR-013) |
 | Keycloak SSO config | **one-shot job exited 0** — non-deleting client/mapper reconciliation; idempotency exercised twice |
-| Adapter | **running, healthy, DH-010 verified** — ledger/dead-letter/retry/audit foundation only; no FHIR transport yet |
+| Adapter | **running, healthy, DH-010 + DH-025 core verified** — ledger/dead-letter/retry/audit plus process-lifetime recovery fence and fail-closed crash coordinator; concrete OpenELIS correlation binding and all FHIR transport remain absent |
 | WhatsApp notifier | not written |
 | Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path was verified end-to-end, including both engines, realm, volumes, manifest, encryption, and scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
@@ -242,7 +250,7 @@ and a README complete enough to hand the stack to another operator.
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **High** | It is pinned P0 and sits at build step 7, behind the adapter. Deadline pressure compresses whatever is last. | Move backup + restore drill to run in parallel with SSO work, as soon as both databases exist — not after the adapter. It only needs databases, not the full flow. |
 | SSO across two apps | High | Protocol/client plumbing is verified, but role/provider mapping grants clinical access and cannot be inferred. Public-origin cookies also need DH-016 HTTPS. | Keep fail-closed off; obtain BLOCKER-5's explicit authorization matrix, then activate and demonstrate the full two-app session after Caddy. |
-| OpenMRS order polling safety | **High** | The watermark is accepted, but a crash after an outbound write and before ledger completion leaves an ambiguous `processing` claim. Blind replay can duplicate an order; skipping can lose it. | DH-025 must implement target-side reconciliation and crash-point tests before DH-011 transport activation; never steal a stale claim on elapsed time alone. |
+| OpenMRS order polling safety | **High** | DH-025's recovery core and crash tests pass, but safety still depends on the concrete OpenELIS write carrying its correlation and a demonstrated exact target lookup. | Bind and demonstrate correlation attach/query in DH-011 before activation; multiple matches or unavailable lookup remain ambiguous and fail closed. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |
 | Clinical sign-off not obtained | **High** | Gates *clinically live*, not pilot-ready — but a pilot with no sign-off path is a pilot that cannot proceed to use. | Get the order set and partograph fields in front of the clinical lead as soon as they are drafted, in week 1, not week 3. |

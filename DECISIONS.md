@@ -362,6 +362,18 @@ query the target on recovery, retry only when absence is proven, and remain bloc
 when the outcome is ambiguous. A timeout alone never authorises stealing the claim. Crash-point
 tests immediately before and after the outbound write are part of that gate.
 
+**Implementation evidence appended 2026-08-13.** The transport-neutral DH-025 core now implements
+that rule: opaque SHA-256 source correlation, a PostgreSQL advisory fence retained for the adapter
+process lifetime, and typed `found` / `absent` / `ambiguous` recovery. Exactly one target match is
+completed without rewriting; only proven zero matches may retry; ambiguity and dead letters stop.
+Twenty-seven tests cover concurrent claims and both crash points. A live rollback-only PostgreSQL
+probe retained no synthetic row, a second process could not acquire the running adapter's fence,
+and restart reacquired it.
+
+This is not yet the whole gate: the concrete DH-011 OpenELIS writer must attach that correlation
+to its selected Task/ServiceRequest, and its probe must demonstrate exactly-one and zero-match
+search behavior. No target resource was invented and no order was moved while BLOCKER-3 remains.
+
 ---
 
 ## ADR-006 — Partograph ships as data entry only; no decision support

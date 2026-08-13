@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** foundation re-verified; DH-025 crash reconciliation gates transport activation
+**Updated:** 2026-08-13 · **Phase:** DH-025 recovery core verified; target binding and human decisions gate DH-011
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -111,16 +111,30 @@ before `processing` becomes `completed`. No transport exists, so no message has 
 DH-025 is now a P0 technical gate requiring target reconciliation and crash-point tests before
 DH-011 may activate.
 
+**DH-025 implementation 2026-08-13:** the adapter now derives a stable opaque correlation from the
+full source-event identity, retains a PostgreSQL advisory fence for its complete process lifetime,
+and exposes a typed recovery coordinator. Exactly one target match completes the existing claim;
+proven zero matches authorises one retry; an unreachable target, multiple matches, `dead_letter`,
+or any other ambiguity fails closed. The suite now passes 27 tests, including actual concurrent
+claims and crashes immediately before/after a target write. A rollback-only live-PostgreSQL probe
+exercised recovery without retaining a row; a second process was refused while the healthy adapter
+held its fence; restart released/reacquired it; operational rows remain zero.
+
+**Boundary not claimed:** no OpenELIS resource currently carries that correlation and no concrete
+OpenELIS lookup has been demonstrated because DH-011's order shape/requester/mapping is not yet
+selected. The transport-neutral safety core is verified; the writer/probe binding remains an
+activation criterion inside DH-011, alongside BLOCKER-3. No clinical message moved.
+
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
-| 🆕 Raised while building | DH-021 (public keystore private key), **DH-025** (in-flight transport crash reconciliation) |
-| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
+| 🆕 Raised while building | DH-021 (public keystore private key) |
+| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README), **DH-025** (recovery core verified; concrete OpenELIS binding remains with DH-011) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5) |
-| 📋 Ready | **DH-016** (Caddy/TLS plumbing; real DNS/domain required for public verification), **DH-025** (technical safety gate; activation still also needs BLOCKER-3) |
+| 📋 Ready | **DH-016** (Caddy/TLS plumbing; real DNS/domain required for public verification) |
 | 🛑 Blocked on human decisions | **DH-004** (clinical form fields/sign-off), **DH-006** (prenatal panel/sign-off), **DH-011** (first-sync scope, requester identity, cancellation contract), **DH-023** (Horiba analyzer scope/configuration) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-015, DH-018 |
 
@@ -134,9 +148,10 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 2. **Resolve BLOCKER-3 before activating DH-011.** The watermark algorithm is accepted, but its
    first-sync boundary and the OpenELIS requester/cancellation contract are human decisions. Do not
    implement an apparent default; see the evidence and options below.
-3. **Close DH-025 before any DH-011 transport activation.** An in-flight `processing` claim is
-   ambiguous after a crash. Reconcile by stable source correlation at the target; never steal it
-   on elapsed time alone. This technical work does not authorize routing a clinical order.
+3. **Bind DH-025 before any DH-011 transport activation.** The recovery core and process-lifetime
+   fence are verified. The concrete OpenELIS writer must attach the exact correlation and its probe
+   must demonstrate exactly-one/zero-match lookup against the selected target resource. Never
+   steal a claim on elapsed time alone. This technical work does not authorize routing an order.
 4. **Other unblocked technical work:** DH-016's Caddy configuration can now be built; public
    certificate issuance still needs the real domain and DNS. Continue DH-014's remaining backup
    layers when the production encryption/off-site settings exist; DH-015's performed restore
@@ -749,7 +764,7 @@ dies between an external write and `mark_completed`. The schema/skeleton remain 
 DH-010's transport-neutral scope, but “unique claim” must not be read as end-to-end exactly-once
 delivery. DH-025 closes that transport-specific gap before activation.
 
-### DH-025 · Reconcile ambiguous in-flight adapter writes · P0 · 📋 READY
+### DH-025 · Reconcile ambiguous in-flight adapter writes · P0 · 🔨 CORE BUILT + VERIFIED; TARGET BINDING PENDING
 **Raised:** 2026-08-13 post-commit quality audit. **Human Decision Required: No** — technical
 correctness; does not select clinical content or workflow.
 
@@ -764,7 +779,29 @@ crashes immediately before and after the target write, concurrent claims, comple
 dead letters, and restart/watermark behavior. `processing` and `dead_letter` must never be treated
 as completed duplicates.
 
-### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED (BLOCKER-3 + DH-025)
+**Built and verified 2026-08-13:** `source_correlation()` hashes the full, unambiguous source-event
+tuple under `urn:daher-health:adapter:source-event`. `PostgresRecoveryFence` is acquired during the
+FastAPI lifespan and held until process shutdown, so recovery and future transport cannot run in a
+second adapter process. Readiness also requires that fence. `RecoveryCoordinator` accepts only a
+typed target result: exactly one match, proven absence, or ambiguous. It reconciles the first,
+retries the second, and raises without state advancement for the third; completed duplicates and
+dead letters stay separate paths.
+
+Dependency consistency, Ruff lint/format, and **27 tests** passed. Tests cover stable/versioned
+correlation, two real concurrent claims, no-fence refusal, missing/completed/dead-letter states,
+ambiguous lookup, failed retry write, and crashes before and after the write. Against live
+PostgreSQL, two fence owners could not coexist; a rollback-only coordinator probe completed and
+then left the row count unchanged. The deployed adapter retained the fence for its lifetime,
+refused a second process, returned healthy, and reacquired after restart. Both operational tables
+remain empty.
+
+**Still required to close the ticket:** DH-011's concrete OpenELIS writer must attach this exact
+correlation to the chosen Task/ServiceRequest, and the probe must demonstrate exactly one match or
+proven zero matches against that API. Multiple matches or an unavailable lookup are ambiguous and
+must stop startup. This cannot be honestly claimed before the target resource shape exists; no
+transport or clinical order was activated here.
+
+### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED (BLOCKER-3 + DH-025 target binding)
 The accepted 15-second inclusive watermark remains the implementation design. Activation is blocked
 on the first-sync boundary, a real OpenELIS requester identity, and the cancellation state contract;
 see BLOCKER-3. DH-006's signed-off test mappings are also required before an end-to-end pilot order
@@ -827,7 +864,7 @@ message shapes).
 | 9 | PostgreSQL health passed against the temporary init server, racing hardening into shutdown | **Fixed and exact empty-volume graph verified — DH-024** |
 | 10 | OpenELIS ignores `DEFAULT_PW` and shipped `adminADMIN!` even on empty volumes | **Fixed and empty-volume form-login verified — DH-024** |
 | 11 | Optional OpenELIS Odoo test-product mapping CSV is absent and logs an error | **Documented, not fabricated** — no Odoo service or billing integration is in v1; adding product/test mappings would be scope and laboratory configuration work |
-| 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Open — DH-025 P0 gate before transport activation**; no transport exists yet, so no message has been affected |
+| 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Core fixed and runtime-verified — DH-025**; concrete OpenELIS correlation attach/query remains a DH-011 activation gate. No transport exists yet, so no message has been affected |
 
 ## Notes for next session
 

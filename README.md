@@ -15,9 +15,10 @@ one `docker-compose.yml`.
 > running fail-closed: Keycloak has verified OpenMRS OIDC and OpenELIS SAML clients, but staff-role
 > mapping is a human authorization decision and SSO remains disabled.
 > **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
-> volume verified; it does not move FHIR messages yet. In-flight crash reconciliation is now an
-> explicit P0 gate (DH-025) before transport may activate. One-login SSO proof and the
-> clinical/integration steps remain incomplete.
+> volume verified. **DH-025's crash-recovery core** is implemented and runtime-verified, including
+> exclusive process ownership and before/after-write tests; its concrete OpenELIS correlation
+> binding remains a transport activation gate. It does not move FHIR messages yet. One-login SSO
+> proof and the clinical/integration steps remain incomplete.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >

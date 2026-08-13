@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -37,6 +39,20 @@ def test_claim_is_unique_and_duplicate_is_a_no_op(
 
     assert first.claimed is True
     assert duplicate == type(duplicate)(claimed=False, state="processing")
+    with sessions() as session:
+        assert len(session.scalars(select(ProcessedMessage)).all()) == 1
+
+
+def test_concurrent_claims_have_exactly_one_owner(
+    sessions: sessionmaker[Session],
+) -> None:
+    def claim() -> bool:
+        return LedgerRepository(sessions).claim(identity()).claimed
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        claimed = list(workers.map(lambda _: claim(), range(2)))
+
+    assert sorted(claimed) == [False, True]
     with sessions() as session:
         assert len(session.scalars(select(ProcessedMessage)).all()) == 1
 

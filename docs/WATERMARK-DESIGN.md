@@ -1,8 +1,8 @@
 # Watermark design — how the adapter learns an order or result exists
 
-**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation is built; DH-025
-must close in-flight crash reconciliation; the watermark and poller are not built.** ADR-005
-records the approval and the 15-second configurable
+**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation and DH-025's
+transport-neutral crash-recovery core are built; the concrete OpenELIS correlation binding,
+watermark, and poller are not built.** ADR-005 records the approval and the 15-second configurable
 interval. With polling, *"no result is lost between the laboratory and a mother's chart"* stops
 being a property of the transport and becomes a property of the logic below.
 
@@ -14,6 +14,12 @@ it does not resolve a crash after the target accepted a write but before the led
 completion. The state-specific behavior below replaces the earlier shorthand that treated every
 existing ledger row as a completed duplicate. This preserves the accepted no-gap invariant and
 makes the previously implicit crash boundary explicit before transport code exists.
+
+**Implemented 2026-08-13:** the source-event tuple is hashed into an opaque correlation under
+`urn:daher-health:adapter:source-event`; a PostgreSQL advisory fence is retained for the adapter
+process lifetime; and the typed coordinator follows the found/absent/ambiguous branches below.
+Twenty-seven tests and live rollback/restart probes pass. DH-011 still has to attach the exact
+correlation to its chosen OpenELIS target and demonstrate the corresponding exact lookup.
 
 ---
 
