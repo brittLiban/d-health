@@ -251,7 +251,8 @@ this exact distribution now establishes that OpenMRS FHIR has no `Subscription` 
 event module exposes only an in-process broker. A separate adapter therefore polls
 `ServiceRequest` by `_lastUpdated`; the durable watermark and ledger design is written in
 `docs/WATERMARK-DESIGN.md`. Liban accepted that design on 2026-08-12 with a configurable 15-second
-poll interval. It is still built into nothing; DH-010 is the first implementation ticket.
+poll interval. DH-010 has runtime-verified the ledger/dead-letter/audit/retry foundation; the
+watermark and poller themselves remain DH-011.
 
 Order discontinuation was tested with the correct verb. The original resource changes without
 advancing `meta.lastUpdated`, but a new timestamped `DISCONTINUE` ServiceRequest carries `replaces`.
@@ -290,6 +291,14 @@ SQLAlchemy + `tenacity` for backoff.
 **Failure handling:** exponential backoff with jitter on unreachable OpenMRS/OpenELIS; messages
 that exhaust retries land in a dead-letter table and raise a loud log event. Nothing is dropped
 silently. Ever.
+
+**DH-010 implementation status (2026-08-13):** this safety foundation now runs. Alembic owns the
+ledger and dead-letter schema; the stable source-event key is unique; state transitions are
+guarded; the strict audit shape cannot accept arbitrary FHIR/clinical-value fields; audit writes
+use append mode, a process lock, `fsync`, and mode `0600`; only explicitly transient exceptions
+retry. The non-root container has a read-only root filesystem and readiness checks PostgreSQL plus
+the named audit volume. Fourteen containerised tests and the live migration/health check passed.
+Order polling and FHIR transport are still DH-011, not implied by a healthy skeleton.
 
 **Timezone:** every container and both databases run `TZ=Africa/Djibouti` (UTC+3). Clinical
 timestamps that silently differ by three hours between the EMR and the LIS are a patient-safety
@@ -519,7 +528,7 @@ than pulled from a registry.
 | PostgreSQL | `postgres:14.4` (via OpenELIS's DB image) | Pinned by OpenELIS's own image; we do not get to choose it |
 | Keycloak | `quay.io/keycloak/keycloak:26.7.1` + digest | Identity provider; realm import verified at DH-007 |
 | Caddy | `caddy:2-alpine` → resolved to exact patch | Automatic HTTPS |
-| Adapter | built here, `python:3.13-slim` base | — |
+| Adapter | `daher-health/adapter:0.1.0`, built here; `python:3.13.14-slim-bookworm@sha256:67a1e1f…` base | DH-010 runtime-verified; base digest pulled 2026-08-12 |
 
 ⚠️ **OpenMRS/OpenELIS version compatibility is the fragile axis of this stack.** These two versions
 are chosen together because the OpenMRS HIS distribution exercises this pairing upstream. Upgrading

@@ -11,7 +11,9 @@ one `docker-compose.yml`.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
 > verified; its UI has not been exercised. **DH-007 Keycloak** is running with the French-first
 > realm, roles, clients, secret interpolation, readiness, and restart persistence verified.
-> One-login SSO is not wired, and the clinical/integration steps remain incomplete.
+> **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
+> volume verified; it does not move FHIR messages yet. One-login SSO and the clinical/integration
+> steps remain incomplete.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -195,7 +197,7 @@ add patients safely. The original local verification volume predates the switch 
 ## Not yet present
 
 OpenMRS maternity configuration (ward, beds, ANC and partograph forms), the prenatal order set,
-single sign-on wiring, the adapter and its audit trail, WhatsApp notifications, the remaining
+single sign-on wiring, adapter order/result transport, WhatsApp notifications, the remaining
 backup layers **and a tested restore**, and Caddy with HTTPS. Sequence and status:
 [`PROJECT_STATE.md`](PROJECT_STATE.md).
 

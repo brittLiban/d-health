@@ -1,7 +1,8 @@
 # Daher Health — v1 pilot stack
 #
 # Built incrementally, one service group at a time (see docs/ARCHITECTURE.md §13).
-# Includes steps 1 (OpenMRS), 3 (OpenELIS), 4a (Keycloak), and DH-014 backup.
+# Includes steps 1 (OpenMRS), 3 (OpenELIS), 4a (Keycloak), DH-010 adapter
+# safety skeleton, and DH-014 backup.
 #
 # Every image is pinned. No `:latest` anywhere. Where an upstream publishes only a
 # moving branch tag (the O3 images), the tag is pinned AND accompanied by a digest so
@@ -485,6 +486,54 @@ services:
     networks:
       internal:
         aliases: [keycloak.openelis.org]
+
+  # ===========================================================================
+  # ADAPTER SAFETY SKELETON (DH-010)
+  #
+  # This service currently owns the ledger, dead-letter table, audit volume,
+  # retry policy and health endpoints. It does NOT yet move a clinical message;
+  # OpenMRS polling and FHIR mapping start at DH-011.
+  # ===========================================================================
+  adapter:
+    image: daher-health/adapter:0.1.0
+    build:
+      context: ./adapter
+      target: runtime
+    restart: unless-stopped
+    init: true
+    read_only: true
+    depends_on:
+      openelis-db:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      ADAPTER_DB_HOST: openelis-db
+      ADAPTER_DB_PORT: 5432
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-adapter}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in .env}
+      ADAPTER_AUDIT_PATH: /var/lib/daher/audit/audit.jsonl
+      ADAPTER_RETRY_MAX_ATTEMPTS: ${ADAPTER_RETRY_MAX_ATTEMPTS:-5}
+      ADAPTER_RETRY_MULTIPLIER_SECONDS: ${ADAPTER_RETRY_MULTIPLIER_SECONDS:-1}
+      ADAPTER_RETRY_MAX_SECONDS: ${ADAPTER_RETRY_MAX_SECONDS:-30}
+    volumes:
+      - adapter-audit:/var/lib/daher/audit
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          body=json.load(urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5));
+          assert body == {'status': 'up'}
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
 
   # ===========================================================================
   # PINNED P0 — nightly backup sidecar (DH-014). A performed restore is DH-015.

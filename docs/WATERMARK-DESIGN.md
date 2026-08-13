@@ -1,9 +1,9 @@
 # Watermark design — how the adapter learns an order or result exists
 
-**Status: ACCEPTED 2026-08-12 by Liban. Nothing here is built yet.** ADR-005 records the approval
-and the 15-second configurable interval. With polling, *"no result is lost between the laboratory
-and a mother's chart"* stops being a property of the transport and becomes a property of the logic
-below.
+**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation is built; the
+watermark and poller are not.** ADR-005 records the approval and the 15-second configurable
+interval. With polling, *"no result is lost between the laboratory and a mother's chart"* stops
+being a property of the transport and becomes a property of the logic below.
 
 **Written:** 2026-08-11 (DH-009a) · **Evidence:** ADR-005's appended evidence section
 **Covers:** the OpenMRS leg only. The OpenELIS leg is DH-009b, after DH-005.

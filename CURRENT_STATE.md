@@ -16,6 +16,10 @@ The **DH-007 Keycloak foundation also runs and is runtime-verified**: realm impo
 roles, clients, environment-resolved secrets, readiness, and restart persistence. Application SSO
 is still absent; DH-008 must wire and demonstrate one login across both applications.
 
+**DH-010 now runs as well:** the adapter's transport-neutral safety skeleton migrated its real
+PostgreSQL database and is healthy with a durable unique ledger, dead-letter table, private audit
+volume, transient-only retry policy, and dependency-aware readiness. It does not move FHIR data yet.
+
 **What running it cost, and what it exposed** (details in §3a):
 
 1. The gateway could not reach the backend at all — it hard-codes upstream hostnames.
@@ -30,7 +34,7 @@ claimed; the webapp needs a Docker secret or its context dies while Tomcat still
 the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
 
 **The honest boundary:** substantial buildable work remains. No OpenELIS login has been performed;
-its frontend is unexercised until Caddy (DH-016); SSO, maternity configuration, the adapter,
+its frontend is unexercised until Caddy (DH-016); SSO, maternity configuration, adapter transport,
 notifications, complete backup/restore, and public TLS remain incomplete. Human decisions are
 collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 
@@ -49,7 +53,7 @@ collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 | OpenELIS FHIR | **running** — `GET /fhir/metadata` → 200 over mutual TLS. HAPI 6.6.0, 146 resource types |
 | OpenELIS frontend | running, **not exercised** — it has no route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm verified** — DH-007 complete; pilot session lifetimes approved (ADR-013) |
-| Adapter | not written |
+| Adapter | **running, healthy, DH-010 verified** — ledger/dead-letter/retry/audit foundation only; no FHIR transport yet |
 | WhatsApp notifier | not written |
 | Backup | **local path verified end-to-end** — both engines, realm, volumes, manifest, encryption, scheduler; off-site upload unverified; no retained test archive; no restore performed |
 | Caddy | not written |
@@ -123,8 +127,8 @@ DH-003.
 Both legs have primary evidence (DH-009a, DH-009b), and Liban approved the custom adapter with a
 configurable 15-second OpenMRS order poll, inclusive watermark, and durable ledger. OpenELIS runs a
 full HAPI server that advertises `Subscription`, but delivery and corrected-result behavior still
-must be demonstrated before trusting the result path. `docs/WATERMARK-DESIGN.md` is accepted and
-still built into nothing; DH-010 is ready.
+must be demonstrated before trusting the result path. DH-010 built and runtime-verified the safety
+foundation; the watermark and poller themselves remain DH-011.
 
 ---
 
@@ -145,7 +149,7 @@ sprint spec, not being useful.**
 ## 6. What is genuinely missing
 
 OpenMRS maternity configuration (locales, ward, beds, ANC and partograph forms); prenatal panel;
-SSO wiring for both applications; the adapter and its audit ledger; WhatsApp notifier; the
+SSO wiring for both applications; adapter order/result transport; WhatsApp notifier; the
 remaining backup layers **and a performed restore drill**; Caddy/TLS; the golden demonstration;
 and a README complete enough to hand the stack to another operator.
 

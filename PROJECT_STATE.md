@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; ADR-005 accepted; adapter skeleton ready
+**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; adapter safety skeleton runtime-verified
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -31,20 +31,20 @@ agent may invent.
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-019** (verified on an empty volume) |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (verified on an empty volume) |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README) |
-| 📋 Ready | DH-003 (maternity configuration), **DH-010** (adapter skeleton) |
-| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-011 … DH-013, DH-015, DH-016, DH-018 |
+| 📋 Ready | DH-003 (maternity configuration), **DH-011** (OpenMRS order path) |
+| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-012, DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
 
 Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
-1. **DH-010 adapter skeleton.** ADR-005 is accepted: custom adapter, 15-second configurable
-   OpenMRS order polling, inclusive watermark, and durable ledger. The result leg still has
-   delivery and corrected-result gates before DH-012 may be trusted.
+1. **DH-011 OpenMRS order path.** DH-010's ledger, dead-letter, retry, audit, migration, and health
+   foundation is runtime-verified. Implement the accepted 15-second inclusive-watermark poller and
+   `replaces` discontinuation handling without crossing into the DH-012 result path.
 2. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
    and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
@@ -276,8 +276,8 @@ configured one. Verified on an empty volume, since that is the only case where i
 
 **Evidence** is appended to ADR-005 in `DECISIONS.md`. Liban accepted the proposed resolution on
 2026-08-12: custom adapter, 15-second configurable order poll, inclusive watermark, and durable
-ledger. **The watermark design is accepted but still built into nothing**:
-`docs/WATERMARK-DESIGN.md`.
+ledger. **The watermark design is accepted; DH-010 has built its safety foundation, while the
+watermark and poller remain unbuilt until DH-011**: `docs/WATERMARK-DESIGN.md`.
 
 **Review scope presented to Liban**, in order: ADR-005's evidence section, then
 `WATERMARK-DESIGN.md` §4 (why `ge` and not `gt` — the choice that trades duplicates for never
@@ -420,10 +420,10 @@ and an explicit success/failure marker.
 | MariaDB `openmrs` | ✅ 15.9 MB, and it **contains the data**: test identifier `10001MJ` present, with real `patient` and `person_name` INSERTs |
 | PostgreSQL `clinlims` | ✅ 1.28 MB |
 | PostgreSQL `keycloak` | ✅ 250 KB after DH-007 — populated realm database |
-| PostgreSQL `adapter` | ✅ ~1 KB — correctly still empty before DH-010 |
+| PostgreSQL `adapter` | ✅ DH-014 test archive captured the empty pre-DH-010 database; it now has the DH-010 schema and zero operational rows, so the next backup must capture that migration |
 | Live Keycloak realm export | ✅ 59 KB from the admin API; staged only inside the encrypted archive |
 | OpenMRS data volume | ✅ 349 MB compressed; includes OCL/module data and future complex observations |
-| Adapter audit volume | ✅ mounted and archived; currently empty before DH-010 |
+| Adapter audit volume | ✅ mounted and archived; DH-010 now owns it, verified mode `0600`, UID/GID `10001:10001`, currently zero bytes before message transport |
 | Encryption + readability | ✅ archive created, encrypted, decrypted, and component filenames read back |
 | Scheduler | ✅ calculated the next configured UTC run while retaining container environment |
 
@@ -448,13 +448,25 @@ working lab system and no patient records; that check must be explicit in the st
 `backup/restore-drill.md`.
 **DoD:** drill actually performed, output recorded, dated.
 
-### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · 📋 READY (DH-009 complete)
+### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · ✅ DONE 2026-08-13
 Processed-message ledger keyed on stable source event ID with a unique constraint; append-only
 structured audit log on a named volume; exponential backoff with jitter; dead-letter table. Two
 separate mechanisms by design — the ledger answers "did we do this", the audit answers "what did
 we do, to whom, when".
 
-### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · ⏸ (needs DH-010)
+**Implemented and verified:** Python 3.13.14 base pinned by pulled digest; exact Python dependency
+versions; Alembic migration; unique source-event claim; guarded `processing` → `completed` or
+`dead_letter` transitions; stack-owned dead-letter payload retention; strict audit schema that
+rejects extra/clinical-value fields; `O_APPEND` + lock + `fsync` JSONL writes; transient-only
+exponential jitter retry; and liveness/readiness checks for PostgreSQL plus the audit volume.
+
+Container tests: dependency consistency, Ruff lint/format, and **14 pytest tests passed**. Runtime:
+migration applied to the real adapter PostgreSQL database; Compose health passed; expected tables
+and named uniqueness constraints inspected; operational rows remained 0; process is UID/GID 10001;
+audit file is mode `0600`; and the read-only root filesystem rejected a write. A restart returned
+healthy without reapplying the migration. No FHIR message was moved—that is DH-011/012.
+
+### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 📋 READY (DH-010 complete)
 ### DH-012 · Adapter: result path OpenELIS → OpenMRS · P0 · ⏸ (needs DH-011)
 Record observed `ServiceRequest` / `DiagnosticReport` shapes here → triggers the ADR-004 revisit.
 
@@ -488,12 +500,12 @@ conversation), RapidPro, Orthanc/PACS, multi-facility.
 ```
 BLOCKER-1 (human) → DH-002 → DH-005 → DH-007 → DH-008 ──┐
                        │                                 ├→ DH-018
-DH-009 (start now) → DH-010 → DH-011 → DH-012 → DH-013 ─┘
+DH-009 ✅ → DH-010 ✅ → DH-011 → DH-012 → DH-013 ─┘
                        │
         DH-014 → DH-015  (run parallel with SSO, not after)
 ```
 
-Longest poles: DH-008 (SSO) and DH-010–012 (adapter, shape depends on DH-009).
+Longest poles: DH-008 (SSO) and DH-011–012 (adapter transport and observed message shapes).
 
 ## Known bugs
 
