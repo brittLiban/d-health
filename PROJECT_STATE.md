@@ -361,11 +361,13 @@ the clinical lead has time.
 French login theme, adapter service account.
 
 ### DH-008 · SSO wiring · P0 · ⏸ (needs DH-003, DH-005, DH-007)
-⚠️ **Re-estimated at DH-005.** OpenELIS's shipped config exposes **SAML**, not OIDC as
-`ARCHITECTURE.md` §5 previously claimed. If that holds, the realm carries an OIDC client *and* a
-SAML client, and this ticket is two federation protocols rather than one — already the schedule's
-biggest single risk. **Confirm the protocol before DH-007 writes the realm JSON**, since that is
-where the work lands.
+✅ **Re-estimate WITHDRAWN at DH-007 — the risk was mine, not real.** I briefly raised this ticket
+to "two federation protocols" after seeing only `org.itech.login.saml.*` keys in OpenELIS's shipped
+`common.properties`. Checking the deployed webapp instead of the config file shows OIDC is fully
+supported (`spring-security-oauth2-client-6.2.8.jar`; `SecurityConfig` reads
+`org.itech.login.oauth.clientID` / `.clientSecret` / `.config`, scope `openid`). **One protocol,
+OIDC, for both apps — as originally planned.** The keys just have to be added to
+`common.properties`, which ships without them. DH-008 returns to its original estimate.
 **Requires joint understanding of: Keycloak realm config, OpenMRS auth, OpenELIS auth.** Not
 split — a working realm and a working OpenMRS that don't authenticate against each other is the
 exact failure this ticket exists to prevent. Includes the documented break-glass local admin.

@@ -183,17 +183,18 @@ OIDC confidential clients with secrets injected from `.env`.
 
 - **OpenMRS** authenticates via its OAuth2/OIDC support (`oauth2.properties`, as the HIS distro
   does). OpenMRS roles are mapped from Keycloak realm roles.
-- **OpenELIS** — ⚠️ **corrected at DH-005: the shipped configuration exposes SAML, not OIDC.**
-  `openelis-config/properties/common.properties` carries only `org.itech.login.saml.*` keys
-  (`registrationId=keycloak`, `entityId=OpenELIS-Global_saml`, and a
-  `.../protocol/saml/descriptor` metadata URL). No OIDC keys are present in it.
+- **OpenELIS** authenticates via OIDC against the same realm — **re-confirmed at DH-007 by
+  inspecting the deployed webapp**, after an intermediate correction wrongly cast doubt on it.
 
-  **This is not fatal, but it changes DH-008's shape and its estimate.** The realm likely needs
-  *two* client definitions — an OIDC client for OpenMRS and a SAML client for OpenELIS — and
-  "one login, both apps" then depends on two different federation protocols against one realm.
-  Whether OpenELIS also supports OIDC is **unconfirmed**; nobody should assume it does because
-  this document previously said so. Verify before building DH-007's realm JSON, because the realm
-  is where the cost lands.
+  The app supports four selectable login modes: `org.itech.login.basic`, `.certificate`, `.form`,
+  `.oauth` (OIDC) and `.saml`. OIDC is real, not vestigial: the WAR bundles
+  `spring-security-oauth2-client-6.2.8.jar`, and `SecurityConfig.class` reads
+  `org.itech.login.oauth.clientID`, `.clientSecret` and `.config`, with the `openid` scope.
+
+  ⚠️ **Note for whoever configures it:** the *shipped* `common.properties` contains only the
+  `org.itech.login.saml.*` keys, so reading that file alone suggests SAML is the only option. It is
+  not — the OIDC keys simply have to be added. An earlier revision of this section drew exactly
+  that wrong conclusion and raised DH-008's estimate on the back of it.
 - **The adapter is not a user.** It gets its own Keycloak service account (client credentials
   grant), so its writes into OpenMRS are attributable to a named machine identity in the audit
   trail rather than borrowing a clinician's account.
