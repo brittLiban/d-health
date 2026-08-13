@@ -197,20 +197,22 @@ full HAPI server that advertises `Subscription`, but delivery and corrected-resu
 must be demonstrated before trusting the result path. DH-010 built and runtime-verified the safety
 foundation; the watermark and poller themselves remain DH-011.
 
-### BLOCKER-3 — DH-011 activation and cancellation contract · 🛑 OPEN
+### BLOCKER-3 — DH-011 activation and cancellation contract · 🗓 TWO LEGS OPEN
 
-The polling algorithm is accepted, but three clinical/scope choices are not: the first-sync
-boundary, the real requester identity attached to orders in OpenELIS, and the laboratory-side
-state transition for a `ServiceRequest.replaces` discontinuation. Upstream's reference bridge
-explicitly leaves panel support and discontinuation incomplete. These choices are recorded under
-**NEEDS LIBAN** in `PROJECT_STATE.md`; no default was inferred and no order transport was activated.
+The polling algorithm is accepted, and the **first-sync boundary is now decided (ADR-015): no
+historical backfill, watermark starts at deployment time.** Two clinical/scope choices remain: the
+real requester identity attached to orders in OpenELIS, and the laboratory-side state transition
+for a `ServiceRequest.replaces` discontinuation. Upstream's reference bridge explicitly leaves panel
+support and discontinuation incomplete. Both wait on the birth-centre meeting; no default was
+inferred and no order transport was activated.
 
-### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · 🛑 OPEN
+### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · ✅ CLOSED BY SCOPE (ADR-016)
 
-The webapp remains reachable, but both upstream analyzer CSVs fail on the same unique description.
-Whether either analyzer and its test mappings belong in this facility is laboratory/clinical
-scope; the audit did not disable, rename, or repair any tests. Exact evidence and options are in
-`PROJECT_STATE.md`.
+v1 is manual result entry only — no analyzer, HL7, or ASTM interface; DH-023 is deferred to v1.1.
+The webapp remains reachable and both upstream analyzer CSVs still fail on the same unique
+description, **left exactly as upstream ships them**: each transaction rolls back, the live table
+has zero duplicate descriptions, and the endpoints answer. ADR-016 does not authorize disabling,
+renaming, repairing, or log-suppressing those tests. No test or mapping has ever been changed.
 
 ### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN
 

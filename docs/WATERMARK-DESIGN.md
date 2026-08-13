@@ -60,6 +60,20 @@ mutation; it just means the mutation is invisible to a timestamp watermark. See 
 
 ## 3. How it advances
 
+**Where the first watermark comes from — decided, ADR-015.** No historical backfill. On first start
+with no persisted watermark, bootstrap to the deployment instant **read from the OpenMRS server**,
+never from the adapter container's clock: the whole watermark contract is comparison against
+server-issued `meta.lastUpdated`, and a few seconds of skew in the wrong direction silently drops
+orders. Persist that value on first acquisition and never re-derive it — re-deriving "now" at boot
+would skip every order placed while the adapter was down. §4's inclusive lower bound applies at the
+boundary too, so an order written in the same instant as bootstrap is routed rather than dropped.
+
+The accepted consequence: an order placed before deployment never reaches OpenELIS, **including one
+still active**, and nothing alerts on its absence. It must be re-placed by a clinician. This also
+constrains §8 — nightly reconciliation counts only orders created at or after the bootstrap
+watermark, because counting from earlier would report a permanent false mismatch and train
+operators to ignore the one check that reveals real silent loss.
+
 ```
 poll(resource_type):
     since   = watermark_ts            # inclusive lower bound, see §4
@@ -267,6 +281,13 @@ loss, and it is the check that lets anyone claim results are not being lost.
    `fhir2` **2.2.0** while we run **4.2.0**. Revisit only after the golden flow, as ADR-004 says.
 3. **Liban's ADR-005 review — completed 2026-08-12.** This design is authorised for implementation.
    Discontinuation visibility is a tested implementation constraint in §6.
+3a. **First-sync boundary — resolved 2026-08-13 (ADR-015):** no historical backfill; bootstrap at
+   deployment time from the server clock, persisted once. Constraints and the accepted consequence
+   are in §3. The remaining DH-011 gates are the requester identity and the cancellation contract,
+   both waiting on the birth-centre meeting.
+3b. **Analyzer interfaces — out of scope for v1 (ADR-016):** results are entered manually in
+   OpenELIS. This does not change the result path's design; it changes only where the value
+   originates. HL7/ASTM instrument integration is a v1.1 question.
 4. **Before the result path:** prove OpenELIS outbound delivery and characterise corrected-result
    version/timestamp behavior. A correction that does not propagate would leave a stale value in
    the OpenMRS chart.

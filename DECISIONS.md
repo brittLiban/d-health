@@ -555,3 +555,75 @@ is hard-coded false, SSO stays off, and the one-login acceptance criterion remai
 Both protocol paths and the realm lifecycle are configuration as code, but DH-008 is not `DONE`
 until the approved authorization matrix is applied and one login across both applications is
 demonstrated.
+
+---
+
+## ADR-015 — The adapter's first watermark starts at deployment time; no historical backfill
+
+**Date:** 2026-08-13 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** ADR-005 specifies exactly how an existing watermark advances but never said where the
+*first* one comes from. BLOCKER-3 recorded three candidate boundaries — every historical order,
+activation-time-forward only, or a hand-selected set of still-active existing orders plus all new
+events — and refused to pick one, because the choice decides which patient orders enter the
+laboratory. That is clinical/scope surface, not a scheduler default.
+
+**Decision.** **No historical backfill.** On first start, with no persisted watermark, the adapter
+initialises its watermark to the deployment instant and routes only orders at or after it. The
+pilot's value is forward-going patients; this project is not digitising existing paper records.
+
+**Implementation constraints.**
+
+- The bootstrap instant must be **read from the OpenMRS server**, not from the adapter container's
+  clock. The watermark's whole contract is comparison against server-issued `meta.lastUpdated`
+  values, and a few seconds of container clock skew in the wrong direction silently drops orders.
+- The bootstrap watermark is persisted on first acquisition and **never re-derived**. A restart
+  reuses the stored value; re-deriving "now" on every boot would skip every order placed while the
+  adapter was down.
+- The inclusive lower bound of ADR-005 §4 still applies at the boundary, so an order written in the
+  same instant as bootstrap is routed rather than dropped.
+
+**Consequence, stated plainly.** An order placed in OpenMRS *before* the adapter is deployed will
+never reach OpenELIS, **including one that is still active**. If such an order matters, a clinician
+re-places it after deployment; the adapter will not discover it, and no operator alert marks its
+absence. This is accepted deliberately. It also means the nightly reconciliation of
+`WATERMARK-DESIGN.md` §8 must count only orders created at or after the bootstrap watermark —
+counting from an earlier point would report a permanent false mismatch and teach operators to
+ignore the one signal that reveals genuine silent loss.
+
+**Consequence for BLOCKER-3.** Its first-sync leg is closed. The requester identity and the
+cancellation state contract remain open and still block DH-011.
+
+---
+
+## ADR-016 — Manual result entry for v1; no analyzer interface
+
+**Date:** 2026-08-13 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** OpenELIS ships analyzer test-mapping CSVs, and both `horiba-micros60-cbc.csv` and
+`horiba-pentra60-cbc.csv` abort on every observed boot trying to give different test rows the
+already-existing unique description `LYM#(Whole Blood)` (BLOCKER-4). Whether either analyzer
+belongs in this facility could not be inferred from an import failure.
+
+**Decision.** **v1 is manual result entry only.** Laboratory technicians type results into OpenELIS
+by hand. No analyzer interface, and no HL7 or ASTM instrument integration, is in scope for v1 —
+defer that to v1.1 or later. DH-023 is not scoped or worked now.
+
+**Why this is not a regression.** The technicians currently write results on paper. Typing the same
+values into OpenELIS is the workflow they already have, and it is what makes the result available to
+the adapter, the chart, and the notification at all. An analyzer interface would be an improvement
+on their current practice, not a restoration of something being taken away.
+
+**What this decision explicitly does *not* authorize.** It does not authorize touching OpenELIS's
+shipped laboratory configuration. The failing Horiba imports are **left exactly as upstream ships
+them** — not disabled, not renamed, not repaired, not suppressed in the logs. Each failed import
+rolls back cleanly; the live table has zero duplicate descriptions, uniqueness is preserved, and
+the web and FHIR endpoints answer. Deleting or rewriting laboratory test rows to quiet a log
+message is laboratory configuration work, it needs the laboratory lead, and "we are not using that
+analyzer in v1" is not the same statement as "those test definitions may be removed."
+
+**Consequence.** BLOCKER-4 closes as a *scope* decision, and DH-023 moves to deferred rather than
+blocked. The import errors remain in the boot log as a known, non-blocking upstream behaviour,
+recorded in `CURRENT_STATE.md` §3a so a future reader does not mistake them for new breakage. When
+an analyzer interface is genuinely wanted, the conflict must be resolved with the laboratory lead's
+confirmed test identities before any import fix is attempted.
