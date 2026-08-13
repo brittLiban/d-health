@@ -167,7 +167,7 @@ only reachable if every piece of configuration loads itself on first boot. Mecha
 | OpenMRS global properties, locales, concepts, forms, roles/privileges, locations | **`openmrs-module-initializer`** — reads a config tree at startup, idempotently | `openmrs-config/` |
 | OpenMRS O3 frontend behaviour (default locale, ward app config) | frontend `config.json` mounted into the frontend container | `openmrs-config/frontend/` |
 | Wards, bed types, beds | `bedmanagement` module. **Open question:** Initializer's coverage of bed domains needs verification. If beds are not an Initializer domain, this becomes a first-boot REST seed script, still code, still committed, still idempotent — just a different mechanism. I'll confirm at build time and record the answer here. | `openmrs-config/` or `openmrs-config/seed/` |
-| Keycloak realm, clients, roles, French login theme | `--import-realm` with a committed realm JSON. I'll base ours on the OpenMRS HIS distribution's `ozone-realm.json`, which already has working `openmrs` and OpenELIS client definitions, rather than deriving them from scratch. Client secrets come from `.env`, never from the JSON. | `keycloak/realm-config/` |
+| Keycloak realm, clients, roles, French login theme | **Built and runtime-verified at DH-007.** `--import-realm` loads committed JSON; environment placeholders keep client secrets out of Git. A restart skips the existing realm without changing it. | `keycloak/realm-config/` |
 | OpenELIS lab tests, LOINC mappings, "accept external orders" | OpenELIS stores these in its DB; upstream documents them as admin-UI steps. I'll capture them as a committed SQL/REST seed applied on first boot so they are reproducible. | `openelis-config/` |
 | Adapter behaviour | environment variables only | `.env` |
 
@@ -180,6 +180,12 @@ cannot be automated, it goes in `README.md` as an explicit numbered post-deploy 
 
 Keycloak is the single identity provider. Realm `daher`, clients `openmrs` and `openelis`, both
 OIDC confidential clients with secrets injected from `.env`.
+
+**DH-007 status:** the provider foundation is running and verified: the French-first realm,
+roles, browser clients, adapter service account, environment-resolved secrets, empty user list,
+successful adapter client-credentials grant, readiness probe, and restart persistence. This is
+not SSO: neither application authenticates
+against the realm until DH-008 is implemented and the one-login flow is demonstrated.
 
 - **OpenMRS** authenticates via its OAuth2/OIDC support (`oauth2.properties`, as the HIS distro
   does). OpenMRS roles are mapped from Keycloak realm roles.
@@ -199,6 +205,10 @@ OIDC confidential clients with secrets injected from `.env`.
   grant), so its writes into OpenMRS are attributable to a named machine identity in the audit
   trail rather than borrowing a clinician's account.
 - **Keycloak login theme is French by default**, English selectable.
+
+The committed 1-hour idle, 10-hour maximum, and 5-minute access-token lifetimes are provisional.
+They have clinical-workflow and shared-terminal security surface and require Liban's decision before
+pilot use; DH-007 records them as such rather than presenting them as approved defaults.
 
 Break-glass: a local OpenMRS admin account remains valid so the system is not unusable if Keycloak
 fails to start. This is a deliberate tradeoff (one credential outside SSO) and is documented in the
@@ -235,44 +245,26 @@ upgrade.
 Revisit trigger: once step 5 of §13 passes end-to-end, record the observed `ServiceRequest` and
 `DiagnosticReport` shapes here and make the call.
 
-### ⚠️ Known unknown this decision creates — how the adapter learns an order exists
+### ⚠️ Trigger evidence gathered — ADR-005 still awaits Liban's review
 
-`labonfhir` is not only a mapper: it is also the thing that makes OpenMRS **emit** the order event.
-Building the transport by hand means we need our own trigger on the OpenMRS side, and I have not yet
-confirmed which mechanisms are actually available and reliable in the 3.7.x line:
+`labonfhir` is not only a mapper: it also makes OpenMRS emit order events. Evidence gathered against
+this exact distribution now establishes that OpenMRS FHIR has no `Subscription` resource and its
+event module exposes only an in-process broker. A separate adapter therefore polls
+`ServiceRequest` by `_lastUpdated`; the durable watermark and ledger design is written in
+`docs/WATERMARK-DESIGN.md` and built into nothing pending ADR-005 review.
 
-- **FHIR Subscription** via the `fhir2` module — clean, event-driven, and what §6's design below
-  assumes. Needs verification that outbound subscriptions are supported and stable.
-- **Polling** the FHIR `ServiceRequest`/`Task` endpoint on an interval — always available, but it
-  changes the adapter's shape: it needs a scheduler, a durable watermark, and an explicit
-  definition of "new since when" that has to interlock with the idempotency ledger. It also changes
-  what "no messages dropped" means, because the guarantee becomes a function of watermark
-  correctness rather than delivery.
-- An OpenMRS event module as a third option.
+Order discontinuation was tested with the correct verb. The original resource changes without
+advancing `meta.lastUpdated`, but a new timestamped `DISCONTINUE` ServiceRequest carries `replaces`.
+The adapter must process that relationship and must not filter on status.
 
-The same question applies in reverse on the OpenELIS side: OpenELIS documents subscription
-*listeners* (it consuming Task/ServiceRequest/etc.); what I have **not** confirmed is the outbound
-direction — how it notifies us that a result is ready.
+The reverse leg is asymmetric: OpenELIS advertises FHIR `Subscription` and has an outbound
+subscriber configuration, but no delivery has been observed. Corrected-result version/timestamp
+behavior is also untested and must be characterised before trusting the result path.
 
-**Both are verified at build step 5, before adapter code is written**, and the answers get recorded
-here. If polling turns out to be the only reliable path on either side, the design below changes and
-I will say so rather than quietly building a poller described as a subscriber.
-
-**How this gets resolved — a commitment, not a preference.** This question does not get settled by
-a default. When step 5 arrives:
-
-1. The verification is presented as **primary evidence** — the specific `fhir2` module source files
-   and documentation consulted, quoted, with paths — not a conclusion of the form "I checked and it
-   works."
-2. If the answer is polling, the **watermark design is written out and read before it is built**:
-   what the watermark is keyed on, how it advances, what happens on a restart mid-window, what
-   happens when a record is back-dated or modified after the watermark passes it, and what the
-   observable failure mode is when the watermark is wrong.
-
-The reason for the ceremony: with polling, "no result is lost between the laboratory and a mother's
-chart" stops being a property of the transport and becomes a property of the watermark logic. That
-is load-bearing safety code, and it is reviewed as such by a human who understands it, not approved
-on the strength of an agent's summary.
+The `labonfhir` revisit is now costed rather than hypothetical: it provides an in-process,
+event-driven order trigger but still polls results, is not shipped in this reference distribution,
+and builds against `fhir2` 2.2.0 while this stack runs 4.2.0. ADR-005 remains open because Liban's
+review—not evidence collection alone—is its acceptance criterion.
 
 ### Adapter design (unchanged by that later decision)
 
@@ -432,8 +424,8 @@ Nightly containerised cron sidecar:
 6. Write a success/failure marker the runbook tells you how to check
 
 **Both engines. Every time.** A restore drill that only restores PostgreSQL would come back with a
-working lab system and no patient records — that failure mode is written into
-`backup/restore-drill.md` as an explicit checklist item, not left to be discovered.
+working lab system and no patient records. That failure mode must be an explicit checklist item in
+`backup/restore-drill.md`; the file does not exist yet and DH-015 remains unperformed.
 
 Credentials from `.env`. The drill — restore into a scratch stack, verify a known test patient, a
 known lab result, and a working SSO login — is performed and its output recorded before this pilot
@@ -450,8 +442,9 @@ repository as:
 
 > ⚠️ **NEEDS SIGN-OFF FROM CLINICAL LEAD** — reference default, not validated for this facility.
 
-Nothing clinical is invented, extrapolated, or "sensibly adjusted". A `docs/CLINICAL-SIGNOFF.md`
-checklist tracks each item and who signed it, and it is unsigned until a clinician signs it.
+Nothing clinical is invented, extrapolated, or "sensibly adjusted". DH-004/DH-006 must create a
+`docs/CLINICAL-SIGNOFF.md` checklist tracking each item and signer; that file does not exist yet,
+and no clinical content is signed off.
 
 ---
 
@@ -491,6 +484,15 @@ Linux 2; the frontend and gateway on Alpine 3.24. All three ship `curl`, and the
 ships the `mariadb` client binary, so the healthcheck commands in the compose file resolve
 (verified by `docker run`, not assumed).
 
+### Digest pulled and pinned — build step 4a, 2026-08-13 (DH-007)
+
+| Image | Digest |
+|---|---|
+| `quay.io/keycloak/keycloak:26.7.1` | `sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6` |
+
+The digest was read back from the pulled local image and is the image that passed realm import,
+secret interpolation, readiness, and restart verification.
+
 | Component | Tag | Why |
 |---|---|---|
 | OpenMRS O3 backend | `openmrs/openmrs-reference-application-3-backend:3.7.x` + digest | Current released O3 line. Upstream publishes only branch tags here, hence the digest pin. |
@@ -499,7 +501,7 @@ ships the `mariadb` client binary, so the healthcheck commands in the compose fi
 | MariaDB | `mariadb:10.11.18` | **Corrected from 11.4 at build step 1.** The OpenMRS reference distribution tests against the 10.11 line; following upstream's tested pairing beats picking the newer LTS on my own judgement |
 | OpenELIS | `itechuw/openelis-global-2:3.2.1.11` (+ matching `-database`, `-fhir`, `-frontend`) | Latest stable patch on the 3.2.1 line; the OpenMRS HIS distro integrates the 3.2.x line, so FHIR interop is exercised upstream |
 | PostgreSQL | `postgres:14.4` (via OpenELIS's DB image) | Pinned by OpenELIS's own image; we do not get to choose it |
-| Keycloak | `keycloak/keycloak:26.7.1` | Current stable |
+| Keycloak | `quay.io/keycloak/keycloak:26.7.1` + digest | Identity provider; realm import verified at DH-007 |
 | Caddy | `caddy:2-alpine` → resolved to exact patch | Automatic HTTPS |
 | Adapter | built here, `python:3.13-slim` base | — |
 
@@ -542,18 +544,19 @@ Where a v1 choice would need to change for multi-facility, it is noted inline in
 
 ## 15. Open items
 
-**Nothing blocks implementation.** All five questions raised in the first draft were answered on
-2026-08-10 and are recorded in §0. What remains open is tracked here and none of it gates the build:
+Open technical and human gates are tracked here and in `PROJECT_STATE.md`; several do block later
+implementation or pilot acceptance:
 
 | Item | Status | Needed by |
 |---|---|---|
 | Real maternity bed counts | Placeholder values in `.env`; changing them is an `.env` edit + restart (§7) | Go-live |
 | WhatsApp Cloud API / BSP credentials | Building against mock; swap is `.env`-only. Line item stays marked **incomplete** until real credentials run end-to-end (§8) | Go-live |
-| `labonfhir` vs. hand-rolled transport | Deferred by decision; revisit after step 5 of §13 with real payloads in hand (§6) | Before v1.1 |
+| `labonfhir` vs. hand-rolled transport | Compatibility/behavior spike complete; Liban's ADR-005 review still gates adapter construction (§6) | Before DH-010 |
 | Initializer coverage of bed domains | To be confirmed at build step 2; falls back to an idempotent REST seed if unsupported (§4) | Build step 2 |
-| **Demo content shipped by the O3 distro** — 50 fictional patients from the bundled `referencedemodata` module, plus 21 OCL packages under a `referenceapplication-demo` tree | **Open, human decision** (BLOCKER-2 in `PROJECT_STATE.md`). Observed at build step 1. `OMRS_CONFIG_ADD_DEMO_DATA=false` does not prevent it — the real control is an OpenMRS global property this repo does not set. Untangling "reference clinical content" from "sample data" is not an agent's call, and stripping the `-demo` tree may remove the lab-test concepts DH-006 needs | **Before the pilot VM is first booted** — the property self-clears after firing, so the fix only works at first boot |
+| Demo patients | **Resolved:** `OMRS_DEMO_PATIENTS=off|on`, default `off`, selects the distribution-source global-property overlay. Demo concept content remains a separate DH-003 seam because removing it may remove lab vocabulary | DH-003 |
+| Keycloak session lifetimes | Provisional 1h idle / 10h maximum / 5m token; **Human Decision Required: Yes** | DH-007 final acceptance / pilot |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
-| Clinical sign-off on all clinical content | `docs/CLINICAL-SIGNOFF.md`, unsigned (§11) | Go-live — **hard gate** |
+| Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |
 
 **Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
 to keep the surface area small enough to be stable by then. Anything that grows the container count

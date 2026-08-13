@@ -15,6 +15,10 @@ Client secrets are `${PLACEHOLDER}` values resolved from the container's environ
 time. That is what makes the file safe to commit. **If a literal secret ever appears in it, treat
 it as leaked and rotate it.**
 
+Verified at DH-007: all three imported client secrets matched their corresponding container
+environment values. The check compared values in-process and printed only match/mismatch status;
+no secret value was written to logs or documentation.
+
 Set in `.env`: `KEYCLOAK_OPENMRS_CLIENT_SECRET`, `KEYCLOAK_OPENELIS_CLIENT_SECRET`,
 `KEYCLOAK_ADAPTER_CLIENT_SECRET`, plus `KEYCLOAK_ADMIN_PASSWORD` and `BASE_DOMAIN`.
 
@@ -60,3 +64,21 @@ docker exec daher-health-keycloak-1 /opt/keycloak/bin/kcadm.sh config credential
 docker exec daher-health-keycloak-1 /opt/keycloak/bin/kcadm.sh get realms/daher \
   --fields realm,defaultLocale
 ```
+
+## DH-007 verification record
+
+Verified against the running stack on 2026-08-13:
+
+- the `daher` realm imported successfully after the invalid JSON comment fields were removed;
+- default locale is `fr`, with `fr` and `en` supported;
+- realm roles `clinician`, `lab-tech`, and `sys-admin` exist;
+- `openmrs` and `openelis` are browser-flow clients;
+- `adapter` has service accounts enabled and browser/direct grants disabled;
+- the adapter client completed a real client-credentials grant against the local token endpoint;
+- the realm contains no committed staff users;
+- all three client-secret placeholders resolved to the expected environment values; and
+- after restarting only Keycloak, readiness returned healthy and import correctly reported
+  `Realm 'daher' already exists. Import skipped` followed by `Import finished successfully`.
+
+This verifies the identity-provider foundation only. OpenMRS and OpenELIS do not use it until
+DH-008 wires and demonstrates one-login SSO across both applications.

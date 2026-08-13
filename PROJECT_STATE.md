@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-12 · **Phase:** Steps 1 and 3 of 8 built · ADR-005 evidence awaiting review
+**Updated:** 2026-08-13 · **Phase:** Steps 1 and 3 built; Keycloak foundation verified · ADR-005 awaiting review
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -14,38 +14,42 @@ himself in the SPA. **Step 3** (PostgreSQL + OpenELIS) is built and verified: th
 databases, 167-table OpenELIS schema, webapp on HTTPS, and a FHIR server answering `metadata` over
 mutual TLS. **DH-019** closed the published-default admin password.
 
-Both steps together surfaced nine defects that `docker compose config` could never have caught
-(`CURRENT_STATE.md` §3a and DH-005's ticket entry). Nothing is blocked on effort — the open items
-are decisions, gathered under **NEEDS LIBAN** below.
+**DH-007** (Keycloak foundation) is built and runtime-verified: the `daher` realm imports with
+French as default; roles and all three clients exist; environment placeholders resolve to the
+expected client secrets; no staff users are committed; and restart returns healthy without
+re-importing the existing realm. **This is not SSO** — application wiring remains DH-008.
 
-Step 2 (DH-003, maternity config) is deliberately *not* started: it depends on BLOCKER-2, which is
-yours to decide.
+Both steps together surfaced nine defects that `docker compose config` could never have caught
+(`CURRENT_STATE.md` §3a and DH-005's ticket entry). Buildable work remains alongside the decisions
+gathered under **NEEDS LIBAN** below.
+
+Step 2 (DH-003, maternity config) has not started. Its demo-patient dependency is resolved; it is
+now technically ready, with real bed counts still a facility placeholder rather than something an
+agent may invent.
 
 ## Ticket status
 
 | Status | Tickets |
 |---|---|
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-019** (verified on an empty volume) |
-| 🟢 Built + verified, awaiting Liban's own look | **DH-005** (PostgreSQL + OpenELIS) |
+| 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look), **DH-007** (session lifetimes) |
 | 🟡 Awaiting Liban's review | **DH-009a** + **DH-009b** (ADR-005 evidence, both legs) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
-| 🔨 In progress | DH-017 (README — now covers step 1 fully, incl. boot timing and the demo-patient warning) |
-| 📋 Ready, no decision needed | DH-007 (Keycloak), DH-014 (backup — pinned P0) |
-| ⏸ Waiting on dependencies | DH-003 … DH-018 |
+| 🔨 In progress | DH-014 (dump layer verified), DH-017 (README) |
+| 📋 Ready | DH-003 (maternity configuration) |
+| ⏸ Waiting on dependencies | DH-004, DH-006, DH-008, DH-010 … DH-013, DH-015, DH-016, DH-018 |
 
 ## ▶ START HERE (next session)
 
-**Everything buildable without a decision has been built.** Work through **NEEDS LIBAN** below —
-that list is the critical path now, not effort.
+Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
 
 1. **ADR-005 review** (items 2–4). Both legs now have evidence, and they are *asymmetric*: OpenMRS
    cannot push, OpenELIS can. The poller is not written, deliberately — ADR-005 forbids it before
    review. This gates DH-010 → DH-012, the longest pole after SSO.
-2. **BLOCKER-2** (item 1). Gates DH-003, and it must be settled before the pilot VM's first boot,
-   because the mechanism self-clears after firing.
-3. **Then, unblocked and needing no decision:** DH-007 (Keycloak — its database already exists) and
-   DH-014 (backup — it only needs databases, and both engines now exist). DH-014 is pinned P0 and
-   `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
+2. **DH-007 session lifetimes** (item 5). The identity-provider foundation is verified, but its
+   provisional timeouts are not approved for a shared ward-terminal workflow.
+3. **Unblocked technical work:** DH-003 and the remaining DH-014 backup layers. DH-014 is pinned P0
+   and `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
 `docker compose down -v` — that destroys the volumes and the evidence.
@@ -62,12 +66,13 @@ exists. Each links to the detail rather than repeating it.
 |---|---|---|---|
 | ~~1~~ | ~~**The 50 fictional demo patients**~~ — ✅ **RESOLVED 2026-08-12.** Answered with "make it an option": `OMRS_DEMO_PATIENTS`, default `off`. The demo *concept* content becomes a second knob in DH-003, default as-shipped — no decision needed from you unless you want a different default | — | Nothing |
 | 2 | **Poll interval for the adapter** — how long may a prenatal order sit before the laboratory sees it? | A clinical-workflow question, not a technical one | `WATERMARK-DESIGN.md` §9.1 → DH-010 |
-| 3 | **Does voiding an order need to reach the laboratory?** If a voided order never advances `meta.lastUpdated`, the LIS keeps working an order the EMR considers cancelled | Patient-safety behaviour, and it may need a reconciliation sweep rather than a watermark | `WATERMARK-DESIGN.md` §6 → DH-010 |
+| ~~3~~ | ~~**Does voiding an order need to reach the laboratory?**~~ — ✅ **RESOLVED TECHNICALLY 2026-08-13.** A proper `DISCONTINUE` creates a new visible ServiceRequest carrying `replaces`; the adapter must forward it and must not filter on `status` | — | Nothing; implementation constraint recorded in `WATERMARK-DESIGN.md` §6 |
 | 4 | **Revisit `labonfhir` (ADR-004)?** It was deferred partly because we'd own the trigger either way. Owning it now demonstrably means *polling* | A recorded decision; ADRs are not re-litigated by an agent | ADR-005 review → DH-010 |
-| 5 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / go-live |
-| 6 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
-| 7 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
-| 8 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
+| 5 | **Keycloak session lifetimes** — provisional values are 1h idle, 10h maximum, 5m access token | Shared-terminal security versus continuity during labour is a clinical workflow decision | DH-007 final acceptance / pilot |
+| 6 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / clinically live |
+| 7 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
+| 8 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
+| 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
 
 **Read-and-approve, rather than decide:** ADR-005's evidence section in `DECISIONS.md`, then
 `docs/WATERMARK-DESIGN.md`. ADR-005 forbids building the poller until you have read it, so DH-010
@@ -231,13 +236,12 @@ item either way.
 | Healthchecks actually pass rather than merely being defined | ✅ — and the backend's was **found lying** and rewritten. See `CURRENT_STATE.md` §3a |
 | DoD: verification steps in `README.md` | ✅ including the ≈50-minute first-boot warning and the demo-patient warning |
 
-**Why this is not ✅ DONE.** Every check ran through `curl`. The O3 single-page app has never been
-opened in a browser, and the sprint spec's own verification for step 1 is *"open OpenMRS, log in,
-register a test patient"* — performed by Liban, not reported to him. Closing this ticket requires
-his run.
+**Why this is now ✅ DONE.** The technical checks ran through `curl`, then Liban opened the O3
+single-page app and registered a patient himself on 2026-08-11. The only UI observation not reported
+was the display language, which remains a DH-003 check rather than reopening DH-002.
 
-**Surfaced here, tracked elsewhere:** BLOCKER-2 (50 demo patients — human decision) and DH-019
-(admin password). Neither blocks this ticket; both block the pilot instance.
+**Surfaced here, resolved elsewhere:** BLOCKER-2 became the explicit demo-patient switch, and
+DH-019 wired and empty-volume-verified the required admin password.
 
 ### DH-019 · Wire the OpenMRS admin password through compose · P0 · ✅ DONE 2026-08-11
 **Verified the only way it can be**: on a throwaway scratch project with an empty volume, a full
@@ -278,16 +282,22 @@ built into nothing**: `docs/WATERMARK-DESIGN.md`, as ADR-005 requires.
 
 **What Liban is being asked to read**, in order: ADR-005's evidence section, then
 `WATERMARK-DESIGN.md` §4 (why `ge` and not `gt` — the choice that trades duplicates for never
-losing a result), §6 (the void-visibility gap), §7 (the timezone constraint), and §9.3
-(polling being the only trigger is new information bearing on ADR-004's `labonfhir` deferral).
+losing a result), §6 (tested discontinuation semantics and the `replaces` obligation), §7 (the
+timezone constraint), and §9.2 (polling being the only trigger is new information bearing on
+ADR-004's `labonfhir` deferral).
 
 **Not done here, by instruction:** no poller was written. ADR-005 forbids building before review.
 
-### DH-009b · Spike: ADR-005, **OpenELIS leg** · P0 · ⏸ (needs DH-005)
-The reverse direction — how OpenELIS tells us a result is ready — **could not be touched**:
-OpenELIS is not deployed. DH-009a's "polling" answer covers the OpenMRS leg **only** and must not
-be read as covering this one. Same standard applies: primary evidence, and if the answer is polling,
-the result-leg watermark design gets reviewed before it is built.
+### DH-009b · Spike: ADR-005, **OpenELIS leg** · P0 · 🟡 EVIDENCE GATHERED — delivery not proven
+OpenELIS is now deployed. Its HAPI FHIR 6.6.0 CapabilityStatement advertises `Subscription`, and
+its committed upstream-derived configuration exposes an outbound subscriber URL plus retry
+interval/resources. That establishes capability and configuration shape, **not working delivery**:
+no receiving endpoint has been registered and no outbound result has been observed.
+
+One higher-stakes behavior also remains uncharacterised: whether correcting a result advances the
+FHIR `DiagnosticReport`/`Observation` version and timestamp. A stale corrected value in OpenMRS is
+more dangerous than a stale order. This must be tested before the result leg is trusted; the
+order-leg answer must not be assumed to generalise.
 
 ### DH-009 · (superseded by DH-009a / DH-009b above) · P0
 **Objective:** answer, with primary evidence, how the adapter learns an order/result exists.
@@ -300,7 +310,7 @@ direction. **Present quoted source with file paths — a conclusion alone is not
 mid-window, back-dated records, failure mode when wrong) for human review **before** building it.
 **Acceptance:** ADR-005 updated from `OPEN` to a decision, with evidence, reviewed by Liban.
 
-### DH-003 · OpenMRS maternity config as code · P0 · ⏸ (needs DH-002)
+### DH-003 · OpenMRS maternity config as code · P0 · 📋 READY (DH-002 complete)
 Initializer config: French locale list + default, Maternité ward, bed types (delivery /
 postpartum), additive-only bed seed driven by `MATERNITY_*_BEDS` (🔒 ADR-007). Confirm whether
 Initializer covers bed domains; if not, an idempotent REST seed — and record which, in
@@ -356,9 +366,31 @@ certificate from this same keystore, so replacing it is a coordinated change, no
 Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
 the clinical lead has time.
 
-### DH-007 · Keycloak + realm import · P0 · ⏸ (needs DH-005)
-`--import-realm`, committed realm JSON based on the OpenMRS HIS distro's, secrets from `.env`,
-French login theme, adapter service account.
+### DH-007 · Keycloak + realm import · P0 · 🟢 BUILT AND VERIFIED 2026-08-13 — awaiting timeout decision
+Keycloak 26.7.1 is digest-pinned and running in production mode against its PostgreSQL co-tenant.
+The committed `daher` realm imports automatically with French as default and English selectable;
+roles `clinician`, `lab-tech`, and `sys-admin`; confidential browser clients for OpenMRS and
+OpenELIS; and a non-browser adapter service account. No staff users are committed.
+
+**Runtime verification, not syntax claims:**
+
+- realm import succeeded after removing `_comment` fields that Keycloak rejects;
+- all three client-secret placeholders resolved and matched their environment values without any
+  secret being printed;
+- the adapter service account completed a real client-credentials token grant, with neither its
+  secret nor token printed;
+- readiness returned healthy only after initialization;
+- a restart preserved the realm and cleanly logged `already exists. Import skipped` followed by
+  `Import finished successfully`; and
+- the pulled image digest matches the digest committed in compose and ARCHITECTURE §12.
+
+**Not DH-008:** neither OpenMRS nor OpenELIS authenticates through Keycloak yet. One-login SSO is
+still unbuilt and must not be inferred from a healthy identity-provider container.
+
+**Human Decision Required: Yes — session lifetimes.** The committed 1h idle / 10h maximum / 5m
+access-token values are explicit provisional settings, not approved workflow. A midwife must not
+be dropped mid-labour, while a shared ward terminal must not remain authenticated overnight.
+Liban's decision is required before this ticket is final for pilot use.
 
 ### DH-008 · SSO wiring · P0 · ⏸ (needs DH-003, DH-005, DH-007)
 ✅ **Re-estimate WITHDRAWN at DH-007 — the risk was mine, not real.** I briefly raised this ticket
@@ -381,7 +413,7 @@ written — run against the live databases:
 |---|---|
 | MariaDB `openmrs` | ✅ 15.9 MB, and it **contains the data**: test identifier `10001MJ` present, with real `patient` and `person_name` INSERTs |
 | PostgreSQL `clinlims` | ✅ 1.28 MB |
-| PostgreSQL `keycloak` / `adapter` | ✅ ~1 KB each — correct, both are empty until DH-007/DH-010 |
+| PostgreSQL `keycloak` / `adapter` | ✅ ~1 KB each — correct at the time: both were empty before DH-007/DH-010. Keycloak is populated now, so final DH-014 verification must dump it again |
 
 **NOT yet done:** the script has never run end-to-end (encryption, S3 upload, volume tarring, the
 sidecar container and its schedule are all unexercised), and **no restore has been attempted**.
@@ -395,7 +427,8 @@ work gets squeezed (`CURRENT_STATE.md` §7).
 ### DH-015 · Restore drill, performed and documented · P0 🔒 · ⏸ (needs DH-014)
 Restore into a scratch stack; verify a known test patient, a known lab result, and a working SSO
 login. **"The dump ran" is not this ticket.** A restore that only covers PostgreSQL would return a
-working lab system and no patient records — that check is explicit in `backup/restore-drill.md`.
+working lab system and no patient records; that check must be explicit in the still-unwritten
+`backup/restore-drill.md`.
 **DoD:** drill actually performed, output recorded, dated.
 
 ### DH-010 · Adapter skeleton: audit ledger, idempotency, retry · P0 · ⏸ (needs DH-009)
@@ -452,16 +485,16 @@ Longest poles: DH-008 (SSO) and DH-010–012 (adapter, shape depends on DH-009).
 | 1 | Gateway could not resolve `backend`/`frontend` — hard-coded upstream names in its nginx template | Fixed (network aliases) |
 | 2 | Backend healthcheck reported healthy 8s into a 49-minute boot | Fixed (explicit `= 200` on the REST session endpoint) |
 | 3 | `OMRS_CONFIG_ADD_DEMO_DATA` inert in this image | Documented, not removed |
-| 4 | 50 fictional demo patients created on first boot | **Open — BLOCKER-2**, human decision |
-| 5 | Admin password defaults to the published `Admin123` | **Open — DH-019** |
+| 4 | 50 fictional demo patients created on first boot | **Resolved** — `OMRS_DEMO_PATIENTS=off|on`, default `off`; old verification volume still contains them |
+| 5 | Admin password defaults to the published `Admin123` | **Fixed and empty-volume verified — DH-019** |
 
 ## Notes for next session
 
 - See **▶ START HERE** near the top of this file for the immediate next action.
 - Read `DECISIONS.md` before touching anything. ADR-005 is the live open question; ADR-003,
   ADR-006, ADR-007 are pinned and not to be "simplified".
-- **Step 1 has now genuinely run** — but "verified through the API" and "demonstrated to a human
-  in the UI" are different claims, and only the first is true. Keep them apart in what you report.
+- **Step 1 has now genuinely run.** API verification and Liban's SPA registration are separate
+  evidence and both are complete; the unreported French-locale observation belongs to DH-003.
 - `docker compose config` passing still means only that the syntax parses. Every one of the five
   findings above survived that check.
 - Digests are recorded from a real pull (ARCHITECTURE §12). **Never fabricate a digest.**

@@ -5,12 +5,13 @@ OpenMRS (patient records, maternity care) + OpenELIS (laboratory) + Keycloak (on
 + a small adapter that routes lab orders and results between them, all in Docker containers behind
 one `docker-compose.yml`.
 
-> ### ⚠️ Status: build step 1 of 8 runs. Not for use with real patients.
+> ### ⚠️ Status: infrastructure foundation runs. Not for use with real patients.
 >
-> **Step 1 (MariaDB + OpenMRS O3) boots and has been verified through the API** on 2026-08-11:
-> images pinned by digest, admin login, a test patient registered and retrieved via REST and FHIR,
-> and data surviving a `down`/`up` cycle. The single-page app has **not** yet been opened in a
-> browser. Steps 2–8 are not written.
+> **Step 1 (MariaDB + OpenMRS O3)** is API-verified and Liban registered a test patient in the SPA.
+> **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
+> verified; its UI has not been exercised. **DH-007 Keycloak** is running with the French-first
+> realm, roles, clients, secret interpolation, readiness, and restart persistence verified.
+> One-login SSO is not wired, and the clinical/integration steps remain incomplete.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -92,13 +93,13 @@ The O3 backend image defaults the `admin` account to the well-known published pa
 `Admin123`, and it writes that password into the database **the first time OpenMRS initialises an
 empty schema**. Changing it afterwards in `.env` does nothing — the account already exists.
 
-As of build step 1 the compose file does not yet pass an admin password through
-(`OMRS_CONFIG_ADMIN_USER_PASSWORD`, ticket DH-019), so **this stack currently uses `Admin123`**.
-That is tolerable here only because the port binds to `127.0.0.1`. Before the first `up` on any
-instance that is not a throwaway, DH-019 must land and the password must be set — after the first
-boot the fix is a manual password change, not an `.env` edit.
+DH-019 now passes required `OMRS_ADMIN_PASSWORD` through
+`OMRS_CONFIG_ADMIN_USER_PASSWORD`; compose refuses to start if it is missing. This was verified on
+an empty volume: the configured password authenticated and `Admin123` was refused. On a database
+created before DH-019 landed, `.env` cannot rotate the existing account—change it manually in
+OpenMRS.
 
-## Running what currently exists (build step 1: OpenMRS only)
+## Running the current foundation
 
 ```bash
 docker compose up -d
@@ -150,12 +151,12 @@ public route before TLS exists.
 
 ### Verifying step 1
 
-**What has been verified, and by whom.** Everything below was exercised on 2026-08-11 through the
-REST and FHIR APIs with `curl`. **The single-page app has not been opened in a browser** — that is
-the part left for you, and it is the reason DH-002 is not marked done.
+**What has been verified, and by whom.** The REST/FHIR and persistence checks below were exercised
+with `curl` on 2026-08-11. Liban then opened the single-page app and registered a test patient,
+closing DH-002. He did not report whether the UI opened in French; that remains a DH-003 check.
 
-1. **Log in.** Open <http://127.0.0.1:8080/openmrs/spa>. See the ⚠️ note above about the admin
-   password — on this stack it is the image default, `admin` / `Admin123`.
+1. **Log in.** Open <http://127.0.0.1:8080/openmrs/spa> with `admin` and the password configured
+   before that database's first boot. Existing pre-DH-019 volumes retain their existing password.
 2. **Register a test patient**, then search for them and open the chart.
 3. **Check the French default.** The frontend is configured with `SPA_DEFAULT_LOCALE=fr`. Note
    that the *backend* still reports `locale: "en"` — its allowed-locale list and default are set
@@ -172,32 +173,29 @@ The same checks from the command line, if you want them:
 
 ```bash
 # does the API authenticate?
-curl -s -u admin:Admin123 http://127.0.0.1:8080/openmrs/ws/rest/v1/session
+curl -s -u "admin:<configured-password>" http://127.0.0.1:8080/openmrs/ws/rest/v1/session
 
 # is a given patient retrievable by identifier, and through FHIR R4?
-curl -s -u admin:Admin123 "http://127.0.0.1:8080/openmrs/ws/rest/v1/patient?q=<IDENTIFIER>"
-curl -s -u admin:Admin123 "http://127.0.0.1:8080/openmrs/ws/fhir2/R4/Patient?identifier=<IDENTIFIER>"
+curl -s -u "admin:<configured-password>" "http://127.0.0.1:8080/openmrs/ws/rest/v1/patient?q=<IDENTIFIER>"
+curl -s -u "admin:<configured-password>" "http://127.0.0.1:8080/openmrs/ws/fhir2/R4/Patient?identifier=<IDENTIFIER>"
 ```
 
-### ⚠️ This stack boots with 50 fictional demo patients
+### ⚠️ Demo patients are an explicit first-boot option
 
 `OMRS_ADD_DEMO_DATA=false` **does not prevent this** — that variable was verified inert at DH-002.
-The demo patients come from the `referencedemodata` module bundled in the O3 distribution image,
-driven by an OpenMRS global property this repo does not currently set. On a fresh boot you will
-find 50 fictional people (Betty Williams, Michael Turner, …) alongside anything you register — so
-a patient count of 50 on an instance where you have registered nobody is expected, not a sign that
-something went wrong. They are created once, on the first boot; restarting does not add more.
+The actual control is `OMRS_DEMO_PATIENTS=off|on`, implemented at the distribution's Initializer
+source. It defaults to `off`, the only appropriate value for an instance that may hold real patient
+records. `on` deliberately creates 50 fictional people and is for training/demo instances only.
 
-That is tolerable on a throwaway verification stack and **is not acceptable on the pilot
-instance**. Suppressing it is an open decision recorded as BLOCKER-2 in
-[`PROJECT_STATE.md`](PROJECT_STATE.md), to be resolved in build step 2. Until then, do not treat
-any instance of this stack as clean.
+This setting is first-boot-only. Changing it against an initialized database does not remove or
+add patients safely. The original local verification volume predates the switch and still contains
+50 fictional patients; it is a throwaway test stack, not a clean pilot database.
 
 ## Not yet present
 
-Build steps 2–8: OpenMRS maternity configuration (ward, beds, ANC and partograph forms),
-PostgreSQL + OpenELIS, Keycloak and single sign-on, the adapter and its audit trail, WhatsApp
-notifications, backup **and a tested restore**, and Caddy with HTTPS. Sequence and status:
+OpenMRS maternity configuration (ward, beds, ANC and partograph forms), the prenatal order set,
+single sign-on wiring, the adapter and its audit trail, WhatsApp notifications, the remaining
+backup layers **and a tested restore**, and Caddy with HTTPS. Sequence and status:
 [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
 Deliberate placeholders — **not gaps to be quietly filled**: maternity bed counts, WhatsApp

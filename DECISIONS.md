@@ -183,6 +183,13 @@ Observed on a real order placed for this purpose (`ORD-96`, Haemoglobin, read ba
 - Timestamps are **whole-second** (`.000`); multiple records routinely share one second (7 patients
   shared `10:24:46`).
 
+**Correction appended 2026-08-13:** the sentence above saying orders are not updated in place was
+too strong. A proper `DISCONTINUE` writes `date_stopped` and changes the original FHIR status without
+advancing its `meta.lastUpdated`. It also creates a new timestamped ServiceRequest whose `replaces`
+points to the original, which is how the poller can see the cancellation. The implementation must
+process `replaces` and must not filter on status. Full evidence and consequences are in
+`docs/WATERMARK-DESIGN.md` §6; the original statement remains here so the correction is auditable.
+
 #### Q4 — OpenELIS outbound direction: **evidence gathered 2026-08-12 (DH-009b), after DH-005**
 
 Superseded within this same appendix: OpenELIS was deployed at DH-005, so this half became
