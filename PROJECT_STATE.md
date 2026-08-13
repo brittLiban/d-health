@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-11 · **Phase:** Step 1 of 8 ✅ done · ADR-005 evidence awaiting review
+**Updated:** 2026-08-12 · **Phase:** Steps 1 and 3 of 8 built · ADR-005 evidence awaiting review
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -9,10 +9,17 @@ Single agent, one ticket at a time. Update this file before ending a session.
 
 ## Current phase
 
-Step 1 (MariaDB + OpenMRS O3) **boots and works**. Images are pulled and digest-pinned; a test
-patient was registered and retrieved through REST and FHIR R4, and survived `down`/`up`. Running
-it exposed five defects that `docker compose config` could never have caught — see
-`CURRENT_STATE.md` §3a. Two remain open as flagged decisions (BLOCKER-2, DH-019).
+**Step 1** (MariaDB + OpenMRS O3) boots and works — verified through REST and FHIR, and by Liban
+himself in the SPA. **Step 3** (PostgreSQL + OpenELIS) is built and verified: three co-tenant
+databases, 167-table OpenELIS schema, webapp on HTTPS, and a FHIR server answering `metadata` over
+mutual TLS. **DH-019** closed the published-default admin password.
+
+Both steps together surfaced nine defects that `docker compose config` could never have caught
+(`CURRENT_STATE.md` §3a and DH-005's ticket entry). Nothing is blocked on effort — the open items
+are decisions, gathered under **NEEDS LIBAN** below.
+
+Step 2 (DH-003, maternity config) is deliberately *not* started: it depends on BLOCKER-2, which is
+yours to decide.
 
 ## Ticket status
 
@@ -23,21 +30,22 @@ it exposed five defects that `docker compose config` could never have caught —
 | 🟡 Awaiting Liban's review | **DH-009a** + **DH-009b** (ADR-005 evidence, both legs) |
 | 🆕 Raised while building | DH-020 (Postgres public-schema grant), DH-021 (public keystore private key) |
 | 🔨 In progress | DH-017 (README — now covers step 1 fully, incl. boot timing and the demo-patient warning) |
-| 📋 Ready | DH-019 (admin password wiring — new, from DH-002) |
+| 📋 Ready, no decision needed | DH-007 (Keycloak), DH-014 (backup — pinned P0) |
 | ⏸ Waiting on dependencies | DH-003 … DH-018 |
 
 ## ▶ START HERE (next session)
 
-1. **DH-009a needs Liban's review before any adapter code exists.** ADR-005 forbids building the
-   poller until the watermark design has been read. `docs/WATERMARK-DESIGN.md` is written and
-   built into nothing. The two questions that actually need his judgement are §9.1 (poll interval
-   — a clinical-workflow question, not a technical one) and §9.3 (polling being the only available
-   trigger is new information bearing on ADR-004's `labonfhir` deferral).
-2. **BLOCKER-2 also needs him** — the distro creates 50 fictional patients on first boot, and
-   `OMRS_ADD_DEMO_DATA=false` does not stop it. Not urgent locally; a hard gate before the pilot
-   VM is built, and it shapes DH-003.
-3. **Then DH-003 or DH-005**, whichever he prefers. DH-005 (PostgreSQL + OpenELIS) additionally
-   unblocks DH-009b, the untouched half of ADR-005.
+**Everything buildable without a decision has been built.** Work through **NEEDS LIBAN** below —
+that list is the critical path now, not effort.
+
+1. **ADR-005 review** (items 2–4). Both legs now have evidence, and they are *asymmetric*: OpenMRS
+   cannot push, OpenELIS can. The poller is not written, deliberately — ADR-005 forbids it before
+   review. This gates DH-010 → DH-012, the longest pole after SSO.
+2. **BLOCKER-2** (item 1). Gates DH-003, and it must be settled before the pilot VM's first boot,
+   because the mechanism self-clears after firing.
+3. **Then, unblocked and needing no decision:** DH-007 (Keycloak — its database already exists) and
+   DH-014 (backup — it only needs databases, and both engines now exist). DH-014 is pinned P0 and
+   `CURRENT_STATE.md` §7 warns it is the thing that gets squeezed if left late.
 
 **If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
 `docker compose down -v` — that destroys the volumes and the evidence.
