@@ -541,10 +541,18 @@ All four tags existed as listed — no substitutions were needed.
 | `itechuw/openelis-global-2-database:3.2.1.11` | `sha256:c7750aad1650a1dbc73f97240167bb778e9df23592e41c2c2232d47a4054c14f` |
 | `itechuw/openelis-global-2-fhir:3.2.1.11` | `sha256:e58bc63f2248b55670017b7854ca3dd17c69c2977c4b38b98c20068f8f8e2320` |
 | `itechuw/openelis-global-2-frontend:3.2.1.11` | `sha256:8054581aee1ef5b15e4a1ebc4fa8d96d7c5021ca36e580a7d78d2f2c7c78bb5a` |
-| `itechuw/certgen:main` | `sha256:e27a8194300ba73309e835a4070e9ce531687eb3ee604895de781f3061791635` |
+| ~~`itechuw/certgen:main`~~ **removed at DH-021** | ~~`sha256:e27a8194300ba73309e835a4070e9ce531687eb3ee604895de781f3061791635`~~ |
+| `eclipse-temurin:17-jre-alpine` (base of local `daher-health/certgen`) | `sha256:02320dd4ce20e243dfb915c686089cf9315c763084fafbb12d5c9993aee18b57` |
 
-All four OpenELIS tags existed as this section predicted. `certgen` publishes only the moving tag
-`main`, so it carries a digest for the same reason the O3 images do. PostgreSQL is **14.4**, as
+All four OpenELIS tags existed as this section predicted.
+
+**`certgen` was removed at DH-021 (2026-08-13).** It never generated anything — it shipped
+pre-built keystores inside a public image, so the private key protecting both internal 8443
+connectors was publicly downloadable, and its certificate had *already expired* (`notAfter
+2026-07-23`) while nothing on that path validated expiry. It is replaced by a local image built
+from the digest-pinned `eclipse-temurin` base above, which generates the material on the deployment
+and renders the matching `common.properties` in the same job so the keystore and its password
+cannot drift apart. PostgreSQL is **14.4**, as
 predicted — confirmed from the running container, not from the tag. The O3 backend runs on Amazon
 Linux 2; the frontend and gateway on Alpine 3.24. All three ship `curl`, and the MariaDB image
 ships the `mariadb` client binary, so the healthcheck commands in the compose file resolve

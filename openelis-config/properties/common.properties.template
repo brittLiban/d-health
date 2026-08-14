@@ -8,6 +8,17 @@
 # upstream. Diff against the exact upstream tag before assuming anything here
 # is our invention.
 #
+# ⚠️ THIS IS A TEMPLATE, NOT THE DEPLOYED FILE (DH-021). The @NAME@ placeholders
+#    below are substituted at deploy time by openelis-config/certs/render-properties.sh
+#    into a volume, so the real SSL passwords are never committed. Edit this
+#    file, never the rendered output — the rendered copy is overwritten on every
+#    `up` and is gitignored.
+#
+# ⚠️ `encryption.general.password` is deliberately LEFT as upstream's published
+#    value. It is NOT part of DH-021. It encrypts application data, so changing
+#    it may make already-stored encrypted values unreadable. It needs its own
+#    analysis and is potentially clinical-data surface — do not fold it in here.
+#
 # ⚠️ TWO ITEMS NEED A HUMAN DECISION BEFORE THIS IS USED WITH REAL PATIENTS —
 #    both are recorded in PROJECT_STATE.md:
 #      1. The default requester is upstream's sample clinician ("Felix
@@ -19,10 +30,10 @@
 
 # SSL Config
 server.ssl.key-store = file:/etc/openelis-global/keystore
-server.ssl.key-store-password = kspass
-server.ssl.key-password = kspass
+server.ssl.key-store-password = @OE_KEYSTORE_PASSWORD@
+server.ssl.key-password = @OE_KEYSTORE_PASSWORD@
 server.ssl.trust-store= file:/etc/openelis-global/truststore
-server.ssl.trust-store-password=tspass
+server.ssl.trust-store-password=@OE_TRUSTSTORE_PASSWORD@
 
 #/usr/local/tomcat/webapps/OpenELIS-Global/certs
 encryption.general.password=kspass

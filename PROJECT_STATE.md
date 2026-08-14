@@ -163,11 +163,11 @@ target, not the page text, and always run the wrong-password control.
 |---|---|
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
-| 🆕 Raised while building | DH-021 (public keystore private key) |
+
 | 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
 | 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
-| 📋 Ready, agent-buildable now | **DH-017** (README), **DH-021** (keystore), **DH-016** configuration (public certificates wait on #15 DNS) |
+| 📋 Ready, agent-buildable now | **DH-017** (README), **DH-016** configuration (public certificates wait on #15 DNS) |
 | 🗓 Blocked on the birth-centre meeting | **DH-004**, **DH-006** (clinical sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
@@ -179,8 +179,8 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 1. ~~**DH-015, the performed restore drill.**~~ ✅ **PERFORMED 2026-08-13** — see the ticket below and
    `backup/restore-drill.md`. It found two real defects. It is **not closed**: re-run it once a lab
    result exists and SSO is active, and answer the §6 question about hand-entering a result.
-2. **DH-017 (README) and DH-021 (keystore) are now the top unblocked work.** Neither needs the
-   birth-centre meeting.
+2. **DH-017 (README) and DH-016 (Caddy configuration) are the top unblocked work.** Neither needs
+   the birth-centre meeting. DH-021 and the healthcheck false green are both closed.
 3. **Do not activate SSO or DH-011 transport.** BLOCKER-5 and BLOCKER-3's two remaining legs are
    meeting-blocked (see the 🗓 table above). ADR-015 closed the first-sync boundary only — that is
    one leg of three, not permission to build the poller.
@@ -239,7 +239,7 @@ DH-018 (needs DH-013 + DH-015). So the meeting sits in front of five of the eigh
 stays blocked for public verification until the records exist.
 
 **Not waiting on the meeting** (agent-buildable now): DH-015 restore drill, DH-017 README,
-DH-021 keystore, DH-016 configuration short of public certificate issuance.
+DH-016 configuration short of public certificate issuance.
 
 **ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
 interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
@@ -630,7 +630,7 @@ connections passed and all six cross-tenant connections were denied. After resta
 PostgreSQL client, OpenELIS HTTPS, OpenELIS FHIR mutual-TLS metadata, Keycloak readiness, and adapter
 readiness all passed. A second hardening run exited 0, proving restart idempotency.
 
-### DH-021 · Replace the shipped keystore · **P0 (raised from P1)** · 🔨 GENERATOR BUILT + PROVEN; APPLICATION BLOCKED
+### DH-021 · Replace the shipped keystore · **P0 (raised from P1)** · ✅ DONE 2026-08-13
 Raised at DH-005. `itechuw/certgen` generates nothing — it ships **pre-built** keystores inside a
 public image, so the private key protecting the internal 8443 connectors is publicly downloadable.
 Attempting the replacement on 2026-08-13 found two further defects and one unrelated false green.
@@ -657,26 +657,35 @@ second run leaving it untouched, an `openssl s_server -Verify 1` mutual-TLS hand
 `Verify return code: 0 (ok)`, and a no-client-certificate control correctly refused with
 `tlsv13 alert certificate required`.
 
-**🛑 Blocked on a coordination step, and the live stack was rolled back.** Applying it took OpenELIS
-down: the Spring context failed with `keystore password was incorrect` and every page became a
-redirect loop. The cause is `openelis-config/properties/common.properties` — the **committed**
-Docker secret — which hardcodes `server.ssl.key-store-password = kspass`, `server.ssl.key-password`
-and `server.ssl.trust-store-password=tspass`. The webapp reads its SSL material from there, not from
-`CATALINA_OPTS`. The keystore volume and `.env` were restored from a pre-change backup, both
-services recreated, and the known-good state re-verified: configured admin reaches
-`/OpenELIS-Global/`, `adminADMIN!` and a wrong-password control both bounce to `/LoginPage`,
-mutual-TLS FHIR metadata returns 200, ten services running.
+**The coordination step, found the hard way.** The first attempt took OpenELIS down: the Spring
+context failed with `keystore password was incorrect` and every page became a redirect loop.
+OpenELIS reads its SSL passwords from `common.properties` — the **committed** Docker secret — not
+from `CATALINA_OPTS`. A regenerated keystore paired with a `kspass` properties file is an outage.
+The stack was restored from a pre-change backup and re-verified before continuing.
 
-**What closing this ticket requires:** rendering `common.properties` with the real passwords
-*without committing them*. The file is currently committed precisely because it held only published
-values, so that shape has to change — a template rendered to a gitignored path, or a switch from
-`secrets:` to a generated mount. That is a design decision affecting how the secret is delivered,
-not a value edit, so it was not improvised while the stack was down.
+**How it was closed.** `common.properties` became
+`common.properties.template` with `@OE_KEYSTORE_PASSWORD@` / `@OE_TRUSTSTORE_PASSWORD@`
+placeholders, and `render-properties.sh` substitutes them at deploy time into the
+`openelis-properties` volume, mounted read-only at `/run/secrets` — the path the application
+already expects. A file-based Docker `secret` must be a host path, and a host path cannot be
+produced by a container during the same `up`, which is why the delivery mechanism changed rather
+than the value. **Certificates and properties are generated by one job on purpose**, so the
+keystore and the password that opens it cannot drift apart.
 
-⚠️ **Do not change `encryption.general.password=kspass` in the same pass.** It is in the same file
+**Verified 2026-08-13 on the live stack:** the keystore opens with the configured password and
+refuses both `kspass` and a wrong-password control; the certificate served on the wire is
+`CN=openelis.org, O=Daher Health`, valid to 2028-11-16, `checkend 0` clean; mutual-TLS FHIR
+metadata returns 200 with the new client certificate and is refused without one; the rendered
+properties file has zero remaining placeholders, mode `0444`, and its password hash matches `.env`;
+configured admin login reaches `/OpenELIS-Global/` while `adminADMIN!` and a wrong control both
+bounce to `/LoginPage`. A full `docker compose up -d` is idempotent — the certs job reported
+"existing certificate is valid for more than 30 days — leaving it alone". Ten services running,
+zero restarts, zero OOM, 102 patients unchanged.
+
+⚠️ **`encryption.general.password=kspass` was deliberately NOT changed.** It is in the same file
 and looks like part of this fix. It is not — it is application data encryption, and changing it may
 make already-encrypted stored values unreadable. It needs its own analysis and is potentially
-clinical-data surface.
+clinical-data surface. The template carries this warning inline.
 
 ### DH-022 · Keep unconfigured backup out of the default Compose path · P0 · ✅ DONE 2026-08-13
 The documented `docker compose up -d` previously selected `backup` even when the required
@@ -1001,8 +1010,8 @@ message shapes).
 | 10 | OpenELIS ignores `DEFAULT_PW` and shipped `adminADMIN!` even on empty volumes | **Fixed and empty-volume form-login verified — DH-024** |
 | 11 | Optional OpenELIS Odoo test-product mapping CSV is absent and logs an error | **Documented, not fabricated** — no Odoo service or billing integration is in v1; adding product/test mappings would be scope and laboratory configuration work |
 | 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Core fixed and runtime-verified — DH-025**; concrete OpenELIS correlation attach/query remains a DH-011 activation gate. No transport exists yet, so no message has been affected |
-| 13 | **The OpenELIS internal TLS certificate expired 2026-07-23** and nothing on that path validates expiry, so it kept serving | **Open — DH-021 (now P0).** Replacement generator built and proven in isolation; application blocked on `common.properties` rendering |
-| 14 | **`OE_KEYSTORE_PASSWORD`/`OE_TRUSTSTORE_PASSWORD` are empty in `.env`**, so `${VAR:-kspass}` silently selected upstream's published passwords while the variables looked configured | **Open — DH-021.** The `:-` fallback is the mechanism; the fix removes it so an empty value fails loudly instead of quietly using a public password |
+| 13 | **The OpenELIS internal TLS certificate expired 2026-07-23** and nothing on that path validates expiry, so it kept serving | **Fixed and live-verified — DH-021.** Material is now generated on this deployment, valid to 2028-11-16, and the generator renews early (`OE_CERT_RENEW_BEFORE_DAYS`) rather than at expiry |
+| 14 | **`OE_KEYSTORE_PASSWORD`/`OE_TRUSTSTORE_PASSWORD` are empty in `.env`**, so `${VAR:-kspass}` silently selected upstream's published passwords while the variables looked configured | **Fixed — DH-021.** Both are now `:?` required; an empty value fails loudly at `up` instead of quietly selecting a public password |
 | 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Fixed and verified 2026-08-13.** The check now requires `LoginPage` to return 200 *and* contain the Spring Security `_csrf` token — something only a live application context produces. Proven in both directions: it passes against the healthy webapp and **fails against the bare 302** (0-byte body) that the broken context returned. `start_period` raised 60s → 180s because the context must genuinely be up, not merely bound |
 
 ## Notes for next session
