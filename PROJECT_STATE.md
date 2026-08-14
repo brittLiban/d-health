@@ -168,7 +168,7 @@ target, not the page text, and always run the wrong-password control.
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
 | 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
 | 🔨 Built + locally verified, external input to finish | **DH-016** (routing/TLS verified locally; public certificates wait on #15 DNS) |
-| 🗓 Blocked on the birth-centre meeting | **DH-004** (form fields), **DH-006** (mechanism built; contents await sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
+| 🗓 Blocked on the birth-centre meeting | **DH-004** (ADR-006 guard built; fields await sign-off), **DH-006** (mechanism built; contents await sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -589,10 +589,40 @@ zero placeholders pending real facility numbers (ADR-007). A human has not yet r
 the SPA visibly opens in French, so that browser observation remains unverified rather than being
 inferred from config.
 
-### DH-004 · ANC + partograph forms · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
+### DH-004 · ANC + partograph forms · P0 · 🔨 ADR-006 GUARD BUILT 2026-08-13 · 🛑 FIELDS AWAIT SIGN-OFF
 Data-entry only. 🔒 No alert lines, no action lines, no prolonged-labour flagging (ADR-006).
-Fields from unmodified WHO/OpenMRS reference defaults, marked *needs sign-off from clinical lead*.
 **Cannot be marked DONE without a recorded human response**, even when technically complete.
+
+**Same finding as DH-006: nothing ships to copy.** No antenatal or partograph form exists anywhere
+in this stack. Checked, not assumed — the only 10 forms present are upstream `-core_demo.json` demo
+forms, and a full-text search of the distribution for "antenatal"/"partograph" returns only a demo
+billing CSV. So the fields must be composed, which is the clinical lead's decision.
+
+**Built: ADR-006 is now executable rather than a promise.**
+`openmrs-config/forms/validate_form_safety.py` refuses any AMPATH form schema that performs
+clinical interpretation — `calculate`/`calculateExpression`, `alert`/`warning` keys,
+`js_expression` validators, and decision-support vocabulary (alert line, action line, prolonged
+labour, risk score, triage, recommend, danger sign). 19 tests, each encoding a specific way
+decision support gets added to a form. A pinned P0 that previously depended on whoever remembered
+it now fails the deployment instead.
+
+**A defect found in the guard itself, and fixed.** Pointed at a directory whose contents it could
+not see, it reported "no clinical interpretation found" and exited 0 — a checker producing a green
+result having examined zero files. An empty check is now an error, with tests locking that in. This
+is the fourth false-green of this kind found in the project; the pattern is always the same, a check
+that passes for a reason unrelated to what it claims to prove.
+
+**⚠️ Finding — three demo forms currently loaded here DO perform clinical interpretation.**
+Running the guard against the shipped demo schemas flagged `structured_soap_note` (an actual
+`alert` key, `calculateExpression`, expression validators), `mental_health_assessment_form`, and
+`form-engine-cookbook`. All three are live in the database. They are upstream **demo content**, not
+maternity forms, and **nothing was changed**. `OMRS_DEMO_CONTENT=off` removes them and is already a
+supported switch — but demo content is a decided option (BLOCKER-2), so turning it off for the
+pilot is **Liban's call, not an agent's**. Human Decision Required: Yes.
+
+**Still required to close:** the clinical lead supplies the field list in
+`docs/CLINICAL-SIGNOFF.md` §6; the schema is built from it and must pass the guard; the response is
+recorded here with its date and who gave it.
 
 ### DH-005 · PostgreSQL + OpenELIS standalone · P0 · 🟢 BUILT AND VERIFIED 2026-08-12
 Five services added, all digest-pinned. Verified by running, not by `compose config`:
@@ -1097,6 +1127,7 @@ message shapes).
 | 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Core fixed and runtime-verified — DH-025**; concrete OpenELIS correlation attach/query remains a DH-011 activation gate. No transport exists yet, so no message has been affected |
 | 13 | **The OpenELIS internal TLS certificate expired 2026-07-23** and nothing on that path validates expiry, so it kept serving | **Fixed and live-verified — DH-021.** Material is now generated on this deployment, valid to 2028-11-16, and the generator renews early (`OE_CERT_RENEW_BEFORE_DAYS`) rather than at expiry |
 | 14 | **`OE_KEYSTORE_PASSWORD`/`OE_TRUSTSTORE_PASSWORD` are empty in `.env`**, so `${VAR:-kspass}` silently selected upstream's published passwords while the variables looked configured | **Fixed — DH-021.** Both are now `:?` required; an empty value fails loudly at `up` instead of quietly selecting a public password |
+| 16 | **Three upstream demo forms loaded here perform clinical interpretation** — `structured_soap_note` (an `alert` key, `calculateExpression`, expression validators), `mental_health_assessment_form`, `form-engine-cookbook` | **Open — raised 2026-08-13 by DH-004's new guard.** Demo content, not maternity forms; nothing changed. `OMRS_DEMO_CONTENT=off` removes them, but that is a decided switch (BLOCKER-2) — **Human Decision Required: Yes** |
 | 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Fixed and verified 2026-08-13.** The check now requires `LoginPage` to return 200 *and* contain the Spring Security `_csrf` token — something only a live application context produces. Proven in both directions: it passes against the healthy webapp and **fails against the bare 302** (0-byte body) that the broken context returned. `start_period` raised 60s → 180s because the context must genuinely be up, not merely bound |
 
 ## Notes for next session

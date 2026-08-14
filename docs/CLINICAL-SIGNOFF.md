@@ -110,10 +110,28 @@ OpenELIS. Wherever a chosen test lacks a code on either side, that pair needs an
 This does not change *what* you choose — it changes how much wiring each choice needs, and it is
 better known now than discovered during the pilot.
 
-## 6. Partograph fields (DH-004) — same process, separate sheet
+## 6. ANC and partograph fields (DH-004)
 
-The partograph form is the other item needing your sign-off. Per **ADR-006** it ships as
-**data entry only**: it records what a midwife observes and does nothing else. It has
+The forms are the other item needing your sign-off, and they are in the same position as the panel:
+**no antenatal or partograph form ships anywhere in this stack.** Checked, not assumed — the only
+10 forms present are upstream *demo* forms (`covid19`, `SOAP note`, `Mental Health Assessment`,
+and so on), and searching the whole distribution for "antenatal" or "partograph" returns nothing.
+So the fields have to be composed, and that is yours.
+
+### What we need
+
+| # | Observation to record | Units / type | Notes |
+|---|---|---|---|
+| 1 |  |  |  |
+| 2 |  |  |  |
+| 3 |  |  |  |
+
+Add as many rows as the form needs. For each one, the value is simply **recorded and displayed** —
+see below.
+
+### ⚠️ What the partograph will NOT do, by decision (ADR-006)
+
+It ships as **data entry only**. It records what a midwife observes and does nothing else:
 
 - no alert line, no action line,
 - no prolonged-labour flagging,
@@ -121,6 +139,18 @@ The partograph form is the other item needing your sign-off. Per **ADR-006** it 
 
 That is a deliberate decision, not an oversight and not a limitation to be "fixed" later without a
 new decision. This system records and routes; it does not interpret.
+
+**This is now enforced in code, not just written down.** `openmrs-config/forms/validate_form_safety.py`
+refuses any form schema containing computed values, alerts, warnings, expression validators, or
+decision-support vocabulary. If someone later adds an alert line "helpfully", the check fails and the
+deployment stops. If you *want* any of that, it needs a superseding ADR and an explicit decision from
+you — not a code edit.
+
+> **Related finding, for your awareness — not a request.** Three of the upstream *demo* forms
+> currently loaded in this deployment (`Structured SOAP note`, `Mental Health Assessment Form`,
+> `Form Engine Cookbook`) do contain computed fields, an `alert`, and expression validators. They
+> are demo content, not maternity forms, and nothing has been changed. Turning them off is a single
+> switch (`OMRS_DEMO_CONTENT=off`) and is Liban's call, recorded against DH-004 in `PROJECT_STATE.md`.
 
 ## 7. Recording the decision
 
