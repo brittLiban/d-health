@@ -164,10 +164,10 @@ target, not the page text, and always run the wrong-password control.
 | ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
 
-| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011) |
+| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README brought current; needs a fresh-VM walk-through), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
 | 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
-| 📋 Ready, agent-buildable now | **DH-017** (README), **DH-016** configuration (public certificates wait on #15 DNS) |
+| 🔨 Built + locally verified, external input to finish | **DH-016** (routing/TLS verified locally; public certificates wait on #15 DNS) |
 | 🗓 Blocked on the birth-centre meeting | **DH-004**, **DH-006** (clinical sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
@@ -179,8 +179,9 @@ Work through **NEEDS LIBAN** below while continuing only the unblocked tickets l
 1. ~~**DH-015, the performed restore drill.**~~ ✅ **PERFORMED 2026-08-13** — see the ticket below and
    `backup/restore-drill.md`. It found two real defects. It is **not closed**: re-run it once a lab
    result exists and SSO is active, and answer the §6 question about hand-entering a result.
-2. **DH-017 (README) and DH-016 (Caddy configuration) are the top unblocked work.** Neither needs
-   the birth-centre meeting. DH-021 and the healthcheck false green are both closed.
+2. **DH-016 and DH-017 are both built and locally verified.** What remains on each needs Liban:
+   the real domain/DNS for public certificates, and a fresh-VM walk-through of the README.
+   DH-021 and the healthcheck false green are closed.
 3. **Do not activate SSO or DH-011 transport.** BLOCKER-5 and BLOCKER-3's two remaining legs are
    meeting-blocked (see the 🗓 table above). ADR-015 closed the first-sync boundary only — that is
    one leg of three, not permission to build the poller.
@@ -238,8 +239,10 @@ DH-018 (needs DH-013 + DH-015). So the meeting sits in front of five of the eigh
 **Separately in progress, not meeting-blocked:** #15 domain/DNS — Liban is registering it; DH-016
 stays blocked for public verification until the records exist.
 
-**Not waiting on the meeting** (agent-buildable now): DH-015 restore drill, DH-017 README,
-DH-016 configuration short of public certificate issuance.
+**Not waiting on the meeting:** DH-015 (performed), DH-016 (built; public certs need #15),
+DH-017 (brought current; needs a fresh-VM walk-through), DH-021 (done), healthcheck bug 15 (done).
+The remaining agent-buildable surface is now small — most of what is left needs the meeting or the
+domain.
 
 **ADR-005 review completed 2026-08-12.** Liban approved the custom adapter and 15-second poll
 interval after the evidence and watermark design were presented. OpenELIS outbound delivery and
@@ -994,11 +997,33 @@ control that swaps a file a dependency also writes must do the same.
    `https://emr.localhost:8443` behind a locally-trusted CA — a worse position than today. Remove it
    with #15.
 
-### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · 🔨 IN PROGRESS
-Started 2026-08-10 — covers project purpose, status warning, doc map, prerequisites, `.env` setup,
-and step-1 run + verification. Grows with each subsequent step.
-**DoD:** someone else could deploy a second instance without asking Liban anything. Not there yet —
-it currently documents step 1 only, and says so.
+### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · 🔨 BROUGHT CURRENT 2026-08-13
+Now covers the whole deployed stack rather than step 1 only: purpose, honest status, doc map,
+prerequisites, `.env` setup, first-boot timing, demo-data controls, maternity beds, **the reverse
+proxy and how to actually reach the system**, **a whole-stack verification section**, and
+**backup/restore with the drill's two traps**.
+
+Additions this pass:
+
+- A **required-values table** — everything that must be set before the first `up`.
+- ⚠️ **"An empty value is not the same as a safe default"**, with DH-021's concrete case: empty
+  `OE_KEYSTORE_PASSWORD` silently selected upstream's published `kspass` through a `:-` fallback.
+- The DH-016 access model, including the constraint that OpenELIS's SPA and API **must share one
+  origin**, and the warning that an empty `email` makes Caddy fail to *parse* its config.
+- Restore guidance pointing at `backup/restore-drill.md` for the `--clean` data-loss trap and the
+  tenant-isolation loss that drop-and-recreate causes.
+- Verification commands that assert **application behaviour, not open ports** — the mistake this
+  project has now made three separate times.
+
+**All six documented verification commands were run verbatim against the live stack** and produce
+the stated output.
+
+**Not yet closed.** The DoD is "someone else could deploy a second instance without asking Liban
+anything", and two things still require him: the real domain/DNS for public TLS, and the facility
+values (bed counts, requester identity). A second *local* instance is now reproducible from this
+README alone. It should also be re-walked on a genuinely fresh VM before being called DONE —
+documentation verified only against an already-working machine is exactly the kind of claim this
+repo distrusts.
 
 ### DH-018 · Golden end-to-end demonstration · P0 · ⏸ (needs DH-013, DH-015)
 All eight steps of §8, demonstrated live to Liban, including the retry/restart no-duplicates check.

@@ -10,15 +10,21 @@ one `docker-compose.yml`.
 > **Step 1 (MariaDB + OpenMRS O3)** is API-verified and Liban registered a test patient in the SPA.
 > **Step 3 (PostgreSQL + OpenELIS)** is running with its schema and mutual-TLS FHIR endpoint
 > verified; configured admin authentication is form-verified, but its browser workflow has not
-> been exercised, and the upstream Horiba Micros60/Pentra60 analyzer imports are blocked
-> pending confirmation that either device is in facility scope. **DH-008 SSO protocol plumbing** is
-> running fail-closed: Keycloak has verified OpenMRS OIDC and OpenELIS SAML clients, but staff-role
-> mapping is a human authorization decision and SSO remains disabled.
-> **DH-010's adapter safety skeleton** is also healthy with its real database migration and audit
-> volume verified. **DH-025's crash-recovery core** is implemented and runtime-verified, including
-> exclusive process ownership and before/after-write tests; its concrete OpenELIS correlation
-> binding remains a transport activation gate. It does not move FHIR messages yet. One-login SSO
-> proof and the clinical/integration steps remain incomplete.
+> been exercised. Analyzer interfaces are **out of scope for v1** — results are entered manually
+> (ADR-016). **DH-008 SSO protocol plumbing** runs fail-closed: Keycloak has verified OpenMRS OIDC
+> and OpenELIS SAML clients, but staff-role mapping is a human authorization decision and SSO
+> remains disabled. **DH-010's adapter safety skeleton** is healthy, and **DH-025's crash-recovery
+> core** is runtime-verified including before/after-write crash tests — but it does not move FHIR
+> messages yet. **DH-016's reverse proxy** serves all three subdomains over HTTPS locally;
+> publicly trusted certificates still need the real domain and DNS. **DH-021** replaced the
+> upstream keystore, whose private key was public *and whose certificate had already expired*.
+>
+> **A restore has actually been performed** (DH-015) — archive decrypted, restored into an isolated
+> stack, and a patient read back through the API. It is *partial coverage*, not done: see
+> [`backup/restore-drill.md`](backup/restore-drill.md). Off-site backup is still unexercised.
+>
+> Still missing: clinical forms, the prenatal order set, order/result transport, notifications,
+> SSO activation, and the end-to-end demonstration.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -57,6 +63,7 @@ language, not a localisation afterthought.
 | [`DECISIONS.md`](DECISIONS.md) | Architecture decision records — why things are the way they are |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order |
 | [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks |
+| [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---
@@ -97,6 +104,36 @@ Keep `.env` mode `0600`: it contains database, application, and OIDC client cred
 
 The compose file uses `${VAR:?}` guards, so a missing required value fails loudly at startup
 instead of silently falling back to a default password.
+
+### ⚠️ An empty value is not the same as "left at a safe default"
+
+DH-021 found this the expensive way. `OE_KEYSTORE_PASSWORD` and `OE_TRUSTSTORE_PASSWORD` were
+**empty** in a working `.env`, and compose read them as `${OE_KEYSTORE_PASSWORD:-kspass}` — so an
+empty value silently selected upstream's *published* password while the variable looked configured.
+Both are now `:?` required and must be generated:
+
+```bash
+openssl rand -base64 32
+```
+
+If you are copying an older `.env` forward, fill these in; `docker compose up -d` will refuse to
+start until you do. That refusal is the feature.
+
+### Required values at a glance
+
+Everything below must have a real value before the first `docker compose up -d`:
+
+| Variable | Notes |
+|---|---|
+| `OMRS_DB_PASSWORD`, `OMRS_DB_ROOT_PASSWORD` | MariaDB application and root |
+| `OMRS_ADMIN_PASSWORD` | ⚠️ **first boot only** — see below |
+| `OE_DB_PASSWORD`, `OE_DB_SUPERUSER_PASSWORD`, `OE_POSTGRES_PASSWORD` | three *separate* PostgreSQL credentials |
+| `OE_ADMIN_PASSWORD` | narrower alphabet — letters, digits, and `* $ # !` only |
+| `OE_KEYSTORE_PASSWORD`, `OE_TRUSTSTORE_PASSWORD` | DH-021; never `kspass`/`tspass` |
+| `KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD` | |
+| `KEYCLOAK_OPENMRS_CLIENT_SECRET`, `KEYCLOAK_ADAPTER_CLIENT_SECRET` | |
+| `ADAPTER_DB_PASSWORD` | |
+| `BASE_DOMAIN` | `localhost` for local work; the real domain on the pilot VM |
 
 OpenELIS password policy is narrower than a general password generator: its admin password must
 use only letters, numbers, and `* $ # !`, must be at least seven characters, and must contain at
@@ -190,15 +227,61 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' \
 
 Then open <http://127.0.0.1:8080/openmrs/spa>.
 
-The port binds to `127.0.0.1` only. On a remote VM, reach it through an SSH tunnel rather than
+That port binds to `127.0.0.1` only. On a remote VM, reach it through an SSH tunnel rather than
 opening a firewall port:
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 user@your-vm
 ```
 
-Public access arrives at build step 8, with Caddy and HTTPS. There is deliberately no
-public route before TLS exists.
+## Reaching the system through the reverse proxy (DH-016)
+
+Caddy is the **only** container that publishes host ports. Everything else — both databases, both
+FHIR endpoints, Keycloak, the adapter — stays on the internal Docker network, which is what makes
+"not publicly routed" a fact rather than an intention.
+
+Routing is by **subdomain, not path prefix** (ADR-008):
+
+| URL | Serves |
+|---|---|
+| `https://emr.<BASE_DOMAIN>` | OpenMRS O3 (via the distro's own gateway, ADR-010) |
+| `https://lab.<BASE_DOMAIN>` | OpenELIS — SPA at `/`, API at `/OpenELIS-Global/*` |
+| `https://id.<BASE_DOMAIN>` | Keycloak |
+
+⚠️ **OpenELIS's SPA and API must share one origin.** The built bundle calls `/OpenELIS-Global/...`
+as a *relative* path, and its own nginx serves static files only. Splitting those across two
+hostnames breaks every API call the SPA makes. Do not "tidy" that into separate vhosts.
+
+### With `BASE_DOMAIN=localhost` (local work)
+
+Caddy issues certificates from its **internal CA**. Browsers will warn — that is expected and is
+not a misconfiguration. This proves routing, origins, and cookie behaviour. It proves **nothing**
+about public certificate issuance.
+
+Set the host ports so they do not collide with anything already running:
+
+```bash
+CADDY_HTTP_PORT=8081
+CADDY_HTTPS_PORT=8443
+```
+
+Then reach it at `https://emr.localhost:8443`. `*.localhost` resolves to loopback on most systems;
+if yours does not, add entries to `/etc/hosts`.
+
+### On the pilot VM, with a real domain
+
+1. Point `emr`, `lab`, and `id` A/AAAA records at the VM.
+2. Set `BASE_DOMAIN` to the real domain and `CADDY_HTTP_PORT=80`, `CADDY_HTTPS_PORT=443`.
+3. Open **only** 80 and 443 on the firewall. Port 80 is required for ACME.
+4. Add an `email` line to the global block in [`caddy/Caddyfile`](caddy/Caddyfile) so certificate
+   expiry warnings reach a human.
+
+⚠️ **Do not add an empty `email` value.** Caddy fails to *parse* the whole file if `email` is
+present with no argument, which takes the entire proxy down rather than degrading. That is why the
+directive is absent rather than blank.
+
+Publicly trusted certificates have **not** been demonstrated — that needs the real domain and DNS,
+which the facility has not yet provided.
 
 ### Verifying step 1
 
@@ -273,12 +356,100 @@ The seed is strictly additive (ADR-007): raising a count adds missing beds; lowe
 not remove, retire, move, or edit anything. If existing ward/type/bed metadata conflicts with the
 committed definition, the setup job exits non-zero and the frontend dependency gate stays closed.
 
+## Verifying the whole stack
+
+Run these after `docker compose up -d` settles. Each one asserts something an application must
+actually be doing — not that a port is open. **This distinction has bitten this project three
+times**, so prefer these to eyeballing `docker compose ps`.
+
+```bash
+# 1. Everything up, nothing restarting or OOM-killed.
+docker compose ps
+for c in $(docker ps -a --filter name=daher-health --format '{{.Names}}'); do
+  printf '%-42s restarts=%s oom=%s\n' "$c" \
+    "$(docker inspect -f '{{.RestartCount}}' $c)" \
+    "$(docker inspect -f '{{.State.OOMKilled}}' $c)"
+done
+```
+
+```bash
+# 2. OpenMRS authenticates with YOUR password and refuses the published one.
+docker exec daher-health-openmrs-backend-1 curl -s \
+  -u "admin:<your-password>" \
+  'http://localhost:8080/openmrs/ws/rest/v1/session?v=custom:(authenticated)'   # authenticated:true
+docker exec daher-health-openmrs-backend-1 curl -s \
+  -u "admin:Admin123" \
+  'http://localhost:8080/openmrs/ws/rest/v1/session?v=custom:(authenticated)'   # authenticated:false
+```
+
+```bash
+# 3. OpenELIS application context is genuinely up.
+#    A 302 from / proves only that Tomcat is listening — the Spring context can be
+#    completely dead and still return it. Assert the login form instead.
+docker exec daher-health-openelis-webapp-1 sh -c \
+  'curl -ksS https://localhost:8443/OpenELIS-Global/LoginPage | grep -c _csrf'   # non-zero
+```
+
+```bash
+# 4. Database tenant isolation — all nine cases. Each role reaches its own
+#    database and is refused by the other two. Use -h: without it, psql may
+#    connect over a trusting local socket and tell you nothing about passwords.
+docker exec -e PGPASSWORD="$OE_DB_PASSWORD" daher-health-openelis-db-1 \
+  psql -h openelis-db -U clinlims -d keycloak -c 'SELECT 1'    # must FAIL
+```
+
+```bash
+# 5. The proxy serves all three vhosts, and the OpenELIS API leg is TLS-verified.
+docker exec daher-health-caddy-1 sh -c '
+  for u in emr.$BASE_DOMAIN lab.$BASE_DOMAIN id.$BASE_DOMAIN; do
+    wget -qO- --no-check-certificate --server-response --spider https://$u/ 2>&1 | grep -m1 HTTP/
+  done'
+```
+
+```bash
+# 6. Adapter readiness (asserts the response body, not just a 200).
+docker exec daher-health-adapter-1 python -c \
+  "import json,urllib.request; print(json.load(urllib.request.urlopen('http://localhost:8000/health/ready')))"
+```
+
+## Backup and restore
+
+```bash
+docker compose --profile backup run --rm \
+  -e BACKUP_ENCRYPTION_PASSPHRASE="<your-passphrase>" \
+  -e BACKUP_REQUIRE_OFFSITE=false \
+  backup /usr/local/bin/daher-backup
+```
+
+⚠️ **Keep the passphrase.** An encrypted archive whose key you did not retain is not a backup. A
+prior verification run had to delete its own archive for exactly this reason.
+
+**Read [`backup/restore-drill.md`](backup/restore-drill.md) before attempting a restore.** It
+documents two traps found by actually performing one:
+
+- `pg_restore --clean --if-exists` over OpenELIS's pre-populated database produced **213 errors
+  including failed row inserts** — silent data loss behind a run that looked successful. Drop and
+  recreate each database first.
+- That drop-and-recreate then **discards tenant isolation**, because a fresh PostgreSQL database
+  grants `CONNECT` to `PUBLIC`. Re-run the hardening and re-verify all nine cases afterwards. The
+  restore is not complete until that passes.
+
 ## Not yet present
 
-OpenMRS ANC and partograph forms, the prenatal order set,
-single sign-on authorization/activation and one-login proof, adapter order/result transport, WhatsApp notifications, the remaining
-backup layers **and a tested restore**, and Caddy with HTTPS. Sequence and status:
-[`PROJECT_STATE.md`](PROJECT_STATE.md).
+OpenMRS ANC and partograph forms, the prenatal order set, SSO authorization/activation and the
+one-login proof, adapter order/result transport, WhatsApp notifications, off-site backup, and the
+end-to-end demonstration. Sequence and status: [`PROJECT_STATE.md`](PROJECT_STATE.md).
+
+Partially done, and the boundary matters:
+
+- **Restore drill** — performed, but two acceptance legs (a known lab result, an SSO login) could
+  not be exercised because neither exists yet. It must be re-run. `backup/restore-drill.md` §6.
+- **Reverse proxy** — routing and local HTTPS verified; publicly trusted certificates need the real
+  domain and DNS.
+- **Analyzer interfaces** — deliberately **out of scope for v1** (ADR-016). Lab technicians enter
+  results by hand, as they currently do on paper. HL7/ASTM integration is a v1.1 question. The
+  shipped Horiba imports are left untouched and still log errors on boot; that is known, not new
+  breakage.
 
 Deliberate placeholders — **not gaps to be quietly filled**: maternity bed counts, WhatsApp
 credentials (none held yet), the prenatal lab order set, and the partograph form fields. The last
@@ -293,8 +464,19 @@ two need clinical sign-off; the first two need real values from the facility.
 - The only outbound patient-adjacent traffic is a content-free WhatsApp notification ("your results
   are ready" — never result values) and the encrypted nightly backup.
 - Databases, FHIR endpoints, and the adapter are never publicly routed; only the three application
-  subdomains are, and only over HTTPS.
+  subdomains are, and only over HTTPS. Caddy is the sole container publishing host ports.
 - Every image is version-pinned. No `:latest` tags anywhere.
+- Every published default credential found so far is actively refused, and that refusal is tested:
+  OpenMRS `Admin123` (DH-019), the OpenELIS database roles (DH-020), and OpenELIS `adminADMIN!`
+  (DH-024). Each test includes a deliberately-wrong control, because a check that passes for the
+  wrong reason is worse than no check.
+- The internal 8443 keystore is generated **on your deployment** (DH-021). It replaced upstream's
+  pre-built keystore, whose private key ships inside a public image and whose certificate had
+  already expired — while nothing on that path validated expiry. The proxy *verifies* that
+  certificate rather than skipping verification, so the hop from the public edge to the clinical
+  backend is authenticated.
+- PostgreSQL hosts three databases as co-tenants, and each role is refused by the other two
+  databases. Co-tenancy is a deployment convenience, not a relaxed trust boundary.
 
 ## Licence
 
