@@ -519,13 +519,28 @@ services:
     secrets:
       - common.properties
     healthcheck:
+      # ⚠️ This previously asserted only that `/OpenELIS-Global/` returned 302.
+      # That is a FALSE GREEN, observed directly on 2026-08-13 during DH-021: when
+      # the Spring context failed to start, Tomcat still answered 302 on every
+      # path, so the container reported `healthy` while the entire application was
+      # down and every page was a redirect loop.
+      #
+      # A 302 proves Tomcat is listening. It does not prove OpenELIS started. So
+      # assert something only a live application context can produce: the login
+      # form itself, returning 200 and containing the Spring Security CSRF token.
+      # Same lesson as the OpenMRS backend at DH-002 and Keycloak above — check
+      # readiness the application must satisfy, not a port that is merely open.
       test:
         - CMD-SHELL
-        - test "$$(curl -ksS -o /dev/null -w '%{http_code}' https://localhost:8443/OpenELIS-Global/)" = "302"
+        - >-
+          curl -ksSf -o /tmp/hc.html https://localhost:8443/OpenELIS-Global/LoginPage &&
+          grep -q '_csrf' /tmp/hc.html
       interval: 10s
       timeout: 10s
       retries: 30
-      start_period: 60s
+      # The context now has to be genuinely up, not just bound, so first boot
+      # needs more room than the old port-level check did.
+      start_period: 180s
     networks:
       internal:
         aliases: [oe.openelis.org]
