@@ -1,0 +1,113 @@
+# Daher Health — public reverse proxy (DH-016)
+#
+# Subdomains, not path prefixes (ADR-008). Path-prefix routing breaks both
+# applications: OpenMRS O3's SPA and OpenELIS's SPA each assume they own the
+# root, and rewriting their asset paths is a permanent maintenance tax.
+#
+# Caddy is the ONLY container publishing host ports. Everything else stays on
+# the internal Docker network. The O3 gateway container is kept and proxied to,
+# rather than replaced (ADR-010).
+#
+# ⚠️ WITH BASE_DOMAIN=localhost this uses Caddy's INTERNAL CA — a locally
+# trusted certificate, not a public one. Publicly trusted certificates require
+# the facility's real domain with DNS pointing at the pilot VM (NEEDS LIBAN
+# #15). Local HTTPS here proves routing, origins, and cookie behaviour; it does
+# NOT prove public certificate issuance, and this file must not be read as
+# though it did.
+
+{
+	# No admin API: it is unauthenticated by default and this container is the
+	# only one exposed to the host.
+	admin off
+
+	# ⚠️ No global `email` directive here on purpose. Caddy fails to PARSE this
+	# file if `email` is present with an empty value, which takes the whole proxy
+	# down rather than degrading — verified 2026-08-13. ACME does not require an
+	# address. When the real domain arrives (NEEDS LIBAN #15), add:
+	#     email your-ops-address@example.org
+	# so expiry warnings reach a human.
+}
+
+# ---------------------------------------------------------------------------
+# Shared hardening. These are transport/proxy concerns only — nothing here
+# makes a clinical decision or inspects clinical content.
+# ---------------------------------------------------------------------------
+(common) {
+	encode zstd gzip
+
+	header {
+		# The pilot is HTTPS-only once behind Caddy.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		# Clinical records must not be framable by another origin.
+		X-Frame-Options "SAMEORIGIN"
+		# Caddy's own identity is not useful to a client and is useful to a scanner.
+		-Server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# emr.<domain> — OpenMRS O3.
+#
+# Proxied to the distro's own gateway container, which already routes the SPA
+# and the backend consistently (ADR-010). Do not split those here; the gateway
+# owns that mapping and its nginx template hard-codes the upstream names.
+# ---------------------------------------------------------------------------
+emr.{$BASE_DOMAIN} {
+	import common
+	reverse_proxy openmrs-gateway:80
+}
+
+# ---------------------------------------------------------------------------
+# lab.<domain> — OpenELIS.
+#
+# ⚠️ The SPA and the API MUST share one origin. Verified 2026-08-13 by reading
+# the built bundle: it calls `/OpenELIS-Global/...` as a RELATIVE path, and its
+# nginx serves static files only with no API proxy of its own. Splitting these
+# across two hostnames breaks every API call the SPA makes.
+#
+# The API leg speaks HTTPS to Tomcat on 8443 and is VERIFIED, not skipped:
+# DH-021 generates that certificate on this deployment and exports its PEM, so
+# the proxy has a real trust anchor. `tls_insecure_skip_verify` would mean the
+# hop between the public edge and the clinical backend was unauthenticated.
+# ---------------------------------------------------------------------------
+lab.{$BASE_DOMAIN} {
+	import common
+
+	handle /OpenELIS-Global/* {
+		reverse_proxy https://openelis-webapp:8443 {
+			transport http {
+				tls
+				tls_trusted_ca_certs /etc/caddy/ca/openelis-ca.pem
+				# The certificate is issued for the openelis.org names this
+				# stack uses internally; the public hostname is Caddy's, not
+				# the backend's.
+				tls_server_name oe.openelis.org
+			}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	handle {
+		reverse_proxy openelis-frontend:80
+	}
+}
+
+# ---------------------------------------------------------------------------
+# id.<domain> — Keycloak.
+#
+# DH-008's OIDC/SAML flows need a stable public origin; browser cookies and
+# redirect URIs are origin-bound, which is why SSO activation waits on this as
+# well as on BLOCKER-5's authorization matrix.
+# ---------------------------------------------------------------------------
+id.{$BASE_DOMAIN} {
+	import common
+	reverse_proxy keycloak:8080 {
+		# Keycloak builds absolute URLs (issuer, redirects) from these. Getting
+		# them wrong produces tokens whose issuer does not match what the
+		# browser reached, which fails only at login time.
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Port 443
+	}
+}

@@ -354,6 +354,7 @@ services:
     volumes:
       - openelis-keystore:/etc/openelis-global
       - openelis-properties:/output
+      - openelis-ca:/ca
       - ./openelis-config/properties/common.properties.template:/template/common.properties.template:ro
     networks: [internal]
 
@@ -818,6 +819,55 @@ services:
       - backup-data:/backup
     networks: [internal]
 
+  # ===========================================================================
+  # BUILD STEP 8 — Caddy reverse proxy, TLS, subdomains (DH-016)
+  #
+  # The ONLY container that publishes host ports. Everything else stays on the
+  # internal network, which is what makes "not publicly routed" true rather
+  # than aspirational.
+  #
+  # ⚠️ With BASE_DOMAIN=localhost, Caddy uses its INTERNAL CA. That proves
+  # routing, origins and cookies; it does NOT prove public certificate
+  # issuance, which needs the facility's real domain and DNS (NEEDS LIBAN #15).
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    depends_on:
+      openmrs-gateway:
+        condition: service_started
+      openelis-frontend:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+      # Needs the exported CA PEM before it can verify the OpenELIS API leg.
+      openelis-certs:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN in .env}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - openelis-ca:/etc/caddy/ca:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Assert the proxy actually serves the EMR vhost over TLS, not merely
+      # that Caddy is listening — the DH-002 / bug-15 lesson applied up front.
+      test:
+        - CMD-SHELL
+        - wget -q --no-check-certificate --spider https://emr.$${BASE_DOMAIN}/ || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+
 volumes:
   openmrs-db-data:
   openmrs-data:
@@ -825,6 +875,9 @@ volumes:
   openelis-db-data:
   openelis-keystore:   # internal keystore/truststore from openelis-certs (DH-021)
   openelis-properties: # common.properties rendered with real SSL passwords (DH-021)
+  openelis-ca:         # OpenELIS public cert in PEM, so Caddy can verify it (DH-016)
+  caddy-data:          # ACME account + issued certificates — losing this re-issues
+  caddy-config:
   openelis-plugins:
   openelis-logs:
   adapter-audit:

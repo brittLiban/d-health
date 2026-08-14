@@ -120,7 +120,7 @@ complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.
 | Adapter | **running, healthy, DH-010 + DH-025 core verified** — ledger/dead-letter/retry/audit plus process-lifetime recovery fence and fail-closed crash coordinator; concrete OpenELIS correlation binding and all FHIR transport remain absent |
 | WhatsApp notifier | not written |
 | Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path is verified end-to-end, and **a restore has now actually been performed** (DH-015, `backup/restore-drill.md`): archive decrypted, all seven manifest hashes re-verified, restored into an isolated scratch stack, and patient `10001MJ` read back through the OpenMRS REST API. Off-site upload remains unverified; the drill archive and passphrase were destroyed afterwards. Two acceptance legs (a lab result, an SSO login) remain unexercised, so DH-015 is **performed, not done** |
-| Caddy | not written |
+| Caddy | **running, healthy — DH-016 built and locally verified** — subdomain routing for `emr`/`lab`/`id`, security headers, and a TLS-**verified** hop to the OpenELIS API using DH-021's exported CA (control-tested: an unrelated CA yields 502 `unknown authority`). Uses Caddy's internal CA under `BASE_DOMAIN=localhost`; public issuance still needs the real domain/DNS |
 
 ⚠️ **This local stack contains 100 fictional demo patients** plus two deliberate test patients (one
 registered via the API, one by Liban in the SPA). It is a throwaway verification stack and must

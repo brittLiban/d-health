@@ -60,9 +60,25 @@ needs_generation() {
   return 0
 }
 
+# Public certificate in PEM, for reverse proxies that must VERIFY this backend
+# rather than skip verification (DH-016 Caddy). Certificate only — never the
+# private key. This runs on EVERY invocation, not only when material is
+# regenerated: an idempotent run that skipped it would leave a proxy with no
+# trust anchor after any restart that recreated the volume.
+export_ca_pem() {
+  CA_DIR="${OE_CA_OUT_DIR:-/ca}"
+  [ -d "$CA_DIR" ] || return 0
+  keytool -exportcert -rfc -alias "$ALIAS" -keystore "$KS" \
+    -storepass "$OE_KEYSTORE_PASSWORD" 2>/dev/null >"${CA_DIR}/.openelis-ca.pem.tmp"
+  install -m 0444 "${CA_DIR}/.openelis-ca.pem.tmp" "${CA_DIR}/openelis-ca.pem"
+  rm -f "${CA_DIR}/.openelis-ca.pem.tmp"
+  log "exported openelis-ca.pem for reverse-proxy trust"
+}
+
 if ! needs_generation; then
   keytool -list -v -keystore "$KS" -storepass "$OE_KEYSTORE_PASSWORD" 2>/dev/null \
     | grep -E '^Valid from' | sed 's/^/[certs] /'
+  export_ca_pem
   exit 0
 fi
 
@@ -105,6 +121,8 @@ openssl x509 -in "$TMP/cert.pem" -noout -checkend 0 >/dev/null
 install -m 0644 "$TMP/keystore"                "$KS"
 install -m 0644 "$TMP/client_facing_keystore"  "$CFKS"
 install -m 0644 "$TMP/truststore"              "$TS"
+
+export_ca_pem
 
 log "installed keystore, client_facing_keystore, truststore"
 openssl x509 -in "$TMP/cert.pem" -noout -subject -dates | sed 's/^/[certs] /'

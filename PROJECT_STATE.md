@@ -959,11 +959,40 @@ French default + English templates; content-free ("results are ready", never val
 a module inside the adapter (ADR-002). **Status on completion of the mock work is `BLOCKED`, not
 `DONE`** (ADR-003).
 
-### DH-016 · Caddy, TLS, subdomains · P0 · 📋 READY (DH-008 plumbing complete)
-Configuration can now be built without changing SSO authorization. Public certificate issuance and
-the real browser-origin verification require the facility's actual domain and DNS. This removes
-the loopback port from step 1 and provides the secure origins required for DH-008's eventual
-one-login demonstration after BLOCKER-5 is resolved.
+### DH-016 · Caddy, TLS, subdomains · P0 · 🔨 BUILT + LOCALLY VERIFIED 2026-08-13; public issuance pending #15
+Subdomain routing per ADR-008, proxying to the retained O3 gateway per ADR-010. Caddy is the only
+container publishing host ports.
+
+**Routing verified through the proxy** (`emr`/`lab`/`id`): OpenMRS 301 (its gateway's own redirect),
+Keycloak 302, OpenELIS SPA 200. Security headers (HSTS, nosniff, SAMEORIGIN, Referrer-Policy) present.
+
+**The finding that shaped the config:** OpenELIS's SPA and API **must share one origin**. Reading the
+built bundle showed it calls `/OpenELIS-Global/...` as a *relative* path, and its nginx serves static
+files only with no API proxy. So `lab.<domain>/` serves the SPA while `lab.<domain>/OpenELIS-Global/*`
+proxies to Tomcat. Verified by content, not status code — the API path returns Tomcat's real login
+page containing `_csrf`, which the SPA fallback does not.
+
+**The API hop is TLS-verified, not skipped.** DH-021's generated certificate is exported as a PEM so
+Caddy has a real trust anchor, rather than `tls_insecure_skip_verify` leaving the edge→backend hop
+unauthenticated. Proven by control: swapping in an unrelated CA produced **502 with
+`x509: certificate signed by unknown authority`**, and restoring it returned 200.
+
+⚠️ **The first run of that control was invalid and said so falsely.** `docker compose up -d caddy`
+re-ran the `openelis-certs` dependency, which overwrote the bogus CA with the real one before Caddy
+started — so it "passed" while proving nothing. `--no-deps` gives the real answer. Any future
+control that swaps a file a dependency also writes must do the same.
+
+**Remaining before DONE:**
+1. Public certificate issuance needs the real `BASE_DOMAIN` and DNS (NEEDS LIBAN #15). With
+   `localhost` this uses Caddy's **internal CA** — that proves routing, origins and cookies, and
+   proves nothing about ACME.
+2. The `email` directive is deliberately absent: Caddy **fails to parse** the whole file if `email`
+   is present but empty, taking the proxy down rather than degrading. Add a real address with the
+   real domain.
+3. `openmrs-gateway`'s `127.0.0.1:8080` publish is **deliberately retained for now**. Removing it is
+   part of this ticket, but with no real domain the only route in would be
+   `https://emr.localhost:8443` behind a locally-trusted CA — a worse position than today. Remove it
+   with #15.
 
 ### DH-017 · README for a fresh Ubuntu 24.04 VM · P0 · 🔨 IN PROGRESS
 Started 2026-08-10 — covers project purpose, status warning, doc map, prerequisites, `.env` setup,
