@@ -630,12 +630,53 @@ connections passed and all six cross-tenant connections were denied. After resta
 PostgreSQL client, OpenELIS HTTPS, OpenELIS FHIR mutual-TLS metadata, Keycloak readiness, and adapter
 readiness all passed. A second hardening run exited 0, proving restart idempotency.
 
-### DH-021 · Replace the shipped keystore · P1 · 📋 READY
+### DH-021 · Replace the shipped keystore · **P0 (raised from P1)** · 🔨 GENERATOR BUILT + PROVEN; APPLICATION BLOCKED
 Raised at DH-005. `itechuw/certgen` generates nothing — it ships **pre-built** keystores inside a
-public image, so the private key protecting the internal 8443 connectors is publicly downloadable,
-and its passwords are the published `kspass`/`tspass`. Acceptable only while nothing outside the
-Docker network speaks to 8443. Interacts with ADR-005 Q5: the adapter authenticates with a client
-certificate from this same keystore, so replacing it is a coordinated change, not a drop-in.
+public image, so the private key protecting the internal 8443 connectors is publicly downloadable.
+Attempting the replacement on 2026-08-13 found two further defects and one unrelated false green.
+
+**Why this is now P0, not P1:** the shipped certificate **had already expired** — `notAfter
+2026-07-23`, found 2026-08-13, verified with `openssl x509 -checkend 0` against the container clock.
+Nothing on the internal path validates expiry, so it kept working silently. The first thing to
+check it strictly — Caddy at DH-016, or the adapter's mTLS client at ADR-005 Q5 — would have failed
+against a cause three weeks in the past.
+
+**Second defect: the store passwords were the published `kspass`/`tspass` in effect.** `.env` sets
+`OE_KEYSTORE_PASSWORD=` and `OE_TRUSTSTORE_PASSWORD=` **empty**, and compose read
+`${OE_KEYSTORE_PASSWORD:-kspass}` — so an empty value silently selected upstream's published
+password while the variable looked configured. Confirmed directly: the live keystore opens with
+`kspass`, and refuses both the `.env` value and a wrong-password control.
+
+**Built and proven in isolation** (`openelis-config/certs/`): a generator producing 4096-bit
+RSA/SHA-256 material valid 825 days, with upstream's SANs plus this stack's service names, and
+`serverAuth,clientAuth` because the webapp presents the same certificate as a *client* to the FHIR
+server. It keeps the exact filenames, paths, PKCS12 structure, and alias layout so no consumer
+changes, and is idempotent — it regenerates only when the certificate is missing, expired, within
+`OE_CERT_RENEW_BEFORE_DAYS`, or unreadable with the configured password. Verified: generation, a
+second run leaving it untouched, an `openssl s_server -Verify 1` mutual-TLS handshake returning
+`Verify return code: 0 (ok)`, and a no-client-certificate control correctly refused with
+`tlsv13 alert certificate required`.
+
+**🛑 Blocked on a coordination step, and the live stack was rolled back.** Applying it took OpenELIS
+down: the Spring context failed with `keystore password was incorrect` and every page became a
+redirect loop. The cause is `openelis-config/properties/common.properties` — the **committed**
+Docker secret — which hardcodes `server.ssl.key-store-password = kspass`, `server.ssl.key-password`
+and `server.ssl.trust-store-password=tspass`. The webapp reads its SSL material from there, not from
+`CATALINA_OPTS`. The keystore volume and `.env` were restored from a pre-change backup, both
+services recreated, and the known-good state re-verified: configured admin reaches
+`/OpenELIS-Global/`, `adminADMIN!` and a wrong-password control both bounce to `/LoginPage`,
+mutual-TLS FHIR metadata returns 200, ten services running.
+
+**What closing this ticket requires:** rendering `common.properties` with the real passwords
+*without committing them*. The file is currently committed precisely because it held only published
+values, so that shape has to change — a template rendered to a gitignored path, or a switch from
+`secrets:` to a generated mount. That is a design decision affecting how the secret is delivered,
+not a value edit, so it was not improvised while the stack was down.
+
+⚠️ **Do not change `encryption.general.password=kspass` in the same pass.** It is in the same file
+and looks like part of this fix. It is not — it is application data encryption, and changing it may
+make already-encrypted stored values unreadable. It needs its own analysis and is potentially
+clinical-data surface.
 
 ### DH-022 · Keep unconfigured backup out of the default Compose path · P0 · ✅ DONE 2026-08-13
 The documented `docker compose up -d` previously selected `backup` even when the required
@@ -960,6 +1001,9 @@ message shapes).
 | 10 | OpenELIS ignores `DEFAULT_PW` and shipped `adminADMIN!` even on empty volumes | **Fixed and empty-volume form-login verified — DH-024** |
 | 11 | Optional OpenELIS Odoo test-product mapping CSV is absent and logs an error | **Documented, not fabricated** — no Odoo service or billing integration is in v1; adding product/test mappings would be scope and laboratory configuration work |
 | 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Core fixed and runtime-verified — DH-025**; concrete OpenELIS correlation attach/query remains a DH-011 activation gate. No transport exists yet, so no message has been affected |
+| 13 | **The OpenELIS internal TLS certificate expired 2026-07-23** and nothing on that path validates expiry, so it kept serving | **Open — DH-021 (now P0).** Replacement generator built and proven in isolation; application blocked on `common.properties` rendering |
+| 14 | **`OE_KEYSTORE_PASSWORD`/`OE_TRUSTSTORE_PASSWORD` are empty in `.env`**, so `${VAR:-kspass}` silently selected upstream's published passwords while the variables looked configured | **Open — DH-021.** The `:-` fallback is the mechanism; the fix removes it so an empty value fails loudly instead of quietly using a public password |
+| 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Open — raised 2026-08-13 during DH-021.** Observed directly, not theorised. The check should require `LoginPage` to return 200 with a CSRF token — i.e. that the application context started, not that Tomcat is listening |
 
 ## Notes for next session
 
