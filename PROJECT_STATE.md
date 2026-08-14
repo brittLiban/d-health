@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-13 · **Phase:** DH-025 committed; ADR-015/ADR-016 close two decisions; the birth-centre meeting is now the critical path
+**Updated:** 2026-08-14 · **Phase:** the agent-buildable surface is essentially exhausted; the birth-centre meeting and the domain are the critical path
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -156,6 +156,16 @@ POST returns 302 in every case; the discriminator is the `Location` header — c
 redirects to `/OpenELIS-Global/`, while `adminADMIN!` redirects to `/LoginPage`, byte-identical to
 the behaviour of a deliberately wrong control password. DH-024's result stands. Test the redirect
 target, not the page text, and always run the wrong-password control.
+
+**End-of-session verification 2026-08-14.** Both Compose profiles parse; all tracked
+shell/JSON/XML/CSV syntax, Git whitespace, and the untracked-`.env` check pass; the only non-digest
+images are the four locally built `daher-health/*`, whose bases are all pinned. **Three test suites
+pass: adapter 27, seeds 16, forms 18 (+1 skipped)**, with Ruff lint/format clean in all three under
+the project config. Runtime: **11 services running, 7 setup jobs at exit 0, zero restarts, zero OOM
+kills**. Configured OpenMRS login passes while `Admin123` is refused; OpenELIS serves DH-021's
+generated certificate (`CN=openelis.org`, not expired); all three Caddy vhosts answer and the
+OpenELIS API shares the `lab` origin. Data unchanged: 102 patients, ledger 0 rows, `Bilan prénatal`
+present with **0 members** exactly as intended.
 
 ## Ticket status
 

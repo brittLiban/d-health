@@ -1,6 +1,6 @@
 # Current State — Daher Health
 
-**Assessed:** 2026-08-13 · **Target:** pilot-ready by 2026-09-01
+**Assessed:** 2026-08-14 · **Target:** pilot-ready by 2026-09-01
 **Method:** inspection of the actual repository and running environment, not the plan.
 
 ---
@@ -249,6 +249,19 @@ sprint spec, not being useful.**
 | Partograph form fields | Not yet written. Data-entry only, no decision support (ADR-006). | Clinical lead |
 
 ---
+
+## 5a. What changed 2026-08-13/14
+
+DH-015's restore drill was **performed** (partial coverage). DH-021 replaced the OpenELIS keystore,
+whose private key was public *and whose certificate had already expired unnoticed*. DH-016's Caddy
+proxy serves all three subdomains locally over HTTPS with a **verified** hop to the OpenELIS API.
+DH-017's README now covers the whole stack. DH-006 and DH-004 gained their mechanisms — an
+additive-only order-set seed shipping an **empty** panel, and an **executable** ADR-006 guard that
+refuses any form performing clinical interpretation. Two false greens were closed: the OpenELIS
+healthcheck that reported healthy through a total outage, and one inside the new form guard itself.
+
+**Nothing above chose any clinical content.** The panel is empty, no form schema is committed, and
+both sign-off requests are in `docs/CLINICAL-SIGNOFF.md`.
 
 ## 6. What is genuinely missing
 
