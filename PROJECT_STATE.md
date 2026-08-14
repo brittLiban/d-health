@@ -168,7 +168,7 @@ target, not the page text, and always run the wrong-password control.
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
 | 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
 | 🔨 Built + locally verified, external input to finish | **DH-016** (routing/TLS verified locally; public certificates wait on #15 DNS) |
-| 🗓 Blocked on the birth-centre meeting | **DH-004**, **DH-006** (clinical sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
+| 🗓 Blocked on the birth-centre meeting | **DH-004** (form fields), **DH-006** (mechanism built; contents await sign-off), **DH-008** activation (role matrix), **DH-011** (requester identity, cancellation contract) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -742,9 +742,40 @@ and a fresh local encrypted backup read-back. Final normal startup left ten long
 healthy/running as applicable and all five setup jobs at exit 0, with zero restarts or OOM kills.
 The backup was neither off-site nor restored.
 
-### DH-006 · Prenatal panel order set + LOINC mappings · P0 · 🛑 BLOCKED ON CLINICAL SIGN-OFF · **Human Decision Required: Yes**
-Reference panels as a starting point, as code. Clinical sign-off gate — draft early (week 1) so
-the clinical lead has time.
+### DH-006 · Prenatal panel order set + LOINC mappings · P0 · 🔨 MECHANISM BUILT + VERIFIED 2026-08-13 · 🛑 CONTENTS AWAIT SIGN-OFF
+**The panel ships EMPTY, and that is the correct committed state.** The ticket said "draft early
+(week 1) so the clinical lead has time" — what has been drafted is the *decision*, not the answer.
+
+**The finding that shaped this.** Neither system ships a prenatal panel to copy unmodified, so it
+has to be *composed* — and composition is the reserved clinical decision. Checked, not assumed:
+OpenMRS had **zero** order sets defined, and OpenELIS's four shipped panels are `Bilan Biochimique`,
+`NFS`, `Serologie VIH`, `Typage lymphocytaire`. **Liban confirmed 2026-08-13** that only artifacts
+already shipped in this stack may be used, so no external guideline was fetched and no test was
+selected by an agent.
+
+**Built:**
+- `docs/CLINICAL-SIGNOFF.md` — a checklist **generated from live reference data**, listing all 37
+  OpenMRS lab sets installed here with their LOINC codes and concept UUIDs, plus the 4 OpenELIS
+  panels. It is an inventory, explicitly **not** a recommendation, and nothing is pre-ticked.
+- `openmrs-config/seed/seed_prenatal_panel.py` + an **empty** `prenatal-panel.members.csv`.
+  Additive-only: it adds listed members, verifies each concept already exists, and **never removes**
+  a member that is present but unlisted — that member may already have been used to order tests for
+  a patient (ADR-007's reasoning). It never creates a clinical concept.
+- Compose job `openmrs-prenatal-panel`, gating the frontend like the DH-003 seed does.
+
+**Verified:** 16 seed tests (11 new) plus Ruff lint/format. Against live OpenMRS the seed created
+`Bilan prénatal` with **0 members**, and a second run reported "already exists / 0 added" — the
+order set count stayed at 1 and members at 0. Full stack: 11 running, 7 setup jobs at exit 0, zero
+restarts.
+
+**Technical finding for the meeting — LOINC coverage is partial on both sides.** OpenELIS: 42 of
+177 active tests carry a LOINC code. OpenMRS: 21 of 37 lab sets. So LOINC alone cannot be the join
+key between an OpenMRS order and an OpenELIS test; whichever tests are chosen, some pairs will need
+an explicit mapping. This changes how much wiring each choice needs, not what may be chosen.
+
+**Still required to close:** the clinical lead completes `docs/CLINICAL-SIGNOFF.md`; each ticked lab
+set is copied verbatim into the members file; the response is recorded here with its date and who
+gave it. **DH-006 stays OPEN until then, even though the mechanism is finished.**
 
 ### DH-007 · Keycloak + realm import · P0 · ✅ DONE 2026-08-13
 Keycloak 26.7.1 is digest-pinned and running in production mode against its PostgreSQL co-tenant.
@@ -1029,8 +1060,8 @@ repo distrusts.
 All eight steps of §8, demonstrated live to Liban, including the retry/restart no-duplicates check.
 
 ### P1 / P2
-P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth, `docs/CLINICAL-SIGNOFF.md`
-tracking. P2: graphical partogram plotting recorded values only (still needs the ADR-006
+P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`
+now exists — created at DH-006.) P2: graphical partogram plotting recorded values only (still needs the ADR-006
 conversation), RapidPro, Orthanc/PACS, multi-facility.
 
 ---

@@ -245,7 +245,7 @@ sprint spec, not being useful.**
 |---|---|---|
 | Maternity bed counts | `.env` config, additive-only seed (ADR-007). Committed defaults are placeholders, marked as such. | Liban, from the birth centre |
 | WhatsApp credentials | None held. Mock build; ticket stays `BLOCKED` not `DONE` (ADR-003). | Liban |
-| Prenatal lab order set | Not yet written. Must be unmodified WHO/OpenELIS reference defaults, marked as needing sign-off. | Clinical lead |
+| Prenatal lab order set | **Mechanism built and verified; panel is deliberately EMPTY.** Neither system ships one to copy, so its contents must be composed — that is the clinical lead's decision. `docs/CLINICAL-SIGNOFF.md` lists the 37 installed lab sets for them to tick; nothing is pre-selected. | Clinical lead |
 | Partograph form fields | Not yet written. Data-entry only, no decision support (ADR-006). | Clinical lead |
 
 ---

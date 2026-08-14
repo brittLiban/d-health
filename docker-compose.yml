@@ -232,6 +232,50 @@ services:
     networks: [internal]
 
   # ---------------------------------------------------------------------------
+  # Prenatal lab order set (DH-006).
+  #
+  # ⚠️ This ships the panel EMPTY, and that is the correct state — not an
+  # unfinished one. Neither OpenMRS nor OpenELIS ships a prenatal panel to copy
+  # unmodified (checked: OpenMRS had zero order sets, OpenELIS's four panels are
+  # Bilan Biochimique / NFS / Serologie VIH / Typage lymphocytaire). So the panel
+  # has to be COMPOSED, and composing it is a clinical decision reserved to the
+  # clinical lead — AGENTS.md, NEEDS LIBAN #9.
+  #
+  # The mechanism exists now so that when docs/CLINICAL-SIGNOFF.md comes back,
+  # the answer is applied verbatim rather than transcribed by judgement. Members
+  # are added; a member present in OpenMRS but absent from the file is NEVER
+  # removed, because it may already have been used to order tests for a patient
+  # (same reasoning as ADR-007's beds).
+  #
+  # Initializer 2.12.0 has no order-set domain, so this uses the native REST
+  # seam exactly as DH-003 did for beds.
+  # ---------------------------------------------------------------------------
+  openmrs-prenatal-panel:
+    image: python:3.13.14-slim-bookworm@sha256:67a1e1f215ccda113cfc024e8639049257e88f273898f595b61476d128d387e8
+    restart: "no"
+    read_only: true
+    user: "65534:65534"
+    depends_on:
+      openmrs-backend:
+        condition: service_healthy
+      openmrs-maternity-config:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      OPENMRS_BASE_URL: http://openmrs-backend:8080/openmrs/ws/rest/v1/
+      OPENMRS_USERNAME: admin
+      OPENMRS_ADMIN_PASSWORD: ${OMRS_ADMIN_PASSWORD:?set OMRS_ADMIN_PASSWORD in .env}
+      PRENATAL_PANEL_MEMBERS: /opt/daher/prenatal-panel.members.csv
+    volumes:
+      - ./openmrs-config/seed/seed_prenatal_panel.py:/opt/daher/seed_prenatal_panel.py:ro
+      - ./openmrs-config/seed/prenatal-panel.members.csv:/opt/daher/prenatal-panel.members.csv:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    command: ["python", "/opt/daher/seed_prenatal_panel.py"]
+    cap_drop: [ALL]
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
   # OpenMRS frontend — nginx serving the O3 single-page application.
   #
   # French is the default locale here AND in the backend's global properties
@@ -246,6 +290,8 @@ services:
       openmrs-backend:
         condition: service_healthy
       openmrs-maternity-config:
+        condition: service_completed_successfully
+      openmrs-prenatal-panel:
         condition: service_completed_successfully
     environment:
       <<: *common-env

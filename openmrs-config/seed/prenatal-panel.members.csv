@@ -1,0 +1,28 @@
+# Prenatal lab panel members — DH-006
+#
+# ⚠️ THIS FILE SHIPS EMPTY ON PURPOSE. An empty file is the CORRECT committed
+#    state, not an unfinished one. Do not "helpfully" populate it.
+#
+# The contents of the prenatal panel are a clinical decision reserved to the
+# birth centre's clinical lead (AGENTS.md; NEEDS LIBAN #9). Neither OpenMRS nor
+# OpenELIS ships a prenatal panel to copy, so this panel has to be composed —
+# and composing it is exactly the decision that is not an engineer's to make.
+#
+# HOW THIS GETS FILLED
+#   1. The clinical lead completes docs/CLINICAL-SIGNOFF.md, which lists every
+#      lab set actually installed in this deployment.
+#   2. Each ticked lab set becomes one row below, copied verbatim from that
+#      sheet — the UUID column there is the concept_uuid column here.
+#   3. Record the response, with its date and who gave it, against DH-006 in
+#      PROJECT_STATE.md.
+#
+# The seed is ADDITIVE-ONLY. Adding a row adds a member. REMOVING A ROW DOES NOT
+# REMOVE A MEMBER — retiring a member from a panel that may already have been
+# used to order tests for a patient is a clinical/audit action, and it is
+# deliberately not automated here. Same reasoning as ADR-007's beds.
+#
+# Columns:
+#   concept_uuid  the OpenMRS concept UUID, copied from the sign-off sheet
+#   label         free text for humans reading this file; not sent to OpenMRS
+#
+concept_uuid,label
