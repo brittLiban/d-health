@@ -139,13 +139,19 @@ org.openelisglobal.menu.configuration.autocreate=false
 # Set false to use checksums. it is set to true by default to reload all configs on startup
 # org.openelisglobal.configuration.forcereload=false
 
-#Unique Facility Details 
-org.openelisglobal.facility.country=
+#Unique Facility Details
+#
+# DAHER (2026-08-14): country is known; the facility id is a deliberate INTERNAL
+# placeholder until an official code exists, if one ever does. City, state,
+# district and postal code are still blank because nobody has supplied them —
+# they are real-world facts about the birth centre, not values to guess. Fill
+# them in before clinically live use.
+org.openelisglobal.facility.country=Djibouti
 org.openelisglobal.facility.state=
 org.openelisglobal.facility.district=
 org.openelisglobal.facility.city=
 org.openelisglobal.facility.postalcode=
-org.openelisglobal.facility.id=
+org.openelisglobal.facility.id=DJ-BC-001
 
 # DAHER: blanked. Upstream defaults this to a third-party gmail address, which
 # would be an outbound path for clinical mail. Disabling egress needs no

@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-14 · **Phase:** the agent-buildable surface is essentially exhausted; the birth-centre meeting and the domain are the critical path
+**Updated:** 2026-08-15 · **Phase:** four policy calls decided (ADR-017/018/019 + placeholders); BLOCKER-3 closed, BLOCKER-5 down to names. DH-011 is now implementation work, not a decision wait.
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -220,28 +220,29 @@ exists. Each links to the detail rather than repeating it.
 | ~~3~~ | ~~**Does voiding an order need to reach the laboratory?**~~ — ✅ **RESOLVED TECHNICALLY 2026-08-13.** A proper `DISCONTINUE` creates a new visible ServiceRequest carrying `replaces`; the adapter must forward it and must not filter on `status` | — | Nothing; implementation constraint recorded in `WATERMARK-DESIGN.md` §6 |
 | ~~4~~ | ~~**Revisit `labonfhir` (ADR-004)?**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** continue the custom adapter for v1; revisit after the golden flow | — | DH-010 is unblocked |
 | ~~5~~ | ~~**Keycloak session lifetimes**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 1h idle, 10h maximum, 5m access token (ADR-013) | — | DH-007 complete |
-| 6 | **OpenELIS default requester identity** — upstream ships a sample clinician ("Felix Dr. Mauritius") as the default order requester. Left unmodified rather than invented | Clinical content. Never invented (AGENTS.md) | DH-006 / clinically live |
-| 7 | **Facility identity** — country, state, district, city, postal code, facility id are empty, exactly as upstream ships them | The birth centre's real details are yours | `openelis-config/properties/common.properties` |
-| 8 | **Maternity bed counts** — committed defaults are placeholders (ADR-007) | Facility numbers | DH-003 |
+| ~~6~~ | ~~**OpenELIS default requester identity**~~ — ⏳ **INTERIM DECIDED 2026-08-14:** create one controlled test provider ("Pilot Test Clinician") replacing upstream's sample ("Felix Dr. Mauritius"). The real ordering clinician swaps in after the meeting — a one-line change, not a redesign. **Not yet created; tracked in DH-011.** | — | DH-011 |
+| 7 | **Facility identity** — ✅ **PARTIALLY SET 2026-08-14:** country `Djibouti`, facility id `DJ-BC-001` (deliberate internal placeholder). ⏳ **Still needed: city**, plus state/district/postal code. These are real-world facts, not guesses | The birth centre's real details are yours | `common.properties.template` |
+| 8 | **Maternity bed counts** — ✅ **PLACEHOLDERS SET 2026-08-14:** 2 delivery / 4 postpartum, clearly marked. ⚠️ Additive-only means these CANNOT be removed later; set real numbers before the pilot deployment | Facility numbers | DH-003 unblocked |
 | 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
 | ~~10~~ | ~~**DH-011 first-sync boundary**~~ — ✅ **RESOLVED 2026-08-13 by Liban (ADR-015):** no historical backfill; the watermark starts at deployment time. The pilot is forward-going patients, not a paper-record digitisation | — | BLOCKER-3 leg 1 closed |
-| 11 | 🗓 **OpenELIS requester identity for routed orders** — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
-| 12 | 🗓 **Cancellation contract once an order reaches OpenELIS** — revoke while retaining history, delete only while unaccepted, or leave it for explicit manual handling | Each choice changes laboratory workflow and audit/history. Upstream does not provide a completed reference behavior | DH-011 |
+| ~~11~~ | ⏳ **OpenELIS requester identity** — **INTERIM DECIDED 2026-08-14** (controlled test provider; real name after the meeting). Was: 🗓  — provide the facility's real requester identity; the upstream sample clinician must not silently own pilot orders | Order attribution is clinical/audit data. The current upstream value is deliberately only a placeholder | DH-006, DH-011 |
+| ~~12~~ | ~~**Cancellation contract**~~ — ✅ **DECIDED 2026-08-14 (ADR-018):** revoke if the lab has not accepted/started; leave in-progress work for manual handling. Interim policy, to be **validated against real workflow** at the meeting | — | BLOCKER-3 closed |
 | ~~13~~ | ~~**Horiba Micros60/Pentra60 analyzer scope**~~ — ✅ **RESOLVED 2026-08-13 by Liban (ADR-016):** v1 is manual result entry only; no analyzer/HL7/ASTM interface. DH-023 deferred to v1.1. The shipped imports are left untouched — the decision does not authorize editing lab test rows | — | BLOCKER-4 closed |
-| 14 | 🗓 **SSO authorization matrix** — map `clinician`, `lab-tech`, and `sys-admin` to exact OpenMRS and OpenELIS native roles, and decide which staff classes are OpenMRS providers | These mappings grant access to clinical records and laboratory functions and change clinical attribution. An agent may not infer them from role labels | DH-008 / BLOCKER-5 |
+| ~~14~~ | ~~**SSO authorization matrix**~~ — ✅ **ROLE TYPES DECIDED 2026-08-14 (ADR-017).** `clinician`→`Provider`+`Organizational: Nurse` (provider=yes); `lab-tech`→`Reception`,`Results`,`Validation`; `sys-admin`→`Organizational: System Administrator`+`Global Administrator`. ⏳ **Only the NAMES still need the meeting.** Was:  — map `clinician`, `lab-tech`, and `sys-admin` to exact OpenMRS and OpenELIS native roles, and decide which staff classes are OpenMRS providers | These mappings grant access to clinical records and laboratory functions and change clinical attribution. An agent may not infer them from role labels | DH-008 / BLOCKER-5 |
 | 15 | ⏳ **Pilot domain and DNS** — *in progress 2026-08-13; Liban is registering it.* Provide/control the real `BASE_DOMAIN` and point `emr`, `lab`, and `id` records at the pilot VM | Public certificate issuance cannot be demonstrated against `localhost` or invented facility DNS | DH-016 |
 
-### 🗓 Waiting on the birth-centre meeting — not yet scheduled as of 2026-08-13
+### 🗓 Waiting on the birth-centre meeting — as of 2026-08-15
 
-These are the only open items that need the facility's staff in the room. **This meeting is the
-critical path to pilot-ready.** Nothing an agent can build clears any row below.
+**Much shorter than it was.** On 2026-08-14 four of these turned out to be policy calls rather than
+facts, and were decided (ADR-017, ADR-018, ADR-019, plus marked placeholders). What is left needs
+the room:
 
 | Needs | Decisions | Tickets held | What unblocks the moment it is answered |
 |---|---|---|---|
-| **Real staff roles** | #14 SSO authorization matrix | **DH-008** activation | Enable SSO, apply the role map, demonstrate one login across both applications — golden-flow step 2 |
-| **Requester identity** | #11 | **DH-011** | Orders can carry an attributable requester instead of upstream's sample clinician |
-| **Cancellation contract** | #12 | **DH-011** | The last BLOCKER-3 leg; DH-011 transport can then be built and activated |
-| **Clinical sign-off** | #9 prenatal panel + partograph fields | **DH-004**, **DH-006** | Clinical form/order-set work can start. Gates *clinically live* (ADR-012), not pilot-ready |
+| **Staff names only** | #14 — role *types* already decided (ADR-017) | **DH-008** activation | Who holds `clinician` / `lab-tech` / `sys-admin`. The mapping itself is done |
+| **Clinical sign-off** | #9 prenatal panel + partograph fields | **DH-004**, **DH-006** | Mechanisms are built and ship empty; the lead's answer fills them. Gates *clinically live* (ADR-012), not pilot-ready |
+| **Workflow validation** | Confirm ADR-018's cancellation default matches practice | — | Nothing is held; it is already the interim policy. Confirm or supersede |
+| **The city** | Facility identity #7 | — | Country and facility id are set; city/state/district/postal are still blank because nobody has supplied them |
 
 **Downstream of those, by dependency only:** DH-012 (needs DH-011), DH-013 (needs DH-012),
 DH-018 (needs DH-013 + DH-015). So the meeting sits in front of five of the eight golden-flow steps.
@@ -366,7 +367,7 @@ that helps, since the property self-clears after firing.
 
 _No blockers open against DH-002._
 
-### BLOCKER-3 — DH-011 activation and cancellation contract · 🛑 OPEN · **Human Decision Required: Yes**
+### BLOCKER-3 — DH-011 activation and cancellation contract · ✅ CLOSED BY DECISION 2026-08-14
 
 **Ticket:** DH-011
 
@@ -388,15 +389,19 @@ support and discontinuation unsupported. Its current cancellation path deletes o
 `REQUESTED` Task/ServiceRequest and carries a TODO that it should revoke rather than delete. That
 is evidence of an unresolved upstream contract, not permission to choose one here.
 
-**Options requiring Liban/clinical workflow confirmation — 🗓 waiting on the birth-centre meeting:**
+**All three legs are now decided:**
 
-1. Requester: supply the real facility requester identity before routing; the upstream sample may
-   be used only if Liban explicitly authorizes it for this throwaway test stack.
-2. Cancellation: retain and mark revoked; delete only before acceptance and require manual handling
-   afterward; or never mutate the lab order automatically and raise an operator-visible exception.
+1. **First sync** — ADR-015: no historical backfill; watermark starts at deployment time.
+2. **Requester** — interim decision 2026-08-14: a controlled test provider ("Pilot Test Clinician")
+   replaces upstream's sample for testing; the real ordering clinician swaps in after the meeting.
+3. **Cancellation** — ADR-018: revoke if the laboratory has not accepted or started the test; leave
+   in-progress work alone for manual handling. Interim policy, to be validated against real
+   workflow at the meeting.
 
-No poller or clinical order was activated. DH-011 remains blocked; DH-010's safety skeleton remains
-healthy and unchanged.
+**DH-011 is therefore no longer blocked on decisions.** What remains is implementation plus two
+verification gates: DH-025's correlation must be attached to the concrete OpenELIS resource, and
+ADR-018's "accepted or started" must map to a *verified* OpenELIS status rather than an assumed
+one. No poller or clinical order has been activated.
 
 ### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · ✅ CLOSED BY SCOPE 2026-08-13 (ADR-016)
 
@@ -417,7 +422,7 @@ authorize disabling, renaming, repairing, or log-suppressing shipped laboratory 
 The errors remain a known non-blocking boot behaviour. No test, mapping, or analyzer configuration
 has ever been changed.
 
-### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN · **Human Decision Required: Yes**
+### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 
 **Ticket:** DH-008
 

@@ -627,3 +627,102 @@ blocked. The import errors remain in the boot log as a known, non-blocking upstr
 recorded in `CURRENT_STATE.md` §3a so a future reader does not mistake them for new breakage. When
 an analyzer interface is genuinely wanted, the conflict must be resolved with the laboratory lead's
 confirmed test identities before any import fix is attempted.
+
+---
+
+## ADR-017 — SSO authorization matrix (role types now, named people later)
+
+**Date:** 2026-08-14 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** BLOCKER-5 held DH-008 activation on "the SSO authorization matrix", which was treated
+as a single blocker needing the staff roster. It is two things: the **role-type mapping**, which is
+a policy call, and the **named individuals** in each role, which is a real-world fact. Only the
+second needs the meeting. Separating them unblocks the mapping today.
+
+An agent may not infer this mapping — it grants access to clinical records and laboratory
+functions. This entry is the recorded human decision that AGENTS.md requires.
+
+**Decision — the exact native roles, verified to exist in each deployed system:**
+
+| Keycloak realm role | OpenMRS native role(s) | OpenMRS provider? | OpenELIS native role(s) |
+|---|---|---|---|
+| `clinician` | `Provider`, `Organizational: Nurse` | **yes** | — |
+| `lab-tech` | — | no | `Reception`, `Results`, `Validation` |
+| `sys-admin` | `Organizational: System Administrator` | no | `Global Administrator` |
+
+**Two sub-decisions, made explicitly rather than by default:**
+
+- **`lab-tech` receives `Validation`.** OpenELIS separates entering a result from validating and
+  releasing it, and some laboratories split them so one person cannot do both. For a birth-centre
+  laboratory of a few staff, the same person does both, and withholding it would leave nobody able
+  to release a result. Revisit if the laboratory grows enough to separate the duties.
+- **One `clinician` role, mapped to `Organizational: Nurse`.** Midwives are the primary users.
+  Doctors receive the same access for the pilot rather than adding a second realm role. If scope of
+  practice needs to differ in the applications, that is a new realm role and a superseding ADR.
+
+**What still needs the meeting:** only the **names** — which staff hold which role, and their
+accounts. That is a roster, not a design.
+
+**Consequence.** This does not by itself activate SSO. Activation additionally needs the public
+HTTPS origins from DH-016 (browser cookies and redirect URIs are origin-bound), so `SSO_ENABLED`
+stays `false` until the real domain exists. The hardcoded `provider=false` claim is superseded by
+this matrix: `clinician` now maps to a provider.
+
+---
+
+## ADR-018 — Order cancellation: revoke before acceptance, manual handling after
+
+**Date:** 2026-08-14 · **Status:** ACCEPTED (interim policy, to be validated against real workflow)
+· **Decided by:** Liban
+
+**Context.** BLOCKER-3's remaining leg. ADR-005 proved the adapter will see a discontinuation as a
+new `ServiceRequest` carrying `replaces`, but not what the laboratory should then do. Upstream's
+reference bridge deletes only a still-`REQUESTED` Task/ServiceRequest and carries a TODO saying it
+ought to revoke instead — evidence of an unresolved contract, not a default to copy.
+
+**Decision.**
+
+- If the laboratory has **not yet accepted or started** the test, the adapter **revokes** it in
+  OpenELIS when OpenMRS discontinues the order.
+- If it is **already in progress**, the adapter **does not touch it**. It is left for manual
+  handling and staff communicate directly.
+
+Automatically pulling back work that is already underway is worse than a phone call: it destroys
+laboratory context and can discard a specimen already drawn.
+
+**Explicitly interim.** This is a sensible, safe default set as policy now so DH-011 is not blocked
+on it. It must be **validated against how the laboratory actually works** at the birth-centre
+meeting, and this ADR superseded if practice differs.
+
+**Implementation constraints.**
+
+- "Accepted or started" must map to a **verified** OpenELIS status, not an assumed one. The exact
+  state transition is to be confirmed against the deployed OpenELIS before DH-011 activates.
+- Revocation must **retain history**. Deleting the record would remove evidence that the order ever
+  existed, which is audit data.
+- An order that cannot be classified as either state is **ambiguous and must fail closed**,
+  operator-visible, exactly as DH-025 treats an ambiguous target.
+
+---
+
+## ADR-019 — Demo content is off for the pilot
+
+**Date:** 2026-08-14 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** `OMRS_DEMO_CONTENT` defaulted to `on`, preserving the O3 reference distribution as
+shipped. DH-004's new form-safety guard then found that three demo forms loaded by that switch —
+`Structured SOAP note`, `Mental Health Assessment Form`, `Form Engine Cookbook` — contain an
+`alert` key, computed `calculateExpression` fields, and expression validators. They are upstream
+demonstration content, not maternity forms, but they are live in the database and a clinician could
+open them.
+
+**Decision.** `OMRS_DEMO_CONTENT=off` for the pilot. A system whose stated premise is that it
+records and routes rather than interprets should not ship demonstration forms that compute and
+alert, even incidentally.
+
+**Consequences.** The switch selects a locally built backend target that omits the
+`referenceapplication-demo` source directories. It **does not delete** concepts, forms, or data
+already imported into an existing database — the existing throwaway volume keeps what it has. This
+is separate from `OMRS_DEMO_PATIENTS`, which remains `off` and governs fictional patients. Any
+reference vocabulary that later mapping genuinely needs must be added deliberately rather than
+inherited from demo content.
