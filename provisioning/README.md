@@ -56,11 +56,14 @@ provisioning/
     models.py        facility records + closed API schemas
     facility_env.py  renders and writes a facility's .env
     audit.py         tamper-evident hash-chained audit log
+    auth.py          scoped credential authentication
+    ratelimit.py     per-caller token bucket
   tests/
     test_secrets.py           generation, uniqueness, redaction
     test_no_clinical_data.py  the structural guarantee
     test_facility_env.py      rendering, permissions, compose sync
     test_audit.py             recording, tamper detection, no secrets
+    test_auth.py              scopes, credential handling, rate limiting
 ```
 
 ## The facility env file
@@ -92,6 +95,43 @@ docker run --rm \
   -v "$PWD/provisioning/tests:/app/tests:ro" \
   daher-provisioning-test pytest -q
 ```
+
+## Authentication and scopes
+
+The portal authenticates with a scoped credential (`dhp_<id>_<secret>`). The id travels in the
+clear so the server compares against exactly one candidate; the secret is **stored hashed**, so a
+compromised API host does not yield a usable credential.
+
+SHA-256 rather than bcrypt/argon2 is deliberate: slow hashes exist to frustrate brute force against
+*low-entropy human passwords*. These keys carry 256 bits from `secrets.token_urlsafe`, so there is
+nothing to brute-force and a slow hash would only make every request slower.
+
+Comparison is constant-time, and **an unknown key id still performs a comparison against a decoy
+hash** — returning early would reveal which ids exist purely from how fast the request failed.
+Errors name the key id, never the presented secret, because errors reach logs.
+
+| Scope | Grants |
+|---|---|
+| `facility:create` | Create a facility |
+| `facility:read` | List and read status |
+| `credentials:rotate` | Rotate a facility's secrets |
+| `facility:decommission` | Soft-stop a facility's stack |
+
+**The portal does not hold `facility:decommission` by default.** Stopping a facility is granted
+explicitly rather than inherited from a default set. No scope grants shell, Docker socket, or
+database access — a test asserts the vocabulary itself contains no such capability.
+
+## Rate limiting
+
+Per-caller token bucket: steady refill with a burst allowance. Creating five facilities in quick
+succession is legitimate; five hundred is not, and a fixed window would either permit a damaging
+burst at the boundary or refuse ordinary bursty use. The limiter raises rather than returning a
+boolean — a limiter whose result can be ignored at the call site is not a limiter.
+
+⚠️ **In-memory and per-process.** It resets when the API restarts, so an attacker who can
+crash-loop the service can reset their budget; and it does not coordinate across workers, so N
+processes multiply the effective limit by N. Acceptable for a single-process deployment, not
+after it scales out. The interface is narrow so a shared backend swaps in without rippling.
 
 ## The audit log
 
