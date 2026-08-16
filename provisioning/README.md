@@ -55,10 +55,12 @@ provisioning/
     secrets.py       per-facility credential generation
     models.py        facility records + closed API schemas
     facility_env.py  renders and writes a facility's .env
+    audit.py         tamper-evident hash-chained audit log
   tests/
     test_secrets.py           generation, uniqueness, redaction
     test_no_clinical_data.py  the structural guarantee
     test_facility_env.py      rendering, permissions, compose sync
+    test_audit.py             recording, tamper detection, no secrets
 ```
 
 ## The facility env file
@@ -90,6 +92,30 @@ docker run --rm \
   -v "$PWD/provisioning/tests:/app/tests:ro" \
   daher-provisioning-test pytest -q
 ```
+
+## The audit log
+
+Every provisioning action is recorded **by the code that performed it**, including failures. What
+the portal claims happened is not evidence; the API's own record is.
+
+Entries are hash-chained: each carries the hash of the previous one, so editing, deleting,
+reordering, or truncating the file breaks the chain and `verify_chain()` reports the first damaged
+position. All four of those tampering shapes have their own test — a hash chain nobody has tried to
+break is a claim, not a property.
+
+⚠️ **Be precise about what this buys.** A hash chain makes tampering **detectable**, not
+**impossible**. An attacker with write access can rewrite the whole file and recompute every hash.
+Your actual requirement — a log that survives this host being rebuilt — needs an **external
+append-only destination, which does not exist yet** and is marked incomplete rather than pretended.
+What the chain gives today is that silent selective edits are caught, and it makes the eventual
+external destination a shipper rather than a redesign.
+
+⚠️ **Verifying zero entries is not a pass.** `verify_chain()` returns the number of entries
+checked, so callers must check the count. A clean return on an empty log after actions were
+performed is itself the finding.
+
+Secrets never enter the log. Entries reference credentials by `credential_set_id`, the model is
+closed, and a test asserts no field is named for a password, secret, token, or passphrase.
 
 ## Secrets
 
