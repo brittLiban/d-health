@@ -122,6 +122,7 @@ provisioning/
     repository.py    facility record storage
     hosts.py         registered deploy hosts (the allowlist)
     jobs.py          the job vocabulary shared with the agent
+    enrolment.py     single-use host enrolment tokens
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
     app.py           the FastAPI surface
@@ -134,6 +135,7 @@ provisioning/
     test_app.py               the boundary, enforced through HTTP
     test_hosts.py             the allowlist and the occupied-host refusal
     test_agent_validation.py  every refusal, written as an attack
+    test_enrolment.py         single-use, expiry, host binding
 ```
 
 ## The facility env file
@@ -177,6 +179,18 @@ automatically without recreating the problem it solves. So enrolment is manual, 
 4. The agent generates its own long-lived credential locally and registers its host id. The
    enrollment token is consumed and cannot be reused.
 5. From then on the agent polls outbound. **No inbound port is ever opened.**
+
+**The property that makes the manual step worth it:** the agent generates its own long-lived
+credential locally and sends **only the hash**. The provisioning API never sees an agent's secret,
+not even during enrolment — so a breached API host cannot impersonate any facility agent, past or
+future. Passing a secret where the hash belongs is refused, so the dangerous wiring is not
+available even by mistake.
+
+Three refusals close the ways a leaked token would otherwise still be useful: it is **single-use**
+(a replay is refused even inside its lifetime), **short-lived** (a token that reaches a shell
+history expires on its own), and **bound to one host** (a token for `host-a` cannot enrol `host-b`,
+so it cannot introduce an attacker-controlled host into the fleet). Minting for an
+already-enrolled host is refused rather than silently replacing a live agent's credential.
 
 Steps 1–3 do not disappear no matter how automated the rest becomes. Describing this system as
 "no manual steps" would be false, so it is written down instead.

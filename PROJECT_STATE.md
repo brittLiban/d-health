@@ -1207,7 +1207,17 @@ skip, because it lives on the far end.
 `FACILITY_ID` is validated at **both** ends, plus a second independent character filter, because it
 reaches a Compose project name and the cost of being wrong there is root.
 
-**Next:** enrolment (the one irreducibly manual step), then the job queue and the agent's poll loop.
+**Enrolment built 2026-08-16 — 220 tests.** The agent generates its long-lived credential **on the
+facility host** and sends only the hash, so the API never sees an agent secret even during
+enrolment, and a breached API host cannot impersonate any agent past or future. Passing a secret
+where the hash belongs is refused, so the dangerous wiring is not reachable by mistake.
+
+Enrollment tokens are **single-use** (replay refused even inside the lifetime), **short-lived**, and
+**bound to one host** — a token for `host-a` cannot enrol `host-b`, so a leak cannot introduce an
+attacker-controlled host into the fleet. Minting for an already-enrolled host is refused rather than
+silently replacing a live agent's credential. Errors never contain the presented token.
+
+**Next:** the job queue and the agent's poll loop.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
