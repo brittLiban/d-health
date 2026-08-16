@@ -84,11 +84,45 @@ It is defence in depth for the day someone loosens a pattern, and this demonstra
 not exercise it. Saying "the agent's validation refused hostile input" without that
 distinction would overstate what was shown.
 
+## 3a. TLS — demonstrated 2026-08-16
+
+The demo now runs over HTTPS with a private CA. The agent verifies; it does not skip.
+
+```sh
+docker compose -f provisioning/demo/docker-compose.demo.yml exec -T agent \
+  python /app/demo/harness_tls.py
+```
+
+| Control | Expected | Result |
+|---|---|---|
+| Real CA, correct hostname | succeed | ✅ `HTTP 200` |
+| **Bogus CA** (unrelated issuer) | refuse | ✅ `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` |
+| **Real CA, wrong hostname** (IP; cert is `SAN:api`) | refuse | ✅ `CERTIFICATE_VERIFY_FAILED: IP address mismatch` |
+| System trust store only | refuse | ✅ `unable to get local issuer` |
+
+The controls are the test. Presenting only the correct certificate would pass identically
+with `verify=False`, and would prove nothing.
+
+### Two things the TLS leg caught that plain HTTP could not
+
+**a. The CA lacked `keyUsage`.** OpenSSL 3 refused it outright — *"CA cert does not include
+key usage extension"*. A CA generated without `basicConstraints` **and** `keyUsage` is not a
+usable signing CA, and nothing in a plain-HTTP path would ever have said so.
+
+**b. A control that passed for the wrong reason.** The hostname-mismatch case first used
+`127.0.0.1:8443`, which has nothing listening inside the agent container. It "passed" with
+`ConnectionRefused` — never reaching TLS at all. A control passing for an unrelated reason is
+worse than no control, because it reads as evidence. It now connects to the real listener by
+IP, where the certificate carries `SAN:api` only, and fails with a genuine
+`IP address mismatch`.
+
+**c. A harness that could not reach the system produced a convincing empty result.** After the
+switch to HTTPS the hostile harness still pointed at `http://localhost:8000`, silently
+enqueued nothing, and the run looked exactly like "the agent refused everything" — 2 audit
+entries instead of 14. Worth remembering: an empty result is not a passing result.
+
 ## 4. What is still NOT demonstrated
 
-- **TLS.** The demo runs over plain HTTP on a Docker bridge. Certificate validation,
-  hostname verification, and the `verify=` path in `HttpTransport` are entirely untested.
-  ADR-022 assumes the agent authenticates outbound **over TLS**; that half is unproven.
 - **Partial or truncated reads.** No test delivered a job payload split across TCP segments
   or truncated mid-body. The code assumes `httpx` reassembles before `.json()` returns,
   which is its documented contract but remains an assumption here.
@@ -96,6 +130,7 @@ distinction would overstate what was shown.
   through this path, and the compose-invocation seam — the last place an argument could
   reach a command boundary — is unwritten.
 
-Those three are why the transport is **partially** demonstrated. The network boundary,
-refusal path, crash behaviour and audit trail are shown; the encrypted channel, the parsing
-edge, and the execution seam are not.
+Those two are why the transport is still **partially** demonstrated. The network boundary,
+the refusal path, crash behaviour, the audit trail and now the encrypted channel with real
+certificate and hostname verification are shown; the parsing edge and the execution seam are
+not.

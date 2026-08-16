@@ -114,4 +114,20 @@ def build():
 
 
 if __name__ == "__main__":
-    uvicorn.run(build(), host="0.0.0.0", port=8000, log_level="warning")  # noqa: S104
+    import subprocess
+
+    tls = SHARED / "tls"
+    # Generate the demonstration's CA and certificates, including the two deliberately
+    # wrong ones the controls need. A TLS test that only presents the correct certificate
+    # proves nothing — `verify=False` would pass it identically.
+    subprocess.run(["/bin/sh", "/app/demo/make_certs.sh", str(tls)], check=True)  # noqa: S603
+    (SHARED / "ready").write_text("ok", encoding="utf-8")
+
+    uvicorn.run(
+        build(),
+        host="0.0.0.0",  # noqa: S104
+        port=8443,
+        log_level="warning",
+        ssl_certfile=str(tls / "api.pem"),
+        ssl_keyfile=str(tls / "api.key"),
+    )

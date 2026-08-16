@@ -14,7 +14,12 @@ import json
 
 import httpx
 
-client = httpx.Client(base_url="http://localhost:8000", timeout=10)
+# HTTPS with the demo CA. Pointing this at the old plain-HTTP URL made it fail silently and
+# enqueue nothing, which looked exactly like "the agent refused everything" — a reminder that
+# a harness which cannot reach the system under test produces a very convincing empty result.
+client = httpx.Client(
+    base_url="https://api:8443", timeout=10, verify="/shared/tls/real-ca.pem"
+)
 NOW = datetime.datetime.now(datetime.UTC).isoformat()
 
 

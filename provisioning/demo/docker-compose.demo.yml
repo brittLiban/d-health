@@ -38,7 +38,8 @@ services:
       PYTHONPATH: /app/src
       DEMO_SHARED: /shared
       HOST_ID: host-a
-      PROVISIONING_URL: http://api:8000
+      PROVISIONING_URL: https://api:8443
+      AGENT_CA_BUNDLE: /shared/tls/real-ca.pem
     volumes:
       - ../demo:/app/demo:ro
       - ../src:/app/src:ro

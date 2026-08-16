@@ -36,11 +36,16 @@ def note(path: Path, record: dict) -> None:
 
 
 def main() -> None:
-    while not (SHARED / "agent_credential").is_file():
+    while not ((SHARED / "agent_credential").is_file() and (SHARED / "tls" / "real-ca.pem").is_file()):
         time.sleep(0.5)
     credential = (SHARED / "agent_credential").read_text(encoding="utf-8").strip()
 
-    transport = HttpTransport(os.environ["PROVISIONING_URL"], credential)
+    # ⚠️ `verify` is the whole point of the TLS leg. It is read from the environment so the
+    # controls can point it at a BOGUS CA and prove the agent refuses — a demonstration that
+    # only ever presents the correct certificate would pass identically with verification
+    # disabled, and would therefore prove nothing.
+    verify: bool | str = os.environ.get("AGENT_CA_BUNDLE") or True
+    transport = HttpTransport(os.environ["PROVISIONING_URL"], credential, verify=verify)
     validator = JobValidator(host_id=HOST_ID, facility_exists=lambda fid: False)
 
     def execute(job: Job) -> ExecutionResult:

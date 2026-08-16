@@ -1261,8 +1261,24 @@ untested: **TLS** (the demo runs plain HTTP, so certificate and hostname verific
 while ADR-022 assumes them), **partial/truncated reads**, and **the real executor** — nothing has
 ever started a clinical stack through this path.
 
-**Next:** TLS on the demo path, then the compose executor — the last seam where an argument could
-reach a command boundary.
+**TLS demonstrated 2026-08-16.** The demo now runs over HTTPS with a private CA, and **4/4
+controls behave correctly**: the real CA succeeds; a bogus CA, a wrong hostname, and the system
+trust store alone are each refused with genuine `CERTIFICATE_VERIFY_FAILED` reasons. The controls
+are the test — presenting only the correct certificate would pass identically with verification
+disabled. Full job flow re-run over TLS: 14 audit entries, 6 refusals, chain verifies, and only the
+legitimate job reached the executor.
+
+**Three more things the TLS leg caught**, none reachable over plain HTTP: the CA lacked `keyUsage`
+and OpenSSL 3 refused it outright; the hostname control first passed for the **wrong reason**
+(`127.0.0.1` had nothing listening, so it never reached TLS — now it hits the real listener by IP
+and fails with `IP address mismatch`); and after the HTTPS switch the hostile harness still pointed
+at the old plain-HTTP URL, enqueued nothing, and produced a convincing empty result that looked
+like success.
+
+**Still not demonstrated:** partial/truncated reads, and the real executor — nothing has ever
+started a clinical stack through this path.
+
+**Next:** the compose executor — the last seam where an argument could reach a command boundary.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
