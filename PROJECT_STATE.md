@@ -1341,8 +1341,26 @@ login so a fixated cookie is useless; **CSRF on every POST including login**; lo
 source; `no-store` on fleet pages so a stale "backup succeeded" is never shown as current; CSP with
 `script-src 'none'`. The login error never reveals which half was wrong.
 
-**Next:** wire the portal to the real API in the two-container demo, then `rotate-credentials` and
-the per-facility backup auto-wiring the build prompt asks for.
+**End-to-end demonstration performed 2026-08-16 — four containers, fixed subnet.** Signing into
+the portal and submitting the create-facility form produces a facility record, a **queued
+provisioning job**, an agent that claims it over TLS and validates it locally, an execution, and a
+report the API records from what it observed. Audit: 6 entries, chain verifies.
+
+**ADR-023 demonstrated against real addresses**: an outsider holding a *genuinely valid* portal
+credential is refused `403 source not allowed` on both the portal and agent endpoints, recorded as
+`blocked-source` naming `172.30.0.40`, and cannot reach the agent on any port.
+
+**Two things the full chain caught that every unit test missed:**
+
+1. **The portal cannot work over plain HTTP** — its session cookie is `Secure`+`SameSite=strict`,
+   so login silently failed. The portal was failing closed *correctly*; the harness was wrong. The
+   portal now has its own certificate, which is how it must run.
+2. **Creating a facility did not enqueue anything.** The API recorded a record and stopped, so the
+   agent never acted. Invisible until the whole chain ran. Now wired — and `incomplete_steps` still
+   reports DNS and backup, because **queued is not running**.
+
+**Next:** `rotate-credentials`, per-facility backup auto-wiring, and DNS/TLS — the three
+`incomplete_steps` the API currently reports honestly.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

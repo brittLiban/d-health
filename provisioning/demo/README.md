@@ -1,4 +1,4 @@
-# Two-container transport demonstration (ADR-022)
+# Provisioning demonstration (ADR-020, ADR-022, ADR-023)
 
 **Performed 2026-08-16.** Upgrades the pull transport from *written* to *demonstrated* — but
 read §4 before treating that as complete, because two claimed properties are still untested.
@@ -121,14 +121,65 @@ switch to HTTPS the hostile harness still pointed at `http://localhost:8000`, si
 enqueued nothing, and the run looked exactly like "the agent refused everything" — 2 audit
 entries instead of 14. Worth remembering: an empty result is not a passing result.
 
+## 3b. End to end through the portal — demonstrated 2026-08-16
+
+Four containers on a fixed subnet, so the source allowlist is demonstrated against **real
+addresses** rather than asserted:
+
+| | Address | Role |
+|---|---|---|
+| `portal` | 172.30.0.10 | the console, HTTPS |
+| `api` | 172.30.0.20 | provisioning API, HTTPS |
+| `agent` | 172.30.0.30 | facility host agent, **no inbound port** |
+| `outsider` | 172.30.0.40 | valid credential, **disallowed address** |
+
+**The click-the-button chain, with nothing stubbed but the compose call itself:**
+
+1. Signed out, `GET /` → `303 /login` — the fleet is not visible.
+2. Sign in, submit the create-facility form.
+3. The portal calls the API **server-side**; the API records the facility and **queues a
+   provisioning job**.
+4. The agent claims it over TLS, validates it locally, and executes.
+5. The agent reports back; the API records the outcome **from what it observed**.
+6. The facility appears in the portal.
+
+Audit for one run: 6 entries, chain verifies — four portal actions, then
+`job … claimed` and `agent reported succeeded`, both attributed to `agent:host-a`.
+
+**ADR-023 demonstrated with a real address.** The outsider holds a *genuinely valid* portal
+credential and is still refused:
+
+```
+/facilities        -> 403 source not allowed
+/agent/jobs/claim  -> 403 source not allowed
+agent:8000/8443/9000 -> refused (no inbound port on the agent)
+```
+
+The audit records both attempts as `blocked-source` naming `172.30.0.40`.
+
+### What this run caught
+
+**The portal cannot work over plain HTTP, and that is correct.** The first attempt drove the
+portal over `http://` and login silently failed — the session cookie is `Secure` +
+`SameSite=strict`, so it was dropped. The portal was **failing closed** exactly as designed
+and the harness was wrong. The demo now gives the portal its own certificate, which is how it
+must actually run.
+
+**Creation did not enqueue anything.** The first end-to-end run showed a facility appearing in
+the portal with the agent never acting — because `POST /facilities` recorded a record and
+stopped. Visible only once the whole chain ran; every unit test passed throughout.
+
 ## 4. What is still NOT demonstrated
 
 - **Partial or truncated reads.** No test delivered a job payload split across TCP segments
   or truncated mid-body. The code assumes `httpx` reassembles before `.json()` returns,
   which is its documented contract but remains an assumption here.
-- **The real executor.** The demo substitutes it. Nothing has ever started a clinical stack
-  through this path, and the compose-invocation seam — the last place an argument could
-  reach a command boundary — is unwritten.
+- **The real executor.** The demo substitutes it. The compose invocation is now written and
+  unit-tested on its exact argv, but **nothing has ever started a clinical stack through this
+  path** — the demo agent has no Docker daemon, and no facility has ever actually booted from
+  a provisioning job.
+- **DNS/TLS provisioning and per-facility backup wiring.** Still unbuilt; both are reported in
+  `incomplete_steps` rather than implied.
 
 Those two are why the transport is still **partially** demonstrated. The network boundary,
 the refusal path, crash behaviour, the audit trail and now the encrypted channel with real

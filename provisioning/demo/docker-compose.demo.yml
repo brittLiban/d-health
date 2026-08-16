@@ -1,50 +1,72 @@
-# DH-027 two-container demonstration (ADR-022).
+# DH-027 three-container demonstration (ADR-020, ADR-022, ADR-023).
 #
-# Proves over a REAL socket what unit tests could not: the agent polls a separate host,
-# refuses hostile input by its own validation, and exposes no inbound port.
+# portal (172.30.0.10) -> api (172.30.0.20) <- agent (172.30.0.30)
+# outsider (172.30.0.40) holds a VALID credential but a disallowed address.
 #
-# `agent` publishes nothing and listens on nothing. That is the property under test.
+# Static addressing so the API's source allowlist is demonstrated against real addresses
+# rather than asserted. `agent` and `portal` publish nothing and listen on nothing the API
+# can reach — that asymmetry is the design.
 name: daher-demo
+
+x-common: &common
+  build:
+    context: ..
+    target: test
+  working_dir: /app
+  # Harness only: the shared volume is root-owned and every side writes to it. The
+  # production images run as unprivileged users; this says nothing about deployment.
+  user: "0:0"
+  volumes:
+    - ../demo:/app/demo:ro
+    - ../src:/app/src:ro
+    - shared:/shared
+  environment: &common-env
+    PYTHONPATH: /app/src
+    DEMO_SHARED: /shared
 
 services:
   api:
-    build:
-      context: ..
-      target: test
-    working_dir: /app
-    # Harness only: the shared volume is root-owned and both sides need to write to it.
-    # The production image runs as uid 10002; this override exists so the demo can share a
-    # scratch volume, and says nothing about how the API is deployed.
-    user: "0:0"
+    <<: *common
     command: ["python", "/app/demo/api_server.py"]
     environment:
-      PYTHONPATH: /app/src
-      DEMO_SHARED: /shared
+      <<: *common-env
       DEMO_HOST_ID: host-a
-    volumes:
-      - ../demo:/app/demo:ro
-      - ../src:/app/src:ro
-      - shared:/shared
-    networks: [demo]
+      # Only the portal and the agent may reach the API (ADR-023).
+      DEMO_ALLOWED_CIDRS: "172.30.0.10/32,172.30.0.30/32"
+    networks:
+      demo:
+        ipv4_address: 172.30.0.20
+
+  portal:
+    <<: *common
+    command: ["python", "/app/demo/portal_server.py"]
+    environment:
+      <<: *common-env
+      PROVISIONING_URL: https://api:8443
+    networks:
+      demo:
+        ipv4_address: 172.30.0.10
+    depends_on: [api]
 
   agent:
-    build:
-      context: ..
-      target: test
-    working_dir: /app
-    user: "0:0"  # harness only — see the note on `api`
+    <<: *common
     command: ["python", "/app/demo/agent_runner.py"]
     environment:
-      PYTHONPATH: /app/src
-      DEMO_SHARED: /shared
+      <<: *common-env
       HOST_ID: host-a
       PROVISIONING_URL: https://api:8443
       AGENT_CA_BUNDLE: /shared/tls/real-ca.pem
-    volumes:
-      - ../demo:/app/demo:ro
-      - ../src:/app/src:ro
-      - shared:/shared
-    networks: [demo]
+    networks:
+      demo:
+        ipv4_address: 172.30.0.30
+    depends_on: [api]
+
+  outsider:
+    <<: *common
+    command: ["sleep", "3600"]
+    networks:
+      demo:
+        ipv4_address: 172.30.0.40
     depends_on: [api]
 
 volumes:
@@ -53,3 +75,6 @@ volumes:
 networks:
   demo:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

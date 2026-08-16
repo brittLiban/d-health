@@ -122,13 +122,23 @@ class TestScopeBoundary:
 
 class TestCreateDoesNotOverclaim:
     def test_201_reports_what_did_not_happen(self, wired):
+        """A 201 means recorded and queued — never running.
+
+        Queueing a provisioning job is not deployment: nothing has started until an agent
+        pulls that job, validates it, and the compose stack comes up. DNS and backup are
+        untouched either way, so the response must still say so.
+        """
         client, portal_key, _, _ = wired
         response = client.post("/facilities", json=a_body(), headers=auth(portal_key))
         assert response.status_code == 201
         payload = response.json()
         assert payload["dns_configured"] is False
         assert payload["incomplete_steps"], "a 201 must not imply the stack is running"
-        assert any("deploy" in step for step in payload["incomplete_steps"])
+        assert any("dns" in step for step in payload["incomplete_steps"])
+        assert any("backup" in step for step in payload["incomplete_steps"])
+        assert payload["facility"]["state"] == "provisioning", (
+            "a freshly created facility must not claim to be running"
+        )
 
     def test_credentials_are_referenced_never_returned(self, wired):
         client, portal_key, _, _ = wired

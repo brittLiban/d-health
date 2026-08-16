@@ -47,6 +47,12 @@ gen_server() {
 gen_ca real "Daher Demo CA"
 gen_server api api real
 
+# The portal serves HTTPS too. Not decoration: its session cookie is Secure +
+# SameSite=strict, so over plain HTTP the browser drops it and login cannot work. The
+# portal fails closed rather than silently downgrading, which is the correct behaviour and
+# is why the demo needs a certificate here.
+gen_server portal portal real
+
 # Control 1: an unrelated CA the agent must NOT accept.
 gen_ca bogus "Not The Real CA"
 

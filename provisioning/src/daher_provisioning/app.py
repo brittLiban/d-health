@@ -30,6 +30,7 @@ from daher_provisioning.auth import (
 )
 from daher_provisioning.enrolment import EnrolmentError, EnrolmentService
 from daher_provisioning.hosts import HostError, HostRegistry
+from daher_provisioning.jobs import Job, JobParams, JobVerb
 from daher_provisioning.models import (
     CredentialReference,
     Facility,
@@ -46,7 +47,7 @@ from daher_provisioning.secrets import SecretGenerationError, validate_facility_
 
 # What a caller is told did not happen. Keeping these as explicit strings rather than
 # leaving the list empty is the difference between "provisioned" and "recorded".
-STEP_DEPLOY = "deploy: no job was enqueued; the host agent is not built (ADR-022)"
+STEP_DEPLOY = "deploy: no job was enqueued for this facility"
 STEP_DNS = "dns: no domain or DNS provider is configured; no record was created (ADR-020)"
 STEP_BACKUP = "backup: no scheduled backup was wired up for this facility"
 
@@ -69,6 +70,7 @@ def create_app(
     job_queue: JobQueue | None = None,
     enrolment: EnrolmentService | None = None,
     allowed_source_cidrs: list[str] | None = None,
+    base_domain: str = "localhost",
 ) -> FastAPI:
     facilities = repository or FacilityRepository()
     host_registry = hosts or HostRegistry()
@@ -246,13 +248,42 @@ def create_app(
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
         credential_set_id = f"cs-{facility_id}-{int(facility.created_at.timestamp())}"
+
+        # Enqueue the provisioning job for the host's agent. The job carries PARAMETERS
+        # ONLY — no spec, no secrets. The agent generates its own credentials and runs the
+        # compose file already on that host (ADR-022).
+        deploy_queued = False
+        try:
+            queue.enqueue(
+                Job(
+                    job_id=f"job-{facility_id}-{int(facility.created_at.timestamp())}",
+                    host_id=body.host_id,
+                    verb=JobVerb.PROVISION,
+                    params=JobParams(
+                        facility_id=facility_id,
+                        facility_type=body.type.value,
+                        base_domain=base_domain,
+                    ),
+                    issued_at=facility.created_at,
+                )
+            )
+            deploy_queued = True
+        except Exception as exc:  # noqa: BLE001 - the record stands even if queueing fails
+            audit_log.record(
+                actor=principal.actor,
+                action=AuditAction.FACILITY_CREATE,
+                outcome=AuditOutcome.FAILURE,
+                facility_id=facility_id,
+                message=f"facility recorded but job not queued: {exc}"[:512],
+                source_ip=_client_ip(request),
+            )
         audit_log.record(
             actor=principal.actor,
             action=AuditAction.FACILITY_CREATE,
             outcome=AuditOutcome.SUCCESS,
             facility_id=facility_id,
             credential_set_id=credential_set_id,
-            message="record created; deploy and DNS not performed",
+            message="record created; provisioning job queued; DNS not performed",
             source_ip=_client_ip(request),
         )
 
@@ -266,7 +297,7 @@ def create_app(
                 "(ADR-022). This API never holds a facility credential.",
             ),
             dns_configured=False,
-            incomplete_steps=[STEP_DEPLOY, STEP_DNS, STEP_BACKUP],
+            incomplete_steps=([] if deploy_queued else [STEP_DEPLOY]) + [STEP_DNS, STEP_BACKUP],
         )
 
     @app.get("/facilities", response_model=list[Facility])

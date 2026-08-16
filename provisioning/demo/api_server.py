@@ -74,12 +74,14 @@ def build():
     (SHARED / "agent_credential").write_text(agent_secret, encoding="utf-8")
     (SHARED / "portal_key").write_text(portal_key, encoding="utf-8")
 
+    allowed = [c for c in os.environ.get("DEMO_ALLOWED_CIDRS", "").split(",") if c]
     app = create_app(
         key_store=KeyStore([portal_record]),
         audit_log=AuditLog(SHARED / "audit.jsonl"),
         hosts=hosts,
         job_queue=queue,
         enrolment=enrolments,
+        allowed_source_cidrs=allowed or None,
     )
 
     @app.post("/demo/enqueue-raw")
