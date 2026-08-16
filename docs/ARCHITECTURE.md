@@ -679,6 +679,40 @@ The third is the real guarantee — the first two catch mistakes, the third make
 unreachable. Verified by control: adding a `patient_count` field makes the suite fail; removing it
 returns to green.
 
+### How the API reaches a facility host (ADR-022)
+
+**Pull-based host agent, outbound-only.** Facility hosts poll for jobs addressed to themselves and
+authenticate outbound with a per-host token. **No clinical host exposes an inbound port.**
+
+The deciding constraint: **Docker access is root access.** Anyone who can cause an arbitrary
+container spec to run can `docker run -v /:/host` and read every clinical volume. So the question is
+never "can an attacker get a shell" but "can an attacker cause an arbitrary spec to run" — hence:
+
+> **The compose file lives on the facility host. The API sends parameters, never a spec.**
+
+| Option | API-host breach yields | Inbound port on clinical host |
+|---|---|---|
+| Remote Docker socket | **Root on every facility VM** | Yes |
+| SSH forced command | Fixed script with chosen params | Yes |
+| Signed webhook listener | Same as above, plus bespoke code parsing untrusted input | Yes |
+| **Pull agent (chosen)** | Can *enqueue*; nothing executes until an agent pulls and validates | **None** |
+
+**The agent validates its own jobs.** It does not trust the queue. That local validation — not the
+transport — is the real boundary, so a job runs only if the target host is itself, the verb is in
+its fixed set, and every parameter matches a strict pattern.
+
+**Secrets are generated on the facility host**, not by the API. A breached API host has never held
+any facility's database passwords.
+
+**Bootstrap is the one irreducibly manual step.** A host cannot poll until it has an identity, and
+that first credential cannot be delivered automatically without recreating the problem: an operator
+runs a single-use, short-lived enrollment token on a bare VM, and the agent then generates its own
+long-lived credential locally. Documented as manual rather than described as "no manual steps".
+
+**Two escalation paths closed in the API:** `deploy_target` is resolved from an operator-registered
+host allowlist rather than supplied by a caller, and an already-occupied host is a hard conflict
+rather than an overwrite.
+
 ### Deliberately incomplete
 
 **DNS/TLS provisioning is unconfigured**, built against a provider-agnostic interface, and reports

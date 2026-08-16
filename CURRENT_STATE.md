@@ -273,9 +273,16 @@ not be demonstrated by 1 September. That is a recorded decision, not a slip.
 no-clinical-data guarantee (46 tests, control-verified). `FACILITY_ID` now namespaces the clinical
 stack.
 
-**What does not:** the API surface, the deploy driver, and the portal. **Nothing provisions a real
-facility today.** DNS/TLS and the audit log's external destination are deliberately unconfigured
-and report their own incompleteness rather than appearing to succeed.
+**What exists now (159 tests):** per-facility secret generation, closed API schemas, the facility
+env writer, a hash-chained audit log, scoped auth, rate limiting, the deploy-host allowlist, and the
+FastAPI surface enforcing all of it over HTTP. The deploy transport is decided — **ADR-022,
+pull-based host agent, outbound-only**, with the compose file living on the facility host so the API
+sends parameters and never a spec.
+
+**What does not exist:** the host agent and the portal. **Nothing provisions a real facility
+today** — `POST /facilities` returns 201 meaning *recorded*, not *running*, and lists what did not
+happen. DNS/TLS, the audit log's external destination, and cross-process rate limiting are
+deliberately incomplete and each reports its own incompleteness rather than appearing to succeed.
 
 ## 6. What is genuinely missing
 

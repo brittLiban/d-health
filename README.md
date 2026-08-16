@@ -26,9 +26,10 @@ one `docker-compose.yml`.
 > Still missing: clinical forms, the prenatal order set, order/result transport, notifications,
 > SSO activation, and the end-to-end demonstration.
 >
-> A **multi-facility provisioning API and portal** started 2026-08-15 (`provisioning/`) as a
-> deliberate schedule trade ahead of the transport chain. Foundation only — **nothing provisions a
-> real facility yet**. It is a separate system that never touches clinical data.
+> A **multi-facility provisioning API** started 2026-08-15 (`provisioning/`) as a deliberate
+> schedule trade ahead of the transport chain. Its API surface, auth, audit log and host allowlist
+> work; **the host agent and portal do not exist, so nothing provisions a real facility yet**. It is
+> a separate system that **never touches clinical data**.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -82,9 +83,20 @@ namespaces the Compose project and therefore every container, volume and network
 changing it later does not rename anything — it points the stack at fresh empty volumes and
 orphans the patient database while appearing to start normally. Set it once, before the first `up`.
 
-A provisioning API and portal to automate this is **in progress and does not work yet** — see
-[`provisioning/README.md`](provisioning/README.md). Today, a second facility is a manual copy of
-`.env` with fresh secrets and a distinct `FACILITY_ID`.
+**Today, a second facility is a manual copy of `.env` with fresh secrets and a distinct
+`FACILITY_ID`.** The provisioning API that will automate this is in progress and **does not deploy
+anything yet** — see [`provisioning/README.md`](provisioning/README.md).
+
+How it will work when it does (ADR-022): facility hosts run a small agent that **polls outbound**
+for jobs addressed to itself, so **no clinical host exposes an inbound port**. The compose file
+lives on the facility host and the API sends only parameters — because Docker access is root access,
+and an API that could hand a host an arbitrary container spec would be root on every clinical VM.
+Each host generates its own credentials locally, so the API never holds a facility's database
+passwords.
+
+Enrolling a new host is deliberately manual and always will be: a host cannot poll for work until it
+has an identity, and that first credential cannot be delivered automatically without recreating the
+problem it solves.
 
 ## Prerequisites
 

@@ -1141,26 +1141,64 @@ the facility record**, not a hardcoded assumption; DNS built against a provider-
 and left explicitly unconfigured until a domain exists; portal is a self-contained FastAPI + Jinja2
 app rather than integrating with a website that does not exist yet.
 
-**Built so far:**
-- `secrets.py` — per-facility credential generation covering all 16 variables the clinical stack
-  requires. Encodes constraints learned by running the stack, not by reading docs: OpenELIS's
-  narrow `*$#!` alphabet, OpenMRS complexity plus its refusal of "admin" as a substring, and the
-  Compose project-name restriction on `FACILITY_ID`. `__repr__`/`__str__` are overridden so a
-  stack trace or log line cannot print a secret — tested by formatting the object into a string
-  and asserting no value appears.
-- `models.py` — closed (`extra="forbid"`) response schemas, deploy target as data, soft-only
-  decommission with no destructive state reachable from the API, and `dns_configured` defaulting
-  to **False** so a caller is told the step did not run rather than inferring success from a 201.
+**Built and verified — 159 tests, Ruff clean:**
 
-**The structural no-clinical-data guarantee (ADR-021), and its control test.** Enforced three
-ways: closed schemas, a test walking every model against clinical vocabulary, and — the only one
-that does not depend on anyone staying careful — the service holding **no clinical database
-credentials at all**. Verified by control: adding a `patient_count` field to `FacilityStatus` made
-two independent tests fail with the ADR-021 explanation; removing it returned to green. 46 tests,
-Ruff clean.
+| Module | What it does |
+|---|---|
+| `secrets.py` | Per-facility credentials for all 16 stack variables. Encodes constraints learned by *running* the stack: OpenELIS's narrow `*$#!` alphabet, OpenMRS complexity plus its refusal of "admin", the Compose project-name restriction. `__repr__`/`__str__` redact, tested by formatting into a log line |
+| `models.py` | Closed (`extra="forbid"`) schemas, soft-only decommission, `dns_configured` defaulting to **False** |
+| `facility_env.py` | Renders/writes a facility `.env` at 0600, created restricted rather than chmod-ed. **Refuses to overwrite** — rewriting is not rotation, it produces a stack whose passwords no longer match its own databases |
+| `audit.py` | Hash-chained, `O_APPEND`+`fsync`. Written by the code that performed the action, including failures |
+| `auth.py` | Scoped credentials, hashed at rest, constant-time compare, decoy hash so an unknown key id costs the same work |
+| `ratelimit.py` | Per-caller token bucket on a monotonic clock |
+| `hosts.py` | The deploy-host allowlist and the occupied-host refusal |
+| `repository.py` | Facility records. **Holds no clinical credentials**, which is the strongest layer of the guarantee |
+| `app.py` | The FastAPI surface wiring all of it together |
 
-**Next:** the facility env-file writer, then the API surface (auth, rate limiting, independent
-append-only audit log), then the Compose deploy driver.
+**The structural no-clinical-data guarantee (ADR-021).** Three layers: closed schemas; a test
+walking every model against clinical vocabulary; and — the only one not depending on anyone staying
+careful — **the service holds no clinical database credentials at all**. Control-verified: adding a
+`patient_count` field made two independent tests fail; removing it returned to green.
+
+**Deploy transport decided — ADR-022: pull-based host agent, outbound-only.** Options were laid out
+with blast radius *before* building. Rejected: remote Docker socket (collapses to "the API is root
+everywhere") and signed webhook (a bespoke listener parsing untrusted input, for the same
+containment SSH forced-command already gives). Fallback is SSH forced-command.
+
+**The constraint that decided it:** Docker access *is* root access, so the compose file must live on
+the facility host and the API sends **parameters, never a spec**. Otherwise "provisioning API" and
+"root on every clinical VM" are the same sentence.
+
+**Two escalation paths closed**, both live in code written the same day and both arriving through
+requests that look entirely routine:
+
+1. `deploy_target` is resolved from an operator-registered **host allowlist**, not supplied by the
+   caller. An address in the body is rejected by the closed schema, not silently ignored.
+2. An already-occupied host is a **hard conflict**, never an overwrite — reusing one would clobber a
+   live env file and attach a new facility to an existing patient database.
+
+**The API no longer generates facility credentials.** Under ADR-022 the agent generates them locally
+when it pulls its job, so a breached API host has **never held** any facility's database passwords.
+That is what lets the walkthrough say a compromised API *cannot* reach a clinical database, rather
+than that it should not.
+
+**Deliberately incomplete, and each reports its own incompleteness rather than appearing to work:**
+
+- **Deploy** — no host agent exists. `POST /facilities` returns 201 meaning *recorded*, not
+  *running*, and lists what did not happen in `incomplete_steps`.
+- **DNS/TLS** — no domain or provider (NEEDS LIBAN #15). `dns_configured` is always `false`.
+- **Audit log external destination** — the chain makes tampering *detectable*, not *impossible*.
+  Surviving a host rebuild needs an external append-only sink that does not exist.
+- **Rate limiting** is in-memory and per-process: it resets on restart and N workers multiply the
+  limit by N.
+- **The portal** is not built.
+
+**Next:** the host agent — enrolment first (the one irreducibly manual step), then the job queue,
+then the agent's local job validation. That validation, not the transport, is the real boundary:
+the agent must treat every field of a job as hostile even though it arrived authenticated, because
+ADR-022's residual risk is exactly "a breached API enqueues hostile parameters". `FACILITY_ID`
+reaches a Compose project name, so it is validated at **both** ends rather than trusted because the
+API already checked.
 
 ### P1 / P2
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`

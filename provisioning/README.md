@@ -138,6 +138,24 @@ docker run --rm \
   daher-provisioning-test pytest -q
 ```
 
+## Enrolling a facility host — the one manual step
+
+A host cannot poll for work until it has an identity, and that first credential cannot be delivered
+automatically without recreating the problem it solves. So enrolment is manual, permanently:
+
+1. Provision a bare VM.
+2. Obtain a **single-use, short-lived enrollment token** from the API.
+3. Run the bootstrap command on the VM with that token.
+4. The agent generates its own long-lived credential locally and registers its host id. The
+   enrollment token is consumed and cannot be reused.
+5. From then on the agent polls outbound. **No inbound port is ever opened.**
+
+Steps 1–3 do not disappear no matter how automated the rest becomes. Describing this system as
+"no manual steps" would be false, so it is written down instead.
+
+Until a host has enrolled, it can be registered but **not claimed** — assigning a facility to a
+host whose agent has never bootstrapped is refused rather than queued.
+
 ## Authentication and scopes
 
 The portal authenticates with a scoped credential (`dhp_<id>_<secret>`). The id travels in the
