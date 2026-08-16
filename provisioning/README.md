@@ -164,6 +164,10 @@ provisioning/
     queue.py         per-host job routing
     network.py       source allowlist (defence in depth)
     store.py         SQLite persistence for the control plane
+  src/daher_portal/
+    security.py      login, CSRF, password hashing
+    app.py           the server-rendered console
+    templates/       base, login, facilities
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
     poller.py        the poll loop (⚠️ WRITTEN, NOT DEMONSTRATED)
@@ -183,6 +187,7 @@ provisioning/
     test_network.py           the allowlist, and the header it must not believe
     test_executor.py          the exact argv, not 'it worked'
     test_store.py             restart survival, end to end
+    test_portal.py            what must NOT happen in a browser
 ```
 
 ## The facility env file
@@ -244,6 +249,39 @@ Steps 1–3 do not disappear no matter how automated the rest becomes. Describin
 
 Until a host has enrolled, it can be registered but **not claimed** — assigning a facility to a
 host whose agent has never bootstrapped is refused rather than queued.
+
+## The portal
+
+Server-rendered FastAPI + Jinja2 (ADR-020). **The browser never talks to the provisioning API** —
+it talks to the portal, which calls the API server-side with the scoped credential. A test asserts
+no rendered page contains the credential, `Authorization`, or `Bearer`, and it is control-verified:
+injecting a leak into the layout makes it fail.
+
+**Auth libraries, and why** (the build prompt asked to flag this):
+
+| Concern | Library | Why |
+|---|---|---|
+| Password hashing | `argon2-cffi` | Argon2id is the current recommendation; the library owns salt, parameters and constant-time verify |
+| Sessions | Starlette `SessionMiddleware` (signs with `itsdangerous`) | The other place hand-rolling goes wrong |
+
+⚠️ **No MFA.** A single password protects a control plane that can create and stop clinical
+deployments. That is the portal's weakest link, stated here rather than discovered later. The
+upgrade is an external IdP via Authlib, which also removes password storage entirely — deliberately
+not done now because it adds a hard external dependency to a login path that must work when things
+are broken.
+
+Hardening in place: session cookie `https_only` + `SameSite=strict` + HttpOnly; session cleared and
+reissued on login so a fixated pre-login cookie is useless; CSRF token on **every** POST including
+login; login rate-limited by source; `no-store` on fleet pages so a stale "backup succeeded" can
+never be shown as current; and CSP with `script-src 'none'` and `frame-ancestors 'none'`.
+
+The login error never says which half was wrong — "no such user" tells an attacker which half to
+keep guessing.
+
+**It shows nothing from a patient record**, and a test enforces that on template *expressions*
+rather than prose. An earlier version matched the whole file and failed on the page's own sentence
+"never anything from a patient record" — which would have pushed someone to delete an honest
+reassurance to satisfy a blunt guard.
 
 ## Persistence
 

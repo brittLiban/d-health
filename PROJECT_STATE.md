@@ -1322,7 +1322,27 @@ Two races closed with conditional updates rather than read-then-write: claiming 
 `WHERE facility_id IS NULL`, and redeeming an enrolment token updates `WHERE redeemed_at IS NULL`
 — so single-use survives two requests arriving *together*, not just in sequence.
 
-**Next:** the portal — the part Liban actually logs into.
+**Portal built 2026-08-16 — 326 tests.** Server-rendered FastAPI + Jinja2 (ADR-020): facility
+list with health/backup/version, a create-facility form, and a login. **The browser never talks to
+the provisioning API** — the portal calls it server-side, and a control-verified test asserts no
+rendered page contains the credential, `Authorization`, or `Bearer`.
+
+**Auth libraries, flagged as the build prompt asked:** `argon2-cffi` for password hashing (Argon2id;
+the library owns salt, parameters, constant-time verify) and Starlette `SessionMiddleware` for
+sessions (signed with `itsdangerous`). Both are the places hand-rolling goes wrong, so both are
+delegated.
+
+⚠️ **No MFA** — a single password protects a control plane that can create and stop clinical
+deployments. That is the portal's weakest link, recorded rather than left to be discovered. Upgrade
+is an external IdP via Authlib.
+
+Hardening: `https_only` + `SameSite=strict` + HttpOnly session; session cleared and reissued on
+login so a fixated cookie is useless; **CSRF on every POST including login**; login rate-limited by
+source; `no-store` on fleet pages so a stale "backup succeeded" is never shown as current; CSP with
+`script-src 'none'`. The login error never reveals which half was wrong.
+
+**Next:** wire the portal to the real API in the two-container demo, then `rotate-credentials` and
+the per-facility backup auto-wiring the build prompt asks for.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

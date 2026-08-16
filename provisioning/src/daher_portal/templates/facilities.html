@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Facilities</h1>
+<p class="sub">Health, backup and version only — never anything from a patient record.</p>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<table>
+  <tr><th>Facility</th><th>Type</th><th>State</th><th>Services</th><th>Backup</th>
+      <th>Restore drill</th></tr>
+  {% for f in facilities %}
+  <tr>
+    <td><strong>{{ f.display_name }}</strong><br>
+        <span style="color:var(--muted);font-size:.82rem">{{ f.facility_id }}</span></td>
+    <td>{{ f.type }}</td>
+    <td><span class="pill">{{ f.state }}</span></td>
+    <td>{{ f.services_running }}/{{ f.services_expected }}</td>
+    <td class="{{ f.backup_class }}">{{ f.backup_state }}</td>
+    <td class="{{ f.drill_class }}">{{ f.restore_drill }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" style="color:var(--muted)">No facilities yet.</td></tr>
+  {% endfor %}
+</table>
+
+<div class="note">
+  <strong>Provisioning does not deploy yet.</strong> Creating a facility records it and queues a
+  job; the host agent that would act on it is built but not yet deployed anywhere. A new facility
+  will show as <code>provisioning</code> with no running services until that exists.
+</div>
+
+<h1 style="margin-top:34px">Add a facility</h1>
+<p class="sub">The host must already be registered and enrolled.</p>
+<form class="card" method="post" action="/facilities">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="n">Display name</label>
+  <input id="n" name="display_name" required>
+  <label for="t">Type</label>
+  <select id="t" name="type"><option value="hospital">Hospital</option>
+    <option value="lab">Laboratory</option></select>
+  <label for="h">Host</label>
+  <select id="h" name="host_id">
+    {% for h in hosts %}<option value="{{ h }}">{{ h }}</option>{% endfor %}
+  </select>
+  <button type="submit">Create facility</button>
+</form>
+{% endblock %}

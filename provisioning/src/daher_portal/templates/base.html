@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Daher Health provisioning{% endblock %}</title>
+  <style>
+    :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fbfbfa; --muted:#6b6b6b;
+            --line:#e3e3e0; --ok:#1a7f4b; --warn:#a35b00; --bad:#a01b1b; --card:#fff; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg:#e8e8e6; --bg:#191918; --muted:#a0a09a; --line:#33332f; --card:#212120; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font:15px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif;
+           color:var(--fg); background:var(--bg); }
+    header { border-bottom:1px solid var(--line); padding:14px 22px; display:flex;
+             justify-content:space-between; align-items:center; }
+    header strong { font-weight:650; letter-spacing:-.01em; }
+    main { max-width:1000px; margin:0 auto; padding:26px 22px 60px; }
+    h1 { font-size:1.35rem; margin:0 0 4px; letter-spacing:-.015em; }
+    .sub { color:var(--muted); margin:0 0 22px; }
+    table { width:100%; border-collapse:collapse; background:var(--card);
+            border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+    th { font-size:.74rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:.78rem;
+            border:1px solid var(--line); }
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+    form.card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+                padding:18px; max-width:440px; }
+    label { display:block; margin:12px 0 4px; font-size:.85rem; color:var(--muted); }
+    input,select { width:100%; padding:8px 10px; border:1px solid var(--line);
+                   border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+    button { margin-top:16px; padding:9px 16px; border:0; border-radius:6px;
+             background:var(--fg); color:var(--bg); font:inherit; font-weight:600;
+             cursor:pointer; }
+    .note { border-left:3px solid var(--warn); padding:10px 14px; margin:18px 0;
+            background:var(--card); color:var(--muted); font-size:.88rem; }
+    .err { border-left:3px solid var(--bad); padding:10px 14px; margin:14px 0;
+           background:var(--card); color:var(--bad); font-size:.9rem; }
+    a { color:inherit; }
+  </style>
+</head>
+<body>
+<header>
+  <strong>Daher Health · provisioning</strong>
+  {% if operator %}<span style="color:var(--muted)">{{ operator }} ·
+    <a href="/logout">sign out</a></span>{% endif %}
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

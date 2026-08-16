@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+<p class="sub">Fleet provisioning. This console never shows patient data.</p>
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+<form class="card" method="post" action="/login">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="u">Username</label>
+  <input id="u" name="username" autocomplete="username" required autofocus>
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+</form>
+{% endblock %}
