@@ -1217,7 +1217,25 @@ Enrollment tokens are **single-use** (replay refused even inside the lifetime), 
 attacker-controlled host into the fleet. Minting for an already-enrolled host is refused rather than
 silently replacing a live agent's credential. Errors never contain the presented token.
 
-**Next:** the job queue and the agent's poll loop.
+**Job queue and poll loop built 2026-08-16 — 240 tests.** Jobs are addressed to one host and
+claimable only by it; a claimed job is **held, not deleted**, so a crash between claiming and
+finishing leaves work visible rather than silently lost (DH-025's reasoning). `refused` is a
+distinct outcome from `failed` — the boundary working must never read as the deployment breaking.
+
+The poll loop's tested property is **staying alive**: an unreachable API, a malformed payload, a
+smuggled `image` param, an executor that raises, and a reporter that raises are each survived, and
+a hostile job is refused *while the next legitimate job still runs*. An agent that crashes on
+hostile input has been switched off by the attacker, and a host that is not polling is also not
+getting backups or updates.
+
+⚠️ **The transport is WRITTEN, NOT DEMONSTRATED.** The loop is unit-tested against injected
+transport and executor. "Polls a separate host over a network and refuses hostile input over the
+wire" needs two hosts, or two containers on separate networks standing in for them, and that does
+not exist. Same distinction this repo applies to the WhatsApp mock and off-site backup.
+
+**Next:** either the two-container demonstration that would make the transport claim real, or the
+HTTP endpoints the agent polls. The demonstration is the more valuable of the two — an untested
+transport is exactly the shape of thing this project keeps finding.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

@@ -31,6 +31,23 @@ infer success. The portal itself is not built.
 | `POST /facilities/{id}/decommission` | Soft only; records state |
 | `POST /facilities/{id}/rotate-credentials` | Not built |
 
+### ⚠️ The poll loop is WRITTEN, NOT DEMONSTRATED
+
+`daher_agent/poller.py` is unit-tested against injected transport and executor. What is **not**
+proven on one machine is the claim the design rests on — *polls a separate host over a network and
+refuses hostile input over the wire*. That needs two hosts, or two containers on separate networks
+standing in for them. Until that exists, this is written code, not verified behaviour, and the same
+distinction this repo applies to the WhatsApp mock and off-site backup applies here.
+
+What **is** tested: the loop stays alive. An agent that crashes on hostile input has been switched
+off by the attacker, and a host that is not polling is also not getting backups or updates. So an
+unreachable API, a malformed payload, a smuggled `image` param, an executor that raises, and a
+reporter that raises are each survived — and a hostile job is refused *and the next legitimate job
+still runs*.
+
+A refusal is reported as `refused`, never `failed`. The boundary working must not read as the
+deployment breaking.
+
 ### The agent's job validation — the actual boundary
 
 ADR-022's residual risk is stated plainly: *a breached API can enqueue a job with hostile
@@ -123,8 +140,10 @@ provisioning/
     hosts.py         registered deploy hosts (the allowlist)
     jobs.py          the job vocabulary shared with the agent
     enrolment.py     single-use host enrolment tokens
+    queue.py         per-host job routing
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
+    poller.py        the poll loop (⚠️ WRITTEN, NOT DEMONSTRATED)
     app.py           the FastAPI surface
   tests/
     test_secrets.py           generation, uniqueness, redaction
@@ -136,6 +155,7 @@ provisioning/
     test_hosts.py             the allowlist and the occupied-host refusal
     test_agent_validation.py  every refusal, written as an attack
     test_enrolment.py         single-use, expiry, host binding
+    test_queue_and_poller.py  routing, and the loop staying alive
 ```
 
 ## The facility env file
