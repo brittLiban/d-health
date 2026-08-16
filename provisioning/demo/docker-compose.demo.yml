@@ -1,0 +1,54 @@
+# DH-027 two-container demonstration (ADR-022).
+#
+# Proves over a REAL socket what unit tests could not: the agent polls a separate host,
+# refuses hostile input by its own validation, and exposes no inbound port.
+#
+# `agent` publishes nothing and listens on nothing. That is the property under test.
+name: daher-demo
+
+services:
+  api:
+    build:
+      context: ..
+      target: test
+    working_dir: /app
+    # Harness only: the shared volume is root-owned and both sides need to write to it.
+    # The production image runs as uid 10002; this override exists so the demo can share a
+    # scratch volume, and says nothing about how the API is deployed.
+    user: "0:0"
+    command: ["python", "/app/demo/api_server.py"]
+    environment:
+      PYTHONPATH: /app/src
+      DEMO_SHARED: /shared
+      DEMO_HOST_ID: host-a
+    volumes:
+      - ../demo:/app/demo:ro
+      - ../src:/app/src:ro
+      - shared:/shared
+    networks: [demo]
+
+  agent:
+    build:
+      context: ..
+      target: test
+    working_dir: /app
+    user: "0:0"  # harness only — see the note on `api`
+    command: ["python", "/app/demo/agent_runner.py"]
+    environment:
+      PYTHONPATH: /app/src
+      DEMO_SHARED: /shared
+      HOST_ID: host-a
+      PROVISIONING_URL: http://api:8000
+    volumes:
+      - ../demo:/app/demo:ro
+      - ../src:/app/src:ro
+      - shared:/shared
+    networks: [demo]
+    depends_on: [api]
+
+volumes:
+  shared:
+
+networks:
+  demo:
+    driver: bridge

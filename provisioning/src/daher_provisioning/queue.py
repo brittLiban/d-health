@@ -34,6 +34,13 @@ class JobStatus(StrEnum):
 class QueuedJob:
     job: Job
     status: JobStatus = JobStatus.QUEUED
+    # ⚠️ Which host this was HANDED TO, recorded at claim time. Authorisation for reporting
+    # must use this, never the job's self-declared `host_id` — a compromised issuer controls
+    # the payload, so a misrouted job would otherwise be refused by the agent and then be
+    # unreportable, leaving the most security-relevant event invisible to the audit log.
+    # Found by the two-container demonstration; unit tests could not see it because they
+    # injected a reporter that always succeeded.
+    delivered_to: str | None = None
     claimed_at: datetime | None = None
     finished_at: datetime | None = None
     detail: str = ""
@@ -66,6 +73,7 @@ class JobQueue:
                 continue
             record.status = JobStatus.CLAIMED
             record.claimed_at = datetime.now(UTC)
+            record.delivered_to = host_id
             return record.job
         return None
 

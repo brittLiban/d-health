@@ -1233,9 +1233,36 @@ transport and executor. "Polls a separate host over a network and refuses hostil
 wire" needs two hosts, or two containers on separate networks standing in for them, and that does
 not exist. Same distinction this repo applies to the WhatsApp mock and off-site backup.
 
-**Next:** either the two-container demonstration that would make the transport claim real, or the
-HTTP endpoints the agent polls. The demonstration is the more valuable of the two — an untested
-transport is exactly the shape of thing this project keeps finding.
+**Two-container demonstration PERFORMED 2026-08-16 — `provisioning/demo/README.md`.** Real API and
+real agent in separate containers on a bridge network, exercising the production poller,
+validator and HTTP transport. Only the executor is substituted.
+
+**Demonstrated:** authenticated polling over a real socket; 1 of 7 jobs reaching the executor;
+6 of 6 hostile payloads refused over the wire; the agent's **own** host check firing on a
+deliberately misrouted job; **no inbound port** on the agent (probes to 22/80/443/8000/8080/9000
+all refused); "held, not deleted" across a real **SIGKILL** — the job stayed `claimed` and was never
+re-handed-out; the agent resuming after process death; and a 14-entry audit chain that verifies.
+
+**Three defects the unit tests structurally could not find:**
+
+1. **The agent's own host check was never exercised.** The queue routed the misrouted job away, so
+   the agent never saw it — the demo would have passed while silently never testing that refusal.
+2. **A refused misrouted job could not be reported.** The report endpoint authorised on the job's
+   *self-declared* `host_id`, a field a compromised issuer controls, so the agent refused hostile
+   work and the API recorded nothing. Now authorised on `delivered_to`, recorded at claim time.
+3. **The audit call could fail *after* the state change**, leaving a job finished with no record.
+   An audit that can fail after the event it records is worse than none, because the gap is
+   invisible. Now read defensively, before mutating state.
+
+⚠️ **Honest limits — the transport is PARTIALLY demonstrated.** Five of six refusals came from
+*schema* validation, not the agent's deeper `revalidate_params`/character filter, so that second
+layer remains proven only by unit tests that bypass the schema. And three things are entirely
+untested: **TLS** (the demo runs plain HTTP, so certificate and hostname verification are unproven
+while ADR-022 assumes them), **partial/truncated reads**, and **the real executor** — nothing has
+ever started a clinical stack through this path.
+
+**Next:** TLS on the demo path, then the compose executor — the last seam where an argument could
+reach a command boundary.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

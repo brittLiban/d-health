@@ -13,6 +13,8 @@ is recorded by this service from what it actually did**, never from what the cli
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
+from secrets import compare_digest
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -26,6 +28,7 @@ from daher_provisioning.auth import (
     Scope,
     require,
 )
+from daher_provisioning.enrolment import EnrolmentError, EnrolmentService
 from daher_provisioning.hosts import HostError, HostRegistry
 from daher_provisioning.models import (
     CredentialReference,
@@ -35,6 +38,7 @@ from daher_provisioning.models import (
     FacilityState,
     FacilityStatus,
 )
+from daher_provisioning.queue import JobQueue, JobStatus
 from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 from daher_provisioning.repository import FacilityExists, FacilityNotFound, FacilityRepository
 from daher_provisioning.secrets import SecretGenerationError, validate_facility_id
@@ -61,9 +65,13 @@ def create_app(
     repository: FacilityRepository | None = None,
     limiter: TokenBucketLimiter | None = None,
     hosts: HostRegistry | None = None,
+    job_queue: JobQueue | None = None,
+    enrolment: EnrolmentService | None = None,
 ) -> FastAPI:
     facilities = repository or FacilityRepository()
     host_registry = hosts or HostRegistry()
+    queue = job_queue or JobQueue()
+    enrolments = enrolment or EnrolmentService()
     rate_limiter = limiter or TokenBucketLimiter(rate_per_second=1.0, burst=20)
 
     app = FastAPI(
@@ -309,4 +317,120 @@ def create_app(
         )
         return updated
 
+    async def agent_principal(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> str:
+        """Authenticate a facility agent. Returns its host id.
+
+        Deliberately a separate credential space from the portal's: an agent credential
+        must not be able to drive the fleet, and a portal credential must not be able to
+        claim a host's work.
+        """
+        presented = None
+        if authorization and authorization.lower().startswith("bearer "):
+            presented = authorization[7:].strip()
+
+        parts = (presented or "").split("_", 2)
+        if len(parts) != 3 or parts[0] != "dha" or not parts[1] or not parts[2]:
+            audit_log.record(
+                actor="unauthenticated-agent",
+                action=AuditAction.AUTH_DENIED,
+                outcome=AuditOutcome.DENIED,
+                message="malformed agent credential",
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credential")
+
+        host_id, secret = parts[1], parts[2]
+        try:
+            agent = enrolments.agent(host_id)
+        except EnrolmentError as exc:
+            audit_log.record(
+                actor="unauthenticated-agent",
+                action=AuditAction.AUTH_DENIED,
+                outcome=AuditOutcome.DENIED,
+                message=str(exc)[:512],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credential") from exc
+
+        if not compare_digest(sha256(secret.encode("utf-8")).hexdigest(), agent.credential_hash):
+            audit_log.record(
+                actor=f"agent:{host_id}",
+                action=AuditAction.AUTH_DENIED,
+                outcome=AuditOutcome.DENIED,
+                message="agent credential mismatch",
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credential")
+        return host_id
+
+    @app.get("/agent/jobs/claim")
+    async def claim_job(host_id: str = Depends(agent_principal)) -> JSONResponse:
+        """Hand this host its next job, if any. A host can only ever claim its own."""
+        job = queue.claim(host_id)
+        if job is None:
+            return JSONResponse({"job": None})
+        # Record who took what. ADR-021 requires every action be logged by the API from
+        # what it observed; a claim is an action.
+        audit_log.record(
+            actor=f"agent:{host_id}",
+            action=AuditAction.FACILITY_STATUS,
+            outcome=AuditOutcome.SUCCESS,
+            facility_id=getattr(getattr(job, "params", None), "facility_id", None),
+            message=f"job {getattr(job, 'job_id', 'unknown')} claimed",
+            source_ip=None,
+        )
+        return JSONResponse({"job": job.model_dump(mode="json")})
+
+    @app.post("/agent/jobs/{job_id}/report")
+    async def report_job(
+        job_id: str,
+        request: Request,
+        host_id: str = Depends(agent_principal),
+    ) -> JSONResponse:
+        """Record an agent's claim about an outcome.
+
+        ⚠️ This is the agent's *claim*. The API's own audit record is authoritative
+        (ADR-021) — an agent that says "succeeded" has said so, not proven it.
+        """
+        body = await request.json()
+        reported = str(body.get("status", ""))[:32]
+        detail = str(body.get("detail", ""))[:512]
+        mapping = {
+            "succeeded": JobStatus.SUCCEEDED,
+            "failed": JobStatus.FAILED,
+            "refused": JobStatus.REFUSED,
+        }
+        if reported not in mapping:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown status")
+
+        record = queue.get(job_id)
+        # Authorise on who the job was DELIVERED to, not on what the payload claims. A
+        # compromised issuer controls `job.host_id`, so using it here would make an agent's
+        # refusal of a misrouted job unreportable — silencing exactly the event most worth
+        # recording (found by the two-container demonstration, ADR-022).
+        if record.delivered_to is not None and record.delivered_to != host_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "job was delivered to another host")
+
+        # ⚠️ Read anything the audit needs BEFORE changing state, and read it defensively.
+        # The demonstration caught this: the state change succeeded and then the audit call
+        # raised while reaching into a field, leaving the job finished with no record of it.
+        # An audit that can fail after the thing it records has already happened is worse
+        # than no audit, because the gap is invisible.
+        facility_id = getattr(getattr(record.job, "params", None), "facility_id", None)
+        queue.finish(job_id, mapping[reported], detail)
+        audit_log.record(
+            actor=f"agent:{host_id}",
+            action=AuditAction.FACILITY_STATUS,
+            outcome=AuditOutcome.SUCCESS if reported == "succeeded" else AuditOutcome.FAILURE,
+            facility_id=facility_id,
+            message=f"agent reported {reported}: {detail}"[:512],
+            source_ip=_client_ip(request),
+        )
+        return JSONResponse({"recorded": reported})
+
+    app.state.queue = queue
+    app.state.enrolments = enrolments
+    app.state.hosts = host_registry
     return app
