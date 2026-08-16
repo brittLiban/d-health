@@ -1,6 +1,12 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-15 · **Phase:** four policy calls decided (ADR-017/018/019 + placeholders); BLOCKER-3 closed, BLOCKER-5 down to names. DH-011 is now implementation work, not a decision wait.
+**Updated:** 2026-08-15 · **Phase:** provisioning API + portal work started (DH-026). Four policy calls decided (ADR-017/018/019); BLOCKER-3 closed, BLOCKER-5 down to names.
+
+**⚠️ Recorded schedule trade, made deliberately by Liban 2026-08-15.** The provisioning API and
+portal are being built *before* DH-011→012→013. The consequence, stated once and accepted: the
+order/result transport chain and therefore the **golden end-to-end flow will very likely not be
+demonstrated by 1 September**. This is a decision, not an oversight — it is recorded here so nobody
+later reads the missed date as a delivery failure.
 **Target:** pilot-ready 2026-09-01 · **Not** clinically live (ADR-012)
 
 Single agent, one ticket at a time. Update this file before ending a session.
@@ -1103,6 +1109,28 @@ repo distrusts.
 
 ### DH-018 · Golden end-to-end demonstration · P0 · ⏸ (needs DH-013, DH-015)
 All eight steps of §8, demonstrated live to Liban, including the retry/restart no-duplicates check.
+
+### DH-026 · Facility parameterisation (multi-facility foundation) · 🔨 STARTED 2026-08-15
+First ticket of the provisioning API + portal work. The Compose project name is now
+`daher-${FACILITY_ID:-default}`, which namespaces every container, volume and network so two
+facilities can run on one host.
+
+**A hazard found while doing it, and closed.** The running stack's 14 volumes were created under
+the project name `daher-health`. An unset `FACILITY_ID` resolves to `daher-default`, so the next
+`docker compose up` would have built a **new empty stack beside the existing one** and orphaned the
+patient database — while appearing to start perfectly normally. `FACILITY_ID=health` is now pinned
+in the local `.env`, verified to resolve back to the same 11 containers and 102 patients. The same
+trap is documented in `.env.example`: this value is an identity, stable for the life of the
+deployment, never edited afterwards.
+
+**Collision survey (what actually clashes between two facilities on one host):** only the project
+name and the three published host ports. The 7 network aliases live on each stack's own network and
+the 12 named volumes are namespaced by project name, so both are free. Locally built image tags are
+deliberately shared — build once, run many.
+
+**Still open before facility #2 is real:** the host-port model (only one Caddy can own 80/443, so
+either one shared edge proxy or per-facility loopback ports behind one), automated DNS/TLS, and the
+per-facility secret generator.
 
 ### P1 / P2
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`

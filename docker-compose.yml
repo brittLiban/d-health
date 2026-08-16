@@ -16,7 +16,13 @@
 #
 # Versions and the reasoning behind them: docs/ARCHITECTURE.md §12.
 
-name: daher-health
+# ⚠️ MULTI-FACILITY (DH-026). The project name namespaces every container, volume
+# and network, so it is what keeps two facilities on one host from colliding.
+# FACILITY_ID must be unique per facility and stable for the life of that
+# deployment — changing it later orphans the volumes, which on a clinical stack
+# means orphaning the patient database. It is not a display name; it is an
+# identity. Lowercase alphanumeric and hyphens only (Compose restriction).
+name: daher-${FACILITY_ID:-default}
 
 x-common-env: &common-env
   TZ: ${TZ:-Africa/Djibouti}
