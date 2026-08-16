@@ -52,11 +52,43 @@ control — a security check nobody has tried to defeat is worth very little.
 ```
 provisioning/
   src/daher_provisioning/
-    secrets.py    per-facility credential generation
-    models.py     facility records + closed API schemas
+    secrets.py       per-facility credential generation
+    models.py        facility records + closed API schemas
+    facility_env.py  renders and writes a facility's .env
   tests/
     test_secrets.py           generation, uniqueness, redaction
     test_no_clinical_data.py  the structural guarantee
+    test_facility_env.py      rendering, permissions, compose sync
+```
+
+## The facility env file
+
+`render_env()` produces everything a facility's stack needs; `write_env()` writes it at mode
+`0600`, created restricted from the outset rather than chmod-ed afterwards — a world-readable
+window, however brief, is a window in which every credential is readable.
+
+**It refuses to overwrite an existing env file.** A facility's databases are initialised with the
+credentials from their first boot. Rewriting the file with fresh secrets does not rotate anything:
+it leaves a running stack whose passwords no longer match its own databases, and an
+`OMRS_ADMIN_PASSWORD` that was only ever applied on first boot. Rotation is a separate, deliberate
+operation, and `overwrite=True` exists for it — not as a retry convenience.
+
+### The sync test
+
+`test_renders_every_variable_the_real_compose_file_requires` parses the actual
+`docker-compose.yml` for `${VAR:?}` guards and asserts the renderer produces all of them. When
+someone adds a required variable to the clinical stack, **that test fails** rather than a facility
+failing at `docker compose up` after it has already been provisioned.
+
+It is control-tested: removing one variable from the renderer makes it fail, naming the exact
+variable. Run it with the compose file mounted:
+
+```sh
+docker run --rm \
+  -v "$PWD/docker-compose.yml:/docker-compose.yml:ro" \
+  -v "$PWD/provisioning/src:/app/src:ro" \
+  -v "$PWD/provisioning/tests:/app/tests:ro" \
+  daher-provisioning-test pytest -q
 ```
 
 ## Secrets
