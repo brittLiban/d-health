@@ -141,6 +141,7 @@ provisioning/
     jobs.py          the job vocabulary shared with the agent
     enrolment.py     single-use host enrolment tokens
     queue.py         per-host job routing
+    network.py       source allowlist (defence in depth)
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
     poller.py        the poll loop (⚠️ WRITTEN, NOT DEMONSTRATED)
@@ -156,6 +157,7 @@ provisioning/
     test_agent_validation.py  every refusal, written as an attack
     test_enrolment.py         single-use, expiry, host binding
     test_queue_and_poller.py  routing, and the loop staying alive
+    test_network.py           the allowlist, and the header it must not believe
 ```
 
 ## The facility env file
@@ -217,6 +219,27 @@ Steps 1–3 do not disappear no matter how automated the rest becomes. Describin
 
 Until a host has enrolled, it can be registered but **not claimed** — assigning a facility to a
 host whose agent has never bootstrapped is refused rather than queued.
+
+## Where this service should run (ADR-023)
+
+**Not on the public internet.** The API is firewalled to the portal server's address; the portal
+runs on its own domain, separate from any marketing site and from `BASE_DOMAIN`'s facility
+subdomains; and **the browser never talks to this API** — it talks to the portal, which calls
+here server-side. A scoped provisioning credential in browser JavaScript is one XSS away from
+being stolen.
+
+The firewall is the primary control. `network.py` is the **second** one, because firewalls get
+edited — usually by someone opening a port to debug and not closing it. Set
+`allowed_source_cidrs` and the API refuses anything else and records the attempt.
+
+⚠️ **The check uses the real peer address and never `X-Forwarded-For`.** Any client can set that
+header, so believing it would hand over the bypass for free. A test asserts a request carrying
+`X-Forwarded-For`, `X-Real-IP` and `Forwarded` all pointing at an allowed address is still
+refused. If a reverse proxy is ever put in front, update the allowlist to the proxy deliberately
+— do not start trusting a header.
+
+An unparseable or missing peer address is **refused** while enforcing, not allowed. Otherwise any
+transport that obscures the peer becomes a bypass.
 
 ## Authentication and scopes
 

@@ -1278,6 +1278,20 @@ like success.
 **Still not demonstrated:** partial/truncated reads, and the real executor — nothing has ever
 started a clinical stack through this path.
 
+**Network exposure decided and implemented 2026-08-16 — ADR-023.** The provisioning API is
+**not publicly reachable**: firewalled to the portal server's address, portal on its own domain
+separate from any marketing site and from `BASE_DOMAIN`, and the browser never talks to the API.
+Rejected a VPN tunnel for now — stronger, but a persistent moving part that only adds protection
+against an attacker who has already stolen the portal credential *and* can spoof a source address.
+Upgrade path recorded: WireGuard later, **no code changes**.
+
+Implemented as **defence in depth**, because firewalls get edited: `network.py` enforces a source
+allowlist ahead of authentication, so an unauthorised source cannot even reach credential
+comparison. It uses the **real peer address and never `X-Forwarded-For`** — a test asserts a
+request carrying three forwarded headers pointing at an allowed address is still refused. A missing
+or unparseable peer is refused rather than allowed, so nothing that obscures the peer becomes a
+bypass. 257 tests.
+
 **Next:** the compose executor — the last seam where an argument could reach a command boundary.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate

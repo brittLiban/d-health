@@ -933,3 +933,49 @@ Steps 1–3 are the irreducible manual step. Documented as such rather than pres
 2. **A create request targeting an already-provisioned host or facility id is a hard conflict**,
    never an overwrite. Same class of bug as the `FACILITY_ID` default trap: a routine-looking
    request silently clobbering something live.
+
+---
+
+## ADR-023 — The provisioning API is not publicly reachable
+
+**Date:** 2026-08-16 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** ADR-021 established that the portal is an untrusted client holding a scoped
+credential. It left unstated *who else can reach the API*, and an unstated assumption is one that
+regresses silently — typically when somebody opens a port to debug something at 2am.
+
+**Decision.**
+
+1. **The provisioning API is firewalled to the portal server's address.** It does not listen to
+   the internet. One rule, and it removes scanners, credential stuffing, and whatever CVE lands
+   in the web stack next year — essentially every attacker who is not already inside the portal.
+2. **The portal runs on its own domain**, separate from any marketing site and separate from
+   `BASE_DOMAIN`'s facility subdomains. If a marketing site is ever WordPress or similar — a
+   plugin-heavy, frequently-patched codebase — sharing an origin would let its XSS act *as* the
+   fleet-provisioning portal. If subdomains of one registrable domain are used instead, cookies
+   must be host-scoped; a cookie on `.example.org` is readable across all of it.
+3. **The browser never talks to the provisioning API.** It talks to the portal; the portal calls
+   the API server-side. A scoped provisioning credential in browser JavaScript is one XSS away
+   from being stolen, and an admin page is exactly the sort that gets less scrutiny than a public
+   app. ADR-020's server-rendered choice already produces this — it is recorded here so it stays
+   deliberate.
+
+**Rejected: a VPN tunnel, for now.** Genuinely stronger, and the right upgrade later. But it is a
+persistent moving part — key rotation, tunnel-down debugging — and above the IP rule it only
+defends against an attacker who has *already* stolen the portal credential *and* can spoof a
+source address. Not worth the operational cost at one pilot facility. Upgrade path: WireGuard
+between portal and API host, then tighten the firewall to the tunnel interface. **No code
+changes** — same credential, same HTTPS, different route.
+
+**Rejected: same domain.** See point 2.
+
+**Defence in depth, because firewalls get edited.** The application enforces its own source
+allowlist in addition to the firewall. If someone opens a port to debug and forgets, the API
+still refuses and records the attempt. The check uses the **real peer address only** and never
+`X-Forwarded-For`, which any client can set — trusting a forwarded header here would hand an
+attacker the allowlist bypass for free.
+
+**What this does NOT change.** It does nothing against a compromised *portal server* — the
+attacker is already at the allowed address. That case is ADR-021's walkthrough and is unchanged:
+create, inspect, stop facilities, loudly, with no clinical data reachable. This decision removes
+every attacker who is not already inside the portal, which is nearly all of them.

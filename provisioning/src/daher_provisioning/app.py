@@ -38,6 +38,7 @@ from daher_provisioning.models import (
     FacilityState,
     FacilityStatus,
 )
+from daher_provisioning.network import SourceAllowlist, SourceNotAllowed
 from daher_provisioning.queue import JobQueue, JobStatus
 from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 from daher_provisioning.repository import FacilityExists, FacilityNotFound, FacilityRepository
@@ -67,12 +68,14 @@ def create_app(
     hosts: HostRegistry | None = None,
     job_queue: JobQueue | None = None,
     enrolment: EnrolmentService | None = None,
+    allowed_source_cidrs: list[str] | None = None,
 ) -> FastAPI:
     facilities = repository or FacilityRepository()
     host_registry = hosts or HostRegistry()
     queue = job_queue or JobQueue()
     enrolments = enrolment or EnrolmentService()
     rate_limiter = limiter or TokenBucketLimiter(rate_per_second=1.0, burst=20)
+    allowlist = SourceAllowlist(allowed_source_cidrs)
 
     app = FastAPI(
         title="Daher Health provisioning",
@@ -91,6 +94,21 @@ def create_app(
         authorization: str | None = Header(default=None),
     ) -> Principal:
         """Authenticate, then rate limit. Both failures are audited."""
+        # Source check first. An unauthorised source should not reach credential
+        # comparison at all — otherwise it can still probe timing and rate limits from
+        # anywhere on the internet (ADR-023).
+        try:
+            allowlist.check(_client_ip(request))
+        except SourceNotAllowed as exc:
+            audit_log.record(
+                actor="blocked-source",
+                action=AuditAction.AUTH_DENIED,
+                outcome=AuditOutcome.DENIED,
+                message=str(exc)[:512],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "source not allowed") from exc
+
         presented = None
         if authorization and authorization.lower().startswith("bearer "):
             presented = authorization[7:].strip()
@@ -326,6 +344,18 @@ def create_app(
         must not be able to drive the fleet, and a portal credential must not be able to
         claim a host's work.
         """
+        try:
+            allowlist.check(_client_ip(request))
+        except SourceNotAllowed as exc:
+            audit_log.record(
+                actor="blocked-source",
+                action=AuditAction.AUTH_DENIED,
+                outcome=AuditOutcome.DENIED,
+                message=str(exc)[:512],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "source not allowed") from exc
+
         presented = None
         if authorization and authorization.lower().startswith("bearer "):
             presented = authorization[7:].strip()
