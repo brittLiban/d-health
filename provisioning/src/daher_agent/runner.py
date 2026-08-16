@@ -18,9 +18,9 @@ from pathlib import Path
 
 import httpx
 
-from daher_agent.poller import AgentPoller, ExecutionResult
+from daher_agent.executor import ComposeExecutor
+from daher_agent.poller import AgentPoller
 from daher_agent.validation import JobValidator
-from daher_provisioning.jobs import Job
 
 logger = logging.getLogger("daher_agent.runner")
 
@@ -67,20 +67,14 @@ def facility_exists(facility_root: Path):
     return check
 
 
-def make_executor(facility_root: Path):
-    """Execute a validated job.
+def make_executor(facility_root: Path, *, compose_file: Path, base_domain: str):
+    """Build the real executor: the compose file already on this host, run as an argv list.
 
-    ⚠️ The demonstration harness substitutes this. The real implementation runs the compose
-    file that already lives on this host with a fixed argument list — never a shell string,
-    and never a spec supplied by the caller (ADR-022).
+    Never a shell string, and never a spec supplied by the caller (ADR-022).
     """
-
-    def execute(job: Job) -> ExecutionResult:  # pragma: no cover - replaced in the demo
-        raise NotImplementedError(
-            "the real compose executor is not built; the demonstration injects its own"
-        )
-
-    return execute
+    return ComposeExecutor(
+        compose_file=compose_file, facility_root=facility_root, base_domain=base_domain
+    ).execute
 
 
 def run_forever(
@@ -91,6 +85,8 @@ def run_forever(
     facility_root: Path,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     execute=None,
+    compose_file: Path | None = None,
+    base_domain: str = "localhost",
     max_iterations: int | None = None,
 ) -> None:
     transport = HttpTransport(base_url, credential)
@@ -98,7 +94,12 @@ def run_forever(
     poller = AgentPoller(
         validator=validator,
         fetch=transport.fetch,
-        execute=execute or make_executor(facility_root),
+        execute=execute
+        or make_executor(
+            facility_root,
+            compose_file=compose_file or Path("/opt/daher/docker-compose.yml"),
+            base_domain=base_domain,
+        ),
         report=transport.report,
     )
 
@@ -122,6 +123,8 @@ def main() -> int:  # pragma: no cover - exercised by the demonstration, not uni
         host_id=os.environ["HOST_ID"],
         facility_root=Path(os.environ.get("FACILITY_ROOT", "/var/lib/daher/facilities")),
         poll_seconds=float(os.environ.get("POLL_SECONDS", DEFAULT_POLL_SECONDS)),
+        compose_file=Path(os.environ.get("COMPOSE_FILE", "/opt/daher/docker-compose.yml")),
+        base_domain=os.environ.get("BASE_DOMAIN", "localhost"),
     )
     return 0
 

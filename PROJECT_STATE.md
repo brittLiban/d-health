@@ -1292,7 +1292,21 @@ request carrying three forwarded headers pointing at an allowed address is still
 or unparseable peer is refused rather than allowed, so nothing that obscures the peer becomes a
 bypass. 257 tests.
 
-**Next:** the compose executor — the last seam where an argument could reach a command boundary.
+**Compose executor built 2026-08-16 — 276 tests.** The last seam where a parameter reaches a
+command. Five rules: **never a shell** (argv list, `shell=False` — removing injection as a
+*category* rather than filtering for it); the **compose file is fixed and local**, never from the
+job, because an issuer who could name a spec would be root on the host; the facility id validated a
+**third** time immediately before becoming an argument; secrets generated **on the host**; and
+**`stop`, never `down`** — a test asserts no verb can emit `--volumes` or `-v`, so nothing here can
+destroy clinical data.
+
+Tests assert the **exact argv** rather than "it worked" — a test checking only the return value
+would pass identically whether the command was a safe list or a shell string with the id
+interpolated. Both guards control-verified: removing the executor's validation lets a hostile id
+reach the command and fails the suite; `shell=True` fails it too.
+
+**Next:** persistence — everything (facilities, hosts, enrolments, credentials, queue) is still
+in-memory, so an API restart loses the fleet. That now blocks everything real.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

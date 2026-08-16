@@ -48,6 +48,27 @@ still runs*.
 A refusal is reported as `refused`, never `failed`. The boundary working must not read as the
 deployment breaking.
 
+### The executor — the last command boundary
+
+`executor.py` is where a parameter finally reaches a command, so five rules hold absolutely:
+
+1. **Never a shell.** Every invocation is an argv *list* with `shell=False`. There is no string
+   for a metacharacter to live in, which removes command injection as a *category* rather than
+   filtering for it.
+2. **The compose file is fixed and local**, from this host's configuration and never from the
+   job. An issuer who could name a compose file could name any container spec — and Docker
+   access is root access. That one rule is what keeps ADR-022's walkthrough true.
+3. **The facility id is validated a third time**, immediately before it becomes an argument.
+4. **Secrets are generated here**, on the host. The job carries none; the API has never held any.
+5. **`stop`, never `down`.** `down` removes containers and networks and is one flag from removing
+   volumes. A test asserts no verb can ever emit `--volumes` or `-v`.
+
+Tests assert the **exact argv**, not that the call succeeded — a test checking only the return
+value would pass identically whether the command was a safe list or a shell string with the
+facility id interpolated into it. Both guards are control-verified: removing the executor's own
+validation makes a hostile id reach the command and fails the suite; switching to `shell=True`
+fails it too.
+
 ### The agent's job validation — the actual boundary
 
 ADR-022's residual risk is stated plainly: *a breached API can enqueue a job with hostile
@@ -145,6 +166,7 @@ provisioning/
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
     poller.py        the poll loop (⚠️ WRITTEN, NOT DEMONSTRATED)
+    executor.py      runs compose — the last command boundary
     app.py           the FastAPI surface
   tests/
     test_secrets.py           generation, uniqueness, redaction
@@ -158,6 +180,7 @@ provisioning/
     test_enrolment.py         single-use, expiry, host binding
     test_queue_and_poller.py  routing, and the loop staying alive
     test_network.py           the allowlist, and the header it must not believe
+    test_executor.py          the exact argv, not 'it worked'
 ```
 
 ## The facility env file
