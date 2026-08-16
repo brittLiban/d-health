@@ -163,6 +163,7 @@ provisioning/
     enrolment.py     single-use host enrolment tokens
     queue.py         per-host job routing
     network.py       source allowlist (defence in depth)
+    store.py         SQLite persistence for the control plane
   src/daher_agent/
     validation.py    the agent's local job validation — the real boundary
     poller.py        the poll loop (⚠️ WRITTEN, NOT DEMONSTRATED)
@@ -181,6 +182,7 @@ provisioning/
     test_queue_and_poller.py  routing, and the loop staying alive
     test_network.py           the allowlist, and the header it must not believe
     test_executor.py          the exact argv, not 'it worked'
+    test_store.py             restart survival, end to end
 ```
 
 ## The facility env file
@@ -242,6 +244,32 @@ Steps 1–3 do not disappear no matter how automated the rest becomes. Describin
 
 Until a host has enrolled, it can be registered but **not claimed** — assigning a facility to a
 host whose agent has never bootstrapped is refused rather than queued.
+
+## Persistence
+
+SQLite, one file. Facilities, host registrations, agent enrolments, API credentials and the job
+queue all survive a restart — previously they were plain dicts, so restarting the control plane
+lost the entire fleet and recovery meant re-enrolling every VM by hand.
+
+SQLite rather than a database server because this is one control plane on one host with small
+data, and ACID with no daemon to run, patch or back up separately is the right trade. The store
+classes are the seam if it ever outgrows that.
+
+⚠️ **No clinical credential is stored here.** Facility secrets are generated on the facility host
+and written to its own env file (ADR-022); this database holds identities and **hashes**. A test
+asserts no column is named for a password or secret, and another asserts an issued key's secret
+is not recoverable from the table.
+
+Two concurrency details worth knowing, both written as conditional updates so a race loses rather
+than corrupts:
+
+- **Claiming a host** updates `WHERE facility_id IS NULL`, so two simultaneous creates cannot both
+  attach a facility to the same host.
+- **Redeeming an enrolment token** updates `WHERE redeemed_at IS NULL`, so single-use survives two
+  requests arriving together — not just two arriving in sequence.
+
+`synchronous=FULL` because losing an acknowledged enrolment to a power cut would mean walking back
+to that VM.
 
 ## Where this service should run (ADR-023)
 

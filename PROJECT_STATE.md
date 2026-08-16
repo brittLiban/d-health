@@ -1305,8 +1305,24 @@ would pass identically whether the command was a safe list or a shell string wit
 interpolated. Both guards control-verified: removing the executor's validation lets a hostile id
 reach the command and fails the suite; `shell=True` fails it too.
 
-**Next:** persistence — everything (facilities, hosts, enrolments, credentials, queue) is still
-in-memory, so an API restart loses the fleet. That now blocks everything real.
+**Persistence built 2026-08-16 — 304 tests.** SQLite, one file. Facilities, host registrations,
+agent enrolments, API credentials and the job queue all survive a restart; previously an API
+restart lost the entire fleet and recovery meant re-enrolling every VM by hand.
+
+Proven end to end through the real app, not just the stores: a facility created before a restart is
+still listed after one, the portal credential still authenticates, and a host claimed before a
+restart still refuses a second facility with the "existing patient database" reason. "Held, not
+deleted" now survives an **API** restart too, not only an agent crash.
+
+**No clinical credential is stored** — facility secrets are generated on the facility host
+(ADR-022); this database holds identities and hashes. Tests assert no column is named for a
+password or secret, and that an issued key's secret is not recoverable from the table.
+
+Two races closed with conditional updates rather than read-then-write: claiming a host updates
+`WHERE facility_id IS NULL`, and redeeming an enrolment token updates `WHERE redeemed_at IS NULL`
+— so single-use survives two requests arriving *together*, not just in sequence.
+
+**Next:** the portal — the part Liban actually logs into.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
