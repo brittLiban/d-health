@@ -1132,6 +1132,36 @@ deliberately shared — build once, run many.
 either one shared edge proxy or per-facility loopback ports behind one), automated DNS/TLS, and the
 per-facility secret generator.
 
+### DH-027 · Provisioning API foundation · 🔨 IN PROGRESS 2026-08-15
+New system under `provisioning/`, separate service and deploy, sharing this repo's decision
+record. Python/FastAPI to match the adapter (ADR-020).
+
+**Answers received 2026-08-15:** one VM per facility by default but **deploy target is a field on
+the facility record**, not a hardcoded assumption; DNS built against a provider-agnostic interface
+and left explicitly unconfigured until a domain exists; portal is a self-contained FastAPI + Jinja2
+app rather than integrating with a website that does not exist yet.
+
+**Built so far:**
+- `secrets.py` — per-facility credential generation covering all 16 variables the clinical stack
+  requires. Encodes constraints learned by running the stack, not by reading docs: OpenELIS's
+  narrow `*$#!` alphabet, OpenMRS complexity plus its refusal of "admin" as a substring, and the
+  Compose project-name restriction on `FACILITY_ID`. `__repr__`/`__str__` are overridden so a
+  stack trace or log line cannot print a secret — tested by formatting the object into a string
+  and asserting no value appears.
+- `models.py` — closed (`extra="forbid"`) response schemas, deploy target as data, soft-only
+  decommission with no destructive state reachable from the API, and `dns_configured` defaulting
+  to **False** so a caller is told the step did not run rather than inferring success from a 201.
+
+**The structural no-clinical-data guarantee (ADR-021), and its control test.** Enforced three
+ways: closed schemas, a test walking every model against clinical vocabulary, and — the only one
+that does not depend on anyone staying careful — the service holding **no clinical database
+credentials at all**. Verified by control: adding a `patient_count` field to `FacilityStatus` made
+two independent tests fail with the ADR-021 explanation; removing it returned to green. 46 tests,
+Ruff clean.
+
+**Next:** the facility env-file writer, then the API surface (auth, rate limiting, independent
+append-only audit log), then the Compose deploy driver.
+
 ### P1 / P2
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`
 now exists — created at DH-006.) P2: graphical partogram plotting recorded values only (still needs the ADR-006

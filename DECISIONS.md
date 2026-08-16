@@ -726,3 +726,103 @@ already imported into an existing database — the existing throwaway volume kee
 is separate from `OMRS_DEMO_PATIENTS`, which remains `off` and governs fictional patients. Any
 reference vocabulary that later mapping genuinely needs must be added deliberately rather than
 inherited from demo content.
+
+---
+
+## ADR-020 — Provisioning architecture: one VM per facility by default, deploy target as data
+
+**Date:** 2026-08-15 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** The clinical stack is being made multi-facility, driven by a provisioning API with a
+portal on top. Hospitals and labs are independently provisionable types; neither implies the other.
+
+**Decision — topology.** **One VM per facility is the default.** It is the stronger isolation match
+for ADR-001 and for the standing rule that there is never a shared multi-tenant clinical database.
+A shared edge proxy across facilities means port routing, per-facility TLS termination, and one
+more component whose misconfiguration could cross-contaminate two facilities' traffic. That
+complexity is not justified at this number of facilities.
+
+**But the API must not hardcode it.** The **deploy target is a field on the facility record**, not
+an assumption in the provisioning logic. The API needs somewhere to deploy to; it does not need to
+know whether that host is dedicated or shared. This keeps the shared-host model available later
+without a rewrite — design for optionality, while building the simpler and safer thing now.
+
+**Decision — DNS and TLS: swappable, and honestly incomplete.** No domain or DNS provider exists
+yet (NEEDS LIBAN #15). The DNS step is therefore built against a **provider-agnostic interface**
+(Caddy already selects DNS-challenge providers by configuration rather than code) and is left
+**unconfigured and explicitly marked incomplete**. It must not appear to work against invented
+values — a provisioning step that silently "succeeds" against a fake DNS provider is exactly the
+false green this project has now found five times. Cloudflare is a reasonable later default (free,
+real API, pairs cleanly with Caddy) but is a configuration choice, not something locked in now.
+
+**Decision — implementation stack.** The provisioning API is **Python/FastAPI**, matching the
+adapter, so the repository has one language and one test idiom rather than a second toolchain. The
+portal is a **self-contained FastAPI app with server-rendered Jinja2 pages** on its own subdomain.
+There is no existing website to integrate with, and inventing an integration with a site that does
+not exist would be building against a guess. If a marketing site later appears in some other
+framework, the portal does not need to move into it.
+
+**Consequence.** `FACILITY_ID` (DH-026) namespaces containers, volumes and networks. Facility
+records carry identity, type, and deploy target. Nothing in the API assumes co-location.
+
+---
+
+## ADR-021 — Provisioning trust boundary and compromise blast radius
+
+**Date:** 2026-08-15 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** The portal runs on a general-purpose website server; the provisioning API runs on the
+infrastructure side. These are different trust levels even though one person owns both. The design
+question is not "how do the two talk" but **"what can an attacker do once the website server is
+theirs"** — because a public web server is the likeliest thing here to be breached.
+
+**Decision — the portal is an untrusted client.** It authenticates with a **scoped credential over
+TLS**, not a shared secret pasted into both codebases. Its scope is exactly: create a facility,
+list facilities, read status, rotate credentials, soft-decommission. That credential grants **no
+shell, no Docker socket, no database access** on any target host, and it is rotatable without
+redeploying anything.
+
+**Decision — the API's audit log is authoritative.** Every provisioning action is recorded by the
+API from what it actually did, never from what the client reported. "The portal said it succeeded"
+is not evidence. The log is **append-only and written to a destination outside the API host's own
+mutable filesystem**, so it survives that host being rebuilt or tampered with. A log an attacker
+can edit is decoration.
+
+**Decision — secrets are referenced, never echoed.** Per-facility secrets are generated, never
+reused across facilities, and never returned inline in an API response, written to the audit log,
+or included in an error or stack trace. Responses carry a **reference** to where credentials can be
+retrieved, not the credentials.
+
+### The blast-radius walkthrough — what a compromised website server actually gets
+
+Assume the attacker has full control of the website server, including the portal's credential.
+
+**They can:** create facilities (costing money and noise), list facilities and read their health,
+backup status, and image versions, rotate a facility's credentials (disruptive — it breaks that
+facility's stack until redeployed), and soft-decommission a facility (stopping its stack). All of
+this is loud: every action lands in an audit log they cannot reach.
+
+**They cannot:** read any patient record, obtain a shell on a facility host, connect to any
+clinical database, retrieve existing secrets (rotation issues new ones; it does not disclose old
+ones), or destroy clinical data — decommission is **soft only**, and there is deliberately no
+one-call destructive delete in the standard API surface. A hard delete requires a separate,
+harder-to-invoke mechanism with sign-off at the time.
+
+**Worst realistic outcome:** availability damage and a cleanup job — facilities stopped, credentials
+churned, spurious facilities created — with a complete record of it. Not a clinical data breach.
+**If a future change makes that paragraph untrue, the change is wrong**, not the paragraph.
+
+### The structural no-clinical-data guarantee
+
+"The portal must never show clinical data" is enforced three ways, in increasing order of strength:
+
+1. **Response schemas are closed and allowlisted** — extra fields are rejected at construction, so
+   a clinical field cannot be added by accident downstream.
+2. **A test asserts every response model against clinical vocabulary**, failing the build if a
+   field named for a patient, result, observation, diagnosis, or specimen ever appears.
+3. **The provisioning service holds no clinical database credentials at all.** It talks to
+   deployment and health surfaces, never to `openmrs` or `clinlims`. It cannot read a patient
+   record because it has no way to reach one — which is the only guarantee that does not depend on
+   anyone continuing to be careful.
+
+Point 3 is the real one. The first two catch mistakes; the third makes the mistake unreachable.
