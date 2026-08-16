@@ -29,7 +29,13 @@ from pathlib import Path
 
 from daher_agent.poller import ExecutionResult
 from daher_agent.validation import revalidate_params
-from daher_provisioning.facility_env import FacilityEnvError, render_env, write_env
+from daher_provisioning.facility_env import (
+    ROTATABLE,
+    FacilityEnvError,
+    render_env,
+    rotate_env_values,
+    write_env,
+)
 from daher_provisioning.jobs import Job, JobVerb
 from daher_provisioning.models import DeployTarget, Facility, FacilityType
 from daher_provisioning.secrets import generate_facility_secrets, validate_facility_id
@@ -123,6 +129,27 @@ class ComposeExecutor:
         write_env(self.env_path(facility_id), contents)
         return self._argv(facility_id, "up", "--detach")
 
+    def _rotate_tls(self, facility_id: str) -> list[str]:
+        """Rotate only what can be rotated safely (ADR-024).
+
+        Fresh values for the TLS stores and Keycloak client secrets; everything else in the
+        file is left exactly as it is, because rewriting a database password here would
+        leave the stack unable to reach its own databases.
+        """
+        path = self.env_path(facility_id)
+        if not path.is_file():
+            raise FacilityEnvError(f"no env file for {facility_id!r}; nothing to rotate")
+
+        fresh = generate_facility_secrets(facility_id).values
+        replacements = {name: fresh[name] for name in ROTATABLE if name in fresh}
+        updated = rotate_env_values(path.read_text(encoding="utf-8"), replacements)
+        # The deliberate overwrite path: this is rotation, which is exactly the case
+        # `write_env` reserves it for.
+        write_env(path, updated, overwrite=True)
+        # `up` re-runs the certs job, which finds a keystore it can no longer open and
+        # regenerates it, and re-runs Keycloak reconciliation with the new client secrets.
+        return self._argv(facility_id, "up", "--detach", "--force-recreate")
+
     def execute(self, job: Job) -> ExecutionResult:
         """Run one validated job. Returns a result; never raises into the poll loop."""
         try:
@@ -140,6 +167,8 @@ class ComposeExecutor:
         try:
             if job.verb is JobVerb.PROVISION:
                 argv = self._provision(facility_id, job.params.facility_type)
+            elif job.verb is JobVerb.ROTATE_TLS:
+                argv = self._rotate_tls(facility_id)
             elif job.verb is JobVerb.START:
                 argv = self._argv(facility_id, "up", "--detach")
             elif job.verb is JobVerb.STOP:

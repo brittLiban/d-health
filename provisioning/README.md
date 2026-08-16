@@ -29,7 +29,7 @@ infer success. The portal itself is not built.
 | `GET /facilities` | Works |
 | `GET /facilities/{id}/status` | Works; counts are zero because nothing is deployed |
 | `POST /facilities/{id}/decommission` | Soft only; records state |
-| `POST /facilities/{id}/rotate-credentials` | Not built |
+| `POST /facilities/{id}/rotate-credentials` | Rotates TLS + client secrets; **refuses the rest** (ADR-024) |
 
 ### ⚠️ The poll loop is WRITTEN, NOT DEMONSTRATED
 
@@ -249,6 +249,27 @@ Steps 1–3 do not disappear no matter how automated the rest becomes. Describin
 
 Until a host has enrolled, it can be registered but **not claimed** — assigning a facility to a
 host whose agent has never bootstrapped is refused rather than queued.
+
+## Credential rotation — what it will not do (ADR-024)
+
+"Rotate this facility's credentials" is not one operation, and the obvious implementation would
+**break the facility it was meant to protect**. Building it surfaced this:
+
+| Credential | Rewriting it in the env file | |
+|---|---|---|
+| Database passwords | The databases were provisioned once by `initdb`. The stack now presents a new password to a database holding the old one — **every service loses its database** | ❌ refused |
+| `OMRS_ADMIN_PASSWORD` | Applied on first boot only (DH-019). Changes nothing, while the file claims otherwise | ❌ refused |
+| `BACKUP_ENCRYPTION_PASSPHRASE` | Decrypts existing archives. Changing it without escrow makes **every prior backup unrecoverable** — including the one needed in the disaster that prompted the rotation | ❌ refused |
+| TLS keystore/truststore | DH-021's generator finds a store it cannot open and regenerates. Self-healing | ✅ rotated |
+| Keycloak client secrets | Reapplied by the idempotent reconciliation job | ✅ rotated |
+
+Each refusal names what is *actually* required — `ALTER USER` inside the engine, a password
+change through OpenMRS, escrow of the old passphrase — so it points somewhere instead of just
+saying no. The endpoint's response carries `not_rotated` for the same reason: a response listing
+only what it rotated would imply the whole set was replaced.
+
+Control-verified: removing the guard makes 13 tests fail, including one asserting a rotation left
+`OMRS_DB_PASSWORD` untouched.
 
 ## The portal
 

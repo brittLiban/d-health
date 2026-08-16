@@ -1359,8 +1359,26 @@ credential is refused `403 source not allowed` on both the portal and agent endp
    agent never acted. Invisible until the whole chain ran. Now wired — and `incomplete_steps` still
    reports DNS and backup, because **queued is not running**.
 
-**Next:** `rotate-credentials`, per-facility backup auto-wiring, and DNS/TLS — the three
-`incomplete_steps` the API currently reports honestly.
+**`rotate-credentials` built 2026-08-16 — 346 tests — and building it found that the obvious
+implementation would break every facility (ADR-024).** Rewriting the env file rotates nothing
+useful and destroys plenty: database passwords were set once by `initdb`, so the stack would
+present new credentials to databases holding the old ones and **lose every database**;
+`OMRS_ADMIN_PASSWORD` is first-boot-only, so the file would claim a change that never happened;
+and the backup passphrase decrypts existing archives, so changing it without escrow makes **every
+prior backup unrecoverable** — including the one needed in the disaster that prompted the rotation.
+
+So rotation is **scoped and honest**: it rotates the TLS material (DH-021's generator self-heals)
+and Keycloak client secrets (reapplied by the reconciliation job), and **refuses the rest with what
+is actually required** — `ALTER USER` in the engine, a change through OpenMRS, escrow of the old
+passphrase. The response carries `not_rotated`, because listing only what it rotated would imply
+the whole set was replaced. Control-verified: removing the guard fails 13 tests.
+
+**This narrows ADR-021's blast radius slightly, in the right direction:** an attacker holding the
+portal credential can force TLS and client secrets to be regenerated — disruptive, loud in the
+audit log — but cannot use rotation to lock a facility out of its own databases or destroy its
+ability to decrypt backups.
+
+**Next:** per-facility backup auto-wiring, then DNS/TLS when the domain lands.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked

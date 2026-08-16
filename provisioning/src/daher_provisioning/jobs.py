@@ -31,6 +31,10 @@ class JobVerb(StrEnum):
     """
 
     PROVISION = "provision"
+    # Narrowly named on purpose. "rotate" would imply it rotates everything, and ADR-024
+    # records exactly why it cannot: database credentials, the OpenMRS admin password and
+    # the backup passphrase each need coordination the env file cannot provide.
+    ROTATE_TLS = "rotate_tls"
     START = "start"
     STOP = "stop"
     STATUS = "status"

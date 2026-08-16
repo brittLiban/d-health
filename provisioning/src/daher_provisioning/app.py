@@ -29,6 +29,7 @@ from daher_provisioning.auth import (
     require,
 )
 from daher_provisioning.enrolment import EnrolmentError, EnrolmentService
+from daher_provisioning.facility_env import ROTATABLE, UNROTATABLE
 from daher_provisioning.hosts import HostError, HostRegistry
 from daher_provisioning.jobs import Job, JobParams, JobVerb
 from daher_provisioning.models import (
@@ -342,6 +343,67 @@ def create_app(
             services_expected=0,
             backup_state=BackupState.NEVER_RUN,
             checked_at=datetime.now(UTC),
+        )
+
+    @app.post("/facilities/{facility_id}/rotate-credentials")
+    async def rotate_credentials(
+        facility_id: str,
+        request: Request,
+        principal: Principal = Depends(_scoped(Scope.CREDENTIALS_ROTATE)),
+    ) -> JSONResponse:
+        """Rotate what can be rotated, and say plainly what it does not (ADR-024).
+
+        A rotation that silently breaks a clinical facility is worse than one that states
+        its own bounds, so the response carries `not_rotated` rather than implying the
+        whole credential set was replaced.
+        """
+        try:
+            facility = facilities.get(facility_id)
+        except FacilityNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+        target_host = next(
+            (h.host_id for h in host_registry.list() if h.facility_id == facility_id), None
+        )
+        if target_host is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"facility {facility_id!r} is not bound to a registered host",
+            )
+
+        issued = datetime.now(UTC)
+        try:
+            queue.enqueue(
+                Job(
+                    job_id=f"job-rot-{facility_id}-{int(issued.timestamp())}",
+                    host_id=target_host,
+                    verb=JobVerb.ROTATE_TLS,
+                    params=JobParams(
+                        facility_id=facility_id,
+                        facility_type=facility.type.value,
+                        base_domain=base_domain,
+                    ),
+                    issued_at=issued,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+        audit_log.record(
+            actor=principal.actor,
+            action=AuditAction.CREDENTIALS_ROTATE,
+            outcome=AuditOutcome.SUCCESS,
+            facility_id=facility_id,
+            message="TLS and client-secret rotation queued; database, admin and backup "
+            "credentials deliberately not rotated (ADR-024)",
+            source_ip=_client_ip(request),
+        )
+        return JSONResponse(
+            {
+                "queued": True,
+                "rotated": list(ROTATABLE),
+                "not_rotated": UNROTATABLE,
+            }
         )
 
     @app.post("/facilities/{facility_id}/decommission", response_model=Facility)

@@ -71,6 +71,33 @@ HEADER = """\
 """
 
 
+# Rotating these by rewriting the env file is safe: the certs job regenerates material it
+# can no longer open, and Keycloak's reconciliation job reapplies client secrets (ADR-024).
+ROTATABLE = (
+    "OE_KEYSTORE_PASSWORD",
+    "OE_TRUSTSTORE_PASSWORD",
+    "KEYCLOAK_OPENMRS_CLIENT_SECRET",
+    "KEYCLOAK_OPENELIS_CLIENT_SECRET",
+    "KEYCLOAK_ADAPTER_CLIENT_SECRET",
+)
+
+# Rewriting these breaks the facility or its backups. Each maps to what is actually needed
+# instead, so a refusal points somewhere rather than just saying no (ADR-024).
+UNROTATABLE = {
+    "OMRS_DB_PASSWORD": "databases are provisioned once by initdb; needs ALTER USER inside "
+    "the engine, coordinated with a restart",
+    "OMRS_DB_ROOT_PASSWORD": "as above",
+    "OE_DB_PASSWORD": "as above",
+    "OE_DB_SUPERUSER_PASSWORD": "as above",
+    "OE_POSTGRES_PASSWORD": "as above",
+    "KEYCLOAK_DB_PASSWORD": "as above",
+    "ADAPTER_DB_PASSWORD": "as above",
+    "OMRS_ADMIN_PASSWORD": "applied on first boot only (DH-019); change it through OpenMRS",
+    "BACKUP_ENCRYPTION_PASSPHRASE": "decrypts existing archives; changing it without "
+    "escrowing the old value makes every prior backup unrecoverable",
+}
+
+
 class FacilityEnvError(RuntimeError):
     """The facility env file cannot be written safely."""
 
@@ -145,6 +172,38 @@ def write_env(path: Path | str, contents: str, *, overwrite: bool = False) -> Pa
         raise
     os.chmod(target, 0o600)
     return target
+
+
+def rotate_env_values(contents: str, replacements: dict[str, str]) -> str:
+    """Replace named values in an existing env file, leaving everything else untouched.
+
+    Refuses any name ADR-024 lists as unrotatable, with the reason. This is the guard that
+    stops "rotate credentials" from meaning "lock the facility out of its own databases".
+    """
+    for name in replacements:
+        if name in UNROTATABLE:
+            raise FacilityEnvError(
+                f"{name} cannot be rotated by rewriting the env file: {UNROTATABLE[name]} "
+                f"(ADR-024). Refusing rather than taking the facility down."
+            )
+        if name not in ROTATABLE:
+            raise FacilityEnvError(f"{name} is not in the rotatable set (ADR-024)")
+
+    lines = []
+    seen: set[str] = set()
+    for line in contents.splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key = line.split("=", 1)[0].strip()
+            if key in replacements:
+                lines.append(f"{key}={replacements[key]}")
+                seen.add(key)
+                continue
+        lines.append(line)
+
+    absent = set(replacements) - seen
+    if absent:
+        raise FacilityEnvError(f"env file has no entries for {sorted(absent)}; refusing to append")
+    return "\n".join(lines) + "\n"
 
 
 def missing_required(contents: str, required: set[str]) -> set[str]:

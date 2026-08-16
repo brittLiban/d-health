@@ -979,3 +979,51 @@ attacker the allowlist bypass for free.
 attacker is already at the allowed address. That case is ADR-021's walkthrough and is unchanged:
 create, inspect, stop facilities, loudly, with no clinical data reachable. This decision removes
 every attacker who is not already inside the portal, which is nearly all of them.
+
+---
+
+## ADR-024 — Credential rotation rotates what can be rotated, and refuses the rest
+
+**Date:** 2026-08-16 · **Status:** ACCEPTED · **Decided by:** Liban (build prompt) with the
+constraint below discovered during implementation
+
+**Context.** The provisioning API was specified with a `rotate-credentials` endpoint. Building
+it revealed that "rotate this facility's credentials" is not one operation, and the obvious
+implementation — regenerate the secrets, rewrite the env file, restart — would **break the
+facility it was meant to protect.**
+
+### What rewriting the env file actually does to a running facility
+
+| Credential | Effect of rewriting it | Safe? |
+|---|---|---|
+| `OMRS_DB_*`, `OE_DB_*`, `OE_POSTGRES_*`, `KEYCLOAK_DB_*`, `ADAPTER_DB_*` | The databases were provisioned by `initdb`, which **runs once**. The app now presents a new password to a database that still holds the old one — **every service loses its database** | ❌ |
+| `OMRS_ADMIN_PASSWORD` | Applied on **first boot only** (DH-019). Rewriting it changes nothing; the account keeps the old password while the file claims otherwise | ❌ |
+| `BACKUP_ENCRYPTION_PASSPHRASE` | Decrypts existing archives. Changing it without escrowing the old value makes **every prior backup unrecoverable** — including the one needed in the disaster that prompted the rotation | ❌ |
+| `OE_KEYSTORE_PASSWORD`, `OE_TRUSTSTORE_PASSWORD` | DH-021's generator detects the store no longer opens and regenerates the material. Self-healing by design | ✅ |
+| Keycloak client secrets | Applied by the idempotent reconciliation job on the next `up` | ✅ |
+
+**Decision.** Rotation is **scoped and honest**. The endpoint rotates the internal TLS material
+and Keycloak client secrets — the credentials that can be rotated without coordination — and
+**refuses** the others with the specific reason, rather than performing a rewrite that would take
+the facility down or orphan its backups.
+
+Each refusal names what would actually be required:
+
+- **Database credentials** need `ALTER USER` inside each engine, coordinated with a restart. That
+  is a real procedure and it belongs in a runbook someone follows deliberately, not behind a
+  button labelled "rotate".
+- **The OpenMRS admin password** is changed through OpenMRS, not through configuration.
+- **The backup passphrase** requires the old value to be escrowed and every retained archive to be
+  re-encrypted or accepted as lost. That is a decision about data recoverability, not an
+  operation.
+
+**Why not implement the hard ones anyway.** Because a rotation that silently breaks a clinical
+facility is worse than one that says what it will not do. The `credentials:rotate` scope exists
+and the portal holds it; the value of that scope is bounded by this ADR, which is the honest
+bound rather than an implied one.
+
+**Consequence for ADR-021's blast radius.** Unchanged and slightly narrower than previously
+implied: an attacker who owns the portal can force TLS material and client secrets to be
+regenerated — disruptive, requiring a restart, and loud in the audit log — but cannot use
+rotation to lock a facility out of its own databases or destroy the ability to decrypt its
+backups.
