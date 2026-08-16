@@ -619,10 +619,73 @@ introduced, never batched at the end.
 ## 14. Out of scope for v1 (confirmed, not started)
 
 Orthanc/PACS (v1.1) · billing UI · HR/scheduling · any AI/ML for imaging, triage, or diagnosis ·
-OpenHIM/OpenCR multi-facility sync · self-service provisioning portal.
+OpenHIM/OpenCR multi-facility sync.
+
+⚠️ **The self-service provisioning portal is no longer out of scope** — it started 2026-08-15 as a
+deliberate schedule trade (see §16 and `PROJECT_STATE.md`). This line is left here rather than
+deleted so the change of direction is visible rather than silently rewritten.
 
 Where a v1 choice would need to change for multi-facility, it is noted inline in this document
 (§3) — noted, not built.
+
+---
+
+## 16. Multi-facility provisioning (ADR-020, ADR-021)
+
+**This is a separate system from the clinical stack**, living in `provisioning/`. It creates and
+manages facility deployments. It never touches clinical data — that boundary is the reason every
+other decision in this section looks the way it does.
+
+### Topology
+
+One clinical stack per facility, always. **Never a shared multi-tenant clinical database**: with
+patient records, one query-scoping bug in a shared database is a cross-facility breach, and separate
+stacks make that class of bug impossible rather than unlikely.
+
+Default is **one VM per facility**. But the deploy target is a **field on the facility record**, not
+an assumption in the provisioning logic, so a shared-host model stays available later without a
+rewrite (ADR-020).
+
+`FACILITY_ID` namespaces the Compose project, and therefore every container, volume and network
+(DH-026). ⚠️ It is an identity, not a display name: Compose derives volume names from it, so
+changing it does not rename anything — it points the stack at fresh empty volumes and orphans the
+patient database while appearing to start normally.
+
+### Trust boundary
+
+| | Website server (portal) | Infrastructure (provisioning API) |
+|---|---|---|
+| Trust | **Untrusted.** Public, assume breach | Trusted |
+| Holds | A scoped credential only | Deploy capability |
+| Can reach clinical data | **No** | **No** |
+
+The portal authenticates as an untrusted client over TLS with a credential scoped to create, list,
+status, rotate, and soft-decommission. It grants no shell, Docker socket, or database access. The
+API's own audit log is authoritative over anything the client claims, and lives outside the API
+host's mutable filesystem so it survives that host being rebuilt or tampered with.
+
+Full blast-radius walkthrough: **ADR-021**. Short version — a fully compromised website server buys
+availability damage and a cleanup job, loudly logged, and not a clinical data breach.
+
+### Why the API cannot read clinical data
+
+Three layers, in increasing strength:
+
+1. Response schemas are closed (`extra="forbid"`), so a clinical field cannot be bolted on.
+2. A test walks every model against clinical vocabulary and fails the build on a match.
+3. **The service holds no clinical database credentials at all.**
+
+The third is the real guarantee — the first two catch mistakes, the third makes the mistake
+unreachable. Verified by control: adding a `patient_count` field makes the suite fail; removing it
+returns to green.
+
+### Deliberately incomplete
+
+**DNS/TLS provisioning is unconfigured**, built against a provider-agnostic interface, and reports
+`dns_configured: false` rather than implying success. No domain or DNS provider exists yet
+(NEEDS LIBAN #15). A provisioning step that appears to succeed against invented values is the false
+green this project has repeatedly been bitten by. The same applies to the audit log's external
+destination.
 
 ---
 

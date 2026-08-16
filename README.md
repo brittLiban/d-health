@@ -26,6 +26,10 @@ one `docker-compose.yml`.
 > Still missing: clinical forms, the prenatal order set, order/result transport, notifications,
 > SSO activation, and the end-to-end demonstration.
 >
+> A **multi-facility provisioning API and portal** started 2026-08-15 (`provisioning/`) as a
+> deliberate schedule trade ahead of the transport chain. Foundation only — **nothing provisions a
+> real facility yet**. It is a separate system that never touches clinical data.
+>
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
 > The target state is **pilot-ready**, which is not the same as *clinically live*. Clinically live
@@ -64,9 +68,23 @@ language, not a localisation afterthought.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order |
 | [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks |
 | [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
+| [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---
+
+## Deploying more than one facility
+
+A second facility is a second isolated stack — **never a shared database**. `FACILITY_ID`
+namespaces the Compose project and therefore every container, volume and network.
+
+⚠️ `FACILITY_ID` is an identity, not a display name. Compose derives volume names from it, so
+changing it later does not rename anything — it points the stack at fresh empty volumes and
+orphans the patient database while appearing to start normally. Set it once, before the first `up`.
+
+A provisioning API and portal to automate this is **in progress and does not work yet** — see
+[`provisioning/README.md`](provisioning/README.md). Today, a second facility is a manual copy of
+`.env` with fresh secrets and a distinct `FACILITY_ID`.
 
 ## Prerequisites
 

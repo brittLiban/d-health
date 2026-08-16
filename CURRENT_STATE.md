@@ -263,6 +263,20 @@ healthcheck that reported healthy through a total outage, and one inside the new
 **Nothing above chose any clinical content.** The panel is empty, no form schema is committed, and
 both sign-off requests are in `docs/CLINICAL-SIGNOFF.md`.
 
+## 5b. Multi-facility provisioning — started, not working
+
+A provisioning API and portal (`provisioning/`) began 2026-08-15 as a **deliberate schedule trade**:
+it is being built before DH-011's transport chain, so the golden end-to-end flow will very likely
+not be demonstrated by 1 September. That is a recorded decision, not a slip.
+
+**What exists:** per-facility secret generation, closed API schemas, and the structural
+no-clinical-data guarantee (46 tests, control-verified). `FACILITY_ID` now namespaces the clinical
+stack.
+
+**What does not:** the API surface, the deploy driver, and the portal. **Nothing provisions a real
+facility today.** DNS/TLS and the audit log's external destination are deliberately unconfigured
+and report their own incompleteness rather than appearing to succeed.
+
 ## 6. What is genuinely missing
 
 OpenMRS ANC and partograph forms; prenatal panel; SSO authorization mapping, activation, and proof; adapter
