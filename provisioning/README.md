@@ -15,9 +15,24 @@ independently provisionable; neither implies the other.
 
 ## Status
 
-**Foundation only.** Secret generation and the response schemas exist and are tested. The API
-surface, the Compose deploy driver, and the portal are **not built yet**. Nothing here provisions a
-real facility today.
+**The API surface exists and enforces its boundary. It does not deploy anything.**
+
+`POST /facilities` registers a facility record, generates its credentials, and reports what did
+*not* happen in `incomplete_steps`. **A 201 means "recorded", not "running"** — the Compose deploy
+driver and DNS provisioning do not exist, and the response says so rather than leaving a caller to
+infer success. The portal itself is not built.
+
+| Endpoint | State |
+|---|---|
+| `GET /health` | Works. Unauthenticated, reveals nothing |
+| `POST /facilities` | Records a facility; **deploys nothing** |
+| `GET /facilities` | Works |
+| `GET /facilities/{id}/status` | Works; counts are zero because nothing is deployed |
+| `POST /facilities/{id}/decommission` | Soft only; records state |
+| `POST /facilities/{id}/rotate-credentials` | Not built |
+
+What *is* real: scoped authentication, rate limiting, and an audit record of every action —
+**including denials and failures** — written by this service from what it actually did.
 
 Two things are **deliberately incomplete and must not be reported as working**:
 
@@ -58,12 +73,15 @@ provisioning/
     audit.py         tamper-evident hash-chained audit log
     auth.py          scoped credential authentication
     ratelimit.py     per-caller token bucket
+    repository.py    facility record storage
+    app.py           the FastAPI surface
   tests/
     test_secrets.py           generation, uniqueness, redaction
     test_no_clinical_data.py  the structural guarantee
     test_facility_env.py      rendering, permissions, compose sync
     test_audit.py             recording, tamper detection, no secrets
     test_auth.py              scopes, credential handling, rate limiting
+    test_app.py               the boundary, enforced through HTTP
 ```
 
 ## The facility env file

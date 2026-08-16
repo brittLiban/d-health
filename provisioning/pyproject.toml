@@ -10,3 +10,9 @@ select = ["ASYNC", "B", "E", "F", "I", "S", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S108"]
+# B008 forbids function calls in argument defaults, to catch the classic
+# mutable-default bug. FastAPI's dependency injection is built on exactly that
+# construct — `Depends(...)` in a default is the documented idiom, evaluated once
+# at import by design. Suppressed only for the API surface, not project-wide, so
+# a genuine mutable-default bug elsewhere still fails.
+"src/daher_provisioning/app.py" = ["B008"]
