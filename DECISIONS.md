@@ -826,3 +826,110 @@ churned, spurious facilities created — with a complete record of it. Not a cli
    anyone continuing to be careful.
 
 Point 3 is the real one. The first two catch mistakes; the third makes the mistake unreachable.
+
+---
+
+## ADR-022 — Deploy transport: pull-based host agent, outbound-only
+
+**Date:** 2026-08-15 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** The provisioning API must cause work to happen on a facility host: write an env file,
+start a stack, report health, stop a stack. How it reaches that host determines whether ADR-021's
+blast-radius walkthrough stays true, so the transport was designed before it was built.
+
+### The constraint that eliminates most designs
+
+**Docker access is root access.** Anyone who can cause an arbitrary container spec to run can run
+`docker run -v /:/host` and read every clinical database volume on that machine. So the question is
+not "can an attacker get a shell" but **"can an attacker cause an arbitrary container spec to run."**
+
+That has a hard consequence, and it is the single most important line in this ADR:
+
+> **The compose file lives on the facility host. The API sends parameters, never a spec.**
+
+If the API could hand a host a compose file, then "provisioning API" and "root on every clinical VM"
+would be the same sentence, and every option below would collapse to the same worst case.
+
+### Options considered
+
+| Option | If the API host is breached | If one facility credential leaks | Inbound port on clinical host |
+|---|---|---|---|
+| **A. Remote Docker API/socket** | **Root-equivalent on every host** — arbitrary specs and mounts | One cert = root on that VM | Yes, high-value |
+| **B. SSH push, forced command** | Can invoke the fixed script with chosen params on every host; no arbitrary commands | One key = one host | Yes, locked to one command |
+| **C. Signed webhook to a host listener** | Same containment as B, **plus** a custom listener parsing untrusted input — more attack surface for the same benefit | Same as B | Yes, custom code |
+| **D. Pull-based agent, outbound-only** | Can **enqueue** malicious params; nothing executes until a correct agent pulls and validates its own job | Attacker can pose as that host, still bounded by the param space | **None** |
+
+**Rejected: A.** It makes ADR-021's walkthrough false while every test still passes — precisely the
+failure mode that document exists to prevent.
+
+**Rejected: C.** It buys B's containment while adding a bespoke network listener that parses
+untrusted input. Worse surface, same benefit.
+
+**Fallback: B**, if D's build cost ever stops being worth it.
+
+### Decision — D
+
+Facility hosts **poll** for jobs addressed to themselves, authenticating outbound with a per-host
+token. **No clinical host exposes an inbound port.** The agent runs a fixed local script with
+validated parameters; it never receives or executes a spec.
+
+**The agent validates its own jobs.** It does not trust the queue. A job is executed only if the
+target host id is its own, the verb is in its fixed set, and every parameter matches a strict
+pattern. That local validation — not the transport — is the real boundary, so it is the part that
+gets the most tests.
+
+### Secrets are generated on the facility host, not by the API
+
+Consequence of D worth stating separately: when the host pulls a provisioning job, **it generates
+its own credentials locally** and writes its own env file. The API never sees a clinical credential
+at all — it receives only a `credential_set_id` back.
+
+This is a large improvement and it is why the walkthrough below can say what it says. A breached API
+host does not hold, and has never held, any facility's database passwords.
+
+### Revised blast radius
+
+**Compromised website server (portal):** unchanged from ADR-021 — can create, read, and rotate
+within its scopes, loudly, into a log it cannot reach.
+
+**Compromised provisioning API host** — the case this ADR is about:
+
+*Can:* enqueue jobs, including malicious parameter sets; read facility records (identity, type,
+deploy target, health, backup status); deny service by flooding the queue.
+
+*Cannot:* execute anything on a facility host — nothing runs until a correct agent pulls and
+validates; supply a container spec, because the compose file is local to the host; obtain a shell or
+Docker access anywhere; read any clinical credential, because it never had one; reach any clinical
+database, because no route and no credential exist.
+
+**Compromised facility host:** that facility is lost — the agent runs there and the databases are
+there. **It does not spread.** The host's token authorises pulling its own queue only, and holds no
+credential for any other facility.
+
+**Residual risk, stated rather than hidden:** an attacker who owns the API can enqueue a job whose
+parameters are hostile. Containment rests entirely on the agent's local validation, which is why the
+agent treats every field of a job as untrusted input regardless of it having been signed.
+
+### Bootstrapping — the one manual step that does not disappear
+
+A host cannot poll for work until it has an identity to poll with. That first credential cannot
+itself be delivered automatically without recreating the problem, so it is deliberately manual:
+
+1. Operator provisions a bare VM.
+2. Operator obtains a **single-use, short-lived enrollment token** from the API.
+3. Operator runs the bootstrap command on the VM with that token.
+4. The agent generates its own long-lived credential locally, registers its host id, and the
+   enrollment token is consumed and cannot be reused.
+5. From then on the agent polls outbound. No inbound port is ever opened.
+
+Steps 1–3 are the irreducible manual step. Documented as such rather than presented as
+"no manual steps", which would be false.
+
+### Two escalation paths closed at the same time
+
+1. **`deploy_target` must not be taken from an untrusted client.** It remains a field on the
+   facility record (ADR-020), but its value is validated against an **API-side allowlist of
+   registered hosts**. Otherwise a breached portal could point provisioning at any address it chose.
+2. **A create request targeting an already-provisioned host or facility id is a hard conflict**,
+   never an overwrite. Same class of bug as the `FACILITY_ID` default trap: a routine-looking
+   request silently clobbering something live.

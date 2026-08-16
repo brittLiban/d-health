@@ -31,6 +31,28 @@ infer success. The portal itself is not built.
 | `POST /facilities/{id}/decommission` | Soft only; records state |
 | `POST /facilities/{id}/rotate-credentials` | Not built |
 
+### Deploy transport (ADR-022)
+
+Chosen: **pull-based host agent, outbound-only**. Facility hosts poll for jobs addressed to
+themselves; **no clinical host exposes an inbound port**. Not built yet.
+
+The constraint that shaped it: **Docker access is root access**, so the question is never "can an
+attacker get a shell" but "can an attacker cause an arbitrary container spec to run". Hence the
+rule — **the compose file lives on the facility host; the API sends parameters, never a spec.**
+
+Two consequences already implemented:
+
+- **`deploy_target` is resolved, not supplied.** A create request names a `host_id` an operator
+  registered; supplying an address is rejected by the closed schema. Otherwise a breached portal
+  could point provisioning at any address it chose.
+- **An occupied host is a hard conflict.** Reusing one would overwrite a live env file and attach a
+  new facility to an existing patient database — the same shape as the `FACILITY_ID` default trap,
+  arriving through a request that looks entirely routine.
+
+And one that changes the blast radius most: **the API does not generate facility credentials.** The
+agent generates them locally when it pulls its job, so a breached API host does not hold — and has
+never held — any facility's database passwords.
+
 What *is* real: scoped authentication, rate limiting, and an audit record of every action —
 **including denials and failures** — written by this service from what it actually did.
 
@@ -74,6 +96,7 @@ provisioning/
     auth.py          scoped credential authentication
     ratelimit.py     per-caller token bucket
     repository.py    facility record storage
+    hosts.py         registered deploy hosts (the allowlist)
     app.py           the FastAPI surface
   tests/
     test_secrets.py           generation, uniqueness, redaction
@@ -82,6 +105,7 @@ provisioning/
     test_audit.py             recording, tamper detection, no secrets
     test_auth.py              scopes, credential handling, rate limiting
     test_app.py               the boundary, enforced through HTTP
+    test_hosts.py             the allowlist and the occupied-host refusal
 ```
 
 ## The facility env file

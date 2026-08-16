@@ -15,7 +15,17 @@ from fastapi.testclient import TestClient
 from daher_provisioning.app import create_app
 from daher_provisioning.audit import AuditLog, AuditOutcome
 from daher_provisioning.auth import PORTAL_SCOPES, KeyStore, Scope, issue_key
+from daher_provisioning.hosts import HostRegistry
+from daher_provisioning.models import DeployTarget
 from daher_provisioning.ratelimit import TokenBucketLimiter
+
+
+def a_registry(*host_ids: str) -> HostRegistry:
+    registry = HostRegistry()
+    for host_id in host_ids or ("host-a",):
+        registry.register(host_id, DeployTarget(host="10.0.0.5"))
+        registry.mark_enrolled(host_id)
+    return registry
 
 
 @pytest.fixture
@@ -26,10 +36,12 @@ def wired(tmp_path):
     )
     store = KeyStore([portal_record, admin_record])
     log = AuditLog(tmp_path / "audit.jsonl")
+    registry = a_registry("host-a", "host-b")
     app = create_app(
         key_store=store,
         audit_log=log,
         limiter=TokenBucketLimiter(rate_per_second=100, burst=100),
+        hosts=registry,
     )
     return TestClient(app), portal_key, admin_key, log
 
@@ -38,7 +50,7 @@ def a_body(**overrides):
     body = {
         "display_name": "Daher Birth Centre",
         "type": "hospital",
-        "deploy_target": {"host": "10.0.0.5"},
+        "host_id": "host-a",
     }
     body.update(overrides)
     return body
@@ -126,12 +138,46 @@ class TestCreateDoesNotOverclaim:
         for leaked in ("PASSWORD", "password", "passphrase", "OMRS_ADMIN"):
             assert leaked not in body
 
-    def test_duplicate_facility_id_is_refused(self, wired):
+    def test_reusing_an_occupied_host_is_a_hard_conflict(self, wired):
+        """A routine-looking request must not overwrite a live facility (ADR-022)."""
         client, portal_key, _, _ = wired
         client.post("/facilities", json=a_body(), headers=auth(portal_key))
-        response = client.post("/facilities", json=a_body(), headers=auth(portal_key))
+        response = client.post(
+            "/facilities", json=a_body(display_name="Another Centre"), headers=auth(portal_key)
+        )
         assert response.status_code == 409
         assert "patient database" in response.json()["detail"]
+
+    def test_duplicate_facility_id_on_a_free_host_is_refused(self, wired):
+        client, portal_key, _, _ = wired
+        client.post("/facilities", json=a_body(), headers=auth(portal_key))
+        response = client.post(
+            "/facilities", json=a_body(host_id="host-b"), headers=auth(portal_key)
+        )
+        assert response.status_code == 409
+
+    def test_an_unregistered_host_is_refused(self, wired):
+        """deploy_target must never come from the caller (ADR-022)."""
+        client, portal_key, _, _ = wired
+        response = client.post(
+            "/facilities", json=a_body(host_id="attacker-chosen"), headers=auth(portal_key)
+        )
+        assert response.status_code == 400
+        assert "not registered" in response.json()["detail"]
+
+    def test_the_caller_cannot_supply_an_address(self, wired):
+        """Closed schemas: an address in the body is rejected, not silently ignored."""
+        client, portal_key, _, _ = wired
+        body = a_body()
+        body["deploy_target"] = {"host": "10.9.9.9"}
+        assert client.post("/facilities", json=body, headers=auth(portal_key)).status_code == 422
+
+    def test_the_api_never_generates_facility_credentials(self, wired):
+        """ADR-022: the host's agent generates them, so a breached API holds none."""
+        client, portal_key, _, _ = wired
+        response = client.post("/facilities", json=a_body(), headers=auth(portal_key))
+        hint = response.json()["credentials"]["retrieval_hint"]
+        assert "never holds a facility credential" in hint
 
     def test_invalid_facility_id_is_refused(self, wired):
         client, portal_key, _, _ = wired

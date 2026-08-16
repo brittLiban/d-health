@@ -26,6 +26,7 @@ from daher_provisioning.auth import (
     Scope,
     require,
 )
+from daher_provisioning.hosts import HostError, HostRegistry
 from daher_provisioning.models import (
     CredentialReference,
     Facility,
@@ -36,11 +37,11 @@ from daher_provisioning.models import (
 )
 from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 from daher_provisioning.repository import FacilityExists, FacilityNotFound, FacilityRepository
-from daher_provisioning.secrets import SecretGenerationError, generate_facility_secrets
+from daher_provisioning.secrets import SecretGenerationError, validate_facility_id
 
 # What a caller is told did not happen. Keeping these as explicit strings rather than
 # leaving the list empty is the difference between "provisioned" and "recorded".
-STEP_DEPLOY = "deploy: the Compose deploy driver is not built; no stack was started"
+STEP_DEPLOY = "deploy: no job was enqueued; the host agent is not built (ADR-022)"
 STEP_DNS = "dns: no domain or DNS provider is configured; no record was created (ADR-020)"
 STEP_BACKUP = "backup: no scheduled backup was wired up for this facility"
 
@@ -59,8 +60,10 @@ def create_app(
     audit_log: AuditLog,
     repository: FacilityRepository | None = None,
     limiter: TokenBucketLimiter | None = None,
+    hosts: HostRegistry | None = None,
 ) -> FastAPI:
     facilities = repository or FacilityRepository()
+    host_registry = hosts or HostRegistry()
     rate_limiter = limiter or TokenBucketLimiter(rate_per_second=1.0, burst=20)
 
     app = FastAPI(
@@ -148,8 +151,28 @@ def create_app(
     ) -> FacilityCreateResponse:
         facility_id = body.facility_id or _slugify(body.display_name)
 
+        # Resolve the named host against what an operator registered. An unknown host, an
+        # un-enrolled one, or one already running a facility are all refusals — never an
+        # overwrite (ADR-022).
         try:
-            secrets = generate_facility_secrets(facility_id)
+            host = host_registry.get(body.host_id)
+        except HostError as exc:
+            audit_log.record(
+                actor=principal.actor,
+                action=AuditAction.FACILITY_CREATE,
+                outcome=AuditOutcome.FAILURE,
+                facility_id=facility_id,
+                message=str(exc)[:512],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+        # ⚠️ The API does NOT generate this facility's credentials (ADR-022). The agent on
+        # the facility host generates them locally when it pulls its provisioning job, so a
+        # breached API host does not hold — and has never held — any facility's database
+        # passwords. Validate the id here; the secrets are the host's business.
+        try:
+            validate_facility_id(facility_id)
         except SecretGenerationError as exc:
             audit_log.record(
                 actor=principal.actor,
@@ -165,11 +188,24 @@ def create_app(
             facility_id=facility_id,
             display_name=body.display_name,
             type=body.type,
-            deploy_target=body.deploy_target,
+            deploy_target=host.target,
             identity=body.identity,
             state=FacilityState.PROVISIONING,
             created_at=datetime.now(UTC),
         )
+        try:
+            host_registry.claim(body.host_id, facility_id)
+        except HostError as exc:
+            audit_log.record(
+                actor=principal.actor,
+                action=AuditAction.FACILITY_CREATE,
+                outcome=AuditOutcome.FAILURE,
+                facility_id=facility_id,
+                message=str(exc)[:512],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
         try:
             facilities.add(facility)
         except FacilityExists as exc:
@@ -194,19 +230,14 @@ def create_app(
             source_ip=_client_ip(request),
         )
 
-        # The generated secrets are deliberately dropped here rather than returned or
-        # logged. Writing them into a facility's env file is the deploy driver's job, and
-        # that driver does not exist yet — so this endpoint must not pretend otherwise.
-        del secrets
-
         return FacilityCreateResponse(
             facility=facility,
             credentials=CredentialReference(
                 facility_id=facility_id,
                 credential_set_id=credential_set_id,
                 issued_at=facility.created_at,
-                retrieval_hint="Credentials are retrieved out of band by an operator on the "
-                "provisioning host; they are never returned over this API.",
+                retrieval_hint="Generated on the facility host by its agent, not here "
+                "(ADR-022). This API never holds a facility credential.",
             ),
             dns_configured=False,
             incomplete_steps=[STEP_DEPLOY, STEP_DNS, STEP_BACKUP],

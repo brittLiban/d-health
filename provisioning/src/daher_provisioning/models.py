@@ -136,7 +136,10 @@ class CredentialReference(ClosedModel):
 class FacilityCreateRequest(ClosedModel):
     display_name: str = Field(min_length=1, max_length=128)
     type: FacilityType
-    deploy_target: DeployTarget
+    # ⚠️ A host ID, NOT an address. The caller names a host an operator already registered;
+    # the API resolves it. Accepting an address here would let a breached portal point
+    # provisioning at any host it chose (ADR-022).
+    host_id: str = Field(min_length=3, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
     identity: FacilityIdentity = Field(default_factory=FacilityIdentity)
     facility_id: str | None = Field(
         default=None,
