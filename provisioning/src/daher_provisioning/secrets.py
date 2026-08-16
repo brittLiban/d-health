@@ -137,7 +137,10 @@ def generate_facility_secrets(facility_id: str) -> FacilitySecrets:
         "KEYCLOAK_ADAPTER_CLIENT_SECRET": general_secret(),
         # Adapter
         "ADAPTER_DB_PASSWORD": general_secret(),
-        # Backup
-        "BACKUP_ENCRYPTION_PASSPHRASE": general_secret(48),
+        # ⚠️ BACKUP_ENCRYPTION_PASSPHRASE is deliberately ABSENT (ADR-025). Generating it
+        # here would put the only copy on the machine being backed up, so losing that host
+        # — the disaster backups exist for — would make every off-site archive permanently
+        # undecryptable. The operator supplies it during host bootstrap instead, so it
+        # exists in two places by construction.
     }
     return FacilitySecrets(facility_id=facility_id, values=values)

@@ -34,10 +34,12 @@ from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+# A facility with no backup is one disk failure from losing patient records, so
+# `never_run` is shown as a problem rather than a neutral "nothing yet" (ADR-025).
 BACKUP_CLASSES = {
     "success": "ok",
     "failed": "bad",
-    "never_run": "warn",
+    "never_run": "bad",
     "unverified_no_restore_drill": "warn",
 }
 
@@ -170,6 +172,9 @@ def create_portal(
                         "drill_class": "ok"
                         if status.get("restore_drill_last_performed")
                         else "bad",
+                        # Separate from the state so "scheduled" and "verified" are never
+                        # conflated: a scheduled backup is not a tested one (ADR-025).
+                        "at_risk": status["backup_state"] in ("never_run", "failed"),
                     }
                 )
         except Exception:

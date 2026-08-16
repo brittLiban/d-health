@@ -86,9 +86,18 @@ class TestFacilitySecretSet:
             "KEYCLOAK_DB_PASSWORD",
             "KEYCLOAK_ADMIN_PASSWORD",
             "ADAPTER_DB_PASSWORD",
-            "BACKUP_ENCRYPTION_PASSPHRASE",
         }
         assert required <= set(secrets.values)
+
+    def test_the_backup_passphrase_is_deliberately_not_generated(self):
+        """ADR-025: generating it here puts the only copy on the machine being backed up.
+
+        Losing that host — the disaster backups exist for — would make every off-site
+        archive permanently undecryptable. The operator supplies it at host bootstrap so it
+        exists in two places by construction.
+        """
+        secrets = generate_facility_secrets("test-facility")
+        assert "BACKUP_ENCRYPTION_PASSPHRASE" not in secrets.values
 
     def test_no_secret_is_reused_within_a_facility(self):
         values = list(generate_facility_secrets("test-facility").values.values())

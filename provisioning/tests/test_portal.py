@@ -286,3 +286,45 @@ class TestPasswordHandling:
         operator = Operator(username="liban", password_hash=hash_password(PASSWORD))
         with pytest.raises(AuthError):
             verify_password(operator, "someone-else", PASSWORD)
+
+
+class TestBackupRisk:
+    """A facility with no backup is one disk failure from losing patient records."""
+
+    def _portal_with(self, backup_state):
+        return a_portal(
+            FakeClient(
+                facilities=[{"facility_id": "d", "display_name": "D", "type": "hospital"}],
+                status={
+                    "state": "running",
+                    "services_running": 10,
+                    "services_expected": 10,
+                    "backup_state": backup_state,
+                },
+            )
+        )
+
+    def test_a_facility_with_no_backup_is_shown_as_a_problem(self):
+        client = self._portal_with("never_run")
+        sign_in(client)
+        body = client.get("/").text
+        assert "not protected" in body
+        assert "no working backup" in body
+
+    def test_a_failed_backup_is_shown_as_a_problem(self):
+        client = self._portal_with("failed")
+        sign_in(client)
+        assert "not protected" in client.get("/").text
+
+    def test_a_working_backup_is_not_flagged(self):
+        client = self._portal_with("success")
+        sign_in(client)
+        assert "not protected" not in client.get("/").text
+
+    def test_scheduled_is_never_presented_as_verified(self):
+        """A scheduled backup is not a tested one until a restore has been performed."""
+        client = self._portal_with("success")
+        sign_in(client)
+        body = client.get("/").text
+        assert "Restore drill" in body
+        assert "never" in body, "a facility with no restore drill must say so"

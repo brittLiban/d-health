@@ -15,13 +15,23 @@
     <td>{{ f.type }}</td>
     <td><span class="pill">{{ f.state }}</span></td>
     <td>{{ f.services_running }}/{{ f.services_expected }}</td>
-    <td class="{{ f.backup_class }}">{{ f.backup_state }}</td>
+    <td class="{{ f.backup_class }}">{{ f.backup_state }}{% if f.at_risk %}
+        <br><span style="font-size:.78rem">⚠ not protected</span>{% endif %}</td>
     <td class="{{ f.drill_class }}">{{ f.restore_drill }}</td>
   </tr>
   {% else %}
   <tr><td colspan="6" style="color:var(--muted)">No facilities yet.</td></tr>
   {% endfor %}
 </table>
+
+{% if facilities | selectattr("at_risk") | list %}
+<div class="err">
+  <strong>One or more facilities have no working backup.</strong> A backup is scheduled only when
+  both a passphrase and an off-site destination are configured — otherwise the archive would sit on
+  the same host as the data it protects. A scheduled backup is still not a verified one until a
+  restore has actually been performed.
+</div>
+{% endif %}
 
 <div class="note">
   <strong>Provisioning does not deploy yet.</strong> Creating a facility records it and queues a

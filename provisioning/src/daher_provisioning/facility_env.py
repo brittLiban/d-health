@@ -17,6 +17,7 @@ Two safety properties matter more than the rendering itself:
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from daher_provisioning.models import Facility
@@ -102,11 +103,51 @@ class FacilityEnvError(RuntimeError):
     """The facility env file cannot be written safely."""
 
 
+@dataclass(frozen=True)
+class BackupSettings:
+    """What a facility needs before a scheduled backup can actually succeed (ADR-025).
+
+    ``passphrase`` comes from the operator, never from the agent — a key stored only on the
+    machine being backed up cannot survive losing that machine.
+    """
+
+    passphrase: str
+    s3_bucket: str
+    s3_endpoint: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    retention_days: int = 30
+
+    @property
+    def schedulable(self) -> bool:
+        """Both halves, or nothing. A passphrase with nowhere to send it is local-only."""
+        return bool(self.passphrase and self.s3_bucket)
+
+    def as_env(self) -> dict[str, str]:
+        if not self.schedulable:
+            raise FacilityEnvError(
+                "refusing to schedule a backup that cannot succeed: a passphrase and an "
+                "off-site destination are both required (ADR-025)"
+            )
+        return {
+            "BACKUP_ENCRYPTION_PASSPHRASE": self.passphrase,
+            "BACKUP_S3_BUCKET": self.s3_bucket,
+            "BACKUP_S3_ENDPOINT": self.s3_endpoint,
+            "BACKUP_S3_ACCESS_KEY_ID": self.s3_access_key_id,
+            "BACKUP_S3_SECRET_ACCESS_KEY": self.s3_secret_access_key,
+            "BACKUP_RETENTION_DAYS": str(self.retention_days),
+            "BACKUP_REQUIRE_OFFSITE": "true",
+            # Only now does the scheduler join the default `up` (DH-022).
+            "COMPOSE_PROFILES": "backup",
+        }
+
+
 def render_env(
     facility: Facility,
     secrets: FacilitySecrets,
     *,
     base_domain: str,
+    backup: BackupSettings | None = None,
     extra: dict[str, str] | None = None,
 ) -> str:
     """Render the complete env file contents for one facility.
@@ -128,6 +169,10 @@ def render_env(
         "BASE_DOMAIN": base_domain,
         **STACK_DEFAULTS,
         **secrets.values,
+        # Backup is wired only when it can actually succeed. Otherwise the scheduler is
+        # absent and the facility reports having no backup — as a problem, not silently
+        # (ADR-025, DH-022).
+        **(backup.as_env() if backup and backup.schedulable else {}),
         **(extra or {}),
     }
 

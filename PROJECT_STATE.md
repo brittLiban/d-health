@@ -1378,7 +1378,29 @@ portal credential can force TLS and client secrets to be regenerated — disrupt
 audit log — but cannot use rotation to lock a facility out of its own databases or destroy its
 ability to decrypt backups.
 
-**Next:** per-facility backup auto-wiring, then DNS/TLS when the domain lands.
+**Per-facility backup wiring built 2026-08-16 — 360 tests — and it found a serious flaw in what
+had already been built (ADR-025).**
+
+⚠️ **The backup passphrase would have lived only on the machine being backed up.** ADR-022 has the
+agent generate credentials locally; applied to `BACKUP_ENCRYPTION_PASSPHRASE` that produces
+archives encrypted with a key that dies with the host — the exact disaster backups exist for. Every
+off-site archive would have been permanently undecryptable. **That is not a backup, it is an
+archive nobody can open**, which is worse because it looks like one. Fixed: the operator supplies it
+at host bootstrap, so it exists in two places by construction, and a test asserts the generator does
+not produce it.
+
+**Backup is scheduled only when it can succeed** — a passphrase *and* an off-site destination.
+Auto-enabling it everywhere would recreate DH-022's restart loop at fleet scale; quieting it with
+`BACKUP_REQUIRE_OFFSITE=false` would be worse, producing local-only archives beside the data they
+protect while showing green. When it is not schedulable the facility **reports having no backup**,
+and the portal shows **"⚠ not protected"** with a banner — a facility with no backup is one disk
+failure from losing patient records, not a neutral "nothing yet".
+
+Scheduled is still never shown as verified: the restore-drill date sits beside the backup state, and
+a facility that has never had one says `never`. DH-014's off-site verification and DH-015's
+performed restore remain the pinned gates.
+
+**Next:** DNS/TLS when the domain lands — the last of the three `incomplete_steps`.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
