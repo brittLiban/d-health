@@ -31,6 +31,30 @@ infer success. The portal itself is not built.
 | `POST /facilities/{id}/decommission` | Soft only; records state |
 | `POST /facilities/{id}/rotate-credentials` | Not built |
 
+### The agent's job validation — the actual boundary
+
+ADR-022's residual risk is stated plainly: *a breached API can enqueue a job with hostile
+parameters.* `daher_agent/validation.py` is the only thing standing in the way, so it treats
+**every field as untrusted regardless of the job having arrived authenticated.** "The API already
+validated it" is the reasoning that would make that module decorative — the API's checks protect
+against mistakes, these protect against the API itself.
+
+Five refusals, each written as an attack in the tests:
+
+1. A job not addressed to this host.
+2. A verb outside the fixed set.
+3. A parameter failing local re-validation — including twelve hostile `facility_id` values
+   (`; rm -rf /`, `$(whoami)`, backticks, pipes, newlines) that would otherwise reach a Compose
+   project name.
+4. A stale or replayed job, so a captured one cannot be banked and fired later.
+5. **Provisioning over a facility that already exists here.** The API has the same check, but a
+   breached API can skip its own — this one it cannot reach.
+
+**A job carries parameters, never a spec.** `jobs.py` has no field that can name an image, a
+command, a volume, or a compose file, and a test asserts that for every field of both models. If
+that test ever fails, ADR-022's blast-radius walkthrough has stopped being true — control-verified
+by adding an `image` param and watching it fail with exactly that reasoning.
+
 ### Deploy transport (ADR-022)
 
 Chosen: **pull-based host agent, outbound-only**. Facility hosts poll for jobs addressed to
@@ -97,6 +121,9 @@ provisioning/
     ratelimit.py     per-caller token bucket
     repository.py    facility record storage
     hosts.py         registered deploy hosts (the allowlist)
+    jobs.py          the job vocabulary shared with the agent
+  src/daher_agent/
+    validation.py    the agent's local job validation — the real boundary
     app.py           the FastAPI surface
   tests/
     test_secrets.py           generation, uniqueness, redaction
@@ -106,6 +133,7 @@ provisioning/
     test_auth.py              scopes, credential handling, rate limiting
     test_app.py               the boundary, enforced through HTTP
     test_hosts.py             the allowlist and the occupied-host refusal
+    test_agent_validation.py  every refusal, written as an attack
 ```
 
 ## The facility env file

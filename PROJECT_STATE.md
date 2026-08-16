@@ -1193,12 +1193,25 @@ than that it should not.
   limit by N.
 - **The portal** is not built.
 
-**Next:** the host agent — enrolment first (the one irreducibly manual step), then the job queue,
-then the agent's local job validation. That validation, not the transport, is the real boundary:
-the agent must treat every field of a job as hostile even though it arrived authenticated, because
-ADR-022's residual risk is exactly "a breached API enqueues hostile parameters". `FACILITY_ID`
-reaches a Compose project name, so it is validated at **both** ends rather than trusted because the
-API already checked.
+**Agent job vocabulary and local validation built 2026-08-16 — 200 tests.** `jobs.py` defines a
+closed job type carrying **parameters, never a spec**: no field can name an image, command, volume,
+or compose file, and a test asserts that across every field of both models. Control-verified by
+adding an `image` param and watching it fail with ADR-022's reasoning attached.
+
+`daher_agent/validation.py` implements the five refusals, each tested as an attack rather than a
+negative case: wrong host, unknown verb, hostile parameters (twelve `facility_id` payloads —
+`; rm -rf /`, `$(whoami)`, backticks, pipes, newlines), stale/replayed jobs, and **provisioning over
+a facility that already exists locally**. That last one is the check a compromised issuer cannot
+skip, because it lives on the far end.
+
+`FACILITY_ID` is validated at **both** ends, plus a second independent character filter, because it
+reaches a Compose project name and the cost of being wrong there is root.
+
+**Next:** enrolment (the one irreducibly manual step), then the job queue and the agent's poll loop.
+⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
+"polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
+networks standing in for them. Validation is unit-tested hard; the transport will be marked
+*written* rather than *demonstrated* until that exists.
 
 ### P1 / P2
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`
