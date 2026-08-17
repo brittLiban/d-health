@@ -177,22 +177,22 @@ present with **0 members** exactly as intended.
 
 | Status | Tickets |
 |---|---|
-| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024** |
+| ✅ Done | DH-001, **DH-002** (Liban confirmed 2026-08-11), **DH-003**, **DH-007**, **DH-009a**, **DH-009b**, **DH-010**, **DH-019** (empty-volume verified; old live volume rotated), **DH-020**, **DH-022**, **DH-024**, **DH-011A** (ADR-026), **DH-011B** (spike performed) |
 | 🟢 Built + verified, awaiting human input | **DH-005** (Liban's own look) |
-
-| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README brought current; needs a fresh-VM walk-through), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011) |
+| 🔨 In progress | DH-014 (local encrypted path verified; off-site unverified), DH-017 (README brought current; needs a fresh-VM walk-through), **DH-025** (recovery core verified + committed; concrete OpenELIS binding remains with DH-011C) |
 | 🟢 Built + verified, activation blocked | **DH-008** (protocol/client plumbing; BLOCKER-5 — 🗓 meeting) |
 | 🔨 Performed, partial coverage | **DH-015** (restore drill performed 2026-08-13; re-run needed for the lab-result and SSO legs) |
 | 🔨 Built + locally verified, external input to finish | **DH-016** (routing/TLS verified locally; public certificates wait on #15 DNS) |
 | 🗓 Blocked on the birth-centre meeting | **DH-004** (ADR-006 guard built; fields await sign-off), **DH-006** (mechanism built; contents await sign-off), **DH-008** activation (staff **names** only — types decided, ADR-017) |
-| 🔓 Unblocked, not started — **the critical path** | **DH-011** (BLOCKER-3 closed 2026-08-14; two *verification* gates remain, not decisions) |
+| 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
+| 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
 ## ▶ START HERE (next session)
 
-**Read `DECISIONS.md` first — 25 ADRs, several load-bearing.** Then this section.
+**Read `DECISIONS.md` first — 26 ADRs, several load-bearing.** Then this section.
 
 ### Where things actually are
 
@@ -209,18 +209,27 @@ very likely not be demonstrated by then.
 
 ### Unblocked and buildable right now
 
-1. ⚠️ **DH-011 is now blocked on BLOCKER-6, raised 2026-08-16.** BLOCKER-3 is indeed closed, but
-   probing the running stack before writing code found that OpenELIS **pulls** orders from a remote
-   FHIR source rather than accepting a push into its FHIR store — the mechanism every document here
-   implicitly assumed. Which ingestion path to use changes what the adapter is, so it is Liban's
-   call (**NEEDS LIBAN #16**). The correlation binding *is* feasible and control-proven; ADR-018's
-   status mapping is **not verifiable until one order has actually flowed**, because the lab's order
-   tables are empty. The OpenMRS-side poller and watermark remain buildable meanwhile.
-2. ~~**Known bug 17**~~ — ✅ **fixed 2026-08-16** with per-verb timeouts (Liban chose the longer
-   timeout over detaching). See the known-bugs table. It left **bug 18** open by decision: the agent
-   does not poll while a long job runs, so jobs issued in that window are refused as stale.
+**The DH-011 order path is half built and now waits on you.** Read BLOCKER-6 before anything else in
+this section — it is the decision that unblocks five of the eight golden-flow steps.
+
+1. 🛑 **DH-011's target leg is blocked on BLOCKER-6 / NEEDS LIBAN #16.** Probing before writing code
+   found that OpenELIS **pulls** orders from a remote FHIR source rather than accepting a push into
+   its FHIR store — the mechanism every document here implicitly assumed. **Five** candidates are
+   recorded with their costs; DH-011B proved Option F reaches real native lab state but is refused
+   by accession configuration (`DEV01`, NEEDS LIBAN #7). Which path to use changes what the adapter
+   *is*, and one option adds a second system storing patient data, so it is yours.
+   ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
+   built and verified, deliberately not activated).
+2. **DH-027M — CI.** There is **no `.github/` directory at all**, so 465 tests across two suites gate
+   nothing. Unblocked, cheap, and independent of every human decision outstanding. The one caveat is
+   in §10 of the roadmap: do not run the ~50-minute clinical cold boot on every PR.
 3. **DH-017** — the README needs a walk-through on a genuinely fresh VM. Documentation verified only
-   against an already-working machine is the weakest kind.
+   against an already-working machine is the weakest kind. ⚠️ Now partly entangled with the
+   cloud-primary direction, which is itself an open decision (data residency).
+4. ~~**Known bug 17**~~ — ✅ **fixed 2026-08-16** with per-verb timeouts. It left **bug 18** open by
+   decision: the agent does not poll while a long job runs, so jobs issued in that window are refused
+   as stale. **Bugs 19 and 20 were also opened** — see the known-bugs table; 19 is an upstream
+   OpenELIS `201`-on-failure that any target implementation must defend against.
 
 ### Blocked, and on what
 
@@ -549,8 +558,8 @@ reported as passing.
 |---|---|---|
 | 1 | Register test patient in OpenMRS | ✅ Liban registered a patient in the O3 SPA himself, 2026-08-11 |
 | 2 | Same SSO session into OpenELIS, no second login | ⏸ |
-| 3 | Place prenatal panel lab order in OpenMRS | ⏸ |
-| 4 | Order appears in OpenELIS worklist | ⏸ |
+| 3 | Place prenatal panel lab order in OpenMRS | ⏸ — the panel deliberately ships **empty** (DH-006, clinical sign-off). An order *can* be placed with an existing upstream test, and DH-011E's poller would detect it; nothing consumes it |
+| 4 | Order appears in OpenELIS worklist | ⏸ 🛑 **BLOCKER-6.** Not a build task: how an order enters OpenELIS is undecided. DH-011B showed the lab has **never** received one (`electronic_order`, `sample`, `analysis` all 0 rows) |
 | 5 | Enter result in OpenELIS | ⏸ |
 | 6 | Result appears in OpenMRS chart | ⏸ |
 | 7 | WhatsApp notification fires (mock OK for Day 1; real send is the `DONE` gate) | ⏸ |
@@ -1732,15 +1741,28 @@ conversation), RapidPro, Orthanc/PACS, multi-facility.
 ## Critical path
 
 ```
-BLOCKER-1 (human) → DH-002 → DH-005 → DH-007 → DH-008 ──┐
-                       │                                 ├→ DH-018
-DH-009 ✅ → DH-010 ✅ → DH-025 → DH-011 → DH-012 → DH-013 ─┘
+BLOCKER-1 ✅ → DH-002 ✅ → DH-005 ✅ → DH-007 ✅ → DH-008 🟢 ─┐
+                       │           (activation: staff names)  ├→ DH-018
+DH-009 ✅ → DH-010 ✅ → DH-025 🟢 → DH-011 ─────────────────────┤
+                       │            │                         │
+                       │            ├─ DH-011A ✅  ADR-026     │
+                       │            ├─ DH-011B ✅  spike       │
+                       │            ├─ DH-011E 🟢  poller      │
+                       │            │     (built, NOT active)  │
+                       │            └─ 🛑 BLOCKER-6 ── target leg
+                       │                  (human decision)     │
+                       │                     ↓                 │
+                       │            DH-011C/J/K/L → DH-012 → DH-013 ─┘
                        │
         DH-014 → DH-015  (run parallel with SSO, not after)
 ```
 
-Longest poles: DH-008 (SSO) and DH-025/DH-011–012 (crash-safe adapter transport and observed
-message shapes).
+**The critical path now runs through a human decision, not through code.** BLOCKER-6 gates
+DH-011's target leg and therefore DH-012, DH-013 and DH-018 — five of the eight golden-flow steps.
+Everything buildable on the OpenMRS side of that boundary is done.
+
+Longest poles: BLOCKER-6's resolution plus the target leg behind it, and DH-008's activation (staff
+names). DH-011E removed the poller/watermark from this list on 2026-08-17.
 
 ## Known bugs
 
@@ -1771,7 +1793,18 @@ message shapes).
 
 - See **▶ START HERE** near the top of this file for the immediate next action.
 - Read `DECISIONS.md` before touching anything. ADR-005 is accepted and load-bearing; ADR-003,
-  ADR-006, ADR-007 are pinned and not to be "simplified".
+  ADR-006, ADR-007 are pinned and not to be "simplified". **ADR-026 is OPEN** — Option F is a
+  recorded candidate, not a selection.
+- **The adapter's OpenMRS side is built but nothing runs it** (DH-011E). If you are tempted to wire
+  up the 15-second loop to "finish the job", stop: there is no delivery target until BLOCKER-6 is
+  decided, and a poller that claims work it cannot deliver would mark orders `completed` that never
+  reached a laboratory. The ledger is deliberately marked `completed` only after a delivery returns
+  a target record.
+- **Two upstream behaviours to defend against, not fix:** OpenELIS's `PatientProvider` returns
+  `201 Created` when its native persist fails (bug 19 — verify by read-back, never by status code),
+  and OpenMRS `fhir2` 4.2.0 accepts `_sort` and silently ignores it (`WATERMARK-DESIGN.md` §3).
+- **Caddy currently reports `unhealthy` and is serving correctly** (bug 20). Its healthcheck cannot
+  exec. Do not "fix" it by restarting before someone has looked — that clears the evidence.
 - **Step 1 has now genuinely run.** API verification and Liban's SPA registration are separate
   evidence and both are complete; DH-003 verified French configuration, while the human-visible
   SPA language observation remains explicitly unreported.
@@ -1780,5 +1813,11 @@ message shapes).
 - Digests are recorded from a real pull (ARCHITECTURE §12). **Never fabricate a digest.**
 - Timing: cold boot ≈49 min, warm ≈38s. Never `docker compose down -v`.
 - Nothing here authorizes real patient data. Pilot-ready ≠ clinically live (ADR-012). This local
-  stack now holds 100 fictional demo patients plus two deliberate test patients, which makes that
-  distinction concrete rather than theoretical.
+  stack now holds 100 fictional demo patients plus two deliberate test patients in OpenMRS, **and one
+  synthetic patient in OpenELIS** (`id=2`, `Dhspike Zzsynthetic`, created by DH-011B and retained on
+  purpose), which makes that distinction concrete rather than theoretical.
+- **An open direction, not yet an ADR:** the 2026-08-17 roadmap moves the project to **cloud-primary**
+  deployment. That changes where patient data physically lives, which `AGENTS.md` makes a
+  stop-and-ask, so it needs an ADR before RES-001/002 or DH-027J/K proceed. `docs/ARCHITECTURE.md`
+  still says data lives "on the facility's own VM" — deliberately left until the decision is made
+  rather than quietly rewritten.

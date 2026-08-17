@@ -13,9 +13,12 @@ one `docker-compose.yml`.
 > been exercised. Analyzer interfaces are **out of scope for v1** — results are entered manually
 > (ADR-016). **DH-008 SSO protocol plumbing** runs fail-closed: Keycloak has verified OpenMRS OIDC
 > and OpenELIS SAML clients, but staff-role mapping is a human authorization decision and SSO
-> remains disabled. **DH-010's adapter safety skeleton** is healthy, and **DH-025's crash-recovery
-> core** is runtime-verified including before/after-write crash tests — but it does not move FHIR
-> messages yet. **DH-016's reverse proxy** serves all three subdomains over HTTPS locally;
+> remains disabled. **DH-010's adapter safety skeleton** is healthy, **DH-025's crash-recovery
+> core** is runtime-verified including before/after-write crash tests, and **DH-011E's OpenMRS order
+> poller and durable watermark** are built and verified (94 tests) — but **nothing is activated and
+> no order has moved.** How an order reaches OpenELIS is an open decision (BLOCKER-6): probing found
+> the laboratory *pulls* from a remote FHIR source rather than accepting a push, and it has never
+> received an order. **DH-016's reverse proxy** serves all three subdomains over HTTPS locally;
 > publicly trusted certificates still need the real domain and DNS. **DH-021** replaced the
 > upstream keystore, whose private key was public *and whose certificate had already expired*.
 >
@@ -369,6 +372,12 @@ The original local verification volume predates DH-024's sole-writer correction 
 It is a throwaway test stack, not a clean pilot database; no patient rows were deleted during the
 fix.
 
+⚠️ **OpenELIS in this local stack also holds one synthetic patient** — `id=2`,
+`Dhspike Zzsynthetic`, created by DH-011B's ingestion spike on 2026-08-17 and retained rather than
+deleted, consistent with never removing patient rows to tidy up. No sample, analysis or
+`electronic_order` exists, and no laboratory test or configuration was modified. Same rule applies:
+this is a verification stack, never to be confused with a clean instance.
+
 `OMRS_DEMO_CONTENT=on|off` is separate. Its default `on` preserves the O3 reference distribution
 as shipped, including `BasicLabTests` and other vocabulary that later mapping may need. `off`
 selects a locally built backend target whose exact digest-pinned upstream base omits only the
@@ -482,6 +491,11 @@ end-to-end demonstration. Sequence and status: [`PROJECT_STATE.md`](PROJECT_STAT
 
 Partially done, and the boundary matters:
 
+- **Adapter order path** — the OpenMRS half is **built and verified but not activated** (DH-011E:
+  poller, durable watermark, cohort completeness, client-side ordering, 94 tests). Nothing runs it,
+  because **how an order reaches OpenELIS is an open decision** (BLOCKER-6). The laboratory *pulls*
+  from a remote FHIR source rather than accepting a push, and it has never received an order. Five
+  candidate designs are recorded; none is chosen.
 - **Restore drill** — performed, but two acceptance legs (a known lab result, an SSO login) could
   not be exercised because neither exists yet. It must be re-run. `backup/restore-drill.md` §6.
 - **Reverse proxy** — routing and local HTTPS verified; publicly trusted certificates need the real

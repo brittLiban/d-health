@@ -1,6 +1,6 @@
 # Current State — Daher Health
 
-**Assessed:** 2026-08-16 · **Target:** pilot-ready by 2026-09-01
+**Assessed:** 2026-08-17 · **Target:** pilot-ready by 2026-09-01
 **Method:** inspection of the actual repository and running environment, not the plan.
 
 ---
@@ -40,6 +40,22 @@ absence, and ambiguity; only proven absence may retry. Twenty-seven tests and a 
 database probe cover concurrent claims and crashes on both sides of the write. The remaining gate
 is concrete: DH-011 must attach/query this correlation on the selected OpenELIS resource. No target
 resource or clinical message exists yet, so that binding is unverified rather than inferred.
+
+**DH-011E's OpenMRS order poller now runs in tests and is deliberately not activated (2026-08-17).**
+The accepted watermark design is implemented: a durable position bootstrapped once from the server's
+own clock (ADR-015), a window bounded at both ends, deduplication by `(type, id, versionId)`, a
+completeness check against the bundle's `total`, and **client-side ordering** — because probing found
+that OpenMRS `fhir2` 4.2.0 accepts `_sort` and silently ignores it. 94 tests and five deliberate
+controls. Its output is a transport-neutral `SourceOrderEvent` that names no target, and **no loop
+runs it**: BLOCKER-6 has not decided how an order reaches OpenELIS, so there is nothing to deliver
+to and no order has moved.
+
+**The same session found that the correlation cannot bind where the design assumed.** DH-011B's spike
+showed the OpenELIS business FHIR server does reach real native laboratory state — a synthetic
+Patient create produced a genuine `clinlims.patient` row — but it does **not** support `identifier`
+search on `ServiceRequest`, which is exactly where DH-025's correlation was to attach. It also returns
+`201 Created` when a native persist fails. Both are recorded as constraints on whatever BLOCKER-6
+selects, not as things to work around quietly.
 
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
@@ -148,7 +164,9 @@ complete.
 | OpenELIS UI | **Authentication form exercised; browser workflow not exercised** | Configured admin login succeeds and the published default is refused on current and empty volumes. Its frontend still has no host route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
 | SSO | **Plumbing runtime-verified; activation unverified** | OpenMRS OIDC module is registered/stopped in disabled mode; OpenELIS is configured for SAML; Keycloak client reconciliation is idempotent. BLOCKER-5 prevents role mapping, activation, and one-login proof. |
-| `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002. |
+| **DH-011E order poller** | **Unit-verified against injected transport; never run against live OpenMRS** | 94 tests and five controls prove the cycle's safety properties — ordering, completeness, dedupe, halt-before-advance. What is *not* proven: a real poll against the running server, and any delivery at all. The bounded-window and `_sort` behaviours it relies on **were** probed live before the code was written. Deliberately unwired, so "not activated" is a property of the deployment, not a promise. |
+| **Migration `0002_watermarks`** | **Applied live and inspected** | Table, columns, and the unique `(direction, resource_type)` index exist in the real adapter database; 0 rows, because nothing polls. |
+| `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002; §6 and §16 brought current 2026-08-17. |
 
 ## 3a. What running it actually exposed
 
@@ -211,7 +229,11 @@ Both legs have primary evidence (DH-009a, DH-009b), and Liban approved the custo
 configurable 15-second OpenMRS order poll, inclusive watermark, and durable ledger. OpenELIS runs a
 full HAPI server that advertises `Subscription`, but delivery and corrected-result behavior still
 must be demonstrated before trusting the result path. DH-010 built and runtime-verified the safety
-foundation; the watermark and poller themselves remain DH-011.
+foundation, and DH-011E has since built and verified the watermark and poller themselves
+(2026-08-17) — **unactivated**, because BLOCKER-6 leaves them with nothing to deliver to. One
+implementation addition to the accepted design is recorded in `WATERMARK-DESIGN.md`: the poll window
+is bounded at **both** ends, because an open-ended top makes the completeness check fire on healthy
+traffic.
 
 ### BLOCKER-3 — DH-011 activation and cancellation contract · ✅ CLOSED BY DECISION 2026-08-14
 
@@ -302,6 +324,38 @@ healthcheck that reported healthy through a total outage, and one inside the new
 **Nothing above chose any clinical content.** The panel is empty, no form schema is committed, and
 both sign-off requests are in `docs/CLINICAL-SIGNOFF.md`.
 
+## 5c. What changed 2026-08-16/17 — the order path, half built and now waiting on a decision
+
+Four commits, and the shape of the ticket changed twice because probing came before coding.
+
+**Known bug 17 fixed** — the provisioning executor had one 900-second timeout for every verb, which
+was shorter than a single healthcheck's grace period in the compose file it runs (`openmrs-backend`
+declares `start_period: 1800s`). The first genuine facility provisioning would have been reported
+`failed` while the stack came up correctly. Now per-verb, asserted against the real compose file.
+It left **bug 18** open by decision rather than weakening ADR-022's replay window.
+
+**BLOCKER-6 raised** — every document here said "the adapter routes the order to OpenELIS" without
+naming a mechanism, and the mechanism they implied turns out not to be the one OpenELIS documents. It
+**pulls** from a remote FHIR source. Five candidates are recorded; none is selected, because the
+choice changes what the adapter *is* and one option adds a second system storing patient data.
+
+**`_sort` correction** — the accepted watermark design's pseudocode relied on server-side ordering.
+`fhir2` 4.2.0 accepts `_sort` and ignores it: ascending, descending and a nonsense key returned
+byte-identical order over 50 distinct resources. Corrected in `WATERMARK-DESIGN.md` §3 by appending,
+not by rewriting history.
+
+**Option F spiked (DH-011B)** — OpenELIS's own webapp serves business FHIR providers that create
+genuine native laboratory rows. Two constraints came with it: `ServiceRequest` is not
+`identifier`-searchable there, and `PatientProvider` returns `201` on a failed persist.
+
+**DH-011E built** — the OpenMRS half of the order path, verified under five controls, deliberately
+unactivated.
+
+**What this session did not do, on purpose:** select a BLOCKER-6 option, write a probe order into the
+laboratory to force an answer, grant itself OpenELIS permissions to make a spike pass, change the
+accession configuration, delete the synthetic patient it created, restart Caddy to clear bug 20, or
+wire up the poll loop to look finished.
+
 ## 5b. Multi-facility provisioning — works end to end, on a stand-in
 
 A provisioning API and portal (`provisioning/`) began 2026-08-15 as a **deliberate schedule trade**:
@@ -373,7 +427,8 @@ disagree, the ticket table is right and this section is stale.
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **Reduced 2026-08-13** | Was the top risk. A real restore has now been performed and documented, and it found two defects — `pg_restore --clean` silently losing rows over the pre-populated OpenELIS image, and a half-initialised Postgres at exit 127. | Largely mitigated. Residual: the drill must be **re-run** once a lab result exists and SSO is active, and off-site is still unexercised. Budget that re-run rather than assuming DH-015 is closed. |
 | SSO across two apps | **Reduced 2026-08-14** | Protocol/client plumbing is verified and the role *types* are decided (ADR-017), so the design question is answered. What is left is naming the staff who hold each type — a fact from the meeting, not a design problem. Caddy now provides the HTTPS origins the browser session needs. | Keep fail-closed off until the names exist, then activate and demonstrate the full two-app session. Budget the demonstration itself: it has never been performed. |
-| OpenMRS order polling safety | **High** | DH-025's recovery core and crash tests pass, but safety still depends on the concrete OpenELIS write carrying its correlation and a demonstrated exact target lookup. | Bind and demonstrate correlation attach/query in DH-011 before activation; multiple matches or unavailable lookup remain ambiguous and fail closed. |
+| OpenMRS order polling safety | **High** | DH-025's recovery core, crash tests, and now DH-011E's poller/watermark all pass under five deliberate controls — but safety still depends on the concrete OpenELIS write carrying its correlation and a demonstrated exact target lookup, and **DH-011B found that the business FHIR server does not support `identifier` search on `ServiceRequest` at all**. So the correlation cannot bind where the design assumed. | Resolve BLOCKER-6, then bind and demonstrate correlation attach/query in DH-011C before activation; `Specimen` is identifier-searchable and worth testing before DH-011D's patch. Multiple matches or an unavailable lookup remain ambiguous and fail closed. |
+| **Trusting an upstream success code** | **High** | New 2026-08-17. OpenELIS's `PatientProvider` returns `201 Created` when its native persist fails (bug 19), with no `Location` header. An adapter that believed it would write `completed` into the ledger for an order that never existed — silent loss, at scale, looking entirely healthy. | Any target implementation **verifies by read-back**, never by status code. The rule is recorded in the poller's own module docstring and in the known-bugs table so it survives this session. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |
 | Clinical sign-off not obtained | **High** | Gates *clinically live*, not pilot-ready — but a pilot with no sign-off path is a pilot that cannot proceed to use. | Get the order set and partograph fields in front of the clinical lead as soon as they are drafted, in week 1, not week 3. |

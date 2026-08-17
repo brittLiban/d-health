@@ -320,6 +320,19 @@ adapter counts OpenMRS `ServiceRequest`s created in the last 48 hours and compar
 ledger entries for the same window. A mismatch is the only signal that would ever reveal silent
 loss, and it is the check that lets anyone claim results are not being lost.
 
+> ⚠️ **NOT BUILT as of 2026-08-17 (DH-011E), and stated here rather than left to be discovered.**
+> DH-011E built the poller, the watermark, and the cohort/ordering guards, but **not** this
+> reconciliation job. The honest reason it was not built: the ledger has no entries until something
+> is actually delivered, and nothing is delivered until BLOCKER-6 is resolved — so the comparison
+> would report a permanent 100% mismatch and train an operator to ignore the one check that reveals
+> real loss. That is a worse outcome than its absence.
+>
+> It therefore belongs with the target leg, and it is a **release gate, not a nice-to-have**: until
+> it exists and has been seen to reconcile, nobody can claim on evidence that orders are not being
+> skipped. §3's advance-only-after-success rule and the cohort completeness check narrow the window
+> in which skipping is possible; they do not close it, because a record the server never returned is
+> invisible to both.
+
 ## 9. Decision and remaining result-path gates
 
 1. **Poll interval — resolved by Liban:** **15 seconds**, configurable by environment variable.
@@ -340,3 +353,30 @@ loss, and it is the check that lets anyone claim results are not being lost.
 4. **Before the result path:** prove OpenELIS outbound delivery and characterise corrected-result
    version/timestamp behavior. A correction that does not propagate would leave a stale value in
    the OpenMRS chart.
+
+## 10. Implementation status — 2026-08-17 (DH-011E)
+
+What this document specifies, and what actually exists. Written as a table because "the design is
+implemented" is the kind of claim that hides the half that is not.
+
+| § | Specified | Status |
+|---|---|---|
+| 1 | Polling rather than events | ✅ Both alternatives ruled out against the running stack (ADR-005) |
+| 2 | Watermark keyed on server `meta.lastUpdated`, per resource type | ✅ `watermark.py` — stored as the server's exact string in a String column |
+| 3 | Advance only after successful processing; never to "now" | ✅ `order_poller.py` — advances to the last contiguous success, or to the frozen window top when the cohort is clean |
+| 3 | Bootstrap at deployment time, persisted once (ADR-015) | ✅ `get_or_bootstrap`, from a **server-issued** instant; never re-derived |
+| 3 | `_sort=_lastUpdated` for ordering | ❌ **Impossible — the server ignores it.** Corrected above; ordering is client-side with a deterministic tie-breaker |
+| — | *(addition)* window bounded at both ends | ✅ Not in the original design; required so the completeness check does not fire on healthy traffic |
+| 4 | Inclusive `ge` lower bound, duplicates absorbed | ✅ Query built with `ge`; dedupe by `(type, id, versionId)` |
+| 5 | Restart mid-window; ledger keyed stably; DH-025 reconciliation | ✅ Tested, including halt-on-ambiguity and halt-on-dead-letter |
+| 6 | Process `replaces`; never filter on `status` | ✅ Carried verbatim on `SourceOrderEvent`; a control proves filtering to `active` breaks 3 tests |
+| 7 | Never parse/reformat the instant; assert the timezone | ✅ `instants.py` — refuses any offset that is not `+03:00` |
+| 8 | Loud failure modes | 🟡 Partial — `PollOutcome` reports halts, dead letters and duplicate counts, and refusals are logged. Metrics/alerting are not wired |
+| 8 | **Nightly reconciliation** | ❌ **Not built.** See the warning in §8 — a release gate, deferred with the target leg for a stated reason |
+| 9 | 15-second configurable interval | ❌ **No loop exists.** `poll_once()` is a method nobody calls; wiring it up with no delivery target would invite a false green |
+
+**The delivery seam is `DeliverOrder` in `order_poller.py`, and it has no implementation.** That is
+BLOCKER-6's decision point. Note also DH-011B's two findings, which constrain whatever is chosen:
+OpenELIS's business FHIR server does **not** support `identifier` search on `ServiceRequest` — where
+DH-025's correlation was to bind — and it returns `201 Created` when a native persist fails, so a
+target implementation must verify by **read-back, never by status code**.
