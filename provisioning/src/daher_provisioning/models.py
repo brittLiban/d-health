@@ -33,6 +33,11 @@ class FacilityState(StrEnum):
     PROVISIONING = "provisioning"
     RUNNING = "running"
     DEGRADED = "degraded"
+    # Requested and the STOP job is queued, but no agent has reported stopping the stack yet
+    # (DH-027E). Distinct from DECOMMISSIONED on purpose: the earlier code jumped straight to
+    # DECOMMISSIONED on request, which told an operator a stack was stopped while it was
+    # still serving. "Queued" is not "done" — the same rule the create path already follows.
+    DECOMMISSIONING = "decommissioning"
     # Soft only. There is deliberately no `deleted` state reachable from the API surface —
     # destroying clinical data requires a separate, harder mechanism and sign-off (ADR-021).
     DECOMMISSIONED = "decommissioned"

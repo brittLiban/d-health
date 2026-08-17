@@ -429,20 +429,83 @@ def create_app(
         request: Request,
         principal: Principal = Depends(_scoped(Scope.FACILITY_DECOMMISSION)),
     ) -> Facility:
-        """Soft only. Stops and isolates a stack; never destroys data (ADR-021)."""
+        """Soft only. Stops a stack; never destroys data (ADR-021).
+
+        **DECOMMISSIONING, not DECOMMISSIONED (DH-027E).** This used to flip the state
+        straight to DECOMMISSIONED and queue nothing, so the fleet reported a facility as
+        decommissioned while its stack was still serving patients. The terminal state is now
+        reached only when the agent reports the STOP succeeded — the same "queued is not
+        running" rule the create path already follows.
+
+        The executor runs `docker compose stop`, never `down`, and no verb can emit
+        `--volumes`. Volumes survive, which is what makes this reversible.
+        """
         try:
-            updated = facilities.set_state(facility_id, FacilityState.DECOMMISSIONED)
+            facility = facilities.get(facility_id)
         except FacilityNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+        # Which host runs this facility is answered by the claim, not by the request — the
+        # claim IS the mapping, and it is the same record that refuses a second facility.
+        host_id = next(
+            (host.host_id for host in host_registry.list() if host.facility_id == facility_id),
+            None,
+        )
+
+        updated = facilities.set_state(facility_id, FacilityState.DECOMMISSIONING)
+
+        stop_queued = False
+        if host_id is not None:
+            try:
+                queue.enqueue(
+                    Job(
+                        job_id=f"job-stop-{facility_id}-{int(datetime.now(UTC).timestamp())}",
+                        host_id=host_id,
+                        verb=JobVerb.STOP,
+                        params=JobParams(
+                            facility_id=facility_id,
+                            facility_type=facility.type.value,
+                            base_domain=base_domain,
+                        ),
+                        issued_at=datetime.now(UTC),
+                    )
+                )
+                stop_queued = True
+            except Exception as exc:  # noqa: BLE001 - the state change stands; say it did not queue
+                audit_log.record(
+                    actor=principal.actor,
+                    action=AuditAction.FACILITY_DECOMMISSION,
+                    outcome=AuditOutcome.FAILURE,
+                    facility_id=facility_id,
+                    message=f"state set to decommissioning but STOP not queued: {exc}"[:512],
+                    source_ip=_client_ip(request),
+                )
 
         audit_log.record(
             actor=principal.actor,
             action=AuditAction.FACILITY_DECOMMISSION,
             outcome=AuditOutcome.SUCCESS,
             facility_id=facility_id,
-            message="soft decommission recorded; no data destroyed",
+            message=(
+                "decommission requested; no data destroyed. "
+                + (
+                    "STOP queued; the facility stays 'decommissioning' until its agent "
+                    "reports the stack stopped"
+                    if stop_queued
+                    else "⚠️ no STOP was queued — "
+                    + (
+                        "no host holds a claim on this facility"
+                        if host_id is None
+                        else "queueing failed"
+                    )
+                )
+            )[:512],
             source_ip=_client_ip(request),
         )
+        # ⚠️ The host claim is deliberately NOT released. The stack's volumes — the patient
+        # database — are still on that host. Freeing the claim would let a different facility
+        # be provisioned onto a host holding this one's data, which is precisely the overwrite
+        # ADR-022 refuses.
         return updated
 
     async def agent_principal(
@@ -559,7 +622,22 @@ def create_app(
         # An audit that can fail after the thing it records has already happened is worse
         # than no audit, because the gap is invisible.
         facility_id = getattr(getattr(record.job, "params", None), "facility_id", None)
+        verb = getattr(record.job, "verb", None)
         queue.finish(job_id, mapping[reported], detail)
+
+        # DH-027E: DECOMMISSIONED is reached here and nowhere else — only a successful STOP
+        # report moves a facility out of DECOMMISSIONING. A failed or refused STOP leaves it
+        # in DECOMMISSIONING, which is the honest state: the request was made and the stack
+        # was not confirmed stopped. Guarded so a STOP report for a facility in some other
+        # state cannot silently retire it.
+        if verb is JobVerb.STOP and reported == "succeeded" and facility_id:
+            try:
+                current = facilities.get(facility_id)
+                if current.state is FacilityState.DECOMMISSIONING:
+                    facilities.set_state(facility_id, FacilityState.DECOMMISSIONED)
+            except FacilityNotFound:
+                pass  # Nothing to transition; the job report itself is still recorded below.
+
         audit_log.record(
             actor=f"agent:{host_id}",
             action=AuditAction.FACILITY_STATUS,

@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -221,7 +221,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **523 tests across four suites** (adapter 94, provisioning 394, seed 16, form-safety 19) plus Ruff, compose
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **532 tests across four suites** (adapter 94, provisioning 403, seed 16, form-safety 19) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
    ticket entry below.
@@ -1836,6 +1836,39 @@ fixed: bug 18, and the backup bound is unmeasured.
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
 *written* rather than *demonstrated* until that exists.
+
+### DH-027E · Real soft decommission · ✅ DONE 2026-08-17
+
+**The defect:** `POST /facilities/{id}/decommission` set `DECOMMISSIONED` on request and
+**queued nothing**. The fleet therefore reported a facility as decommissioned while its stack
+was still serving patients — the same "queued is not running" mistake the create path had
+already been fixed for, in the direction that matters more, because an operator who believes a
+stack is stopped stops watching it.
+
+**Now a real lifecycle.** A new `DECOMMISSIONING` state is entered on request, a **STOP** job is
+enqueued for the host that actually holds the claim (the claim *is* the mapping — the host is
+not taken from the request), and `DECOMMISSIONED` is reached **only** when that host's agent
+reports the STOP succeeded. A failed or refused report leaves the facility in
+`DECOMMISSIONING`, which is the honest state: requested, not confirmed stopped.
+
+**Two guards worth naming.** The terminal transition is gated on the job's verb being `STOP`
+*and* the facility currently being in `DECOMMISSIONING`, so a successful `PROVISION` report
+cannot retire the facility it just brought up. And **the host claim is deliberately not
+released** — the stack's volumes, i.e. the patient database, are still on that host, so freeing
+the claim would let a different facility be provisioned on top of this one's data. That is
+exactly the overwrite ADR-022 refuses, and it has its own test.
+
+No data is destroyed: the executor runs `docker compose stop`, never `down`, and a pre-existing
+test already asserts no verb can emit `--volumes`.
+
+**Verified:** 9 new tests, **403 provisioning tests total** (from 394), Ruff clean.
+Control-verified twice — restoring the jump straight to `DECOMMISSIONED` fails 3 tests, and
+removing the STOP enqueue fails 5.
+
+⚠️ **One existing assertion was changed, not deleted:** `test_a_credential_with_the_scope_may_decommission`
+in `test_app.py` expected `"decommissioned"`. That expectation encoded the bug. It now expects
+`"decommissioning"`, with a comment saying why, and the test still checks the scope enforcement
+it was actually written for.
 
 ### DH-027F · Atomic facility env writes · ✅ DONE 2026-08-17 (rotation rollback still open)
 

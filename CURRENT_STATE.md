@@ -68,6 +68,12 @@ cancellation remain unverified.
 
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
+**DH-027E made decommission real (2026-08-17):** the endpoint set `DECOMMISSIONED` on request and
+queued nothing, so the fleet reported a facility as stopped while its stack was still serving. There
+is now a `DECOMMISSIONING` state, a STOP job queued to the host that actually holds the claim, and the
+terminal state is reached only on that agent's successful report. The host claim is deliberately
+**not** released — the patient database is still on that host.
+
 **DH-027F made facility env writes atomic (2026-08-17):** the writer used `O_TRUNC`, so a death
 mid-write left a torn env file — a live facility's credentials, on the rotation path — and there was
 no `fsync`, so a power cut could leave a partial file after a successful-looking write. Now
@@ -75,9 +81,9 @@ write-temp-then-rename with contents fsynced before the rename. ⚠️ Rotation 
 the write is atomic, so the file is never torn, but a failed `up` afterwards leaves the new file in
 place. Restoring the old one is a credential-custody question, not a code detail.
 
-**CI now exists and gates 523 tests (DH-027M, 2026-08-17).** Until this landed, every verification
+**CI now exists and gates 532 tests (DH-027M, 2026-08-17).** Until this landed, every verification
 claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.github/workflows/ci.yml`
-runs the adapter (94), provisioning (394), seed (16) and form-safety (19) suites plus Ruff, compose
+runs the adapter (94), provisioning (403), seed (16) and form-safety (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
 them, and running the checks found **three** defects in the checks themselves — the third being that

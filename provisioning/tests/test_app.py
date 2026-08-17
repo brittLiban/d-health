@@ -117,7 +117,13 @@ class TestScopeBoundary:
             "/facilities/daher-birth-centre/decommission", headers=auth(admin_key)
         )
         assert response.status_code == 200
-        assert response.json()["state"] == "decommissioned"
+        # ⚠️ `decommissioning`, not `decommissioned` — changed deliberately at DH-027E.
+        # This assertion previously encoded the bug: the endpoint jumped straight to the
+        # terminal state while queueing nothing, so the fleet reported a stack as stopped
+        # while it was still serving. The terminal state now requires an agent's successful
+        # STOP report. Scope enforcement — what this test is actually about — is unchanged.
+        # See tests/test_decommission.py for the lifecycle itself.
+        assert response.json()["state"] == "decommissioning"
 
 
 class TestCreateDoesNotOverclaim:
