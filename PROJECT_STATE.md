@@ -1875,9 +1875,16 @@ Running it per push would make CI useless within a week, and a check people lear
 than no check. Whole-stack verification stays the README's manual procedure plus DH-027J's fresh-VM
 demonstration.
 
-**Honest limits.** ⚠️ CI has **never run on GitHub** — it is verified step-by-step locally, which is
-not the same as a green run on the platform; the first push will prove or disprove the wiring.
-The secret scan **excludes test trees** because fixtures legitimately contain fake credentials, so a
+**Verified green on GitHub, and the first run failed for the right reason.** Run `32030788360`
+failed on the tracked-secret scan flagging **this workflow's own** throwaway compose values — the
+check working correctly on its author. Excluding `.github/` would have been the lazy fix and would
+blind it to a real token pasted into CI, so the dummy values were shortened below the 12-character
+threshold instead (`config` only interpolates, it never validates password content). Control-verified
+in both directions: a real-looking `ghp_…` token appended to the workflow **is** still caught. Runs
+`32030956269` and `32031078854` are green across all five jobs in 23–33 seconds, the latter after
+bumping `checkout@v5`/`setup-python@v6` to clear GitHub's Node 20 deprecation warning.
+
+**Honest limits.** The secret scan **excludes test trees** because fixtures legitimately contain fake credentials, so a
 real secret pasted into a test would be missed there; the `.env`-untracked check is the control that
 actually matters. Compose parsing uses a generated throwaway env written outside the checkout, so it
 proves interpolation and syntax, **not** that the stack boots.

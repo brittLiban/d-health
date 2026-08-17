@@ -71,9 +71,10 @@ claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.
 runs the adapter (94), provisioning (371), seed (16) and form-safety (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
-them, and running the checks found two defects in the checks themselves. ⚠️ **It has never run on
-GitHub** — every step was executed locally, which is not the same as a green run on the platform.
-The ~50-minute clinical cold boot is deliberately excluded.
+them, and running the checks found **three** defects in the checks themselves — the third being that
+the secret scan flagged the workflow's own dummy values, which is how the first GitHub run failed.
+**All five jobs are now green on GitHub in 23 seconds** (run `32031078854`), so this is demonstrated
+rather than written. The ~50-minute clinical cold boot is deliberately excluded.
 
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
