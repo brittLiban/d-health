@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 517 tests now gated, every check control-tested), **DH-027B** (transactional facility creation) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -221,7 +221,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **517 tests across four suites** (adapter 94, provisioning 388, seed 16, form-safety 19) plus Ruff, compose
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **523 tests across four suites** (adapter 94, provisioning 394, seed 16, form-safety 19) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
    ticket entry below.
@@ -1836,6 +1836,38 @@ fixed: bug 18, and the backup bound is unmeasured.
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
 *written* rather than *demonstrated* until that exists.
+
+### DH-027F · Atomic facility env writes · ✅ DONE 2026-08-17 (rotation rollback still open)
+
+**The defect, confirmed in the code rather than taken from the roadmap.** `write_env` opened
+the target with `O_TRUNC`, which empties the file *before* the new contents are written. A
+process that died mid-write therefore left a **torn env file** — and on the rotation path
+(`overwrite=True`) that file is a live facility's credentials. There was also no `fsync`, so a
+power cut could leave a partial or empty file after a write that had already returned
+successfully.
+
+**Fixed with write-temp-then-rename:** `mkstemp` in the target's **own directory** (so
+`os.replace` is atomic — it is only atomic within one filesystem), contents flushed and
+`fsync`ed **before** the rename, then a best-effort directory `fsync` so the rename itself
+survives a power cut. `mkstemp` creates 0600 with `O_EXCL`, so there is no world-readable
+window and no predictable name to pre-create. A reader now sees either the whole old file or
+the whole new one.
+
+The directory fsync is deliberately best-effort: the contents are already durable and renamed
+by that point, so a filesystem refusing to fsync a directory must not turn a completed write
+into a reported failure.
+
+**Verified:** 6 new tests, **394 provisioning tests total** (from 388), Ruff clean.
+Control-verified by restoring the `O_TRUNC` writer: 4 tests fail, including the one that
+matters — with `O_TRUNC` the original file is already destroyed when the failure arrives.
+The fsync-ordering test asserts fsync happens *before* replace, not merely that both occur.
+
+⚠️ **Still open from DH-027F's scope:** rotation rollback. If `rotate_tls` writes a new env
+file and the subsequent `docker compose up --force-recreate` or Keycloak reconciliation fails,
+the env file is already replaced and is not rolled back. The write is now atomic, so the file
+is never *torn* — but it is the new one. Restoring the previous file needs a retained copy,
+which is a credential-custody question (where does the old file live, and for how long?)
+rather than a code detail, so it is not invented here.
 
 ### DH-027B · Transactional facility creation · ✅ DONE 2026-08-17
 

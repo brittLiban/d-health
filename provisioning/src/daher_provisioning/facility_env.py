@@ -17,6 +17,7 @@ Two safety properties matter more than the rendering itself:
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -206,17 +207,58 @@ def write_env(path: Path | str, contents: str, *, overwrite: bool = False) -> Pa
         )
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Create with 0600 from the outset rather than chmod-ing afterwards: a world-readable
-    # window, however brief, is a window in which every facility credential is readable.
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+    # Written to a temporary file and then renamed into place, rather than opened with
+    # O_TRUNC (DH-027F). O_TRUNC empties the target *before* the new contents are written,
+    # so a process that died mid-write left a **torn env file** — and on the rotation path
+    # that file is a live facility's credentials. A facility whose env file is half-written
+    # either refuses to start (the `${VAR:?}` guards, loud) or starts missing values.
+    #
+    # `os.replace` is atomic on POSIX when both paths are on one filesystem, which is why
+    # the temporary file goes in the target's own directory rather than /tmp. A reader
+    # therefore sees either the whole old file or the whole new one, never a partial one.
+    #
+    # `mkstemp` creates with 0600 and O_EXCL, so there is never a window in which a
+    # facility's credentials are world-readable, and no predictable name to pre-create.
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(contents)
+            # flush + fsync before the rename: without them a power cut can leave the
+            # renamed file present but empty, which looks like a successful write.
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
     except BaseException:
-        descriptor = -1
+        # Any failure leaves the ORIGINAL file untouched, which is the whole point.
+        temporary.unlink(missing_ok=True)
         raise
-    os.chmod(target, 0o600)
+
+    _fsync_directory(target.parent)
     return target
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make the rename itself durable.
+
+    Best effort on purpose: the file contents are already fsynced and renamed by the time
+    this runs, so a filesystem that refuses to fsync a directory must not turn a completed
+    write into a reported failure. Without it the rename can be lost to a power cut even
+    though the data was written.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:  # pragma: no cover - platform dependent
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:  # pragma: no cover - some filesystems refuse this
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def rotate_env_values(contents: str, replacements: dict[str, str]) -> str:

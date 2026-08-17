@@ -77,7 +77,7 @@ language, not a localisation afterthought.
 | [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |
 | [`docs/CLINICAL-SIGNOFF.md`](docs/CLINICAL-SIGNOFF.md) | The clinical lead's handover sheet. Inventories what this stack can already order; **nothing is pre-selected** |
 | [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md) | How the adapter will learn an order exists, written **before** any transport code (ADR-005 required it) |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI — gates 517 tests plus Ruff, compose parsing, image pinning, secret and link checks |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI — gates 523 tests plus Ruff, compose parsing, image pinning, secret and link checks |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---
