@@ -1079,3 +1079,60 @@ it is visible rather than silent. The alternative designs either crash-loop, or 
 **Unchanged:** DH-014's off-site verification and DH-015's performed restore remain the pinned
 gates. A scheduled backup is still not a *verified* backup, which is why `BackupState` carries
 `unverified_no_restore_drill` and the portal shows the restore-drill date beside the backup state.
+
+---
+
+## ADR-026 — OPEN: Option F, OpenELIS's own business FHIR providers, as an order ingestion candidate
+
+**Date raised:** 2026-08-16 · **Status:** OPEN — candidate recorded, **not selected**
+**Human Decision Required:** Yes — this is BLOCKER-6's fifth option, and BLOCKER-6 is a human decision
+**Supersedes nothing.** BLOCKER-6's options A–D stand exactly as recorded in `PROJECT_STATE.md`.
+
+**Context.** BLOCKER-6 was raised on 2026-08-16 after probing showed OpenELIS's documented inbound
+path is a **poll** (`org.openelisglobal.remote.source.uri`, empty, polled every 120s) rather than a
+push into its FHIR store — and that the lab has never received an order (`electronic_order`,
+`sample`, `analysis` all 0 rows; FHIR store `total: 0` on every resource type). Four options were
+recorded. A fifth now exists.
+
+**The candidate.** The OpenELIS **webapp** — not the separate HAPI container — ships its own
+business-level FHIR providers. Confirmed in the deployed bytecode of the pinned
+`itechuw/openelis-global-2:3.2.1.11` image:
+
+```
+/usr/local/tomcat/webapps/OpenELIS-Global/WEB-INF/classes/org/openelisglobal/fhir/providers/
+  ServiceRequestProvider.class   PatientProvider.class      PractitionerProvider.class
+  SpecimenProvider.class         DiagnosticReportProvider.class
+  ObservationProvider.class      OrganizationProvider.class  FhirProviderUtils.class
+```
+
+Proposed shape, **if it proves out**:
+
+```
+OpenMRS → Daher Adapter → OpenELIS native business FHIR API → Sample / SampleItem / Analysis
+```
+
+**Why this is materially different from option C.** Option C is writing into the generic HAPI
+`fhirstore`, which the configuration describes as where OpenELIS *publishes*, not an inbox. Option F
+targets providers inside the application itself, which is the layer that would plausibly create
+native laboratory state. If it works, it keeps the adapter as the routing, ledger and audit boundary
+that ADR-005 made load-bearing for patient safety — without turning it into a FHIR server (option B)
+and without introducing a second system that stores patient data (option D).
+
+**What is established, and what is emphatically not.** Established: the classes exist in the image
+we run. **Not established:** the servlet path (it is absent from `web.xml`, so it is Spring-registered
+and must be found), whether a create reaches native `Sample`/`SampleItem`/`Analysis` rather than
+stopping at a FHIR façade, whether the normal OpenELIS UI workflow then sees the order, whether an
+adapter correlation identifier survives ingestion and is exactly searchable, and what cancellation
+does. **The existence of a class is not evidence of a working ingestion path** — this repository has
+been burned repeatedly by treating an advertised capability as a demonstrated one (ADR-005 Q4 is the
+standing example: OpenELIS advertises `Subscription` and no delivery has ever been observed).
+
+**Decision.** None. Option F is recorded as a candidate so the roadmap is not written against a
+narrower set of choices than actually exists. **DH-011B is the runtime spike that must answer the
+questions above, using synthetic data only, before anyone selects A, B, C, D or F.**
+
+**Constraint carried forward.** Direct inserts into the OpenELIS PostgreSQL schema are excluded
+under every option. If OpenELIS turns out not to preserve or search an incoming adapter correlation,
+the fallback is DH-011D's smallest upstream-compatible modification — which would itself need a
+superseding ADR, because ADR-016 and BLOCKER-4 established that shipped laboratory configuration is
+left untouched.

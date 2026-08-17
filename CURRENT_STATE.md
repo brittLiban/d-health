@@ -241,9 +241,16 @@ does not accept a push into its own FHIR store, which is where every document he
 assumed the adapter would write. Its `electronic_order`, `sample` and `analysis` tables are all at
 **0 rows**: the laboratory has never received an order.
 
-The three options change what the adapter *is* — one of them removes the ledger/audit boundary
-ADR-005 made load-bearing for patient safety — so this is a human decision, recorded in
-`PROJECT_STATE.md` with the evidence. **No probe was written into the laboratory to resolve it.**
+There are now **five** candidates (A–D, plus F added 2026-08-16 as ADR-026). They change what the
+adapter *is* — one removes the ledger/audit boundary ADR-005 made load-bearing for patient safety,
+one turns the adapter into a FHIR server, one adds a second system storing patient data — so this is
+a human decision, recorded in `PROJECT_STATE.md` with the evidence.
+
+**Option F is the most promising and the least proven.** The OpenELIS webapp ships eight business
+FHIR provider classes in the pinned image's deployed bytecode, including `ServiceRequestProvider`.
+That is a confirmed premise, not a working path: the servlet route is absent from `web.xml`, and
+nothing has been shown to create native `Sample`/`SampleItem`/`Analysis`. **DH-011B** is the
+synthetic-data-only spike that must answer it before any option is chosen.
 
 ### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 

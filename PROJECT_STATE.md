@@ -520,6 +520,11 @@ data flows where — both on the always-ask list:
 | **C. The adapter writes into OpenELIS's own fhirstore** | Adapter pushes, hoping OpenELIS ingests | ⚠️ **Unverified and possibly not a real path.** The store is empty, `transformOnStartup=false`, and nothing in the config describes it as an inbox. Would need proving before it could be trusted |
 | **D. A dedicated order-exchange FHIR store** *(added by Liban 2026-08-16; **not** selected)* | The adapter writes orders to a separate exchange store; OpenELIS polls **that** store via `remote.source.uri`. Keeps the adapter as the routing and audit boundary without making it a FHIR server (B), and uses the pull mechanism OpenELIS actually documents | ⚠️ **Human Decision Required: Yes — and the widest scope of the four.** It adds another system that **stores patient and order data**, so it lands inside every boundary this project has already drawn: DH-014/DH-015 backup and restore coverage, ADR-021's "no clinical data outside the stack" reasoning, the tenant-isolation model, retention, and the security surface of one more network-reachable store holding clinical records. None of those are implementation details, and a new clinical datastore is not a thing an agent may adopt because it is architecturally tidy |
 
+| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **not** selected)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. If it creates native `Sample`/`SampleItem`/`Analysis`, it keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ⚠️ **Premise confirmed, path unproven.** Eight provider classes are present in the pinned image's deployed bytecode, including `ServiceRequestProvider`. But the servlet path is absent from `web.xml`, and a class existing is not an ingestion path working. **DH-011B is the spike that must answer it** |
+
+**Deliberately not narrowed.** Options A–D are retained exactly as first recorded; F is appended
+rather than replacing them, so the reasoning history stays auditable (ADR-026).
+
 **Also settled by whichever option is chosen:** `remote.source.identifier=Practitioner/*` is the
 filter deciding which orders OpenELIS considers its own — so the requester identity (NEEDS LIBAN #6,
 interim "Pilot Test Clinician") stops being an attribution detail and becomes the routing key.
@@ -1152,6 +1157,27 @@ the adapter is, so it is a human decision.
 **Buildable regardless of BLOCKER-6:** the OpenMRS-side poller, the durable watermark, the
 bootstrap-at-deployment-time rule, and client-side ordering. Not started — recording the design
 contradiction and the blocker came first.
+
+#### DH-011 sub-ticket lettering — fixed 2026-08-16, read this before using an ID
+
+The 2026-08-16 roadmap lettered these sub-tickets, and one ID briefly carried two meanings
+(`DH-011A` was used for both "document Option F" and "the OpenMRS poller"). **The roadmap lettering
+below is authoritative.** The poller is **DH-011E**, not DH-011A.
+
+| ID | Scope | Status |
+|---|---|---|
+| **DH-011A** | Record Option F as a candidate | ✅ **DONE 2026-08-16** — ADR-026 |
+| **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | 🔨 next |
+| **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | ⏸ needs DH-011B |
+| **DH-011D** | Narrow OpenELIS patch, **only if** correlation cannot survive ingestion. Needs a superseding ADR (ADR-016/BLOCKER-4) | ⏸ conditional |
+| **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ⏸ buildable now |
+| **DH-011F** | Watermark/paging test matrix | ⏸ with DH-011E |
+| **DH-011G** | Patient identity mapping — controlled identifiers, fail closed on ambiguity | ⏸ |
+| **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
+| **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off |
+| **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ⏸ needs DH-011B |
+| **DH-011K** | Crash-point qualification across all five points | ⏸ |
+| **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
 
 **Still true:** no transport code has been added, no order has been sent, and nothing has been
 written into OpenELIS. DH-006's signed-off test mappings remain required before any *pilot* order.

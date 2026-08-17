@@ -295,6 +295,16 @@ The reverse leg is asymmetric: OpenELIS advertises FHIR `Subscription` and has a
 subscriber configuration, but no delivery has been observed. Corrected-result version/timestamp
 behavior is also untested and must be characterised before trusting the result path.
 
+**⚠️ How the order reaches OpenELIS is an open question, not a settled part of this design
+(BLOCKER-6, raised 2026-08-16).** This section — and every other document here — described the
+adapter as "routing the order to OpenELIS" without naming an ingestion mechanism. Probing found that
+OpenELIS's documented inbound path is a **poll** from a remote FHIR source it is configured to trust
+(`remote.source.uri`, currently empty), not a push into its FHIR store; and that the laboratory has
+never received an order at all. Five candidates are recorded with their costs in `PROJECT_STATE.md`;
+ADR-026 adds Option F, the business FHIR providers inside the OpenELIS webapp itself. **None is
+selected**, because the choice changes what the adapter is and, for one option, what stores patient
+data. DH-011B is the synthetic-data-only runtime spike that must produce the evidence first.
+
 The `labonfhir` revisit is now costed rather than hypothetical: it provides an in-process,
 event-driven order trigger but still polls results, is not shipped in this reference distribution,
 and builds against `fhir2` 2.2.0 while this stack runs 4.2.0. Liban chose the custom adapter for v1;
