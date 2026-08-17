@@ -51,11 +51,25 @@ services:
   agent:
     <<: *common
     command: ["python", "/app/demo/agent_runner.py"]
+    # ⚠️ The agent gets a real Docker daemon. That is BY DESIGN and is exactly what ADR-022
+    # accounts for: the agent runs on the facility host and needs to bring its stack up.
+    # Docker access is root access, which is precisely why the API never has it and why the
+    # compose file lives here rather than arriving in a job.
+    volumes:
+      - ../demo:/app/demo:ro
+      - ../src:/app/src:ro
+      - shared:/shared
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./facility-stack:/opt/daher:ro
+      - facilities:/facilities
     environment:
       <<: *common-env
       HOST_ID: host-a
       PROVISIONING_URL: https://api:8443
       AGENT_CA_BUNDLE: /shared/tls/real-ca.pem
+      FACILITY_COMPOSE: /opt/daher/docker-compose.yml
+      FACILITY_ROOT: /facilities
+      BASE_DOMAIN: demo.local
     networks:
       demo:
         ipv4_address: 172.30.0.30
@@ -71,6 +85,7 @@ services:
 
 volumes:
   shared:
+  facilities:
 
 networks:
   demo:

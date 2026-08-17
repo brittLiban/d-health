@@ -1,0 +1,21 @@
+# A MINIMAL STAND-IN for a facility's clinical stack.
+#
+# ⚠️ This is not OpenMRS. Booting the real stack takes ~49 minutes and several GB, which is
+# not what this demonstration is for. What it proves is the part that was never proven: that
+# the executor's argv, env file, project naming and `docker compose` invocation actually work
+# against a real Docker daemon and bring containers up.
+#
+# It deliberately reads the same variables the real stack requires, so a facility env file
+# that would fail there fails here too.
+name: daher-${FACILITY_ID:?}
+
+services:
+  placeholder:
+    image: alpine:3.20@sha256:de4fe7064d8f98419ea6b49190df1abbf43450c1702eeb864fe9ced453c1cc5f
+    command: ["sh", "-c", "echo facility ${FACILITY_ID} up; sleep 3600"]
+    environment:
+      FACILITY_ID: ${FACILITY_ID:?}
+      OMRS_DB_NAME: ${OMRS_DB_NAME:?}
+      OMRS_ADMIN_PASSWORD: ${OMRS_ADMIN_PASSWORD:?}
+      OE_KEYSTORE_PASSWORD: ${OE_KEYSTORE_PASSWORD:?}
+      BASE_DOMAIN: ${BASE_DOMAIN:?}

@@ -169,15 +169,48 @@ must actually run.
 the portal with the agent never acting — because `POST /facilities` recorded a record and
 stopped. Visible only once the whole chain ran; every unit test passed throughout.
 
+## 3c. A stack actually started from a provisioning job — demonstrated 2026-08-16
+
+The last "written, not demonstrated" gap. The demo agent now has a **real Docker daemon** and the
+**real `ComposeExecutor`** — not a substitute — so clicking the form in the portal ends with
+containers running.
+
+⚠️ Giving the agent Docker access is **by design**, and is exactly what ADR-022 accounts for: the
+agent runs on the facility host and must bring its stack up. Docker access is root access, which is
+precisely why the *API* never has it and why the compose file lives on the host rather than
+arriving in a job.
+
+Observed on one run:
+
+| | |
+|---|---|
+| Executor invoked | real `docker compose`, `succeeded: true` |
+| Container running | `daher-demo-birth-centre-placeholder-1`, project-labelled `daher-demo-birth-centre` |
+| Env file the agent wrote | mode `600`, 33 variables, on the agent's own host |
+| Secrets reached the container | `OMRS_ADMIN_PASSWORD` length 24, `OE_KEYSTORE_PASSWORD` length 32 — generated locally, never transported |
+| `FACILITY_ID` namespacing | `daher-demo-birth-centre`, derived not supplied |
+| Defaults applied | `OMRS_DEMO_CONTENT=off`, `SSO_ENABLED=false` |
+| Backup passphrase in the env file | **0 lines** — correctly absent (ADR-025) |
+| Audit | 6 entries, chain verifies, agent actions attributed to `agent:host-a` |
+
+**What this proves:** the executor's argv, the env file it writes, the project naming, the locally
+generated secrets, and the `docker compose` invocation all work against a real daemon, driven end
+to end from a browser form.
+
+**What it does not prove:** the compose file is a **minimal stand-in, not the clinical stack**.
+Booting real OpenMRS takes ~49 minutes and several GB, which is not what this demonstration is for.
+The stand-in deliberately requires the same variables the real stack does, so an env file that would
+fail there fails here — but no OpenMRS, OpenELIS, Keycloak or adapter has ever started from a
+provisioning job.
+
 ## 4. What is still NOT demonstrated
 
 - **Partial or truncated reads.** No test delivered a job payload split across TCP segments
   or truncated mid-body. The code assumes `httpx` reassembles before `.json()` returns,
   which is its documented contract but remains an assumption here.
-- **The real executor.** The demo substitutes it. The compose invocation is now written and
-  unit-tested on its exact argv, but **nothing has ever started a clinical stack through this
-  path** — the demo agent has no Docker daemon, and no facility has ever actually booted from
-  a provisioning job.
+- **The real clinical stack.** §3c starts containers from a provisioning job against a real
+  Docker daemon, but against a **minimal stand-in compose file**. No OpenMRS, OpenELIS, Keycloak
+  or adapter has ever booted this way, and the ~49-minute first boot is unexercised in this path.
 - **DNS/TLS provisioning and per-facility backup wiring.** Still unbuilt; both are reported in
   `incomplete_steps` rather than implied.
 

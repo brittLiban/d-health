@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from daher_agent.poller import AgentPoller, ExecutionResult
+from daher_agent.executor import ComposeExecutor
 from daher_agent.runner import HttpTransport
 from daher_agent.validation import JobRefused, JobValidator
 from daher_provisioning.jobs import Job
@@ -48,11 +49,32 @@ def main() -> None:
     transport = HttpTransport(os.environ["PROVISIONING_URL"], credential, verify=verify)
     validator = JobValidator(host_id=HOST_ID, facility_exists=lambda fid: False)
 
+    compose_file = Path(os.environ.get("FACILITY_COMPOSE", "")) if os.environ.get(
+        "FACILITY_COMPOSE"
+    ) else None
+    real = (
+        ComposeExecutor(
+            compose_file=compose_file,
+            facility_root=Path(os.environ.get("FACILITY_ROOT", "/facilities")),
+            base_domain=os.environ.get("BASE_DOMAIN", "localhost"),
+        ).execute
+        if compose_file
+        else None
+    )
+
     def execute(job: Job) -> ExecutionResult:
-        # Deliberately does NOT start a stack. Reaching here at all is the assertion: only
-        # a job that survived every local refusal may be executed.
+        """Run the REAL executor when a compose file is present, otherwise record only.
+
+        With `FACILITY_COMPOSE` set, this invokes `docker compose` against a real daemon —
+        which is the part unit tests could never exercise.
+        """
         note(EXECUTED, {"job_id": job.job_id, "facility_id": job.params.facility_id})
-        return ExecutionResult(True, "demo executor")
+        if real is None:
+            return ExecutionResult(True, "demo executor (no compose file mounted)")
+        result = real(job)
+        note(EXECUTED, {"job_id": job.job_id, "real_executor": True,
+                        "succeeded": result.succeeded, "detail": result.detail[:200]})
+        return result
 
     def report(job_id: str, status: str, detail: str) -> None:
         note(OUTCOMES, {"job_id": job_id, "status": status, "detail": detail})

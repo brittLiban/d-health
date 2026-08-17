@@ -16,6 +16,21 @@ USER provisioning
 
 FROM base AS test
 USER root
+# The demonstration's agent invokes `docker compose` against a mounted daemon socket, so
+# the CLI must exist. Production agents get it from the host, not from this image.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       ca-certificates curl gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+USER root
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir --requirement requirements-dev.txt
 COPY --chown=provisioning:provisioning pyproject.toml ./

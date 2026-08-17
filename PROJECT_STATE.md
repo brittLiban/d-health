@@ -1400,7 +1400,26 @@ Scheduled is still never shown as verified: the restore-drill date sits beside t
 a facility that has never had one says `never`. DH-014's off-site verification and DH-015's
 performed restore remain the pinned gates.
 
-**Next:** DNS/TLS when the domain lands — the last of the three `incomplete_steps`.
+**A stack actually started from a provisioning job — demonstrated 2026-08-16.** The last
+"written, not demonstrated" gap. The demo agent was given a **real Docker daemon** and the **real
+`ComposeExecutor`**, so clicking the portal form ends with containers running.
+
+Observed: `docker compose` genuinely invoked and succeeding; a container running under the
+project-derived name `daher-demo-birth-centre`; the agent's own env file at mode `600` with 33
+variables; locally generated secrets reaching the container (`OMRS_ADMIN_PASSWORD` length 24,
+`OE_KEYSTORE_PASSWORD` length 32) having never been transported; `OMRS_DEMO_CONTENT=off` and
+`SSO_ENABLED=false` applied; the backup passphrase correctly **absent** (ADR-025); 6 audit entries
+with a verifying chain.
+
+⚠️ Giving the agent Docker access is **by design** — it runs on the facility host and must bring
+the stack up. Docker access is root access, which is exactly why the API never has it and why the
+compose file lives on the host rather than arriving in a job.
+
+**What it does not prove, and this is the remaining gap:** the compose file is a **minimal stand-in,
+not the clinical stack**. No OpenMRS, OpenELIS, Keycloak or adapter has ever booted from a
+provisioning job, and the ~49-minute first boot is unexercised on this path.
+
+**Next:** DNS/TLS when the domain lands — the last `incomplete_step` the API reports.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
