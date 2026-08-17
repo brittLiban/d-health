@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from daher_provisioning.app import create_app
+from daher_provisioning.app import create_app, next_facility_state
 from daher_provisioning.audit import AuditLog
 from daher_provisioning.auth import PORTAL_SCOPES, KeyStore, Scope, issue_key
 from daher_provisioning.hosts import HostRegistry
@@ -177,3 +177,111 @@ class TestOnlyAnAgentReportReachesTheTerminalState:
         )
         state = state_of(client, head)
         assert state != FacilityState.DECOMMISSIONED.value
+
+
+class TestTheLifecycleTable:
+    """DH-027C. Every transition is driven by an agent report about work it actually ran —
+    never by a job being queued. Tested directly against the table, because the table is the
+    specification and a table nobody reads is where a wrong transition hides.
+    """
+
+    def test_a_successful_provision_report_starts_running(self):
+        assert (
+            next_facility_state(JobVerb.PROVISION, "succeeded", FacilityState.PROVISIONING)
+            is FacilityState.RUNNING
+        )
+
+    @pytest.mark.parametrize("reported", ["failed", "refused"])
+    def test_a_failed_provision_report_is_degraded_not_running(self, reported):
+        assert (
+            next_facility_state(JobVerb.PROVISION, reported, FacilityState.PROVISIONING)
+            is FacilityState.DEGRADED
+        )
+
+    def test_a_successful_start_recovers_a_degraded_facility(self):
+        assert (
+            next_facility_state(JobVerb.START, "succeeded", FacilityState.DEGRADED)
+            is FacilityState.RUNNING
+        )
+
+    def test_a_successful_stop_only_retires_from_decommissioning(self):
+        assert (
+            next_facility_state(JobVerb.STOP, "succeeded", FacilityState.DECOMMISSIONING)
+            is FacilityState.DECOMMISSIONED
+        )
+        assert next_facility_state(JobVerb.STOP, "succeeded", FacilityState.RUNNING) is None, (
+            "a STOP report for a facility nobody asked to retire must not retire it"
+        )
+
+    @pytest.mark.parametrize(
+        "verb", [JobVerb.PROVISION, JobVerb.START, JobVerb.STOP, JobVerb.STATUS, JobVerb.BACKUP_NOW]
+    )
+    def test_decommissioned_is_terminal(self, verb):
+        """A late or replayed report must never resurrect a retired facility."""
+        assert next_facility_state(verb, "succeeded", FacilityState.DECOMMISSIONED) is None
+
+    @pytest.mark.parametrize("verb", [JobVerb.STATUS, JobVerb.BACKUP_NOW, JobVerb.ROTATE_TLS, None])
+    def test_verbs_that_do_not_change_lifecycle_change_nothing(self, verb):
+        """A status check or a backup is not a lifecycle event. Reporting one must not move
+        the facility, or reading status would rewrite the thing it reports."""
+        for state in (FacilityState.PROVISIONING, FacilityState.RUNNING, FacilityState.DEGRADED):
+            assert next_facility_state(verb, "succeeded", state) is None
+
+    def test_a_provision_report_does_not_revive_a_decommissioning_facility(self):
+        assert (
+            next_facility_state(JobVerb.PROVISION, "succeeded", FacilityState.DECOMMISSIONING)
+            is None
+        )
+
+
+class TestTheLifecycleThroughTheApi:
+    def test_a_confirmed_provision_makes_the_facility_running(self, wired):
+        """Before DH-027C nothing ever left PROVISIONING, so the fleet could never show a
+        working facility."""
+        client, head, _, _, app = wired
+        assert state_of(client, head) == FacilityState.PROVISIONING.value
+
+        agent = TestOnlyAnAgentReportReachesTheTerminalState._agent_headers(app)
+        job = TestOnlyAnAgentReportReachesTheTerminalState._claim_until(
+            client, agent, JobVerb.PROVISION
+        )
+        client.post(
+            f"/agent/jobs/{job['job_id']}/report",
+            json={"status": "succeeded", "detail": "up"},
+            headers=agent,
+        )
+        assert state_of(client, head) == FacilityState.RUNNING.value
+
+    def test_a_failed_provision_makes_it_degraded(self, wired):
+        client, head, _, _, app = wired
+        agent = TestOnlyAnAgentReportReachesTheTerminalState._agent_headers(app)
+        job = TestOnlyAnAgentReportReachesTheTerminalState._claim_until(
+            client, agent, JobVerb.PROVISION
+        )
+        client.post(
+            f"/agent/jobs/{job['job_id']}/report",
+            json={"status": "failed", "detail": "compose exited 1"},
+            headers=agent,
+        )
+        assert state_of(client, head) == FacilityState.DEGRADED.value
+
+    def test_the_state_change_appears_in_the_audit_log(self, wired):
+        client, head, _, log, app = wired
+        agent = TestOnlyAnAgentReportReachesTheTerminalState._agent_headers(app)
+        job = TestOnlyAnAgentReportReachesTheTerminalState._claim_until(
+            client, agent, JobVerb.PROVISION
+        )
+        client.post(
+            f"/agent/jobs/{job['job_id']}/report",
+            json={"status": "succeeded", "detail": "up"},
+            headers=agent,
+        )
+        messages = " ".join(e.message or "" for e in log.entries())
+        assert "provisioning → running" in messages
+
+    def test_queueing_alone_never_makes_a_facility_running(self, wired):
+        """The mistake the roadmap explicitly warns against."""
+        client, head, *_ = wired
+        assert state_of(client, head) == FacilityState.PROVISIONING.value, (
+            "a queued PROVISION job is not a running stack"
+        )

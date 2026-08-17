@@ -1,7 +1,7 @@
 # Daher Health CI (DH-027M)
 #
 # Why this exists: the repository had 500+ tests across four suites — adapter 94,
-# provisioning 403, seed 16, form-safety 19 — and nothing enforcing any of them.
+# provisioning 422, seed 16, form-safety 19 — and nothing enforcing any of them.
 # Every verification recorded in PROJECT_STATE.md was performed by hand, which
 # means it was exactly as reliable as whoever remembered to run it.
 #

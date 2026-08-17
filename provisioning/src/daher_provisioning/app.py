@@ -53,6 +53,61 @@ STEP_DNS = "dns: no domain or DNS provider is configured; no record was created 
 STEP_BACKUP = "backup: no scheduled backup was wired up for this facility"
 
 
+def next_facility_state(
+    verb: JobVerb | None, reported: str, current: FacilityState
+) -> FacilityState | None:
+    """The facility lifecycle, as one table (DH-027C). Returns None for "no change".
+
+    Every transition here is driven by an **agent report about work it actually ran** — never
+    by a job being queued. That distinction is the whole point: before this existed nothing
+    ever left `PROVISIONING`, and the temptation when fixing that is to mark a facility
+    RUNNING when the job is enqueued, which would report a stack as serving before anything
+    had started it.
+
+    ⚠️ What RUNNING means, precisely: **the agent reported that its `docker compose up`
+    returned 0.** Because this compose file gates the frontend, Caddy, the adapter and every
+    setup job behind `service_healthy`, that is meaningfully more than "containers created" —
+    but it is still the agent's claim at one moment, not continuous health. Observed health is
+    DH-027D's job, and DEGRADED is only reachable from a failed report until then.
+
+    ⚠️ `DECOMMISSIONED` is terminal. A late or replayed report must never resurrect a retired
+    facility, so no row transitions out of it.
+
+    **Honest note about the guard below:** control-testing showed it is *redundant today* —
+    removing it changes no test result, because every row already requires a specific
+    `current` state that `DECOMMISSIONED` never matches. It is kept because it stops being
+    redundant the moment someone adds a row that does not check `current` as narrowly, and a
+    row like "a successful START always means RUNNING" is an easy and reasonable-looking
+    thing to add. The invariant is asserted by tests either way; this makes it hold by
+    construction rather than by every future author remembering.
+    """
+    if current is FacilityState.DECOMMISSIONED:
+        return None
+
+    succeeded = reported == "succeeded"
+
+    if verb is JobVerb.PROVISION and current is FacilityState.PROVISIONING:
+        return FacilityState.RUNNING if succeeded else FacilityState.DEGRADED
+
+    if (
+        verb is JobVerb.START
+        and succeeded
+        and current
+        in (
+            FacilityState.PROVISIONING,
+            FacilityState.DEGRADED,
+        )
+    ):
+        return FacilityState.RUNNING
+
+    # Only a confirmed stop retires a facility, and only from DECOMMISSIONING — so a STOP
+    # report for a facility nobody asked to retire cannot quietly retire it (DH-027E).
+    if verb is JobVerb.STOP and succeeded and current is FacilityState.DECOMMISSIONING:
+        return FacilityState.DECOMMISSIONED
+
+    return None
+
+
 def _slugify(display_name: str) -> str:
     allowed = [c.lower() if c.isalnum() else "-" for c in display_name]
     slug = "".join(allowed).strip("-")
@@ -625,16 +680,17 @@ def create_app(
         verb = getattr(record.job, "verb", None)
         queue.finish(job_id, mapping[reported], detail)
 
-        # DH-027E: DECOMMISSIONED is reached here and nowhere else — only a successful STOP
-        # report moves a facility out of DECOMMISSIONING. A failed or refused STOP leaves it
-        # in DECOMMISSIONING, which is the honest state: the request was made and the stack
-        # was not confirmed stopped. Guarded so a STOP report for a facility in some other
-        # state cannot silently retire it.
-        if verb is JobVerb.STOP and reported == "succeeded" and facility_id:
+        # DH-027C/E: the facility lifecycle advances here and nowhere else, because this is
+        # the only place an agent tells us about work it actually ran. `next_facility_state`
+        # holds every transition as one readable table.
+        state_change = None
+        if facility_id:
             try:
                 current = facilities.get(facility_id)
-                if current.state is FacilityState.DECOMMISSIONING:
-                    facilities.set_state(facility_id, FacilityState.DECOMMISSIONED)
+                target_state = next_facility_state(verb, reported, current.state)
+                if target_state is not None:
+                    facilities.set_state(facility_id, target_state)
+                    state_change = f"{current.state.value} → {target_state.value}"
             except FacilityNotFound:
                 pass  # Nothing to transition; the job report itself is still recorded below.
 
@@ -643,7 +699,10 @@ def create_app(
             action=AuditAction.FACILITY_STATUS,
             outcome=AuditOutcome.SUCCESS if reported == "succeeded" else AuditOutcome.FAILURE,
             facility_id=facility_id,
-            message=f"agent reported {reported}: {detail}"[:512],
+            message=(
+                f"agent reported {reported}: {detail}"
+                + (f" [facility state {state_change}]" if state_change else "")
+            )[:512],
             source_ip=_client_ip(request),
         )
         return JSONResponse({"recorded": reported})
