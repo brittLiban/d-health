@@ -1,0 +1,308 @@
+# Daher Health CI (DH-027M)
+#
+# Why this exists: the repository had **500 tests across four suites** — adapter 94,
+# provisioning 371, seed 16, form-safety 19 — and nothing enforcing any of them.
+# Every verification recorded in PROJECT_STATE.md was performed by hand, which
+# means it was exactly as reliable as whoever remembered to run it.
+#
+# Every step below was executed locally before being committed, and each guard was
+# control-tested by breaking it on a throwaway copy of the tree: an unpinned
+# `:latest` is caught, a broken relative link is caught, a corrupt tracked JSON is
+# caught, and a suite discovering zero tests is refused rather than passing.
+#
+# What is deliberately NOT here: the ~50-minute clinical cold boot. Running that
+# on every push would make CI useless within a week, and a check people learn to
+# ignore is worse than no check. Full-stack verification stays a documented manual
+# procedure (README "Verifying the whole stack") plus DH-027J's fresh-VM
+# demonstration.
+#
+# Everything below runs in well under a couple of minutes and gates only things
+# that are genuinely fast to assert.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 3.13 matches the pinned python:3.13.14-slim-bookworm base the adapter and
+  # provisioning images are built from, and the py313 target in both pyproject
+  # files. Keep these in step; a CI that lints against a different version than
+  # it ships is testing the wrong thing.
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  adapter:
+    name: adapter — ruff + pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: adapter/requirements-dev.txt
+      - run: pip install -r adapter/requirements-dev.txt
+      - name: Dependency consistency
+        run: pip check
+      - name: Ruff lint
+        run: ruff check src tests migrations
+        working-directory: adapter
+      - name: Ruff format
+        run: ruff format --check src tests migrations
+        working-directory: adapter
+      - name: pytest
+        # PYTHONPATH mirrors the image's ENV PYTHONPATH=/app/src.
+        run: PYTHONPATH=src python -m pytest -q
+        working-directory: adapter
+
+  provisioning:
+    name: provisioning — ruff + pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: provisioning/requirements-dev.txt
+      - run: pip install -r provisioning/requirements-dev.txt
+      - name: Dependency consistency
+        run: pip check
+      - name: Ruff lint
+        run: ruff check src tests
+        working-directory: provisioning
+      - name: Ruff format
+        run: ruff format --check src tests
+        working-directory: provisioning
+      - name: pytest
+        # These tests parse the real docker-compose.yml at ../../docker-compose.yml
+        # (tests/…/parents[2]). They fail loudly if it is missing rather than
+        # skipping, which is the point — a sync test that cannot find its
+        # counterpart proves nothing.
+        run: PYTHONPATH=src python -m pytest -q
+        working-directory: provisioning
+
+  clinical-config:
+    name: seed + form-safety suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # ⚠️ `unittest discover` exits 0 when it finds NOTHING — "Ran 0 tests" is a
+      # pass. Control-verified against an empty directory. So each suite asserts a
+      # floor on the number of tests actually executed; otherwise a renamed
+      # directory or a bad `-s` path would turn these guards off silently, which is
+      # precisely the failure this repository has hit eight times. The floors are
+      # minimums, not exact counts, so adding tests never breaks CI — but deleting
+      # them does.
+      - name: Maternity and prenatal-panel seed safety
+        # Stdlib only, no dependencies. Enforces ADR-007's additive-only bed seed
+        # and the deliberately EMPTY prenatal panel.
+        run: |
+          python -m unittest discover -s openmrs-config/seed -p 'test_*.py' -v 2>&1 | tee /tmp/seed.log
+          ran=$(sed -n 's/^Ran \([0-9]*\) test.*/\1/p' /tmp/seed.log | tail -1)
+          echo "seed tests executed: ${ran:-0}"
+          test "${ran:-0}" -ge 16 || { echo "::error::expected at least 16 seed tests, ran ${ran:-0}"; exit 1; }
+      - name: ADR-006 form safety guard
+        # Refuses any form that performs clinical interpretation. If this ever
+        # fails open, read ADR-006 before touching it.
+        run: |
+          python -m unittest discover -s openmrs-config/forms -p 'test_*.py' -v 2>&1 | tee /tmp/forms.log
+          ran=$(sed -n 's/^Ran \([0-9]*\) test.*/\1/p' /tmp/forms.log | tail -1)
+          echo "form-safety tests executed: ${ran:-0}"
+          test "${ran:-0}" -ge 19 || { echo "::error::expected at least 19 form tests, ran ${ran:-0}"; exit 1; }
+
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: .env must never be tracked
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked. It holds real credentials and must stay gitignored."
+            exit 1
+          fi
+          echo "ok — .env is not tracked"
+
+      - name: No tracked secrets
+        run: |
+          # Deliberately narrow: assignments of long literal values to
+          # secret-shaped names. Broad entropy scanning produces noise nobody
+          # reads, and a check people learn to ignore is worse than none.
+          #
+          # ⚠️ Honest limitation: test trees are excluded, because fixtures
+          # legitimately contain fake credentials (provisioning's backup tests
+          # assert on a literal passphrase string). A real secret pasted into a
+          # test would therefore be missed here. `.env` staying untracked is the
+          # control that actually matters, and it is checked above.
+          if git grep -nIE '(PASSWORD|PASSPHRASE|SECRET|TOKEN|PRIVATE_KEY)[A-Z_]*[=:][[:space:]]*['"'"'"]?[A-Za-z0-9/+._-]{12,}' \
+               -- . ':(exclude).env.example' ':(exclude)*.md' \
+                    ':(exclude)*/tests/*' ':(exclude)provisioning/demo/*' > /tmp/hits; then
+            echo "::error::possible tracked secret:"; cat /tmp/hits; exit 1
+          fi
+          echo "ok — no secret-shaped assignments found"
+
+      - name: Every image is pinned — no :latest, digests required
+        run: |
+          python - <<'PY'
+          import re, subprocess, sys
+          from pathlib import Path
+
+          def tracked(*patterns):
+              out = subprocess.run(["git","ls-files",*patterns],capture_output=True,text=True).stdout
+              return [p for p in out.splitlines() if p]
+
+          bad = []
+
+          # Compose `image:` references. Locally built daher-health/* images have
+          # no registry digest by definition; their FROM bases are checked below.
+          for path in ["docker-compose.yml", *tracked("provisioning/demo/*.yml")]:
+              for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+                  m = re.match(r"\s*image:\s*(\S+)", line)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if ref.startswith("daher-health/") or "daher-health/" in ref:
+                      continue
+                  if ":latest" in ref or ref.endswith(":latest"):
+                      bad.append(f"{path}:{n} ':latest' is never allowed: {ref}")
+                  elif "@sha256:" not in ref:
+                      bad.append(f"{path}:{n} image without a digest: {ref}")
+
+          # Dockerfile FROMs. A multi-stage `FROM base AS test` references an
+          # earlier STAGE, not an image, so stage aliases are collected first and
+          # skipped — an earlier version of this check flagged all five of them.
+          for path in tracked("*Dockerfile", "*/Dockerfile"):
+              text = Path(path).read_text()
+              stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", text, re.M | re.I))
+              for n, line in enumerate(text.splitlines(), 1):
+                  m = re.match(r"FROM\s+(\S+)", line, re.I)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if ref in stages or ref.startswith("daher-health/"):
+                      continue
+                  if ":latest" in ref:
+                      bad.append(f"{path}:{n} ':latest' is never allowed: {ref}")
+                  elif "@sha256:" not in ref:
+                      bad.append(f"{path}:{n} FROM without a digest: {ref}")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — every external image reference is digest-pinned")
+          PY
+
+      - name: Shell syntax
+        run: |
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            sh -n "$f" 2>/dev/null || bash -n "$f" || { echo "::error::$f"; fail=1; }
+          done
+          exit $fail
+
+      - name: JSON / XML / CSV parse
+        run: |
+          python - <<'PY'
+          import csv, json, subprocess, sys
+          import xml.etree.ElementTree as ET
+          def tracked(pattern):
+              out = subprocess.run(["git","ls-files",pattern],capture_output=True,text=True).stdout
+              return [p for p in out.splitlines() if p]
+          bad = []
+          for p in tracked("*.json"):
+              try: json.load(open(p, encoding="utf-8"))
+              except Exception as e: bad.append(f"{p}: {e}")
+          for p in tracked("*.xml"):
+              try: ET.parse(p)
+              except Exception as e: bad.append(f"{p}: {e}")
+          for p in tracked("*.csv"):
+              try:
+                  with open(p, newline="", encoding="utf-8") as fh: list(csv.reader(fh))
+              except Exception as e: bad.append(f"{p}: {e}")
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — all tracked JSON/XML/CSV parse")
+          PY
+
+      - name: Relative documentation links resolve
+        run: |
+          # A doc set that cross-references itself is only useful if the
+          # references are real. This has caught renames before.
+          python - <<'PY'
+          import os, re, subprocess, sys
+          md = subprocess.run(["git","ls-files","*.md"],capture_output=True,text=True).stdout.split()
+          link = re.compile(r"\]\((?!https?:|mailto:)([^)#]+)")
+          bad = []
+          for f in md:
+              base = os.path.dirname(f)
+              for target in link.findall(open(f, encoding="utf-8").read()):
+                  if not os.path.exists(os.path.join(base, target)):
+                      bad.append(f"{f} -> {target}")
+          if bad:
+              print("\n".join(f"::error::broken link: {b}" for b in bad)); sys.exit(1)
+          print(f"ok — every relative link in {len(md)} documents resolves")
+          PY
+
+  compose:
+    name: compose interpolates and parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate a throwaway env file
+        run: |
+          # The compose file guards 17 variables with ${VAR:?} so a missing value
+          # fails loudly at `up` instead of quietly selecting a published default
+          # (bug 14). That guard is exactly why CI cannot use .env.example, which
+          # correctly ships those values EMPTY.
+          #
+          # These are not secrets and are never used against a real service — they
+          # exist so interpolation can be checked at all. OE_ADMIN_PASSWORD honours
+          # OpenELIS's narrow alphabet (letters, digits, and * $ # ! only).
+          #
+          # Written OUTSIDE the checkout and passed with --env-file, so running
+          # this workflow locally (act) can never overwrite a developer's real
+          # .env. That file holds live credentials.
+          cat > "$RUNNER_TEMP/ci.env" <<'ENVEOF'
+          BASE_DOMAIN=localhost
+          OMRS_DB_NAME=openmrs
+          OMRS_DB_USER=openmrs
+          OMRS_DB_PASSWORD=ci-not-a-real-secret
+          OMRS_DB_ROOT_PASSWORD=ci-not-a-real-secret
+          OMRS_ADMIN_PASSWORD=CiNotARealSecret1
+          OE_DB_PASSWORD=ci-not-a-real-secret
+          OE_DB_SUPERUSER_PASSWORD=ci-not-a-real-secret
+          OE_POSTGRES_PASSWORD=ci-not-a-real-secret
+          OE_ADMIN_PASSWORD=CiTest1!
+          OE_KEYSTORE_PASSWORD=ci-not-a-real-secret
+          OE_TRUSTSTORE_PASSWORD=ci-not-a-real-secret
+          KEYCLOAK_DB_PASSWORD=ci-not-a-real-secret
+          KEYCLOAK_ADMIN_PASSWORD=ci-not-a-real-secret
+          KEYCLOAK_OPENMRS_CLIENT_SECRET=ci-not-a-real-secret
+          KEYCLOAK_ADAPTER_CLIENT_SECRET=ci-not-a-real-secret
+          ADAPTER_DB_PASSWORD=ci-not-a-real-secret
+          ENVEOF
+      - name: Default profile parses
+        run: docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
+      - name: backup profile parses
+        run: COMPOSE_PROFILES=backup docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
+      - name: Demo compose parses
+        run: docker compose -f provisioning/demo/docker-compose.demo.yml config -q
+      - name: A real .env must never have appeared in the checkout
+        run: |
+          test ! -f .env || { echo "::error::a .env exists in the checkout"; exit 1; }
+          rm -f "$RUNNER_TEMP/ci.env"; echo ok

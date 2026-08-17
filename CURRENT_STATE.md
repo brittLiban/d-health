@@ -66,6 +66,15 @@ return `total: 0`. DH-025's 0/1/2+ contract is inexpressible there. Bug 19 adds 
 No `sample`, `analysis` or `electronic_order` was ever created, so laboratory workflow state and
 cancellation remain unverified.
 
+**CI now exists and gates 500 tests (DH-027M, 2026-08-17).** Until this landed, every verification
+claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.github/workflows/ci.yml`
+runs the adapter (94), provisioning (371), seed (16) and form-safety (19) suites plus Ruff, compose
+interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
+`.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
+them, and running the checks found two defects in the checks themselves. ⚠️ **It has never run on
+GitHub** — every step was executed locally, which is not the same as a green run on the platform.
+The ~50-minute clinical cold boot is deliberately excluded.
+
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
 volume despite the local switch returning to `off`; the derived image now removes only upstream's

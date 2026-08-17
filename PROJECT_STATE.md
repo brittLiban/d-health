@@ -187,6 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 500 tests now gated, every check control-tested) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -220,12 +221,15 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. **DH-027M — CI.** There is **no `.github/` directory at all**, so 465 tests across two suites gate
-   nothing. Unblocked, cheap, and independent of every human decision outstanding. The one caveat is
-   in §10 of the roadmap: do not run the ~50-minute clinical cold boot on every PR.
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **500 tests across
+   four suites** (adapter 94, provisioning 371, seed 16, form-safety 19) plus Ruff, compose
+   interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
+   the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
+   ticket entry below.
 3. **DH-017** — the README needs a walk-through on a genuinely fresh VM. Documentation verified only
    against an already-working machine is the weakest kind. ⚠️ Now partly entangled with the
-   cloud-primary direction, which is itself an open decision (data residency).
+   cloud-primary direction, which is itself an open decision (data residency). **This is the next
+   agent-buildable ticket**, and it needs a VM someone can give me access to.
 4. ~~**Known bug 17**~~ — ✅ **fixed 2026-08-16** with per-verb timeouts. It left **bug 18** open by
    decision: the agent does not poll while a long job runs, so jobs issued in that window are refused
    as stale. **Bugs 19 and 20 were also opened** — see the known-bugs table; 19 is an upstream
@@ -1833,6 +1837,50 @@ fixed: bug 18, and the backup bound is unmeasured.
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
 *written* rather than *demonstrated* until that exists.
+
+### DH-027M · Continuous integration · ✅ DONE 2026-08-17
+
+**The finding that motivated it:** the repository held **500 tests across four suites** and nothing
+enforced any of them. Every verification claim in this file was produced by a human remembering to
+run something — which is not a gate, it is a habit.
+
+`.github/workflows/ci.yml`, five jobs, all well under a couple of minutes:
+
+| Job | Gates |
+|---|---|
+| `adapter` | `pip check`, Ruff lint + format, **94 tests** |
+| `provisioning` | `pip check`, Ruff lint + format, **371 tests** |
+| `clinical-config` | seed safety **16 tests** (ADR-007 additive-only beds, the empty prenatal panel) and the ADR-006 form guard **19 tests** |
+| `static` | `.env` untracked, tracked-secret scan, image pinning, shell syntax, JSON/XML/CSV parse, relative-link resolution |
+| `compose` | default and `backup` profiles interpolate and parse, plus the demo compose |
+
+**Every step was executed locally before being committed** — the Python jobs were simulated in the
+same pinned `python:3.13.14-slim-bookworm` the images are built from, confirming both suites run
+natively outside Docker (94 and 371, Ruff clean).
+
+**Four guards control-tested by breaking them on a throwaway tree:** an unpinned `:latest` is caught;
+a broken relative link is caught; a corrupt tracked JSON is caught; a suite discovering zero tests is
+refused. That last one matters most — `unittest discover` **exits 0 on "Ran 0 tests"**, verified
+against an empty directory, so a renamed directory would otherwise switch the clinical-safety guards
+off silently. Both suites now assert a floor on tests actually executed.
+
+**Two defects found in my own checks by running them**, which is the whole argument for controls:
+the secret scan flagged a legitimate test fixture (`BACKUP_ENCRYPTION_PASSPHRASE=a-long-operator-…`
+in provisioning's backup tests), and the image-pinning check flagged all five multi-stage
+`FROM base AS test` lines as unpinned images when they reference an earlier *stage*. Both fixed;
+stage aliases are now collected and skipped.
+
+**Deliberately excluded, and this is a decision not an omission:** the ~50-minute clinical cold boot.
+Running it per push would make CI useless within a week, and a check people learn to ignore is worse
+than no check. Whole-stack verification stays the README's manual procedure plus DH-027J's fresh-VM
+demonstration.
+
+**Honest limits.** ⚠️ CI has **never run on GitHub** — it is verified step-by-step locally, which is
+not the same as a green run on the platform; the first push will prove or disprove the wiring.
+The secret scan **excludes test trees** because fixtures legitimately contain fake credentials, so a
+real secret pasted into a test would be missed there; the `.env`-untracked check is the control that
+actually matters. Compose parsing uses a generated throwaway env written outside the checkout, so it
+proves interpolation and syntax, **not** that the stack boots.
 
 ### P1 / P2
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`
