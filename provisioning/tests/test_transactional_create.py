@@ -168,9 +168,9 @@ class TestThroughTheRealHttpApp:
 
         client, key, hosts, log = self._wired(tmp_path, repository=BrokenRepository())
         response = client.post(
-            "/facilities", json=self._body(facility_id="clinic-one"), headers={
-                "Authorization": f"Bearer {key}"
-            }
+            "/facilities",
+            json=self._body(facility_id="clinic-one"),
+            headers={"Authorization": f"Bearer {key}"},
         )
 
         assert response.status_code == 500
