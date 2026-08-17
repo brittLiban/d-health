@@ -235,18 +235,35 @@ def create_app(
             )
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
+        # ⚠️ The host is claimed BEFORE the facility record exists, so if the insert fails
+        # the claim must be undone — otherwise that host is marked occupied by a facility
+        # that was never created, it can never be deployed to again, and an operator has to
+        # unpick it by hand (DH-027B). `release` is conditional on this exact facility id,
+        # so compensation can never evict a live facility from its host.
+        #
+        # Any exception compensates, not just FacilityExists: a storage error that left the
+        # claim behind would be the same orphan with a less obvious cause.
         try:
             facilities.add(facility)
-        except FacilityExists as exc:
+        except Exception as exc:
+            released = host_registry.release(body.host_id, facility_id)
             audit_log.record(
                 actor=principal.actor,
                 action=AuditAction.FACILITY_CREATE,
                 outcome=AuditOutcome.FAILURE,
                 facility_id=facility_id,
-                message=str(exc)[:512],
+                message=(
+                    f"{exc}"
+                    f" [host claim on {body.host_id!r} "
+                    f"{'rolled back' if released else 'NOT rolled back — investigate'}]"
+                )[:512],
                 source_ip=_client_ip(request),
             )
-            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+            if isinstance(exc, FacilityExists):
+                raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, "facility record could not be stored"
+            ) from exc
 
         credential_set_id = f"cs-{facility_id}-{int(facility.created_at.timestamp())}"
 

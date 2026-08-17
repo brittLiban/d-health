@@ -232,6 +232,21 @@ class SqliteHostStore:
                 raise HostError(f"host {host_id!r} was claimed concurrently")
         return self.get(host_id)
 
+    def release(self, host_id: str, facility_id: str) -> bool:
+        """Undo a claim this same request just made (DH-027B). Compensation, not an operation.
+
+        Conditional in SQL rather than checked first, so a concurrent claim cannot slip
+        between the read and the write: the `AND facility_id=?` predicate means a call
+        naming a facility that no longer holds this host changes zero rows and returns
+        False. See `HostRegistry.release` for why an unconditional release is not offered.
+        """
+        with self._db.write() as conn:
+            cursor = conn.execute(
+                "UPDATE hosts SET facility_id=NULL WHERE host_id=? AND facility_id=?",
+                (host_id, facility_id),
+            )
+            return cursor.rowcount == 1
+
     def list(self) -> list[RegisteredHost]:
         return [
             self.get(row["host_id"])

@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 500 tests now gated, every check control-tested) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 517 tests now gated, every check control-tested), **DH-027B** (transactional facility creation) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -221,8 +221,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **500 tests across
-   four suites** (adapter 94, provisioning 371, seed 16, form-safety 19) plus Ruff, compose
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **517 tests across four suites** (adapter 94, provisioning 388, seed 16, form-safety 19) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
    ticket entry below.
@@ -1838,10 +1837,47 @@ fixed: bug 18, and the backup bound is unmeasured.
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
 *written* rather than *demonstrated* until that exists.
 
+### DH-027B · Transactional facility creation · ✅ DONE 2026-08-17
+
+**The orphan.** `POST /facilities` claims the host *before* inserting the facility record.
+If the insert failed, the claim survived — that host was marked occupied by a facility that
+was never created, could never be deployed to again, and an operator had to unpick it by hand.
+
+**Fixed by conditional compensation, not by reordering.** Reordering only moves the orphan:
+insert-then-claim leaves a facility record holding an id that a retry then collides with.
+So `HostRegistry.release(host_id, facility_id)` and `SqliteHostStore.release(...)` undo a
+claim, and `create_facility` calls it when the insert fails, on **any** exception rather than
+only `FacilityExists` — a storage error leaving the claim behind is the same orphan with a
+less obvious cause.
+
+**`release` is conditional on the exact facility id**, in SQL for the durable store so a
+concurrent claim cannot slip between read and write. That is what stops compensation becoming
+an eviction tool: a stale or hostile call naming another facility changes zero rows and
+returns `False`. There is deliberately **no unconditional release** — "free up that host" is
+not a safe thing to expose, because the host holds a patient database.
+
+**The audit log cannot contradict the result.** A rolled-back create records `FAILURE` and
+never `SUCCESS`, and the message distinguishes `rolled back` from `NOT rolled back —
+investigate`, so a failed compensation is visible rather than assumed. Asserted directly.
+
+**Verified:** 17 new failure-injection tests, **388 provisioning tests total** (from 371),
+Ruff clean. Both backends are parametrised — in-memory *and* SQLite — because a fix that
+worked only in the test double would be no fix. Control-verified: removing the compensation
+line fails exactly the three HTTP-level tests, and the store-level tests still pass, which is
+how the control shows the HTTP tests are the ones carrying the property.
+
+⚠️ **Residual, stated rather than hidden:** this is compensation, not a single ACID
+transaction. A process killed between the claim and the release still orphans the claim. The
+shared SQLite `Database.write()` could wrap both operations for the durable path and close
+that window; it is not done here because the in-memory backend cannot participate and a
+half-transactional path would be harder to reason about than an explicit compensation. The
+window is microseconds wide and the fix is `release`, which an operator can now reach.
+
 ### DH-027M · Continuous integration · ✅ DONE 2026-08-17
 
 **The finding that motivated it:** the repository held **500 tests across four suites** and nothing
-enforced any of them. Every verification claim in this file was produced by a human remembering to
+enforced any of them. (DH-027B added 17 the same day, so CI gates **517** today — the count in this
+entry is what it was when CI landed.) Every verification claim in this file was produced by a human remembering to
 run something — which is not a gate, it is a habit.
 
 `.github/workflows/ci.yml`, five jobs, all well under a couple of minutes:
@@ -1849,7 +1885,7 @@ run something — which is not a gate, it is a habit.
 | Job | Gates |
 |---|---|
 | `adapter` | `pip check`, Ruff lint + format, **94 tests** |
-| `provisioning` | `pip check`, Ruff lint + format, **371 tests** |
+| `provisioning` | `pip check`, Ruff lint + format, **388 tests** |
 | `clinical-config` | seed safety **16 tests** (ADR-007 additive-only beds, the empty prenatal panel) and the ADR-006 form guard **19 tests** |
 | `static` | `.env` untracked, tracked-secret scan, image pinning, shell syntax, JSON/XML/CSV parse, relative-link resolution |
 | `compose` | default and `backup` profiles interpolate and parse, plus the demo compose |

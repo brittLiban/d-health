@@ -66,9 +66,11 @@ return `total: 0`. DH-025's 0/1/2+ contract is inexpressible there. Bug 19 adds 
 No `sample`, `analysis` or `electronic_order` was ever created, so laboratory workflow state and
 cancellation remain unverified.
 
-**CI now exists and gates 500 tests (DH-027M, 2026-08-17).** Until this landed, every verification
+**DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
+
+**CI now exists and gates 517 tests (DH-027M, 2026-08-17).** Until this landed, every verification
 claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.github/workflows/ci.yml`
-runs the adapter (94), provisioning (371), seed (16) and form-safety (19) suites plus Ruff, compose
+runs the adapter (94), provisioning (388), seed (16) and form-safety (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
 them, and running the checks found **three** defects in the checks themselves — the third being that

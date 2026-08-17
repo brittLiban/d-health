@@ -98,5 +98,29 @@ class HostRegistry:
         self._hosts[host_id] = claimed
         return claimed
 
+    def release(self, host_id: str, facility_id: str) -> bool:
+        """Undo a claim this same request just made. **Compensation, not an operation.**
+
+        Creating a facility claims a host and then inserts the facility record. If the
+        insert fails, the claim must not survive — an orphaned claim blocks that host
+        forever and an operator has to unpick it by hand (DH-027B).
+
+        **Conditional on purpose.** It releases only if the host is still claimed by
+        exactly `facility_id`. That is what stops this from becoming a way to evict a live
+        facility from its host: a stale or malicious call naming someone else's facility
+        changes nothing and returns False. There is deliberately no unconditional release,
+        because "free up that host" is not a safe thing to expose — the host holds a
+        patient database.
+
+        Returns True if a claim was released, False if there was nothing to release.
+        """
+        host = self._hosts.get(host_id)
+        if host is None or host.facility_id != facility_id:
+            return False
+        self._hosts[host_id] = RegisteredHost(
+            host_id=host.host_id, target=host.target, enrolled=host.enrolled, facility_id=None
+        )
+        return True
+
     def list(self) -> list[RegisteredHost]:
         return sorted(self._hosts.values(), key=lambda h: h.host_id)
