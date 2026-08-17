@@ -276,8 +276,10 @@ the agent generated on its own host and never transported. 360 tests. State is d
 a control-plane restart no longer loses the fleet.
 
 **⚠️ Proven against a minimal stand-in compose file.** No OpenMRS, OpenELIS, Keycloak or adapter has
-ever booted from a provisioning job, and the ~49-minute first boot is unexercised on that path —
-where the executor's 900-second timeout is currently far too short (known bug 17).
+ever booted from a provisioning job, and the ~49-minute first boot is unexercised on that path. The
+executor's single 900-second timeout — shorter than one healthcheck's grace period in the compose
+file it runs — was fixed 2026-08-16 with per-verb bounds asserted against that file (known bug 17,
+371 tests). That removes a certain false failure; it does not turn the stand-in into a real boot.
 
 **Two design flaws this work found in itself:**
 

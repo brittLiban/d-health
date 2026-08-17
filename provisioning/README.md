@@ -125,11 +125,33 @@ Two things are **deliberately incomplete and must not be reported as working**:
 - **Audit log external destination** — the requirement is a log that survives the API host being
   rebuilt or tampered with. The interface will exist before the destination does.
 
-⚠️ **The executor's 900-second timeout is far short of a real OpenMRS first boot (~49 minutes).**
-The first genuine provisioning run would time out and be reported as failed while the stack was
-still coming up. Found by thinking about the real boot rather than the stand-in the demo uses; fix
-is a longer timeout for `PROVISION` specifically, or detaching and letting a later `STATUS` job
-report progress. Known bug 17 — **not yet fixed.**
+✅ **Known bug 17 is fixed (2026-08-16): the timeout is now per verb.** A single 900-second bound
+was shorter than a real OpenMRS first boot (~49 minutes), so the first genuine provisioning run
+would have been reported as *failed* while the stack was coming up correctly.
+
+`up --detach` does not return once containers exist — this compose file gates the frontend, Caddy,
+the adapter and every setup job behind `service_healthy` on `openmrs-backend`, whose healthcheck
+alone declares `start_period: 1800s`. So the verbs that wait on that graph (`provision`, `start`,
+`rotate_tls`) get 5400s, `backup_now` gets its own bound because it scales with stored data, and
+`status`/`stop` stay tight at 900s. Both long bounds are settable per host
+(`STACK_TIMEOUT_SECONDS`, `BACKUP_TIMEOUT_SECONDS`) because facility hardware differs.
+
+The bound is checked **against the real compose file** rather than asserted as an opinion: a future
+healthcheck with a longer grace period fails the test suite instead of the first deployment.
+Control-verified three ways — putting 900s back fails the two guards by name, wiring `provision` to
+the fast bound fails the per-verb tests, and running without the compose file mounted **fails**
+rather than skipping.
+
+⚠️ **What the fix does not solve — known bug 18.** The poll loop is synchronous, so the agent does
+not poll while a provision runs. A `stop` or `status` issued during that window is refused as stale
+when it is finally claimed, because `JobValidator` rejects jobs older than 900s. That refusal is
+loud and audited — nothing is silently skipped — but the operator must re-issue. Widening the
+staleness window would weaken ADR-022's replay protection, which is a security property rather than
+a tuning constant, so it was not done as a side effect of this fix.
+
+⚠️ **The backup bound is unmeasured.** No backup has ever been timed against a real clinical
+database, and DH-014's off-site leg is still unexercised. It is set above the fast bound only so a
+data-sized job does not inherit a bound chosen for `ps`; replace it with a measured value.
 
 Both report their incompleteness rather than appearing to succeed. A provisioning step that
 silently "succeeds" against nothing is a false green, and this project has found five of those.

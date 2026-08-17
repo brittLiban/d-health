@@ -18,7 +18,11 @@ from pathlib import Path
 
 import httpx
 
-from daher_agent.executor import ComposeExecutor
+from daher_agent.executor import (
+    DEFAULT_BACKUP_TIMEOUT_SECONDS,
+    DEFAULT_STACK_TIMEOUT_SECONDS,
+    ComposeExecutor,
+)
 from daher_agent.poller import AgentPoller
 from daher_agent.validation import JobValidator
 
@@ -67,13 +71,28 @@ def facility_exists(facility_root: Path):
     return check
 
 
-def make_executor(facility_root: Path, *, compose_file: Path, base_domain: str):
+def make_executor(
+    facility_root: Path,
+    *,
+    compose_file: Path,
+    base_domain: str,
+    stack_timeout_seconds: int = DEFAULT_STACK_TIMEOUT_SECONDS,
+    backup_timeout_seconds: int = DEFAULT_BACKUP_TIMEOUT_SECONDS,
+):
     """Build the real executor: the compose file already on this host, run as an argv list.
 
     Never a shell string, and never a spec supplied by the caller (ADR-022).
+
+    The two timeouts are settable because facility hardware differs: the ≈49-minute cold boot
+    behind the defaults was measured on 4 vCPU, and a slower VM is a configuration problem,
+    not a code change.
     """
     return ComposeExecutor(
-        compose_file=compose_file, facility_root=facility_root, base_domain=base_domain
+        compose_file=compose_file,
+        facility_root=facility_root,
+        base_domain=base_domain,
+        stack_timeout_seconds=stack_timeout_seconds,
+        backup_timeout_seconds=backup_timeout_seconds,
     ).execute
 
 
@@ -87,6 +106,8 @@ def run_forever(
     execute=None,
     compose_file: Path | None = None,
     base_domain: str = "localhost",
+    stack_timeout_seconds: int = DEFAULT_STACK_TIMEOUT_SECONDS,
+    backup_timeout_seconds: int = DEFAULT_BACKUP_TIMEOUT_SECONDS,
     max_iterations: int | None = None,
 ) -> None:
     transport = HttpTransport(base_url, credential)
@@ -99,6 +120,8 @@ def run_forever(
             facility_root,
             compose_file=compose_file or Path("/opt/daher/docker-compose.yml"),
             base_domain=base_domain,
+            stack_timeout_seconds=stack_timeout_seconds,
+            backup_timeout_seconds=backup_timeout_seconds,
         ),
         report=transport.report,
     )
@@ -125,6 +148,12 @@ def main() -> int:  # pragma: no cover - exercised by the demonstration, not uni
         poll_seconds=float(os.environ.get("POLL_SECONDS", DEFAULT_POLL_SECONDS)),
         compose_file=Path(os.environ.get("COMPOSE_FILE", "/opt/daher/docker-compose.yml")),
         base_domain=os.environ.get("BASE_DOMAIN", "localhost"),
+        stack_timeout_seconds=int(
+            os.environ.get("STACK_TIMEOUT_SECONDS", DEFAULT_STACK_TIMEOUT_SECONDS)
+        ),
+        backup_timeout_seconds=int(
+            os.environ.get("BACKUP_TIMEOUT_SECONDS", DEFAULT_BACKUP_TIMEOUT_SECONDS)
+        ),
     )
     return 0
 

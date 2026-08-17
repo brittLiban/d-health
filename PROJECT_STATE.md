@@ -212,9 +212,9 @@ very likely not be demonstrated by then.
    implementation plus two verification gates: DH-025's correlation must be attached to the concrete
    OpenELIS resource, and ADR-018's "accepted or started" must map to a **verified** OpenELIS status,
    not an assumed one. This is the critical path to the golden flow.
-2. **Known bug 17** — the provisioning executor's 900s timeout is far short of a real ~49-minute
-   OpenMRS boot, so the first genuine provisioning run would report failure while the stack was
-   still coming up. Design choice: longer timeout for `PROVISION`, or detach and let `STATUS` report.
+2. ~~**Known bug 17**~~ — ✅ **fixed 2026-08-16** with per-verb timeouts (Liban chose the longer
+   timeout over detaching). See the known-bugs table. It left **bug 18** open by decision: the agent
+   does not poll while a long job runs, so jobs issued in that window are refused as stale.
 3. **DH-017** — the README needs a walk-through on a genuinely fresh VM. Documentation verified only
    against an already-working machine is the weakest kind.
 
@@ -1454,6 +1454,33 @@ compose file lives on the host rather than arriving in a job.
 not the clinical stack**. No OpenMRS, OpenELIS, Keycloak or adapter has ever booted from a
 provisioning job, and the ~49-minute first boot is unexercised on this path.
 
+**Per-verb execution timeouts 2026-08-16 — 371 tests — closing known bug 17.** One 900s bound
+covered every verb, and it was shorter than a single healthcheck's grace period in the compose file
+the executor exists to run (`openmrs-backend` declares `start_period: 1800s`, and `up --detach`
+waits on that graph). The first genuine provisioning would have reported `failed` while the stack
+came up correctly — a false negative on the one operation nobody is watching.
+
+Verbs that wait on the health graph (`provision`, `start`, `rotate_tls`) now get 5400s, ≈1.8× the
+measured 49-minute cold boot; `backup_now` gets its own bound because it scales with stored data;
+`status`/`stop` stay tight so a genuine hang is still visible quickly. Per-host configurable, since
+facility hardware differs. An unlisted verb raises rather than inheriting the bound chosen for `ps`
+— that fall-through is how bug 17 happened in the first place.
+
+**The guard reads the real compose file**, in the same idiom as the existing env sync test: it must
+clear every `start_period` and the DH-002 measured cold boot, so adding a slower gate to the
+clinical stack fails this suite instead of the first deployment. Control-verified three ways
+(restore 900s → the two guards fail by name; wire `provision` to the fast bound → the per-verb tests
+fail; unmount the compose file → **fails rather than skips**).
+
+⚠️ **Written and unit-verified, not demonstrated against a real boot — and be precise about what
+"clears the cold boot" means.** The measured 2940s is the *backend* reaching first HTTP 200. `up`
+then still waits, serialized behind it, for six setup jobs, openelis-webapp's 180s gate, Keycloak's
+120s, and image pulls on a fresh host. 5400s leaves ≈2460s for that remainder, which is
+**unmeasured**. The guard asserts what a test can assert — every declared grace period and the
+measured boot — not the composition. Only a real clinical stack booting through a provisioning job
+settles whether 5400s is right, and that is the gap DH-027 has carried throughout. Also **not**
+fixed: bug 18, and the backup bound is unmeasured.
+
 **Next:** DNS/TLS when the domain lands — the last `incomplete_step` the API reports.
 ⚠️ The poll loop is the first component that cannot be honestly verified on this machine — proving
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
@@ -1498,7 +1525,8 @@ message shapes).
 | 12 | A stale adapter `processing` claim cannot distinguish a pre-write crash from a post-write/pre-ledger crash | **Core fixed and runtime-verified — DH-025**; concrete OpenELIS correlation attach/query remains a DH-011 activation gate. No transport exists yet, so no message has been affected |
 | 13 | **The OpenELIS internal TLS certificate expired 2026-07-23** and nothing on that path validates expiry, so it kept serving | **Fixed and live-verified — DH-021.** Material is now generated on this deployment, valid to 2028-11-16, and the generator renews early (`OE_CERT_RENEW_BEFORE_DAYS`) rather than at expiry |
 | 14 | **`OE_KEYSTORE_PASSWORD`/`OE_TRUSTSTORE_PASSWORD` are empty in `.env`**, so `${VAR:-kspass}` silently selected upstream's published passwords while the variables looked configured | **Fixed — DH-021.** Both are now `:?` required; an empty value fails loudly at `up` instead of quietly selecting a public password |
-| 17 | **The provisioning executor's 900s timeout is far short of a real OpenMRS first boot (~49 min)**, so the first genuine facility provisioning would time out and be reported as failed while the stack was still coming up | **Open — found 2026-08-16 by thinking about the real boot rather than the stand-in.** Fix is either a longer timeout for `PROVISION` specifically, or detaching and letting a later `STATUS` job report progress. Not yet done |
+| 17 | **The provisioning executor's 900s timeout is far short of a real OpenMRS first boot (~49 min)**, so the first genuine facility provisioning would time out and be reported as failed while the stack was still coming up | **Fixed 2026-08-16 — per-verb timeouts.** Liban chose the longer-timeout option over detaching. Verbs that wait on the compose health graph (`provision`, `start`, `rotate_tls`) get 5400s; `backup_now` gets its own bound because it scales with stored data, not boot time; `status`/`stop` stay at 900s. Both long bounds are per-host configurable. The bound is asserted **against the real `docker-compose.yml`** — it must clear every `start_period` (the largest is 1800s) and the measured 49-minute cold boot — so a future gate with a longer grace period fails the suite rather than the first deployment. 371 tests, Ruff clean. Control-verified three ways: restoring 900s fails the two guards by name, wiring `provision` to the fast bound fails the per-verb tests, and running without the compose file mounted **fails instead of skipping**. ⚠️ Still unfixed by this: bug 18 below, and the fix has **not** been exercised against a real ~49-minute boot — no clinical stack has ever booted through the provisioning path |
+| 18 | **The agent does not poll while a long job runs**, so a `stop`/`status`/`backup_now` issued during a ~50-minute provision is refused as stale when finally claimed (`JobValidator` rejects jobs older than 900s) | **Open — accepted limit of bug 17's fix, 2026-08-16, not an oversight.** The refusal is loud and audited, so nothing is silently skipped; the operator re-issues. Deliberately **not** fixed by widening the staleness window — that is ADR-022 replay protection, a security property rather than a tuning constant, and changing it is a decision. The real fix is running the long verb off the poll thread, which puts concurrency into the component whose value is partly that it is simple. Worth revisiting when a second facility makes concurrent operations routine |
 | 16 | **Three upstream demo forms loaded here perform clinical interpretation** — `structured_soap_note` (an `alert` key, `calculateExpression`, expression validators), `mental_health_assessment_form`, `form-engine-cookbook` | **Open — raised 2026-08-13 by DH-004's new guard.** Demo content, not maternity forms; nothing changed. `OMRS_DEMO_CONTENT=off` removes them, but that is a decided switch (BLOCKER-2) — **Human Decision Required: Yes** |
 | 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Fixed and verified 2026-08-13.** The check now requires `LoginPage` to return 200 *and* contain the Spring Security `_csrf` token — something only a live application context produces. Proven in both directions: it passes against the healthy webapp and **fails against the bare 302** (0-byte body) that the broken context returned. `start_period` raised 60s → 180s because the context must genuinely be up, not merely bound |
 

@@ -8,14 +8,29 @@ interpolated into it.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from daher_agent.executor import CommandResult, ComposeExecutor
+from daher_agent.executor import (
+    DEFAULT_BACKUP_TIMEOUT_SECONDS,
+    DEFAULT_STACK_TIMEOUT_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
+    CommandResult,
+    ComposeExecutor,
+)
 from daher_provisioning.jobs import Job, JobParams, JobVerb
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+
+# Measured at DH-002: deployment start 06:36:49Z → first HTTP 200 at 07:26:08Z on 4 vCPU,
+# almost entirely OCL concept imports. Recorded here because it is the number the stack
+# timeout has to clear, and a constant nobody can trace back to a measurement rots.
+MEASURED_COLD_BOOT_SECONDS = 49 * 60
 
 
 def a_job(verb: JobVerb = JobVerb.START, facility_id: str = "daher-bc") -> Job:
@@ -235,3 +250,127 @@ class TestFailuresAreReturnedNotRaised:
         executor, recorder = wired
         executor.execute(a_job())
         assert recorder.kwargs[0]["timeout"] > 0
+
+
+class TestTheBoundMatchesTheWorkTheVerbActuallyDoes:
+    """Known bug 17: one timeout for every verb was shorter than a real first boot.
+
+    The first genuine provisioning would have been reported `failed` while the stack was
+    coming up correctly — a false negative on the one operation nobody can watch.
+    """
+
+    def test_every_verb_resolves_to_a_bound(self, wired):
+        """No verb may fall through to a default chosen for `ps`. That is how 17 happened."""
+        executor, _ = wired
+        for verb in JobVerb:
+            assert executor.timeout_for(verb) > 0, f"{verb} has no bound"
+
+    def test_provisioning_gets_the_stack_bound(self, wired):
+        executor, recorder = wired
+        executor.execute(a_job(JobVerb.PROVISION))
+        assert recorder.kwargs[0]["timeout"] == DEFAULT_STACK_TIMEOUT_SECONDS
+
+    def test_start_waits_on_the_same_health_graph(self, wired):
+        """`start` runs `up` too — after a host reboot that is a full cold boot."""
+        executor, recorder = wired
+        executor.execute(a_job(JobVerb.START))
+        assert recorder.kwargs[0]["timeout"] == DEFAULT_STACK_TIMEOUT_SECONDS
+
+    def test_rotate_tls_waits_on_the_same_health_graph(self, wired):
+        """`--force-recreate` restarts every container, so the gates apply again.
+
+        It has to be provisioned first: rotation refuses when there is no env file to
+        rotate, so asserting on a bare fixture would assert on a command never run.
+        """
+        executor, recorder = wired
+        assert executor.execute(a_job(JobVerb.PROVISION)).succeeded
+        recorder.kwargs.clear()
+        executor.execute(a_job(JobVerb.ROTATE_TLS))
+        assert recorder.kwargs, "rotation never reached the command"
+        assert recorder.kwargs[0]["timeout"] == DEFAULT_STACK_TIMEOUT_SECONDS
+
+    def test_fast_verbs_stay_tightly_bounded(self, wired):
+        """`ps` and `stop` return in seconds; a loose bound here hides a hang for an hour."""
+        executor, recorder = wired
+        for verb in (JobVerb.STATUS, JobVerb.STOP):
+            recorder.kwargs.clear()
+            executor.execute(a_job(verb))
+            assert recorder.kwargs[0]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+
+    def test_backup_is_bounded_by_data_size_not_boot_time(self, wired):
+        """⚠️ Unmeasured — no backup has been timed against a real clinical database."""
+        executor, recorder = wired
+        executor.execute(a_job(JobVerb.BACKUP_NOW))
+        assert recorder.kwargs[0]["timeout"] == DEFAULT_BACKUP_TIMEOUT_SECONDS
+
+    def test_the_timeout_is_configurable_per_host(self, tmp_path):
+        """Facility hardware differs; a slower VM must be configuration, not a code change."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        recorder = Recorder()
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "f",
+            base_domain="example.org",
+            stack_timeout_seconds=9000,
+            runner=recorder,
+        )
+        executor.execute(a_job(JobVerb.PROVISION))
+        assert recorder.kwargs[0]["timeout"] == 9000
+
+    def test_a_timeout_names_the_verb_that_hit_it(self, tmp_path):
+        """'timed out after 5400s' and 'after 900s' are different diagnoses."""
+
+        def hang(argv, *, cwd, timeout):
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "f",
+            base_domain="example.org",
+            runner=hang,
+        )
+        result = executor.execute(a_job(JobVerb.PROVISION))
+        assert not result.succeeded
+        assert "provision timed out" in result.detail
+        assert str(DEFAULT_STACK_TIMEOUT_SECONDS) in result.detail
+
+
+class TestTheStackBoundIsCheckedAgainstTheRealComposeFile:
+    """The regression test for bug 17.
+
+    The bound is not an opinion — it has to clear what the clinical stack actually makes
+    `up` wait for. Reading the real compose file means a future gate with a longer grace
+    period fails this suite rather than the first deployment on a facility host.
+    """
+
+    def test_compose_file_is_findable(self):
+        """A check that cannot find its counterpart proves nothing (same trap as DH-024)."""
+        assert COMPOSE_FILE.is_file(), (
+            f"expected the clinical stack compose at {COMPOSE_FILE}. Mount it: "
+            f'-v "$PWD/docker-compose.yml:/docker-compose.yml:ro"'
+        )
+
+    def test_the_stack_bound_clears_every_healthcheck_grace_period(self):
+        periods = [
+            int(value)
+            for value in re.findall(
+                r"start_period:\s*(\d+)s", COMPOSE_FILE.read_text(encoding="utf-8")
+            )
+        ]
+        assert periods, "found no start_period values — the extraction regex is probably wrong"
+        assert DEFAULT_STACK_TIMEOUT_SECONDS > max(periods), (
+            f"the stack timeout ({DEFAULT_STACK_TIMEOUT_SECONDS}s) does not even clear the "
+            f"longest healthcheck grace period in the compose file it runs ({max(periods)}s). "
+            f"`up` waits on those gates, so provisioning would report failure while the stack "
+            f"was still coming up correctly. This is bug 17."
+        )
+
+    def test_the_stack_bound_clears_the_measured_cold_boot(self):
+        assert DEFAULT_STACK_TIMEOUT_SECONDS > MEASURED_COLD_BOOT_SECONDS, (
+            f"a cold boot was measured at {MEASURED_COLD_BOOT_SECONDS}s (DH-002) and the "
+            f"bound is {DEFAULT_STACK_TIMEOUT_SECONDS}s. A fresh host also pulls images "
+            f"before any of that starts."
+        )

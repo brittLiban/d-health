@@ -15,8 +15,11 @@ and absolute:
    third, at the point where being wrong actually costs something.
 4. **Secrets are generated on this host.** The job carries none, and the API has never held
    any. The executor writes the env file itself.
-5. **Everything is bounded.** A hung compose must not hang the agent forever, and a failure
-   is a returned result rather than an exception that stops the poll loop.
+5. **Everything is bounded, but not all work is the same size.** A hung compose must not hang
+   the agent forever, and a failure is a returned result rather than an exception that stops
+   the poll loop. One bound for every verb cannot hold: `ps` finishes in a second, while
+   bringing this stack up waits on a health graph whose first gate alone allows 1800s.
+   See `TIMEOUTS` below — a single number was known bug 17.
 """
 
 from __future__ import annotations
@@ -42,7 +45,41 @@ from daher_provisioning.secrets import generate_facility_secrets, validate_facil
 
 logger = logging.getLogger("daher_agent.executor")
 
+# Fast verbs: `ps` and `stop` return in seconds. Keeping these tight is what makes a hung
+# command visible quickly instead of occupying the agent for an hour.
 DEFAULT_TIMEOUT_SECONDS = 900
+
+# Verbs that wait on the clinical stack's health graph (known bug 17).
+#
+# `up --detach` does not return once containers are created: this compose file gates
+# openmrs-frontend, caddy, the adapter and every setup job behind
+# `condition: service_healthy` / `service_completed_successfully` on openmrs-backend, whose
+# healthcheck alone declares `start_period: 1800s`. A measured cold boot is ≈49 minutes,
+# almost all of it OCL concept imports, and a fresh host pulls images before any of that.
+#
+# 900s was therefore shorter than a single healthcheck's grace period in the very file this
+# executor exists to run: the first genuine provisioning would have been reported `failed`
+# while the stack was coming up correctly.
+#
+# ⚠️ Be precise about what 5400s is known to clear. The 2940s cold boot is the *backend*
+# reaching its first HTTP 200. `up` then still waits, serialized behind it, for the setup
+# jobs (demo preflight, maternity config, prenatal panel, OpenELIS hardening and password
+# rotation, Keycloak reconciliation), openelis-webapp's own 180s gate, Keycloak's 120s, and
+# — on a fresh host — the image pulls that happen before any of it. That leaves ≈2460s of
+# headroom for the remainder, which is **unmeasured**: nothing has ever booted this stack
+# through a provisioning job. The bound is a defensible estimate, not an observed figure.
+# `tests/test_executor.py` asserts what can be asserted here — that it clears every declared
+# grace period and the measured boot — so a future gate with a longer grace period fails the
+# suite rather than the first deployment. It cannot assert the composition.
+DEFAULT_STACK_TIMEOUT_SECONDS = 5400
+
+# `run --rm backup` is neither: it scales with how much data the facility holds, not with
+# boot time. ⚠️ This bound is **unmeasured** — no backup has ever been timed against a real
+# clinical database, and DH-014's off-site upload leg is still unexercised. It is set above
+# the fast bound only so a data-sized job does not re-create bug 17 by inheriting a bound
+# chosen for `ps`. Replace it with a measured value when DH-014 produces one.
+DEFAULT_BACKUP_TIMEOUT_SECONDS = 3600
+
 # Absolute, so a PATH entry planted earlier in the search order cannot substitute a
 # different binary for the one this host means to run.
 DEFAULT_DOCKER_BINARY = "/usr/bin/docker"
@@ -82,6 +119,8 @@ class ComposeExecutor:
         base_domain: str,
         docker_binary: str = DEFAULT_DOCKER_BINARY,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        stack_timeout_seconds: int = DEFAULT_STACK_TIMEOUT_SECONDS,
+        backup_timeout_seconds: int = DEFAULT_BACKUP_TIMEOUT_SECONDS,
         runner: Callable[..., CommandResult] = run_command,
     ) -> None:
         self.compose_file = Path(compose_file)
@@ -89,7 +128,29 @@ class ComposeExecutor:
         self.base_domain = base_domain
         self.docker_binary = docker_binary
         self.timeout_seconds = timeout_seconds
+        self.stack_timeout_seconds = stack_timeout_seconds
+        self.backup_timeout_seconds = backup_timeout_seconds
         self._run = runner
+
+    def timeout_for(self, verb: JobVerb) -> int:
+        """Resolve this verb's bound. Every verb is listed explicitly, on purpose.
+
+        A `dict.get(verb, self.timeout_seconds)` here would hand any verb added later the
+        bound chosen for `ps` — which is exactly how bug 17 happened the first time. An
+        unlisted verb raises instead, and `execute` turns that into a clean refusal.
+        """
+        return {
+            # Wait on the compose health graph, so they inherit the stack's boot time.
+            JobVerb.PROVISION: self.stack_timeout_seconds,
+            JobVerb.START: self.stack_timeout_seconds,
+            # `--force-recreate` restarts every container, so the same gates apply again.
+            JobVerb.ROTATE_TLS: self.stack_timeout_seconds,
+            # Scales with stored data rather than with boot time. Unmeasured; see above.
+            JobVerb.BACKUP_NOW: self.backup_timeout_seconds,
+            # Return in seconds; keeping them tight makes a hung command visible fast.
+            JobVerb.STATUS: self.timeout_seconds,
+            JobVerb.STOP: self.timeout_seconds,
+        }[verb]
 
     def env_path(self, facility_id: str) -> Path:
         return self.facility_root / facility_id / ".env"
@@ -165,6 +226,9 @@ class ComposeExecutor:
             return ExecutionResult(False, f"compose file {self.compose_file} not present on host")
 
         try:
+            # Inside this block deliberately: an unlisted verb becomes a refusal here rather
+            # than an unbounded or wrongly-bounded command below.
+            timeout = self.timeout_for(job.verb)
             if job.verb is JobVerb.PROVISION:
                 argv = self._provision(facility_id, job.params.facility_type)
             elif job.verb is JobVerb.ROTATE_TLS:
@@ -187,10 +251,11 @@ class ComposeExecutor:
             return ExecutionResult(False, f"preparation failed: {type(exc).__name__}"[:400])
 
         try:
-            result = self._run(argv, cwd=self.compose_file.parent, timeout=self.timeout_seconds)
+            result = self._run(argv, cwd=self.compose_file.parent, timeout=timeout)
         except subprocess.TimeoutExpired:
-            # A hung compose must not hang the agent. Report and move on.
-            return ExecutionResult(False, f"timed out after {self.timeout_seconds}s")
+            # A hung compose must not hang the agent. Report and move on. The verb is named
+            # because "timed out after 5400s" and "after 900s" are different diagnoses.
+            return ExecutionResult(False, f"{job.verb.value} timed out after {timeout}s")
         except Exception as exc:  # noqa: BLE001
             return ExecutionResult(False, f"execution error: {type(exc).__name__}")
 

@@ -16,6 +16,23 @@ Two properties the loop must hold, both of which are about *staying alive*:
 
 The executor is injected so that shelling out to `docker compose` is never exercised by a
 unit test pretending to be a deployment.
+
+⚠️ **This loop is synchronous, and that has a consequence worth knowing before it surprises
+someone.** `poll_once` runs the executor inline, so while a `provision` is bringing a stack
+up — up to `DEFAULT_STACK_TIMEOUT_SECONDS`, and a measured cold boot is ≈49 minutes — this
+agent is not polling at all. Two things follow:
+
+1. A `stop`, `status` or `backup_now` issued during that window is not acted on until the
+   provision finishes.
+2. By then it will usually be **refused as stale**, because `JobValidator` rejects any job
+   older than `DEFAULT_MAX_AGE_SECONDS` (900s). That refusal is loud, audited, and safe —
+   nothing is silently skipped — but the operator must re-issue the job.
+
+This is an accepted limit of bug 17's fix, not an oversight: widening the staleness window
+to paper over it would weaken ADR-022's replay protection, which is a security property and
+therefore a decision rather than a tuning constant. Removing the limit properly means
+running the long verb off this thread, which puts concurrency into the component whose value
+is partly that it is simple. Recorded as known bug 18.
 """
 
 from __future__ import annotations
