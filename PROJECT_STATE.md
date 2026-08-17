@@ -1,6 +1,6 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-15 · **Phase:** provisioning API + portal work started (DH-026). Four policy calls decided (ADR-017/018/019); BLOCKER-3 closed, BLOCKER-5 down to names.
+**Updated:** 2026-08-16 · **Phase:** provisioning control plane works end to end on a stand-in; DH-011 transport is now the critical path and is unblocked
 
 **⚠️ Recorded schedule trade, made deliberately by Liban 2026-08-15.** The provisioning API and
 portal are being built *before* DH-011→012→013. The consequence, stated once and accepted: the
@@ -190,26 +190,61 @@ present with **0 members** exactly as intended.
 
 ## ▶ START HERE (next session)
 
-Work through **NEEDS LIBAN** below while continuing only the unblocked tickets listed here.
+**Read `DECISIONS.md` first — 25 ADRs, several load-bearing.** Then this section.
 
-1. ~~**DH-015, the performed restore drill.**~~ ✅ **PERFORMED 2026-08-13** — see the ticket below and
-   `backup/restore-drill.md`. It found two real defects. It is **not closed**: re-run it once a lab
-   result exists and SSO is active, and answer the §6 question about hand-entering a result.
-2. **DH-016 and DH-017 are both built and locally verified.** What remains on each needs Liban:
-   the real domain/DNS for public certificates, and a fresh-VM walk-through of the README.
-   DH-021 and the healthcheck false green are closed.
-3. **Do not activate SSO or DH-011 transport.** BLOCKER-5 and BLOCKER-3's two remaining legs are
-   meeting-blocked (see the 🗓 table above). ADR-015 closed the first-sync boundary only — that is
-   one leg of three, not permission to build the poller.
-4. **Bind DH-025 before any DH-011 transport activation.** The recovery core and process-lifetime
-   fence are verified and committed. The concrete OpenELIS writer must attach the exact correlation
-   and its probe must demonstrate exactly-one/zero-match lookup against the selected target
-   resource. Never steal a claim on elapsed time alone.
-5. **Do not touch the Horiba imports.** ADR-016 deferred analyzers to v1.1 and explicitly did not
-   authorize disabling, repairing, or log-suppressing shipped laboratory test configuration.
+### Where things actually are
 
-**If you restart the stack:** a cold boot is ~50 minutes, a warm boot ~38 seconds. Never
-`docker compose down -v` — that destroys the volumes and the evidence.
+Two systems now live in this repo:
+
+1. **The clinical stack** (`docker-compose.yml`) — 11 services running locally, verified. Golden
+   flow is **1 of 8 steps**. The order/result transport (DH-011/012) is **not built**.
+2. **The provisioning control plane** (`provisioning/`) — API, portal, host agent, durable state.
+   360 tests. Works end to end **against a stand-in compose file**.
+
+⚠️ **The 1 Sept pilot target is at risk by a recorded decision, not an oversight.** Liban chose on
+2026-08-15 to build provisioning before DH-011's transport chain, so the golden end-to-end flow will
+very likely not be demonstrated by then.
+
+### Unblocked and buildable right now
+
+1. **DH-011, the OpenMRS→OpenELIS order path.** No longer decision-blocked — **BLOCKER-3 is closed**
+   (ADR-015 first-sync, ADR-018 cancellation, interim requester identity). What remains is
+   implementation plus two verification gates: DH-025's correlation must be attached to the concrete
+   OpenELIS resource, and ADR-018's "accepted or started" must map to a **verified** OpenELIS status,
+   not an assumed one. This is the critical path to the golden flow.
+2. **Known bug 17** — the provisioning executor's 900s timeout is far short of a real ~49-minute
+   OpenMRS boot, so the first genuine provisioning run would report failure while the stack was
+   still coming up. Design choice: longer timeout for `PROVISION`, or detach and let `STATUS` report.
+3. **DH-017** — the README needs a walk-through on a genuinely fresh VM. Documentation verified only
+   against an already-working machine is the weakest kind.
+
+### Blocked, and on what
+
+| Blocked on | Items |
+|---|---|
+| 🗓 **Birth-centre meeting** | Staff names for the SSO role map (types already decided, ADR-017) · clinical sign-off for DH-004/DH-006 · confirm ADR-018's cancellation default · the facility's **city** |
+| ⏳ **Real domain + DNS** | DH-016 public certificates · the provisioning API's last `incomplete_step` |
+| 🔒 **External** | Off-site bucket + key escrow (DH-014) · WhatsApp credentials (DH-013, ADR-003) |
+
+### Do not
+
+- **Do not activate SSO** until BLOCKER-5's staff names exist. Types are decided; names are not.
+- **Do not fill the prenatal panel or partograph fields.** Both mechanisms ship **empty on purpose**
+  and tests enforce it. `docs/CLINICAL-SIGNOFF.md` is the handover sheet.
+- **Do not touch the Horiba imports.** ADR-016 deferred analyzers to v1.1 and did not authorize
+  disabling or repairing shipped laboratory configuration.
+- **Never `docker compose down -v`.** It destroys the volumes and every piece of evidence in this
+  repo. Cold boot is ~50 minutes; warm is ~38 seconds.
+
+### The pattern worth inheriting
+
+This session found **eight** checks that passed for reasons unrelated to what they claimed — a
+healthcheck green through a total outage, a guard that validated zero files, a control a dependency
+silently overwrote, a TLS control that never reached TLS, string replacements that matched nothing
+and reported success. Several were in tooling written the same hour.
+
+So: **control-test every guard** — break it deliberately and watch it fail — and treat an empty or
+suspiciously clean result as a finding, not a pass.
 
 ---
 
