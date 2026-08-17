@@ -246,11 +246,21 @@ adapter *is* — one removes the ledger/audit boundary ADR-005 made load-bearing
 one turns the adapter into a FHIR server, one adds a second system storing patient data — so this is
 a human decision, recorded in `PROJECT_STATE.md` with the evidence.
 
-**Option F is the most promising and the least proven.** The OpenELIS webapp ships eight business
-FHIR provider classes in the pinned image's deployed bytecode, including `ServiceRequestProvider`.
-That is a confirmed premise, not a working path: the servlet route is absent from `web.xml`, and
-nothing has been shown to create native `Sample`/`SampleItem`/`Analysis`. **DH-011B** is the
-synthetic-data-only spike that must answer it before any option is chosen.
+**Option F is spiked as of 2026-08-17 (DH-011B): it reaches native laboratory state, and it is not
+usable yet.** `POST /OpenELIS-Global/fhir/Patient` over HTTP Basic created a genuine
+`clinlims.patient` + `person` row — so the business providers are not a FHIR façade. A synthetic
+order was then refused with `400 Generated lab number is invalid`: OpenELIS's accession prefix is
+still upstream's `DEV01`, which ties this to facility identity (NEEDS LIBAN #7).
+
+Two constraints came out of it. `PatientProvider` returns **`201 Created` even when the persist
+fails** (known bug 19, proven by a control pair) — so an adapter must confirm by read-back, never by
+status code. And `ServiceRequest` is **not `identifier`-searchable** on that server, which is
+exactly where DH-025's correlation was meant to bind; the standalone HAPI store *does* support it
+but may not reach native lab state. DH-011C must resolve that trade.
+
+⚠️ **This throwaway stack now also contains one synthetic OpenELIS patient** (`id=2`,
+`Dhspike Zzsynthetic`), deliberately retained rather than deleted. No sample, analysis or
+electronic_order exists, and no laboratory test or configuration was modified.
 
 ### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 

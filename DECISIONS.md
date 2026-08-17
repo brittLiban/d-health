@@ -1136,3 +1136,40 @@ under every option. If OpenELIS turns out not to preserve or search an incoming 
 the fallback is DH-011D's smallest upstream-compatible modification — which would itself need a
 superseding ADR, because ADR-016 and BLOCKER-4 established that shipped laboratory configuration is
 left untouched.
+
+### ADR-026 — runtime evidence appended 2026-08-17 (DH-011B). **Status remains OPEN.**
+
+Status stays `OPEN`: BLOCKER-6 is a human decision and nothing below selects an option. What follows
+is evidence, gathered against the running stack with synthetic data only.
+
+**Confirmed — Option F is not a façade.** The providers are served by a HAPI `RestfulServer` mapped
+at `/fhir/*` **inside the webapp** (`AnnotationWebAppInitializer` → `FhirRestfulServer`), running
+**HAPI 7.0.2**, distinct from the standalone container's 6.6.0. Authentication is **HTTP Basic** via
+`SecurityConfig`'s `BasicAuthRequestedMatcher`; a form-login cookie is refused on POST with
+`access=denied`, and a wrong password returns 401. `POST /fhir/Patient` created a real
+`clinlims.patient` + `clinlims.person` row with a `fhir_uuid`, logged as
+`Patient persisted with ID: 2`. **The business providers write native OpenELIS domain state.**
+
+**Two findings that constrain any Option-F design:**
+
+1. **`PatientProvider` returns `201 Created` even when the persist fails**, with no `Location`
+   header. Two identical requests differing only in a given name — one containing digits, which the
+   `Person` validator rejects — both returned 201; one wrote a row, one wrote nothing. Status code
+   is therefore not evidence of persistence, and the response does not carry the created id. An
+   adapter must **verify by read-back**. Known bug 19.
+2. **`ServiceRequest` is not `identifier`-searchable on this server** — rejected with HTTP 400, and
+   the controls hold (an unknown parameter is also 400; the advertised `_id` returns 200). The
+   standalone HAPI 6.6.0 *does* support it. So the option that reaches native lab state cannot be
+   queried by DH-025's correlation, and the option that can be queried may not reach native lab
+   state. Resolving that is DH-011C, and it is the concrete trigger for DH-011D.
+
+**Not disproven, unfinished.** `ServiceRequestProvider` refused a synthetic order with HTTP 400
+`Generated lab number is invalid` — and correctly created nothing, so the false-green above is
+specific to `PatientProvider`. The cause is configuration: the accession prefix is upstream's
+placeholder `DEV01` with `validateAccessionNumber=true`. A laboratory accession number is a
+facility-scoped real-world identifier, so completing this is gated on facility identity
+(NEEDS LIBAN #7), not on engineering judgement.
+
+**Nothing was modified:** no OpenELIS laboratory test, mapping, accession setting, or role was
+changed to make the spike progress. The synthetic patient row is retained and documented rather than
+deleted, consistent with this repository's practice of never removing patient rows to tidy up.

@@ -266,7 +266,7 @@ exists. Each links to the detail rather than repeating it.
 | ~~4~~ | ~~**Revisit `labonfhir` (ADR-004)?**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** continue the custom adapter for v1; revisit after the golden flow | — | DH-010 is unblocked |
 | ~~5~~ | ~~**Keycloak session lifetimes**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 1h idle, 10h maximum, 5m access token (ADR-013) | — | DH-007 complete |
 | ~~6~~ | ~~**OpenELIS default requester identity**~~ — ⏳ **INTERIM DECIDED 2026-08-14:** create one controlled test provider ("Pilot Test Clinician") replacing upstream's sample ("Felix Dr. Mauritius"). The real ordering clinician swaps in after the meeting — a one-line change, not a redesign. **Not yet created; tracked in DH-011.** | — | DH-011 |
-| 7 | **Facility identity** — ✅ **PARTIALLY SET 2026-08-14:** country `Djibouti`, facility id `DJ-BC-001` (deliberate internal placeholder). ⏳ **Still needed: city**, plus state/district/postal code. These are real-world facts, not guesses | The birth centre's real details are yours | `common.properties.template` |
+| 7 | **Facility identity** — ✅ **PARTIALLY SET 2026-08-14:** country `Djibouti`, facility id `DJ-BC-001` (deliberate internal placeholder). ⏳ **Still needed: city**, plus state/district/postal code. ⚠️ **Now also blocks Option F (DH-011B, 2026-08-17):** OpenELIS's accession prefix is still upstream's placeholder `DEV01` with `validateAccessionNumber=true`, and a synthetic order was refused with `Generated lab number is invalid`. A lab accession number is a facility-scoped real-world identifier — not something to invent | The birth centre's real details are yours | `common.properties.template`, **and the DH-011 order path** |
 | 8 | **Maternity bed counts** — ✅ **PLACEHOLDERS SET 2026-08-14:** 2 delivery / 4 postpartum, clearly marked. ⚠️ Additive-only means these CANNOT be removed later; set real numbers before the pilot deployment | Facility numbers | DH-003 unblocked |
 | 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
 | ~~10~~ | ~~**DH-011 first-sync boundary**~~ — ✅ **RESOLVED 2026-08-13 by Liban (ADR-015):** no historical backfill; the watermark starts at deployment time. The pilot is forward-going patients, not a paper-record digitisation | — | BLOCKER-3 leg 1 closed |
@@ -520,7 +520,7 @@ data flows where — both on the always-ask list:
 | **C. The adapter writes into OpenELIS's own fhirstore** | Adapter pushes, hoping OpenELIS ingests | ⚠️ **Unverified and possibly not a real path.** The store is empty, `transformOnStartup=false`, and nothing in the config describes it as an inbox. Would need proving before it could be trusted |
 | **D. A dedicated order-exchange FHIR store** *(added by Liban 2026-08-16; **not** selected)* | The adapter writes orders to a separate exchange store; OpenELIS polls **that** store via `remote.source.uri`. Keeps the adapter as the routing and audit boundary without making it a FHIR server (B), and uses the pull mechanism OpenELIS actually documents | ⚠️ **Human Decision Required: Yes — and the widest scope of the four.** It adds another system that **stores patient and order data**, so it lands inside every boundary this project has already drawn: DH-014/DH-015 backup and restore coverage, ADR-021's "no clinical data outside the stack" reasoning, the tenant-isolation model, retention, and the security surface of one more network-reachable store holding clinical records. None of those are implementation details, and a new clinical datastore is not a thing an agent may adopt because it is architecturally tidy |
 
-| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **not** selected)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. If it creates native `Sample`/`SampleItem`/`Analysis`, it keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ⚠️ **Premise confirmed, path unproven.** Eight provider classes are present in the pinned image's deployed bytecode, including `ServiceRequestProvider`. But the servlet path is absent from `web.xml`, and a class existing is not an ingestion path working. **DH-011B is the spike that must answer it** |
+| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **still not selected**)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. Keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ✅ **Spiked 2026-08-17 (DH-011B) — it reaches native lab state, and it is unfinished.** `POST /OpenELIS-Global/fhir/Patient` over HTTP Basic created a real `clinlims.patient`+`person` row. ServiceRequest returns **400 `Generated lab number is invalid`** — accession config, tied to facility identity (#7). Two hard caveats: `PatientProvider` returns **201 even when the persist fails** (bug 19), and ServiceRequest is **not `identifier`-searchable here**, which is where DH-025's correlation was meant to bind |
 
 **Deliberately not narrowed.** Options A–D are retained exactly as first recorded; F is appended
 rather than replacing them, so the reasoning history stays auditable (ADR-026).
@@ -1167,7 +1167,7 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | ID | Scope | Status |
 |---|---|---|
 | **DH-011A** | Record Option F as a candidate | ✅ **DONE 2026-08-16** — ADR-026 |
-| **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | 🔨 next |
+| **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | ✅ **DONE 2026-08-17** — see below |
 | **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | ⏸ needs DH-011B |
 | **DH-011D** | Narrow OpenELIS patch, **only if** correlation cannot survive ingestion. Needs a superseding ADR (ADR-016/BLOCKER-4) | ⏸ conditional |
 | **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ⏸ buildable now |
@@ -1178,6 +1178,75 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ⏸ needs DH-011B |
 | **DH-011K** | Crash-point qualification across all five points | ⏸ |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
+
+#### DH-011B — OpenELIS native ingestion spike · ✅ PERFORMED 2026-08-17 · synthetic data only
+
+**Option F is real, not a façade — and it is not usable yet.** Both halves are demonstrated.
+
+**The endpoint.** `AnnotationWebAppInitializer` maps `fhirServlet` (`FhirRestfulServer`, a HAPI
+`RestfulServer` holding the business `IResourceProvider`s) at **`/fhir/*`** inside the webapp:
+`https://oe.openelis.org:8443/OpenELIS-Global/fhir/`. It is **HAPI 7.0.2 embedded in the webapp** —
+a different server from the standalone `openelis-fhir` container's HAPI 6.6.0. The compose comment
+calling that container "the endpoint the adapter actually talks to" describes option C, not this.
+
+**Authentication is HTTP Basic, and form-login is the wrong mechanism.** `SecurityConfig` has a
+`BasicAuthRequestedMatcher` (`haveBasicAuth`) selecting a separate `httpBasicServletFilterChain`.
+A cookie session obtained by form login reaches `GET` but is refused on `POST` with
+`302 → /Home?access=denied`. With `Authorization: Basic` the same POST succeeds. Control: a wrong
+password returns **401**, so the 200s are authenticated rather than open.
+
+**✅ The providers create genuine native OpenELIS state.** `PatientProvider` logged
+`Patient persisted with ID: 2` and a real `clinlims.patient` + `clinlims.person` row exists with a
+`fhir_uuid`. This is the question the spike existed to answer: Option F is **not** a FHIR façade
+over the generic store.
+
+**🛑 But `PatientProvider` returns `201 Created` when the native persist FAILS.** Proven by a
+control pair — two identical requests differing only in the patient's given name:
+
+| Request | HTTP | Log | Native rows |
+|---|---|---|---|
+| given name `Dh011b` (contains digits) | **201** | `ERROR … invalid name format, possibly illegal character` | **0** |
+| given name `Dhspike` (letters only) | **201** | `Patient persisted with ID: 2` | **1** |
+
+Same status code, opposite outcomes, and **no `Location` header in either** — so a client cannot
+learn from the response whether anything was created, nor what its id is. **An adapter that trusted
+this 201 would mark an order delivered that never existed**, writing `completed` into the DH-025
+ledger for a write that did not happen. That is the silent-loss direction `WATERMARK-DESIGN.md`
+exists to refuse. Recorded as **known bug 19**. Any option-F implementation must verify by read-back
+rather than by status code.
+
+**🟡 `ServiceRequestProvider` behaves better and is blocked on configuration.** A synthetic
+ServiceRequest (existing upstream LOINC `94500-6`, referencing the synthetic patient) returned
+**HTTP 400 `Generated lab number is invalid`** and correctly created nothing — so the false-green is
+specific to `PatientProvider`, not universal. The cause is deployment configuration: the accession
+prefix is upstream's placeholder `DEV01` with `validateAccessionNumber=true`. **This ties Option F
+to facility identity (NEEDS LIBAN #7)** — the lab number is a facility-scoped accession, so it is a
+real-world value, not an engineering guess. Option F is therefore **not disproven; it is unfinished**.
+
+**🛑 The DH-025 correlation cannot bind to ServiceRequest on this server.** `ServiceRequest` does
+**not** support `identifier` search here — it is rejected with **HTTP 400**, and the controls make
+that meaningful: an unknown parameter is also 400, while the advertised `_id` returns 200.
+`Specimen`, `Patient`, `Practitioner` and `Organization` **do** accept `identifier` (200).
+
+| Server | ServiceRequest `identifier` search |
+|---|---|
+| Standalone HAPI 6.6.0 (option C target) | ✅ supported — 200, `total: 0` |
+| **Business API HAPI 7.0.2 (option F target)** | ❌ **400, rejected** |
+
+So the two options trade off exactly against each other: the one that reaches native lab state
+cannot be queried by our correlation, and the one that can be queried may not reach native lab
+state. This is what **DH-011C** must resolve, and it is the concrete trigger for **DH-011D**'s
+narrow patch if no alternative works. A possible alternative worth testing before any patch:
+`Specimen` *is* identifier-searchable, so the correlation may be bindable there — but a specimen
+identifier is an accession-numbering concern in a laboratory, so that is laboratory configuration
+surface and not an agent's call.
+
+**Synthetic data left in the throwaway stack, deliberately not deleted:** one OpenELIS patient,
+`id=2`, `Dhspike Zzsynthetic`, `fhir_uuid b010ea84-aab8-4917-ad44-7ba155dff2d5`. No sample, no
+analysis, no electronic_order — all still 0. Consistent with this repo's standing practice of never
+deleting patient rows to tidy up (the 100 fictional OpenMRS demo patients were kept for the same
+reason). This stack remains a throwaway verification stack and must never be confused with a clean
+instance. **No OpenELIS laboratory test, mapping, or configuration was modified.**
 
 **Still true:** no transport code has been added, no order has been sent, and nothing has been
 written into OpenELIS. DH-006's signed-off test mappings remain required before any *pilot* order.
@@ -1638,6 +1707,7 @@ message shapes).
 | 17 | **The provisioning executor's 900s timeout is far short of a real OpenMRS first boot (~49 min)**, so the first genuine facility provisioning would time out and be reported as failed while the stack was still coming up | **Fixed 2026-08-16 — per-verb timeouts.** Liban chose the longer-timeout option over detaching. Verbs that wait on the compose health graph (`provision`, `start`, `rotate_tls`) get 5400s; `backup_now` gets its own bound because it scales with stored data, not boot time; `status`/`stop` stay at 900s. Both long bounds are per-host configurable. The bound is asserted **against the real `docker-compose.yml`** — it must clear every `start_period` (the largest is 1800s) and the measured 49-minute cold boot — so a future gate with a longer grace period fails the suite rather than the first deployment. 371 tests, Ruff clean. Control-verified three ways: restoring 900s fails the two guards by name, wiring `provision` to the fast bound fails the per-verb tests, and running without the compose file mounted **fails instead of skipping**. ⚠️ Still unfixed by this: bug 18 below, and the fix has **not** been exercised against a real ~49-minute boot — no clinical stack has ever booted through the provisioning path |
 | 18 | **The agent does not poll while a long job runs**, so a `stop`/`status`/`backup_now` issued during a ~50-minute provision is refused as stale when finally claimed (`JobValidator` rejects jobs older than 900s) | **Open — accepted limit of bug 17's fix, 2026-08-16, not an oversight.** The refusal is loud and audited, so nothing is silently skipped; the operator re-issues. Deliberately **not** fixed by widening the staleness window — that is ADR-022 replay protection, a security property rather than a tuning constant, and changing it is a decision. The real fix is running the long verb off the poll thread, which puts concurrency into the component whose value is partly that it is simple. Worth revisiting when a second facility makes concurrent operations routine |
 | 16 | **Three upstream demo forms loaded here perform clinical interpretation** — `structured_soap_note` (an `alert` key, `calculateExpression`, expression validators), `mental_health_assessment_form`, `form-engine-cookbook` | **Open — raised 2026-08-13 by DH-004's new guard.** Demo content, not maternity forms; nothing changed. `OMRS_DEMO_CONTENT=off` removes them, but that is a decided switch (BLOCKER-2) — **Human Decision Required: Yes** |
+| 19 | **OpenELIS `PatientProvider` returns `201 Created` when the native persist fails**, with no `Location` header in either case. Demonstrated 2026-08-17 by a control pair differing only in the patient's given name: an invalid name logged `ERROR … invalid name format` and created **0** rows; a valid one created 1. Both returned 201 | **Open — upstream defect, not ours; do not "fix" OpenELIS.** The consequence is ours to defend against: an adapter trusting this 201 would write `completed` into the DH-025 ledger for an order that never existed — silent loss, the one direction `WATERMARK-DESIGN.md` refuses. **Any Option-F implementation must confirm by read-back, never by status code.** Also blocks learning the created resource id from the response, which compounds DH-011C |
 | 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Fixed and verified 2026-08-13.** The check now requires `LoginPage` to return 200 *and* contain the Spring Security `_csrf` token — something only a live application context produces. Proven in both directions: it passes against the healthy webapp and **fails against the bare 302** (0-byte body) that the broken context returned. `start_period` raised 60s → 180s because the context must genuinely be up, not merely bound |
 
 ## Notes for next session

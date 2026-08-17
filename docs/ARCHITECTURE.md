@@ -303,7 +303,17 @@ OpenELIS's documented inbound path is a **poll** from a remote FHIR source it is
 never received an order at all. Five candidates are recorded with their costs in `PROJECT_STATE.md`;
 ADR-026 adds Option F, the business FHIR providers inside the OpenELIS webapp itself. **None is
 selected**, because the choice changes what the adapter is and, for one option, what stores patient
-data. DH-011B is the synthetic-data-only runtime spike that must produce the evidence first.
+data.
+
+**DH-011B spiked Option F on 2026-08-17 and it reaches native laboratory state.** OpenELIS's webapp
+serves its own business FHIR providers at `/OpenELIS-Global/fhir/*` (HAPI 7.0.2 embedded — *not* the
+standalone `openelis-fhir` container, which is option C's target), authenticated with HTTP Basic. A
+synthetic Patient create produced a real `clinlims.patient` row. It is still unusable: a synthetic
+order is refused with `Generated lab number is invalid` because the accession prefix is upstream's
+`DEV01`, which makes this dependent on facility identity. Two constraints for whatever is chosen —
+`PatientProvider` returns `201` even when the persist fails (verify by read-back, never by status
+code), and `ServiceRequest` is not `identifier`-searchable there, which is where DH-025's
+correlation was to bind. Evidence in ADR-026 and `PROJECT_STATE.md`.
 
 The `labonfhir` revisit is now costed rather than hypothetical: it provides an in-process,
 event-driven order trigger but still polls results, is not shipped in this reference distribution,
