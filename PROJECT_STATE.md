@@ -532,7 +532,7 @@ data flows where — both on the always-ask list:
 | **C. The adapter writes into OpenELIS's own fhirstore** | Adapter pushes, hoping OpenELIS ingests | ⚠️ **Unverified and possibly not a real path.** The store is empty, `transformOnStartup=false`, and nothing in the config describes it as an inbox. Would need proving before it could be trusted |
 | **D. A dedicated order-exchange FHIR store** *(added by Liban 2026-08-16; **not** selected)* | The adapter writes orders to a separate exchange store; OpenELIS polls **that** store via `remote.source.uri`. Keeps the adapter as the routing and audit boundary without making it a FHIR server (B), and uses the pull mechanism OpenELIS actually documents | ⚠️ **Human Decision Required: Yes — and the widest scope of the four.** It adds another system that **stores patient and order data**, so it lands inside every boundary this project has already drawn: DH-014/DH-015 backup and restore coverage, ADR-021's "no clinical data outside the stack" reasoning, the tenant-isolation model, retention, and the security surface of one more network-reachable store holding clinical records. None of those are implementation details, and a new clinical datastore is not a thing an agent may adopt because it is architecturally tidy |
 
-| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **spiked, still not selected**)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. Keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ✅ **Fully spiked 2026-08-17 (DH-011B) and it is the strongest candidate: the providers write OpenELIS's own domain tables — `clinlims.patient` and `clinlims.provider` rows were created through the supported FHIR surface, and `ServiceRequestProvider` calls the same `SamplePatientEntryService` the human workflow uses.** Two gates, neither an engineering choice: (1) **ServiceRequest is refused** — `SITEYEARNUM` formats accessions as `%013d`, 13 all-numeric digits, while the configured prefix is `DEV01`; a **numeric facility site code** is required (#7), and a supplied accession is ignored because the value is always server-generated. (2) **The correlation does not survive** — our identifier is discarded (`external_id` NULL), and search is delegated to `http://fhir.openelis.org:8080` which is refused, so a submitted identifier and a never-submitted one both return `total: 0`. → **DH-011D** |
+| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **spiked, still not selected**)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. Keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ✅ **Fully spiked 2026-08-17 (DH-011B) and it is the strongest candidate: the providers write OpenELIS's own domain tables — `clinlims.patient` and `clinlims.provider` rows were created through the supported FHIR surface, and `ServiceRequestProvider` calls the same `SamplePatientEntryService` the human workflow uses.** Two gates, neither an engineering choice: (1) **ServiceRequest is refused** — `SITEYEARNUM` formats accessions as `%013d`, 13 all-numeric digits, while the configured prefix is `DEV01`; a **numeric facility site code** is required (#7), and a supplied accession is ignored because the value is always server-generated. (2) **The submitted correlation is not retained** — our identifier is discarded (`external_id` NULL) and replaced by OpenELIS's own. ✅ *Corrected 2026-08-17:* exact identifier **search works** (a real identifier returns 1, a wrong system with the right value returns 0), so only *persistence* of the incoming identifier is missing. → **DH-011D**, narrower than first recorded |
 
 **Deliberately not narrowed.** Options A–D are retained exactly as first recorded; F is appended
 rather than replacing them, so the reasoning history stays auditable (ADR-026).
@@ -1180,8 +1180,8 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 |---|---|---|
 | **DH-011A** | Record Option F as a candidate | ✅ **DONE 2026-08-16** — ADR-026 |
 | **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | ✅ **COMPLETE 2026-08-17** (authorized by Liban) — Option F writes native domain rows; ServiceRequest gated on a numeric site code, correlation does not survive |
-| **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | 🛑 **Answered negatively by DH-011B** — through Option F's surface the contract is inexpressible: a submitted and a never-submitted identifier both return `total: 0`. Superseded by DH-011D |
-| **DH-011D** | Narrow OpenELIS patch to persist and exactly search an external order identifier. Needs a superseding ADR (ADR-016/BLOCKER-4) | 🔓 **Condition met 2026-08-17** — DH-011B proved the correlation is discarded on ingestion. ⚠️ Its *verification* is gated on NEEDS LIBAN #7: proving exact search needs a created ServiceRequest, which needs a valid accession |
+| **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | 🟡 **Half answered, corrected 2026-08-17.** The *lookup* half is proven on `Patient`/`Practitioner` — 1 for a real identifier, 0 for absent, and 0 for a wrong system with the right value. What fails is that a *client-supplied* identifier is not retained → DH-011D. Unproven on `ServiceRequest` until the accession blocker clears |
+| **DH-011D** | Narrow OpenELIS patch to **persist** an incoming external order identifier. Search already works, so this is smaller than first scoped. Needs a superseding ADR (ADR-016/BLOCKER-4) | 🔓 **Condition met 2026-08-17** — the identifier is discarded on ingestion. ⚠️ Verification is gated on NEEDS LIBAN #7, and whether `ServiceRequest` behaves like `Patient`/`Practitioner` here is **untested** |
 | **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ✅ **BUILT + VERIFIED 2026-08-17, NOT ACTIVATED** — see below |
 | **DH-011F** | Watermark/paging test matrix | ⏸ with DH-011E |
 | **DH-011G** | Patient identity mapping — controlled identifiers, fail closed on ambiguity | ⏸ |
@@ -1297,8 +1297,7 @@ accession number is a facility identifier convention, not an engineering default
 **NEEDS LIBAN #7**. Supplying a synthetic accession does **not** work around it: variants 4 and 5
 proved the value is always server-generated and a client-supplied one is ignored.
 
-**🛑 Correlation result: it does not survive, and the negative control proves the search is useless
-here.**
+**🛑 Correlation result: the submitted identifier is discarded. (Corrected 2026-08-17 — see below.)**
 
 | Query | `total` |
 |---|---|
@@ -1306,20 +1305,40 @@ here.**
 | `Practitioner?identifier=NEVER-SUBMITTED-XYZ` — **negative control** | **0** |
 | `Patient?identifier=DHSPIKEPONE` — submitted on the first pass | **0** |
 
-A submitted identifier and one that never existed are **indistinguishable**. So the required
-0 / 1 / 2+ contract — proven absent, proven present, ambiguous — **cannot be expressed through this
-surface at all**, which is a stronger negative result than "our identifier was missing".
+**The identifier is discarded on ingestion.** The returned Practitioner carries only OpenELIS's own
+`provider_uuid` and `facility_id` identifiers; ours is absent, and
+`clinlims.provider.external_id` is **NULL**. The submitted correlation is not persisted anywhere.
 
-Two independent causes, both confirmed:
-
-1. **The identifier is discarded on ingestion.** The returned Practitioner carries only OpenELIS's own
-   `provider_uuid` and `facility_id` identifiers; ours is absent. `clinlims.provider.external_id` is
-   **NULL**. The submitted correlation is not persisted anywhere.
-2. **Search is delegated to a different, unreachable store.** Every search response's `self` link is
-   `http://fhir.openelis.org:8080/fhir/…` — plain HTTP on a port this stack does not serve
-   (connection **refused** from inside the network). So *create* writes native rows locally while
-   *search* asks a remote store. The resources do reach the standalone store on **8443** (Patient 1,
-   Practitioner 1), but stripped of our identifier.
+> ### ⚠️ CORRECTION 2026-08-17 — this section originally overstated the failure
+>
+> The first write-up concluded that **search itself was broken**, on the grounds that every search
+> response's `self` link pointed at `http://fhir.openelis.org:8080/fhir/…`, a port this stack does
+> not serve. From that it inferred the DH-025 0/1/2+ contract was *"inexpressible through this
+> surface at all"*. **That inference was wrong, and it was wrong in the expensive direction** — it
+> would have justified a far larger OpenELIS patch than the evidence supports.
+>
+> The `:8080` self link is a cosmetic HAPI artifact. Re-tested directly:
+>
+> | Query | `total` |
+> |---|---|
+> | `Practitioner?_summary=count` (any) | **1** |
+> | `Practitioner?identifier=<OpenELIS's own provider_uuid>` | **1** — proven present |
+> | `Practitioner?identifier=0000…0000` (control) | **0** — proven absent |
+> | `Practitioner?identifier=NEVER-SUBMITTED-XYZ` (control) | **0** |
+> | `identifier=http://openelis-global.org/provider_uuid\|<uuid>` — full `system\|value` | **1** |
+> | `identifier=urn:wrong-system\|<same uuid>` — **control** | **0** |
+>
+> That last row is the decisive one: a **wrong system with the right value returns 0**, so the
+> search performs real token matching rather than ignoring the system or substring-matching.
+>
+> **Corrected conclusion: exact identifier lookup on this surface WORKS, and the DH-025 contract is
+> expressible.** The single remaining failure is that OpenELIS does not retain an identifier the
+> *client* supplied. That narrows DH-011D from "add a searchable external identifier, including
+> search support" to "**persist the incoming identifier**" — the search half already exists.
+>
+> Still unknown, and not inferable from Patient/Practitioner: whether `ServiceRequestProvider`
+> retains a submitted identifier. It is a different provider and may behave differently. That cannot
+> be tested until the accession blocker is resolved.
 
 **Cancellation: not testable.** It requires an existing order, and no order could be created. The
 provider does expose `@Delete` and `@Update`, so the surface exists; its native state transition

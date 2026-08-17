@@ -59,9 +59,12 @@ strongest of the five candidates.
 
 Blocked on two things an engineer must not decide: a **numeric facility site code** (accessions are
 `%013d` under `SITEYEARNUM`, the prefix is alphabetic `DEV01`, so every order is refused), and the
-**adapter correlation, which does not survive** — the identifier is discarded and search is delegated
-to a port this stack does not serve, so a submitted identifier and a never-submitted control both
-return `total: 0`. DH-025's 0/1/2+ contract is inexpressible there. Bug 19 adds a third constraint:
+**adapter correlation, which is discarded on ingestion** — OpenELIS replaces a client-supplied
+identifier with its own. ✅ **Corrected 2026-08-17:** exact identifier *search* does work (a real
+identifier returns 1; a wrong system with the right value returns 0), so DH-025's contract **is**
+expressible and only persistence of the incoming identifier is missing. The first write-up said the
+contract was inexpressible, which was wrong in the expensive direction — it would have justified a
+larger OpenELIS patch than the evidence supports. Bug 19 adds a third constraint:
 `201 Created` is returned even when the persist fails, so read-back is the only trustworthy check.
 No `sample`, `analysis` or `electronic_order` was ever created, so laboratory workflow state and
 cancellation remain unverified.

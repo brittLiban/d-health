@@ -1217,3 +1217,51 @@ created, so native laboratory workflow state and the OpenELIS UI's view of an in
 `site_information` unchanged (121 rows), no accession setting altered, no role granted, no database row
 written or deleted directly. Two clearly-labelled synthetic resources were created through the
 supported FHIR surface and are retained rather than deleted.
+
+### ADR-026 — correction appended 2026-08-17. **Status remains OPEN.**
+
+**The 2026-08-17 spike appendix above overstated one finding, and this corrects it rather than
+editing it.** The file is append-only so the original reasoning stays auditable — including the
+part that was wrong, because how it was wrong is the useful bit.
+
+**What was claimed:** that the DH-025 contract — 0 = proven absent, 1 = proven present, 2+ =
+ambiguous — was *"inexpressible through this surface at all"*, on the grounds that every search
+response's `self` link pointed at `http://fhir.openelis.org:8080/fhir/…`, a port this stack does not
+serve.
+
+**Why that was wrong:** the `self` link is a cosmetic HAPI artifact and does not indicate where the
+query was answered. The inference was made from a link rather than from a query result, and it was
+wrong in the **expensive** direction — it would have justified a substantially larger OpenELIS patch
+than the evidence supports.
+
+**Re-tested directly, with controls:**
+
+| Query | `total` |
+|---|---|
+| `Practitioner?_summary=count` | 1 |
+| `Practitioner?identifier=<OpenELIS's own provider_uuid>` | **1** — proven present |
+| `Practitioner?identifier=0000…0000` | **0** — proven absent |
+| `identifier=http://openelis-global.org/provider_uuid\|<uuid>` | **1** |
+| `identifier=urn:wrong-system\|<same uuid>` | **0** |
+
+The last row is the control that makes the rest meaningful: a **wrong system with a right value
+returns 0**, so the server performs real token matching rather than ignoring the system or matching a
+substring.
+
+**Corrected position.** Exact identifier lookup on the business FHIR API **works**, and DH-025's
+contract **is** expressible there. The one thing that fails is that OpenELIS does not retain an
+identifier the *client* supplied — it assigns its own and discards ours.
+
+**Consequence for DH-011D, which gets smaller.** Its scope narrows from "persist an external
+identifier *and* make it exactly searchable" to "**persist the incoming identifier**". The search
+half already exists and is control-proven. A patch that also added search machinery would be adding
+something that is already there.
+
+**What is still unknown, and must not be inferred:** whether `ServiceRequestProvider` retains a
+submitted identifier. `Patient` and `Practitioner` do not, but it is a different provider and may
+differ. That is untestable until the accession blocker (NEEDS LIBAN #7) is resolved, so DH-011D
+should not be built until it is known whether it is needed for the resource that actually matters.
+
+**BLOCKER-6 remains OPEN and no option is selected.** This correction makes Option F look *better*,
+not worse, which is precisely why it needed correcting rather than leaving a pessimistic record in
+place.
