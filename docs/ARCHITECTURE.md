@@ -363,9 +363,19 @@ the write; the real PostgreSQL fence, rollback-only coordinator path, and restar
 passed. DH-011 must still attach and demonstrate lookup of this correlation on its concrete
 OpenELIS Task/ServiceRequest before transport activation.
 
+**DH-011E order poller (built 2026-08-17, not activated).** The OpenMRS-side half of the transport
+now exists: a durable watermark bootstrapped once from the server's clock (ADR-015), a window bounded
+at both ends, deduplication by `(type, id, versionId)`, a completeness check against the bundle's
+`total`, and **client-side ordering** — `fhir2` 4.2.0 accepts `_sort` and silently ignores it, so the
+accepted design's reliance on server ordering was corrected in `WATERMARK-DESIGN.md` §3. Its output
+is a transport-neutral `SourceOrderEvent`. **No loop runs it and no delivery implementation exists**,
+because BLOCKER-6 has not decided how an order reaches OpenELIS. 94 tests, five controls.
+
 **Timezone:** every container and both databases run `TZ=Africa/Djibouti` (UTC+3). Clinical
 timestamps that silently differ by three hours between the EMR and the LIS are a patient-safety
-problem, not a cosmetic one.
+problem, not a cosmetic one. DH-011E makes this executable rather than documentary: a `meta.lastUpdated`
+whose offset is not `+03:00` is refused at construction, so a UTC-running adapter fails loudly
+instead of shifting its window by three hours and dropping results.
 
 ---
 

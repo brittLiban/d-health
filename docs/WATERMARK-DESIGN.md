@@ -1,10 +1,21 @@
 # Watermark design — how the adapter learns an order or result exists
 
-**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation and DH-025's
-transport-neutral crash-recovery core are built; the concrete OpenELIS correlation binding,
-watermark, and poller are not built.** ADR-005 records the approval and the 15-second configurable
-interval. With polling, *"no result is lost between the laboratory and a mother's chart"* stops
-being a property of the transport and becomes a property of the logic below.
+**Status: ACCEPTED 2026-08-12 by Liban. DH-010's ledger/dead-letter foundation, DH-025's
+transport-neutral crash-recovery core, and — as of 2026-08-17 (DH-011E) — the watermark and poller
+are BUILT and unit-verified. Nothing is activated: no target exists until BLOCKER-6 is decided, so
+no order has moved.** ADR-005 records the approval and the 15-second configurable interval. With
+polling, *"no result is lost between the laboratory and a mother's chart"* stops being a property of
+the transport and becomes a property of the logic below.
+
+**Implementation note appended 2026-08-17 (DH-011E) — one addition to this design.** The window is
+now bounded at **both** ends, where §3 specified only an inclusive lower bound. Reason: without an
+upper bound, records written *during* a fetch land inside a window whose `total` was already read,
+so §3's completeness check would fire on healthy traffic and the watermark would never advance. The
+top is frozen at a **server-issued** instant — every search Bundle carries its own `meta.lastUpdated`,
+so this needs no clock endpoint and no local time. Both bounds were verified applied before being
+relied on: `ge2026-08-11 & le2000-01-01`, an impossible range, returns `total: 0`, which a server
+silently ignoring `le` could not produce. Nothing is skipped by the upper bound, because the next
+cycle's inclusive lower bound starts where this one finished.
 
 **Written:** 2026-08-11 (DH-009a) · **Evidence:** ADR-005's appended evidence section
 **Covers:** the OpenMRS leg only. The OpenELIS leg is DH-009b, after DH-005.

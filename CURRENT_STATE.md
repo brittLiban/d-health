@@ -120,7 +120,7 @@ itself is complete. Human decisions are collected under **NEEDS LIBAN** in `PROJ
 | OpenELIS frontend | **running; internal HTTP verified** — no browser login or workflow exercised; it has no host route until Caddy (DH-016) |
 | Keycloak | **running, healthy, realm + DH-008 clients verified** — OpenMRS OIDC, OpenELIS SAML; existing-realm reconciliation passed twice; pilot session lifetimes approved (ADR-013) |
 | Keycloak SSO config | **one-shot job exited 0** — non-deleting client/mapper reconciliation; idempotency exercised twice |
-| Adapter | **running, healthy, DH-010 + DH-025 core verified** — ledger/dead-letter/retry/audit plus process-lifetime recovery fence and fail-closed crash coordinator; concrete OpenELIS correlation binding and all FHIR transport remain absent |
+| Adapter | **running, healthy, DH-010 + DH-025 + DH-011E built and verified** — ledger/dead-letter/retry/audit, process-lifetime recovery fence, fail-closed crash coordinator, and now the OpenMRS order poller with its durable watermark (94 tests, migration `0002_watermarks` applied live). ⚠️ **The poller is not activated**: no compose service or `app.py` path starts it, and there is no delivery implementation because BLOCKER-6 is undecided. No order has moved |
 | WhatsApp notifier | not written |
 | Backup | **not running in the current stack** — deliberately behind Compose's `backup` profile until approved production settings exist. The local path is verified end-to-end, and **a restore has now actually been performed** (DH-015, `backup/restore-drill.md`): archive decrypted, all seven manifest hashes re-verified, restored into an isolated scratch stack, and patient `10001MJ` read back through the OpenMRS REST API. Off-site upload remains unverified; the drill archive and passphrase were destroyed afterwards. Two acceptance legs (a lab result, an SSO login) remain unexercised, so DH-015 is **performed, not done** |
 | Caddy | **running, healthy — DH-016 built and locally verified** — subdomain routing for `emr`/`lab`/`id`, security headers, and a TLS-**verified** hop to the OpenELIS API using DH-021's exported CA (control-tested: an unrelated CA yields 502 `unknown authority`). Uses Caddy's internal CA under `BASE_DOMAIN=localhost`; public issuance still needs the real domain/DNS |
@@ -342,7 +342,7 @@ disagree, the ticket table is right and this section is stale.
 
 | Ticket | Missing |
 |---|---|
-| DH-011 / DH-012 | The adapter's order and result transport. The safety core underneath it is built and verified; nothing moves between the two systems. 🛑 **Blocked on BLOCKER-6** since 2026-08-16 — the mechanism by which an order reaches OpenELIS is not what the design assumed. The OpenMRS-side poller remains buildable |
+| DH-011 / DH-012 | The adapter's order and result transport. 🛑 **Blocked on BLOCKER-6** — the mechanism by which an order reaches OpenELIS is not what the design assumed. **The OpenMRS-side half is now built** (DH-011E: poller, durable watermark, cohort completeness, client-side ordering — 94 tests, five controls) but **deliberately not activated**, because there is nothing to deliver to. What is missing is the target leg, the correlation binding (DH-011C), and the mappings (DH-011G/H/I) |
 | DH-013 | The WhatsApp notifier. Not written, and gated on credentials nobody holds (ADR-003) |
 | DH-018 | The golden end-to-end demonstration — 1 of 8 steps |
 

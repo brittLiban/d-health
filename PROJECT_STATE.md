@@ -1170,7 +1170,7 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | ✅ **DONE 2026-08-17** — see below |
 | **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | ⏸ needs DH-011B |
 | **DH-011D** | Narrow OpenELIS patch, **only if** correlation cannot survive ingestion. Needs a superseding ADR (ADR-016/BLOCKER-4) | ⏸ conditional |
-| **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ⏸ buildable now |
+| **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ✅ **BUILT + VERIFIED 2026-08-17, NOT ACTIVATED** — see below |
 | **DH-011F** | Watermark/paging test matrix | ⏸ with DH-011E |
 | **DH-011G** | Patient identity mapping — controlled identifiers, fail closed on ambiguity | ⏸ |
 | **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
@@ -1178,6 +1178,62 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ⏸ needs DH-011B |
 | **DH-011K** | Crash-point qualification across all five points | ⏸ |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
+
+#### DH-011E — OpenMRS poller + durable watermark · ✅ BUILT + VERIFIED 2026-08-17 · ⚠️ NOT ACTIVATED
+
+**94 adapter tests (from 27), Ruff clean, migration `0002_watermarks` applied to the live database
+and verified.** Nothing starts the loop: `grep` confirms `OrderPoller` is referenced by no compose
+service and not by `app.py`. There is no production delivery implementation, because BLOCKER-6 has
+not decided what the target is. **No order has moved.**
+
+| Module | What it does |
+|---|---|
+| `instants.py` | `ServerInstant` — the server's timestamp string, kept byte-exact (§7). Validates the shape, asserts Djibouti's `+03:00`, and orders by a zero-padded key so comparison is exact without ever reformatting what we transmit |
+| `source_events.py` | `SourceOrderEvent` (the transport-neutral output — **names no target**) and cohort assembly: dedupe by `(type, id, versionId)`, prove completeness against the bundle's `total`, sort **client-side** |
+| `watermark.py` | Durable position, bootstrapped **once** from the server clock (ADR-015) and never re-derived; refuses to move backwards |
+| `openmrs.py` | Bounded-window fetch with paging. Read-only — `ServiceRequest` is search/read only on this server anyway |
+| `order_poller.py` | The cycle. Claims via the DH-010 ledger, routes stale claims through DH-025's coordinator, and advances the watermark **only** past accounted-for work |
+
+**Two design choices worth knowing, both forced by measured behaviour rather than preference:**
+
+1. **The window is bounded at *both* ends**, which the accepted design did not specify. Without an
+   upper bound, records written *during* the fetch land inside a window whose `total` was already
+   read, so the completeness check would fire forever on healthy traffic. The top is frozen at a
+   **server-issued** instant — taken from the bundle's own `meta.lastUpdated`, which every search
+   response carries, so no clock endpoint is needed. Both bounds were verified applied before being
+   relied on: an impossible `ge`/`le` range returns 0.
+2. **The ledger is only marked `completed` after a real delivery returns a target record.** Marking
+   it on mere observation would be the worst possible bug here — when the target leg lands, every
+   order polled beforehand would look already-done and never be delivered. Silent loss, at scale.
+
+**Five controls, each breaking a guard deliberately:**
+
+| Control | Result |
+|---|---|
+| Remove the client-side sort | **5 fail**, incl. the reversed-response test |
+| Drop the completeness check | **2 fail** |
+| Let the watermark advance past a halted event | **4 fail** |
+| Filter to `status == active` only | **3 fail** — the cancellation-loss bug |
+| Remove the instant zero-padding | **2 fail** |
+
+⚠️ **The fifth control initially did not fail, and that is worth recording.** The original
+fractional-width test compared `.10` with `.9`, where naive and padded comparison happen to agree —
+for decimal fractions leading digits dominate, so plain lexicographic order is otherwise correct.
+The test proved nothing and 92 tests passed with the padding removed. The real case padding fixes is
+**equal moments written at different precision**: `.1` and `.10`. Under naive comparison `.1` reads
+as *earlier* than a persisted `.10`, so `advance()` would reject a legitimate re-poll as a
+regression and stop the poller. Both tests were rewritten around that, and the control now fails
+correctly. **A guard that is never control-tested is a guess** — this is the eighth instance in this
+repo of a check passing for reasons unrelated to its claim.
+
+**Incidental confirmation:** running the migration through `docker compose run adapter` was refused
+with `RecoveryFenceUnavailable: another adapter process owns startup recovery`. That is DH-025's
+process-lifetime fence doing exactly its job against a live adapter — an unplanned live control.
+
+**Remaining for DH-011:** everything downstream of BLOCKER-6 — the delivery implementation, DH-011C's
+correlation binding, DH-011G/H/I mappings, DH-011K's crash-point qualification, and DH-011L's
+demonstration. The 15-second interval and the loop that calls `poll_once` are deliberately not wired
+either; activating a poller with no target would be pointless and would invite a false green.
 
 #### DH-011B — OpenELIS native ingestion spike · ✅ PERFORMED 2026-08-17 · synthetic data only
 
@@ -1707,6 +1763,7 @@ message shapes).
 | 17 | **The provisioning executor's 900s timeout is far short of a real OpenMRS first boot (~49 min)**, so the first genuine facility provisioning would time out and be reported as failed while the stack was still coming up | **Fixed 2026-08-16 — per-verb timeouts.** Liban chose the longer-timeout option over detaching. Verbs that wait on the compose health graph (`provision`, `start`, `rotate_tls`) get 5400s; `backup_now` gets its own bound because it scales with stored data, not boot time; `status`/`stop` stay at 900s. Both long bounds are per-host configurable. The bound is asserted **against the real `docker-compose.yml`** — it must clear every `start_period` (the largest is 1800s) and the measured 49-minute cold boot — so a future gate with a longer grace period fails the suite rather than the first deployment. 371 tests, Ruff clean. Control-verified three ways: restoring 900s fails the two guards by name, wiring `provision` to the fast bound fails the per-verb tests, and running without the compose file mounted **fails instead of skipping**. ⚠️ Still unfixed by this: bug 18 below, and the fix has **not** been exercised against a real ~49-minute boot — no clinical stack has ever booted through the provisioning path |
 | 18 | **The agent does not poll while a long job runs**, so a `stop`/`status`/`backup_now` issued during a ~50-minute provision is refused as stale when finally claimed (`JobValidator` rejects jobs older than 900s) | **Open — accepted limit of bug 17's fix, 2026-08-16, not an oversight.** The refusal is loud and audited, so nothing is silently skipped; the operator re-issues. Deliberately **not** fixed by widening the staleness window — that is ADR-022 replay protection, a security property rather than a tuning constant, and changing it is a decision. The real fix is running the long verb off the poll thread, which puts concurrency into the component whose value is partly that it is simple. Worth revisiting when a second facility makes concurrent operations routine |
 | 16 | **Three upstream demo forms loaded here perform clinical interpretation** — `structured_soap_note` (an `alert` key, `calculateExpression`, expression validators), `mental_health_assessment_form`, `form-engine-cookbook` | **Open — raised 2026-08-13 by DH-004's new guard.** Demo content, not maternity forms; nothing changed. `OMRS_DEMO_CONTENT=off` removes them, but that is a decided switch (BLOCKER-2) — **Human Decision Required: Yes** |
+| 20 | **The Caddy container reports `unhealthy` while serving perfectly — a false RED.** Its healthcheck runs via `docker exec`, and every attempt fails with `OCI runtime exec failed: … procReady not received` (failing streak 657). Discriminated 2026-08-17: all three vhosts answer (`emr` 301, `lab` 200, `id` 302 — the documented values), ports 80/443 are open, and the log shows certificates renewing normally. `docker exec` into **caddy** fails while `docker exec` into **adapter** succeeds, and the host has 14.8 GB free at load 1.07 — so it is specific to that container, not host pressure | **Open — found 2026-08-17 while verifying an unrelated rebuild.** Deliberately **not** restarted: Caddy is serving correctly so there is no urgency, and a restart would very likely clear the wedged state before anyone can find out why exec died. ⚠️ The consequence to know: any future service using `depends_on: caddy: condition: service_healthy` would block forever on a healthy proxy. This is the inverse of bug 15 — that healthcheck passed while the app was dead; this one fails while the app is alive. Both come from a healthcheck whose failure mode is not the service's |
 | 19 | **OpenELIS `PatientProvider` returns `201 Created` when the native persist fails**, with no `Location` header in either case. Demonstrated 2026-08-17 by a control pair differing only in the patient's given name: an invalid name logged `ERROR … invalid name format` and created **0** rows; a valid one created 1. Both returned 201 | **Open — upstream defect, not ours; do not "fix" OpenELIS.** The consequence is ours to defend against: an adapter trusting this 201 would write `completed` into the DH-025 ledger for an order that never existed — silent loss, the one direction `WATERMARK-DESIGN.md` refuses. **Any Option-F implementation must confirm by read-back, never by status code.** Also blocks learning the created resource id from the response, which compounds DH-011C |
 | 15 | **The OpenELIS webapp healthcheck is a false green.** It asserts only that `/OpenELIS-Global/` returns `302`. A completely failed Spring context still returns 302, so the container reported **healthy** while every page was a redirect loop and the application was down | **Fixed and verified 2026-08-13.** The check now requires `LoginPage` to return 200 *and* contain the Spring Security `_csrf` token — something only a live application context produces. Proven in both directions: it passes against the healthy webapp and **fails against the bare 302** (0-byte body) that the broken context returned. `start_period` raised 60s → 180s because the context must genuinely be up, not merely bound |
 

@@ -52,6 +52,42 @@ class ProcessedMessage(Base):
     dead_letter: Mapped[DeadLetter | None] = relationship(back_populates="processed_message")
 
 
+class Watermark(Base):
+    """One durable poll position per (direction, resource_type) — DH-011E.
+
+    `watermark_raw` is the **exact string the FHIR server emitted**, never a parsed or
+    reformatted value and never a local clock reading (`WATERMARK-DESIGN.md` §2, §7). It is a
+    string column for that reason: storing it as a timestamp would invite the database or the
+    driver to normalise it, and the whole contract is that we hand the server back its own bytes.
+
+    `bootstrapped_raw` records the first value ever persisted and is never updated. ADR-015
+    forbids historical backfill and requires the bootstrap instant to be persisted once and
+    never re-derived — re-deriving "now" at boot would skip every order placed while the
+    adapter was down. Keeping the original alongside the moving position makes that auditable,
+    and §8's nightly reconciliation counts only from it.
+    """
+
+    __tablename__ = "watermarks"
+    __table_args__ = (
+        # One position per stream, enforced by the database rather than by convention: two rows
+        # for one stream would let two poll cycles disagree about what had been processed.
+        Index("uq_watermarks_stream", "direction", "resource_type", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    direction: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    watermark_raw: Mapped[str] = mapped_column(String(64), nullable=False)
+    bootstrapped_raw: Mapped[str] = mapped_column(String(64), nullable=False)
+    bootstrapped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    # Diagnostics only. Never used as a query bound — see §2.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class DeadLetter(Base):
     __tablename__ = "dead_letters"
     __table_args__ = (
