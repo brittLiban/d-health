@@ -275,7 +275,7 @@ exists. Each links to the detail rather than repeating it.
 | ~~4~~ | ~~**Revisit `labonfhir` (ADR-004)?**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** continue the custom adapter for v1; revisit after the golden flow | — | DH-010 is unblocked |
 | ~~5~~ | ~~**Keycloak session lifetimes**~~ — ✅ **RESOLVED 2026-08-12 by Liban:** 1h idle, 10h maximum, 5m access token (ADR-013) | — | DH-007 complete |
 | ~~6~~ | ~~**OpenELIS default requester identity**~~ — ⏳ **INTERIM DECIDED 2026-08-14:** create one controlled test provider ("Pilot Test Clinician") replacing upstream's sample ("Felix Dr. Mauritius"). The real ordering clinician swaps in after the meeting — a one-line change, not a redesign. **Not yet created; tracked in DH-011.** | — | DH-011 |
-| 7 | **Facility identity** — ✅ **PARTIALLY SET 2026-08-14:** country `Djibouti`, facility id `DJ-BC-001` (deliberate internal placeholder). ⏳ **Still needed: city**, plus state/district/postal code. ⚠️ **Now also blocks Option F (DH-011B, 2026-08-17):** OpenELIS's accession prefix is still upstream's placeholder `DEV01` with `validateAccessionNumber=true`, and a synthetic order was refused with `Generated lab number is invalid`. A lab accession number is a facility-scoped real-world identifier — not something to invent | The birth centre's real details are yours | `common.properties.template`, **and the DH-011 order path** |
+| 7 | **Facility identity** — ✅ **PARTIALLY SET 2026-08-14:** country `Djibouti`, facility id `DJ-BC-001` (deliberate internal placeholder). ⏳ **Still needed: city**, plus state/district/postal code. ⚠️ **Now also blocks Option F and therefore the whole order path (DH-011B, 2026-08-17).** The exact question, narrowed so it can be asked of the laboratory directly: **what numeric site code should lab accession numbers carry?** OpenELIS is configured `acessionFormat = SITEYEARNUM`, whose validator formats the accession as **`%013d` — 13 digits, all numeric** — while the configured prefix is still upstream's alphabetic `DEV01`. So every order is refused with `Generated lab number is invalid`. A supplied accession does not work around it: the value is always server-generated. This is a laboratory identifier convention and is deliberately not being invented | The birth centre's real details are yours | `common.properties.template`, **and the DH-011 order path** |
 | 8 | **Maternity bed counts** — ✅ **PLACEHOLDERS SET 2026-08-14:** 2 delivery / 4 postpartum, clearly marked. ⚠️ Additive-only means these CANNOT be removed later; set real numbers before the pilot deployment | Facility numbers | DH-003 unblocked |
 | 9 | **Prenatal panel + partograph fields** — untouched, both need the clinical lead | Hard gate for *clinically live* (ADR-012) | DH-004, DH-006 |
 | ~~10~~ | ~~**DH-011 first-sync boundary**~~ — ✅ **RESOLVED 2026-08-13 by Liban (ADR-015):** no historical backfill; the watermark starts at deployment time. The pilot is forward-going patients, not a paper-record digitisation | — | BLOCKER-3 leg 1 closed |
@@ -529,7 +529,7 @@ data flows where — both on the always-ask list:
 | **C. The adapter writes into OpenELIS's own fhirstore** | Adapter pushes, hoping OpenELIS ingests | ⚠️ **Unverified and possibly not a real path.** The store is empty, `transformOnStartup=false`, and nothing in the config describes it as an inbox. Would need proving before it could be trusted |
 | **D. A dedicated order-exchange FHIR store** *(added by Liban 2026-08-16; **not** selected)* | The adapter writes orders to a separate exchange store; OpenELIS polls **that** store via `remote.source.uri`. Keeps the adapter as the routing and audit boundary without making it a FHIR server (B), and uses the pull mechanism OpenELIS actually documents | ⚠️ **Human Decision Required: Yes — and the widest scope of the four.** It adds another system that **stores patient and order data**, so it lands inside every boundary this project has already drawn: DH-014/DH-015 backup and restore coverage, ADR-021's "no clinical data outside the stack" reasoning, the tenant-isolation model, retention, and the security surface of one more network-reachable store holding clinical records. None of those are implementation details, and a new clinical datastore is not a thing an agent may adopt because it is architecturally tidy |
 
-| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **still not selected**)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. Keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ✅ **Spiked 2026-08-17 (DH-011B) — it reaches native lab state, and it is unfinished.** `POST /OpenELIS-Global/fhir/Patient` over HTTP Basic created a real `clinlims.patient`+`person` row. ServiceRequest returns **400 `Generated lab number is invalid`** — accession config, tied to facility identity (#7). Two hard caveats: `PatientProvider` returns **201 even when the persist fails** (bug 19), and ServiceRequest is **not `identifier`-searchable here**, which is where DH-025's correlation was meant to bind |
+| **F. OpenELIS's own business FHIR providers** *(added 2026-08-16, ADR-026; **spiked, still not selected**)* | The adapter posts to the FHIR providers inside the OpenELIS **webapp** — a different layer from option C's generic HAPI store. Keeps the adapter as the ledger/audit boundary without making it a FHIR server (B) or adding a clinical datastore (D) | ✅ **Fully spiked 2026-08-17 (DH-011B) and it is the strongest candidate: the providers write OpenELIS's own domain tables — `clinlims.patient` and `clinlims.provider` rows were created through the supported FHIR surface, and `ServiceRequestProvider` calls the same `SamplePatientEntryService` the human workflow uses.** Two gates, neither an engineering choice: (1) **ServiceRequest is refused** — `SITEYEARNUM` formats accessions as `%013d`, 13 all-numeric digits, while the configured prefix is `DEV01`; a **numeric facility site code** is required (#7), and a supplied accession is ignored because the value is always server-generated. (2) **The correlation does not survive** — our identifier is discarded (`external_id` NULL), and search is delegated to `http://fhir.openelis.org:8080` which is refused, so a submitted identifier and a never-submitted one both return `total: 0`. → **DH-011D** |
 
 **Deliberately not narrowed.** Options A–D are retained exactly as first recorded; F is appended
 rather than replacing them, so the reasoning history stays auditable (ADR-026).
@@ -1176,15 +1176,15 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | ID | Scope | Status |
 |---|---|---|
 | **DH-011A** | Record Option F as a candidate | ✅ **DONE 2026-08-16** — ADR-026 |
-| **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | ✅ **DONE 2026-08-17** — see below |
-| **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | ⏸ needs DH-011B |
-| **DH-011D** | Narrow OpenELIS patch, **only if** correlation cannot survive ingestion. Needs a superseding ADR (ADR-016/BLOCKER-4) | ⏸ conditional |
+| **DH-011B** | Runtime spike: OpenELIS native business FHIR ingestion, **synthetic data only** | ✅ **COMPLETE 2026-08-17** (authorized by Liban) — Option F writes native domain rows; ServiceRequest gated on a numeric site code, correlation does not survive |
+| **DH-011C** | Prove DH-025 correlation: 0 / 1 / 2+ match behaviour on the real target | 🛑 **Answered negatively by DH-011B** — through Option F's surface the contract is inexpressible: a submitted and a never-submitted identifier both return `total: 0`. Superseded by DH-011D |
+| **DH-011D** | Narrow OpenELIS patch to persist and exactly search an external order identifier. Needs a superseding ADR (ADR-016/BLOCKER-4) | 🔓 **Condition met 2026-08-17** — DH-011B proved the correlation is discarded on ingestion. ⚠️ Its *verification* is gated on NEEDS LIBAN #7: proving exact search needs a created ServiceRequest, which needs a valid accession |
 | **DH-011E** | OpenMRS poller + durable watermark. **Transport-neutral**, unblocked by BLOCKER-6 | ✅ **BUILT + VERIFIED 2026-08-17, NOT ACTIVATED** — see below |
 | **DH-011F** | Watermark/paging test matrix | ⏸ with DH-011E |
 | **DH-011G** | Patient identity mapping — controlled identifiers, fail closed on ambiguity | ⏸ |
 | **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
 | **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off |
-| **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ⏸ needs DH-011B |
+| **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | 🛑 **Not testable yet** — DH-011B could create no order, so no native transition could be observed. The provider does expose `@Delete`/`@Update`, so the surface exists |
 | **DH-011K** | Crash-point qualification across all five points | ⏸ |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
 
@@ -1244,7 +1244,110 @@ correlation binding, DH-011G/H/I mappings, DH-011K's crash-point qualification, 
 demonstration. The 15-second interval and the loop that calls `poll_once` are deliberately not wired
 either; activating a poller with no target would be pointless and would invite a false green.
 
-#### DH-011B — OpenELIS native ingestion spike · ✅ PERFORMED 2026-08-17 · synthetic data only
+#### DH-011B — full runtime spike · ✅ COMPLETE 2026-08-17 · explicitly authorized by Liban · synthetic data only
+
+**Verdict: Option F writes genuine native OpenELIS domain state and is NOT a FHIR façade. It cannot
+be completed here for two separate reasons, neither of which is an engineering choice.**
+
+**Endpoint, and how it differs from the other one.** Two distinct FHIR servers exist in this stack and
+conflating them is the mistake this spike existed to prevent:
+
+| | Business API (Option F) | Standalone store (Option C) |
+|---|---|---|
+| URL | `https://oe.openelis.org:8443/OpenELIS-Global/fhir/` | `https://fhir.openelis.org:8443/fhir/` |
+| Server | HAPI **7.0.2**, embedded in the webapp | HAPI **6.6.0**, separate container |
+| Registered by | `AnnotationWebAppInitializer` → `fhirServlet` (`FhirRestfulServer`) at `/fhir/*` | its own image |
+| Auth | **HTTP Basic** (`SecurityConfig.BasicAuthRequestedMatcher`); a form-login cookie is refused on POST with `access=denied` | mutual TLS |
+| Providers | OpenELIS's own 8 business providers | generic JPA storage |
+
+**Baseline before any write:** `patient 1, person 1, provider 0, sample 0, sample_item 0, analysis 0,
+electronic_order 0`. (The single patient was created by this spike's first pass, already committed.)
+
+**Requests made** — all through the supported FHIR surface, all clearly labelled synthetic:
+
+| # | Request | Result |
+|---|---|---|
+| 1 | `POST /fhir/Practitioner` — `Dhprac Zzsynthetic`, identifier `DHSPIKEPRAC1` | **201**, and returned the created resource body |
+| 2 | `POST /fhir/ServiceRequest` — LOINC `94500-6`, subject + requester + `authoredOn` | **400** `Generated lab number is invalid` |
+| 3 | Same, plus `occurrenceDateTime` | **400**, identical |
+| 4 | Same, plus a supplied `requisition` (synthetic `9990000000001`) | **400**, identical |
+| 5 | Same, plus a supplied accession `identifier` (synthetic `9990000000002`) | **400**, identical |
+
+**✅ Native domain changes observed — the headline.** `PractitionerProvider` logged
+`Successfully created Practitioner with UUID: …` and a real `clinlims.provider` + `clinlims.person`
+row exists (`id=2`, `fhir_uuid bac7daf3-…`). Combined with the earlier `clinlims.patient` row, **the
+business providers write OpenELIS's own domain tables.** Reading `ServiceRequestProvider` confirms the
+mechanism rather than inferring it: it calls `SamplePatientEntryService`, `SamplePatientUpdateData`,
+`SampleOrderItem` and `SampleAddService$SampleTestCollection`, and builds `Sample` and `Analysis` —
+the same services the human sample-entry workflow uses. Option F is real.
+
+**🛑 But the laboratory workflow was never reached.** `sample`, `sample_item`, `analysis` and
+`electronic_order` are **all still 0**. Every ServiceRequest was refused before any of it.
+
+**Root cause of the refusal, and it is not fixable by an engineer.** The provider calls
+`getNewAccessionNumber()` then `validateNewAccessionNumber()`. The configured format is
+`acessionFormat = SITEYEARNUM` (upstream's typo) with `Accession number prefix = DEV01` and
+`validateAccessionNumber = true`. Parsing `SiteYearAccessionValidator`'s constant pool shows its
+format string is **`%013d`** — a **13-digit, all-numeric** accession. `DEV01` is alphabetic, so the
+generated value cannot satisfy it. A **numeric facility site code is required**, and a laboratory
+accession number is a facility identifier convention, not an engineering default —
+**NEEDS LIBAN #7**. Supplying a synthetic accession does **not** work around it: variants 4 and 5
+proved the value is always server-generated and a client-supplied one is ignored.
+
+**🛑 Correlation result: it does not survive, and the negative control proves the search is useless
+here.**
+
+| Query | `total` |
+|---|---|
+| `Practitioner?identifier=DHSPIKEPRAC1` — an identifier we **did** submit | **0** |
+| `Practitioner?identifier=NEVER-SUBMITTED-XYZ` — **negative control** | **0** |
+| `Patient?identifier=DHSPIKEPONE` — submitted on the first pass | **0** |
+
+A submitted identifier and one that never existed are **indistinguishable**. So the required
+0 / 1 / 2+ contract — proven absent, proven present, ambiguous — **cannot be expressed through this
+surface at all**, which is a stronger negative result than "our identifier was missing".
+
+Two independent causes, both confirmed:
+
+1. **The identifier is discarded on ingestion.** The returned Practitioner carries only OpenELIS's own
+   `provider_uuid` and `facility_id` identifiers; ours is absent. `clinlims.provider.external_id` is
+   **NULL**. The submitted correlation is not persisted anywhere.
+2. **Search is delegated to a different, unreachable store.** Every search response's `self` link is
+   `http://fhir.openelis.org:8080/fhir/…` — plain HTTP on a port this stack does not serve
+   (connection **refused** from inside the network). So *create* writes native rows locally while
+   *search* asks a remote store. The resources do reach the standalone store on **8443** (Patient 1,
+   Practitioner 1), but stripped of our identifier.
+
+**Cancellation: not testable.** It requires an existing order, and no order could be created. The
+provider does expose `@Delete` and `@Update`, so the surface exists; its native state transition
+remains unobserved. Deferred with the accession blocker.
+
+**Controls used:** wrong-password → 401 (auth genuinely enforced); unknown search parameter → 400
+`HAPI-0524` while advertised `_id` → 200 (so a 200 means real support); the never-submitted-identifier
+negative control above; and read-back rather than status code throughout, because of bug 19.
+
+**Nothing was modified to make the spike pass.** Laboratory tests unchanged (**177 active**),
+`site_information` unchanged (121 rows), no accession setting altered, no role or permission granted,
+no database row written or deleted directly. Every write went through the supported FHIR surface.
+
+**Synthetic resources created, retained deliberately, never to be confused with real data:**
+
+| Resource | Native row | FHIR uuid |
+|---|---|---|
+| Patient `Dhspike Zzsynthetic` (first pass) | `clinlims.patient id=2` + person | `b010ea84-aab8-4917-ad44-7ba155dff2d5` |
+| Practitioner `Dhprac Zzsynthetic` | `clinlims.provider id=2` + person | `bac7daf3-f68a-490c-bf9c-eaebfe520169` |
+
+Both also exist in the standalone HAPI store. No sample, analysis or electronic_order was created. Not
+deleted, per this repo's standing rule against removing patient rows to tidy up.
+
+**Verdict against the stated rules.** Native domain state **is** created, so Option F does not fail —
+rule 3 does not apply. Correlation **fails**, so **rule 2 applies: Option F remains preferred, and
+DH-011D (narrow correlation preservation and search) is the follow-on.** With one addition the rules
+did not anticipate: DH-011D cannot be *verified* end to end until a numeric site code exists, because
+proving exact search needs a created ServiceRequest. So the facility answer gates the proof, not the
+patch.
+
+#### DH-011B — first pass · ✅ PERFORMED 2026-08-17 · synthetic data only
 
 **Option F is real, not a façade — and it is not usable yet.** Both halves are demonstrated.
 

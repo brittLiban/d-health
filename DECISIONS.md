@@ -1173,3 +1173,47 @@ facility-scoped real-world identifier, so completing this is gated on facility i
 **Nothing was modified:** no OpenELIS laboratory test, mapping, accession setting, or role was
 changed to make the spike progress. The synthetic patient row is retained and documented rather than
 deleted, consistent with this repository's practice of never removing patient rows to tidy up.
+
+### ADR-026 — full spike verdict appended 2026-08-17 (DH-011B, authorized by Liban). **Status remains OPEN.**
+
+Status stays `OPEN` because BLOCKER-6 is Liban's decision and this appendix selects nothing. What it
+does is remove the guesswork: Option F is no longer a candidate resting on the existence of some
+classes.
+
+**Established — Option F writes OpenELIS's own domain tables.** Creating a synthetic Practitioner
+through `POST /OpenELIS-Global/fhir/Practitioner` over HTTP Basic produced a real `clinlims.provider`
++ `clinlims.person` row; the earlier pass produced a real `clinlims.patient` row. `ServiceRequestProvider`
+calls `SamplePatientEntryService`, `SamplePatientUpdateData`, `SampleOrderItem` and
+`SampleAddService$SampleTestCollection` and constructs `Sample` and `Analysis` — the same services the
+human sample-entry workflow uses. **This is not a FHIR façade over the generic store**, which was the
+question the spike existed to answer, and it is what makes Option F preferable to A, B, C and D.
+
+**Blocked — two gates, neither of which an engineer may close.**
+
+1. **A numeric facility site code is required.** `acessionFormat = SITEYEARNUM`, and that validator
+   formats the accession as **`%013d`** — thirteen digits, all numeric — while the configured prefix
+   is upstream's alphabetic `DEV01`. Every ServiceRequest is therefore refused with
+   `Generated lab number is invalid`, before subject or requester is even examined. A client-supplied
+   accession does not help: two variants proved the value is always server-generated and a supplied
+   one is ignored. A laboratory accession is a facility identifier convention (NEEDS LIBAN #7).
+2. **The adapter correlation does not survive ingestion, and the search surface cannot express the
+   contract at all.** Our `identifier` is discarded — the returned resource carries only OpenELIS's
+   own `provider_uuid`/`facility_id`, and `provider.external_id` is NULL. Worse, search is delegated
+   to `http://fhir.openelis.org:8080/fhir` — a port this stack does not serve — so a submitted
+   identifier and a never-submitted control **both return `total: 0`**. DH-025 requires
+   0 = proven absent, 1 = proven present, 2+ = ambiguous; through this surface those are
+   indistinguishable, which is a stronger negative than a missing field.
+
+**Consequence.** Option F remains the preferred ingestion path, and the follow-on is **DH-011D** — the
+smallest upstream-compatible change that persists an external order identifier and makes it exactly
+searchable. Its *verification* is gated on gate 1, because proving exact search requires an order that
+can be created.
+
+**Not observed, and not claimed:** no `Sample`, `SampleItem`, `Analysis` or `electronic_order` was ever
+created, so native laboratory workflow state and the OpenELIS UI's view of an incoming order remain
+**unverified**. Cancellation is likewise unobserved — it needs an order to cancel.
+
+**Nothing was modified to make the spike progress:** laboratory tests unchanged (177 active),
+`site_information` unchanged (121 rows), no accession setting altered, no role granted, no database row
+written or deleted directly. Two clearly-labelled synthetic resources were created through the
+supported FHIR surface and are retained rather than deleted.

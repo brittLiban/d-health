@@ -50,12 +50,21 @@ controls. Its output is a transport-neutral `SourceOrderEvent` that names no tar
 runs it**: BLOCKER-6 has not decided how an order reaches OpenELIS, so there is nothing to deliver
 to and no order has moved.
 
-**The same session found that the correlation cannot bind where the design assumed.** DH-011B's spike
-showed the OpenELIS business FHIR server does reach real native laboratory state — a synthetic
-Patient create produced a genuine `clinlims.patient` row — but it does **not** support `identifier`
-search on `ServiceRequest`, which is exactly where DH-025's correlation was to attach. It also returns
-`201 Created` when a native persist fails. Both are recorded as constraints on whatever BLOCKER-6
-selects, not as things to work around quietly.
+**DH-011B's full spike settled the ingestion question and found the correlation cannot bind at all.**
+Authorized by Liban and run with synthetic data only. Confirmed: OpenELIS's business FHIR providers
+write its **own domain tables** — synthetic Patient and Practitioner creates produced real
+`clinlims.patient` and `clinlims.provider` rows — and `ServiceRequestProvider` calls the same
+`SamplePatientEntryService` the human workflow uses. So Option F is not a façade, and it is the
+strongest of the five candidates.
+
+Blocked on two things an engineer must not decide: a **numeric facility site code** (accessions are
+`%013d` under `SITEYEARNUM`, the prefix is alphabetic `DEV01`, so every order is refused), and the
+**adapter correlation, which does not survive** — the identifier is discarded and search is delegated
+to a port this stack does not serve, so a submitted identifier and a never-submitted control both
+return `total: 0`. DH-025's 0/1/2+ contract is inexpressible there. Bug 19 adds a third constraint:
+`201 Created` is returned even when the persist fails, so read-back is the only trustworthy check.
+No `sample`, `analysis` or `electronic_order` was ever created, so laboratory workflow state and
+cancellation remain unverified.
 
 **DH-024's fresh-deployment audit closed three false-green paths.** The OpenMRS demo-patient
 property had two competing writers and injected a second 50-patient batch into this throwaway
@@ -268,21 +277,35 @@ adapter *is* — one removes the ledger/audit boundary ADR-005 made load-bearing
 one turns the adapter into a FHIR server, one adds a second system storing patient data — so this is
 a human decision, recorded in `PROJECT_STATE.md` with the evidence.
 
-**Option F is spiked as of 2026-08-17 (DH-011B): it reaches native laboratory state, and it is not
-usable yet.** `POST /OpenELIS-Global/fhir/Patient` over HTTP Basic created a genuine
-`clinlims.patient` + `person` row — so the business providers are not a FHIR façade. A synthetic
-order was then refused with `400 Generated lab number is invalid`: OpenELIS's accession prefix is
-still upstream's `DEV01`, which ties this to facility identity (NEEDS LIBAN #7).
+**Option F is fully spiked as of 2026-08-17 (DH-011B, authorized by Liban) and is the strongest
+candidate — but it cannot be completed here.** The business providers write OpenELIS's **own domain
+tables**: synthetic Patient and Practitioner creates through the supported FHIR surface produced real
+`clinlims.patient` and `clinlims.provider` rows, and `ServiceRequestProvider` calls the same
+`SamplePatientEntryService` the human sample-entry workflow uses. It is **not** a FHIR façade over the
+generic store, which was the question worth answering.
 
-Two constraints came out of it. `PatientProvider` returns **`201 Created` even when the persist
-fails** (known bug 19, proven by a control pair) — so an adapter must confirm by read-back, never by
-status code. And `ServiceRequest` is **not `identifier`-searchable** on that server, which is
-exactly where DH-025's correlation was meant to bind; the standalone HAPI store *does* support it
-but may not reach native lab state. DH-011C must resolve that trade.
+**Two gates remain, neither an engineering choice.** (1) Every ServiceRequest is refused with
+`Generated lab number is invalid`: `acessionFormat = SITEYEARNUM` formats accessions as `%013d` —
+thirteen all-numeric digits — while the configured prefix is upstream's alphabetic `DEV01`, so a
+**numeric facility site code** is needed (NEEDS LIBAN #7). Supplying an accession does not help; the
+value is always server-generated. (2) The adapter correlation **does not survive**: our identifier is
+discarded (`external_id` NULL) and search is delegated to `http://fhir.openelis.org:8080`, which this
+stack does not serve — so a submitted identifier and a never-submitted control **both return
+`total: 0`**. DH-025's 0/1/2+ contract is therefore inexpressible through this surface. → **DH-011D**.
 
-⚠️ **This throwaway stack now also contains one synthetic OpenELIS patient** (`id=2`,
-`Dhspike Zzsynthetic`), deliberately retained rather than deleted. No sample, analysis or
-electronic_order exists, and no laboratory test or configuration was modified.
+Also note bug 19: `PatientProvider` returns **`201 Created` even when the persist fails**, so any
+target implementation must confirm by read-back, never by status code.
+
+⚠️ **Never reached, and not claimed:** no `sample`, `sample_item`, `analysis` or `electronic_order`
+row was created, so native laboratory workflow state, the OpenELIS UI's view of an incoming order, and
+cancellation behaviour all remain **unverified**.
+
+⚠️ **This throwaway stack now also contains two synthetic OpenELIS records**, both created through
+the supported FHIR surface by DH-011B and deliberately retained rather than deleted: patient `id=2`
+`Dhspike Zzsynthetic` (`fhir_uuid b010ea84-…`) and provider `id=2` `Dhprac Zzsynthetic`
+(`fhir_uuid bac7daf3-…`). Both also exist in the standalone HAPI store. No sample, analysis or
+electronic_order exists; laboratory tests (177 active) and `site_information` (121 rows) were not
+modified, and no database row was written or deleted directly.
 
 ### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 
