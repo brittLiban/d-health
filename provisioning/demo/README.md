@@ -1,6 +1,8 @@
 # Provisioning demonstration (ADR-020, ADR-022, ADR-023)
 
-**Performed 2026-08-16.** Upgrades the pull transport from *written* to *demonstrated* — but
+**Performed 2026-08-16.** Covers the transport, TLS, the refusal path, crash behaviour, the audit trail, the full portal chain, and a stack genuinely started by the executor.
+
+**Original note:** Upgrades the pull transport from *written* to *demonstrated* — but
 read §4 before treating that as complete, because two claimed properties are still untested.
 
 ## Why it exists

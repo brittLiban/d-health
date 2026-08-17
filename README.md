@@ -26,10 +26,12 @@ one `docker-compose.yml`.
 > Still missing: clinical forms, the prenatal order set, order/result transport, notifications,
 > SSO activation, and the end-to-end demonstration.
 >
-> A **multi-facility provisioning API** started 2026-08-15 (`provisioning/`) as a deliberate
-> schedule trade ahead of the transport chain. Its API surface, auth, audit log and host allowlist
-> work; **the host agent and portal do not exist, so nothing provisions a real facility yet**. It is
-> a separate system that **never touches clinical data**.
+> A **multi-facility provisioning API and portal** started 2026-08-15 (`provisioning/`) as a
+> deliberate schedule trade ahead of the transport chain. It now works end to end: signing into the
+> portal and submitting a form provisions a facility, and a stack **actually starts** from that job
+> on a real Docker daemon. ⚠️ That was proven against a **minimal stand-in compose file** — no
+> OpenMRS, OpenELIS, Keycloak or adapter has ever booted this way. Public DNS/TLS also remains
+> unconfigured. It is a separate system that **never touches clinical data**.
 >
 > First boot takes **≈50 minutes** and looks like a hang. Read the timing note before running it.
 >
@@ -83,11 +85,15 @@ namespaces the Compose project and therefore every container, volume and network
 changing it later does not rename anything — it points the stack at fresh empty volumes and
 orphans the patient database while appearing to start normally. Set it once, before the first `up`.
 
-**Today, a second facility is a manual copy of `.env` with fresh secrets and a distinct
-`FACILITY_ID`.** The provisioning API that will automate this is in progress and **does not deploy
-anything yet** — see [`provisioning/README.md`](provisioning/README.md).
+A second facility can be created **through the provisioning portal** — sign in, submit a form, and
+the facility's host brings its stack up. It can also still be done by hand: copy `.env`, fresh
+secrets, a distinct `FACILITY_ID`. See [`provisioning/README.md`](provisioning/README.md).
 
-How it will work when it does (ADR-022): facility hosts run a small agent that **polls outbound**
+⚠️ **Not yet proven with the real clinical stack.** The provisioning path has started containers
+from a job, but against a minimal stand-in — the ~49-minute OpenMRS first boot is unexercised on
+that path, and public DNS/TLS is unconfigured.
+
+How it works (ADR-022): facility hosts run a small agent that **polls outbound**
 for jobs addressed to itself, so **no clinical host exposes an inbound port**. The compose file
 lives on the facility host and the API sends only parameters — because Docker access is root access,
 and an API that could hand a host an arbitrary container spec would be root on every clinical VM.

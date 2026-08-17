@@ -125,6 +125,12 @@ Two things are **deliberately incomplete and must not be reported as working**:
 - **Audit log external destination** — the requirement is a log that survives the API host being
   rebuilt or tampered with. The interface will exist before the destination does.
 
+⚠️ **The executor's 900-second timeout is far short of a real OpenMRS first boot (~49 minutes).**
+The first genuine provisioning run would time out and be reported as failed while the stack was
+still coming up. Found by thinking about the real boot rather than the stand-in the demo uses; fix
+is a longer timeout for `PROVISION` specifically, or detaching and letting a later `STATUS` job
+report progress. Known bug 17 — **not yet fixed.**
+
 Both report their incompleteness rather than appearing to succeed. A provisioning step that
 silently "succeeds" against nothing is a false green, and this project has found five of those.
 

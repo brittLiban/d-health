@@ -263,26 +263,33 @@ healthcheck that reported healthy through a total outage, and one inside the new
 **Nothing above chose any clinical content.** The panel is empty, no form schema is committed, and
 both sign-off requests are in `docs/CLINICAL-SIGNOFF.md`.
 
-## 5b. Multi-facility provisioning — started, not working
+## 5b. Multi-facility provisioning — works end to end, on a stand-in
 
 A provisioning API and portal (`provisioning/`) began 2026-08-15 as a **deliberate schedule trade**:
-it is being built before DH-011's transport chain, so the golden end-to-end flow will very likely
-not be demonstrated by 1 September. That is a recorded decision, not a slip.
+built before DH-011's transport chain, so the golden end-to-end flow will very likely not be
+demonstrated by 1 September. That is a recorded decision, not a slip.
 
-**What exists:** per-facility secret generation, closed API schemas, and the structural
-no-clinical-data guarantee (46 tests, control-verified). `FACILITY_ID` now namespaces the clinical
-stack.
+**What works, demonstrated across four containers:** signing into the portal and submitting a form
+records a facility, queues a job, and the host's agent claims it over TLS, validates it locally, and
+**actually runs `docker compose`** — containers come up, namespaced by `FACILITY_ID`, with secrets
+the agent generated on its own host and never transported. 360 tests. State is durable (SQLite), so
+a control-plane restart no longer loses the fleet.
 
-**What exists now (159 tests):** per-facility secret generation, closed API schemas, the facility
-env writer, a hash-chained audit log, scoped auth, rate limiting, the deploy-host allowlist, and the
-FastAPI surface enforcing all of it over HTTP. The deploy transport is decided — **ADR-022,
-pull-based host agent, outbound-only**, with the compose file living on the facility host so the API
-sends parameters and never a spec.
+**⚠️ Proven against a minimal stand-in compose file.** No OpenMRS, OpenELIS, Keycloak or adapter has
+ever booted from a provisioning job, and the ~49-minute first boot is unexercised on that path —
+where the executor's 900-second timeout is currently far too short (known bug 17).
 
-**What does not exist:** the host agent and the portal. **Nothing provisions a real facility
-today** — `POST /facilities` returns 201 meaning *recorded*, not *running*, and lists what did not
-happen. DNS/TLS, the audit log's external destination, and cross-process rate limiting are
-deliberately incomplete and each reports its own incompleteness rather than appearing to succeed.
+**Two design flaws this work found in itself:**
+
+- **Rotation would have broken every facility** (ADR-024). Rewriting the env file would present new
+  passwords to databases provisioned once by `initdb`, claim an admin-password change that never
+  happened, and make every prior backup undecryptable. Rotation is now scoped, and refuses the rest
+  with what is actually required.
+- **The backup key would have died with the host** (ADR-025). Generating it on the machine being
+  backed up means losing that machine — the disaster backups exist for — makes every off-site
+  archive permanently undecryptable. The operator now supplies it at bootstrap.
+
+**Still open:** public DNS/TLS (needs the domain), and a real clinical boot through this path.
 
 ## 6. What is genuinely missing
 

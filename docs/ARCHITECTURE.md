@@ -713,6 +713,37 @@ long-lived credential locally. Documented as manual rather than described as "no
 host allowlist rather than supplied by a caller, and an already-occupied host is a hard conflict
 rather than an overwrite.
 
+### Two operations that cannot do what their names suggest
+
+Both were found by building them, and both are recorded because the obvious implementation is
+actively harmful.
+
+**Credential rotation (ADR-024).** Rewriting a facility's env file rotates nothing useful and
+destroys plenty: database passwords were set once by `initdb`, so the stack would present new
+credentials to databases holding the old ones and lose every database; `OMRS_ADMIN_PASSWORD` is
+first-boot-only; and the backup passphrase decrypts existing archives. Rotation is therefore
+**scoped** — TLS material and Keycloak client secrets — and **refuses** the rest, naming what is
+actually required instead.
+
+**Backup key custody (ADR-025).** The agent generates a facility's credentials locally, which is
+what keeps the API from ever holding them. Applied to the backup passphrase that would produce
+archives encrypted with a key stored **only on the machine being backed up** — useless in the
+disaster backups exist for. The operator supplies it at host bootstrap, so it exists in two places
+by construction. **A credential that must survive the loss of a machine cannot be generated on that
+machine.**
+
+Backup is scheduled only when it can succeed — a passphrase *and* an off-site destination. Absent
+either, the scheduler is not enabled and the facility reports having no backup **as a problem**,
+because a facility with no backup is one disk failure from losing patient records.
+
+### State
+
+The control plane's state is durable (SQLite): facilities, host registrations, agent enrolments,
+API credentials and the job queue all survive a restart. Before that, restarting the API lost the
+entire fleet and recovery meant re-enrolling every VM by hand. Two races are closed with conditional
+updates — claiming a host and redeeming an enrolment token — so single-use survives two requests
+arriving *together*, not just in sequence.
+
 ### Deliberately incomplete
 
 **DNS/TLS provisioning is unconfigured**, built against a provider-agnostic interface, and reports
