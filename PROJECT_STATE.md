@@ -209,11 +209,13 @@ very likely not be demonstrated by then.
 
 ### Unblocked and buildable right now
 
-1. **DH-011, the OpenMRS→OpenELIS order path.** No longer decision-blocked — **BLOCKER-3 is closed**
-   (ADR-015 first-sync, ADR-018 cancellation, interim requester identity). What remains is
-   implementation plus two verification gates: DH-025's correlation must be attached to the concrete
-   OpenELIS resource, and ADR-018's "accepted or started" must map to a **verified** OpenELIS status,
-   not an assumed one. This is the critical path to the golden flow.
+1. ⚠️ **DH-011 is now blocked on BLOCKER-6, raised 2026-08-16.** BLOCKER-3 is indeed closed, but
+   probing the running stack before writing code found that OpenELIS **pulls** orders from a remote
+   FHIR source rather than accepting a push into its FHIR store — the mechanism every document here
+   implicitly assumed. Which ingestion path to use changes what the adapter is, so it is Liban's
+   call (**NEEDS LIBAN #16**). The correlation binding *is* feasible and control-proven; ADR-018's
+   status mapping is **not verifiable until one order has actually flowed**, because the lab's order
+   tables are empty. The OpenMRS-side poller and watermark remain buildable meanwhile.
 2. ~~**Known bug 17**~~ — ✅ **fixed 2026-08-16** with per-verb timeouts (Liban chose the longer
    timeout over detaching). See the known-bugs table. It left **bug 18** open by decision: the agent
    does not poll while a long job runs, so jobs issued in that window are refused as stale.
@@ -273,6 +275,7 @@ exists. Each links to the detail rather than repeating it.
 | ~~13~~ | ~~**Horiba Micros60/Pentra60 analyzer scope**~~ — ✅ **RESOLVED 2026-08-13 by Liban (ADR-016):** v1 is manual result entry only; no analyzer/HL7/ASTM interface. DH-023 deferred to v1.1. The shipped imports are left untouched — the decision does not authorize editing lab test rows | — | BLOCKER-4 closed |
 | ~~14~~ | ~~**SSO authorization matrix**~~ — ✅ **ROLE TYPES DECIDED 2026-08-14 (ADR-017).** `clinician`→`Provider`+`Organizational: Nurse` (provider=yes); `lab-tech`→`Reception`,`Results`,`Validation`; `sys-admin`→`Organizational: System Administrator`+`Global Administrator`. ⏳ **Only the NAMES still need the meeting.** Was:  — map `clinician`, `lab-tech`, and `sys-admin` to exact OpenMRS and OpenELIS native roles, and decide which staff classes are OpenMRS providers | These mappings grant access to clinical records and laboratory functions and change clinical attribution. An agent may not infer them from role labels | DH-008 / BLOCKER-5 |
 | 15 | ⏳ **Pilot domain and DNS** — *in progress 2026-08-13; Liban is registering it.* Provide/control the real `BASE_DOMAIN` and point `emr`, `lab`, and `id` records at the pilot VM | Public certificate issuance cannot be demonstrated against `localhost` or invented facility DNS | DH-016 |
+| 16 | 🛑 **How an order enters OpenELIS** — BLOCKER-6, raised 2026-08-16. OpenELIS **pulls** orders from a remote FHIR source it is configured to trust; it does not accept a push into its own FHIR store, which is where the adapter was implicitly assumed to write. **Four** options with costs are in BLOCKER-6 (D added by Liban, none selected) | A removes the adapter's audit/ledger boundary that ADR-005 made load-bearing for patient safety; B turns the adapter into a FHIR server; **D adds a second system storing patient/order data**, changing backup, retention and security scope. Architecture and data-flow decisions, not implementation details | **DH-011** target leg, and therefore DH-012, DH-013, DH-018. **DH-011A** (poller + watermark) is deliberately carved out and proceeds |
 
 ### 🗓 Waiting on the birth-centre meeting — as of 2026-08-15
 
@@ -485,6 +488,50 @@ clinical attribution.
 No role equivalence was inferred. Until the matrix is approved, the Keycloak `provider` claim is
 hard-coded false, SSO defaults disabled, both local login paths remain available, and the one-login
 acceptance test is deliberately unperformed.
+
+### BLOCKER-6 — how an order actually enters OpenELIS · 🛑 OPEN 2026-08-16 · **Human Decision Required: Yes**
+
+**Ticket:** DH-011 (order path). Found by probing the running stack before writing transport code.
+
+**Problem.** Every document in this repo says "the adapter routes the order to OpenELIS" without
+saying *through which ingestion mechanism*, and the evidence now says the obvious one is not it.
+
+**Evidence — read-only, gathered 2026-08-16:**
+
+1. OpenELIS's FHIR store is **completely empty**: `Task`, `ServiceRequest`, `DiagnosticReport`,
+   `Patient` and `Practitioner` all return `total: 0`. So does `clinlims`: `electronic_order`,
+   `sample` and `analysis` are all **0 rows**. The laboratory has never received an order.
+2. `org.openelisglobal.fhirstore.uri` points at **OpenELIS's own HAPI container**. Per
+   `org.openelisglobal.fhir.subscriber.resources`, that store is where OpenELIS *publishes* its own
+   resources. It is not documented as an inbox.
+3. The inbound path in the rendered `common.properties` is a **poll, not a push**:
+   `org.openelisglobal.remote.source.uri` (currently **empty**),
+   `org.openelisglobal.remote.poll.frequency=120000`, and
+   `org.openelisglobal.remote.source.identifier=Practitioner/*`. OpenELIS **pulls** orders from a
+   remote FHIR source it is configured to trust, every two minutes.
+
+**Why this is not mine to decide.** It changes what the adapter *is*, and it changes what patient
+data flows where — both on the always-ask list:
+
+| Option | What it means | Cost |
+|---|---|---|
+| **A. Point `remote.source.uri` at OpenMRS** | OpenELIS pulls orders straight from the EMR | Simplest, and it makes the adapter's order leg largely redundant — which contradicts the accepted architecture and removes the ledger/audit boundary that ADR-005 made load-bearing for patient safety |
+| **B. The adapter exposes a FHIR endpoint OpenELIS polls** | Adapter pulls from OpenMRS, serves to OpenELIS | Preserves the adapter as the routing and audit boundary, but makes it a FHIR **server**, not the client the design assumes. Substantially more surface than DH-010/DH-025 were built for |
+| **C. The adapter writes into OpenELIS's own fhirstore** | Adapter pushes, hoping OpenELIS ingests | ⚠️ **Unverified and possibly not a real path.** The store is empty, `transformOnStartup=false`, and nothing in the config describes it as an inbox. Would need proving before it could be trusted |
+| **D. A dedicated order-exchange FHIR store** *(added by Liban 2026-08-16; **not** selected)* | The adapter writes orders to a separate exchange store; OpenELIS polls **that** store via `remote.source.uri`. Keeps the adapter as the routing and audit boundary without making it a FHIR server (B), and uses the pull mechanism OpenELIS actually documents | ⚠️ **Human Decision Required: Yes — and the widest scope of the four.** It adds another system that **stores patient and order data**, so it lands inside every boundary this project has already drawn: DH-014/DH-015 backup and restore coverage, ADR-021's "no clinical data outside the stack" reasoning, the tenant-isolation model, retention, and the security surface of one more network-reachable store holding clinical records. None of those are implementation details, and a new clinical datastore is not a thing an agent may adopt because it is architecturally tidy |
+
+**Also settled by whichever option is chosen:** `remote.source.identifier=Practitioner/*` is the
+filter deciding which orders OpenELIS considers its own — so the requester identity (NEEDS LIBAN #6,
+interim "Pilot Test Clinician") stops being an attribution detail and becomes the routing key.
+
+**Deliberately not done:** no probe Task was written into OpenELIS. Writing into the laboratory to
+discover whether it ingests would give an ambiguous answer either way — nothing visible could mean
+"not wired" or "wired but unconfigured" — and it is a write into a clinical system to satisfy a
+guess. The read-only evidence above is enough to state the fork; it is not enough to pick a branch.
+
+**Consequence for DH-011:** the OpenMRS-side poller and watermark are still buildable and are
+unaffected by this choice. The OpenELIS write, DH-025's correlation binding, and ADR-018's status
+mapping are all downstream of it.
 
 ---
 
@@ -1061,7 +1108,7 @@ proven zero matches against that API. Multiple matches or an unavailable lookup 
 must stop startup. This cannot be honestly claimed before the target resource shape exists; no
 transport or clinical order was activated here.
 
-### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🗓 BLOCKED (BLOCKER-3 legs 2–3 + DH-025 target binding)
+### DH-011 · Adapter: order path OpenMRS → OpenELIS · P0 · 🛑 BLOCKED ON BLOCKER-6 (target ingestion path)
 The accepted 15-second inclusive watermark remains the implementation design.
 
 **Decided (ADR-015):** the first watermark starts at deployment time — no historical backfill. It
@@ -1069,10 +1116,45 @@ must be read from the OpenMRS server clock, persisted once, and never re-derived
 inclusive lower bound still applies at the boundary. Nightly reconciliation counts only from that
 bootstrap watermark.
 
-**Still blocked** on a real OpenELIS requester identity and the cancellation state contract
-(BLOCKER-3, 🗓 birth-centre meeting), plus DH-025's concrete correlation binding. DH-006's
-signed-off test mappings are also required before an end-to-end pilot order can be claimed. No
-transport code has been added and no order has been sent.
+**Decision-blocked no longer** — BLOCKER-3 closed 2026-08-14 (ADR-015, ADR-018, interim requester).
+The earlier "blocked on BLOCKER-3 legs 2–3" text was stale and is corrected here.
+
+**Evidence gathered 2026-08-16, read-only, against the running stack — before any transport code.**
+Two findings, one helpful and one that stops the ticket:
+
+**✅ The DH-025 correlation binding is feasible, and the control proves it.** OpenELIS's HAPI 6.6.0
+advertises `identifier` search on `Task` (29 params), `ServiceRequest` (31) and `DiagnosticReport`
+(26). A search in our exact correlation shape —
+`Task?identifier=urn:daher-health:adapter:source-event|<hash>` — returns **HTTP 200, Bundle,
+`total: 0`**, which is precisely the "proven absence" that `TargetPresence.ABSENT` requires. The
+control is what makes that meaningful: an unknown search parameter is **rejected with HTTP 400
+`HAPI-0524`**, so a 200 here means the parameter is genuinely supported rather than silently
+ignored. Exactly-one and zero-match behaviour still needs demonstrating against a real resource.
+
+**❌ `_sort` is silently ignored by OpenMRS `fhir2` 4.2.0** — ascending, descending and a nonsense
+sort key return byte-identical order. The accepted design's pseudocode relies on server-side
+ordering. Correction, evidence and the required client-side handling are appended to
+`docs/WATERMARK-DESIGN.md` §3. This does not change the accepted contract; it changes how the
+contract is met.
+
+**🛑 ADR-018's status mapping cannot be verified yet, and that is a finding rather than a delay.**
+"Accepted or started" must map to a *verified* OpenELIS status. With `electronic_order`, `sample`
+and `analysis` all at **0 rows** and the FHIR store empty, there is no observed status vocabulary to
+map to — and a `status=` search cannot discriminate anything against an empty store (a bogus status
+value returns 200/`total: 0` exactly like a real one). This gate is not passable by probing; it
+needs one order to have actually flowed.
+
+**🛑 Blocked on BLOCKER-6:** how an order enters OpenELIS at all. The inbound mechanism is a **poll
+from OpenELIS** (`remote.source.uri`, currently empty), not a push into its FHIR store — which is
+where every document in this repo implicitly assumed the adapter would write. That fork changes what
+the adapter is, so it is a human decision.
+
+**Buildable regardless of BLOCKER-6:** the OpenMRS-side poller, the durable watermark, the
+bootstrap-at-deployment-time rule, and client-side ordering. Not started — recording the design
+contradiction and the blocker came first.
+
+**Still true:** no transport code has been added, no order has been sent, and nothing has been
+written into OpenELIS. DH-006's signed-off test mappings remain required before any *pilot* order.
 ### DH-012 · Adapter: result path OpenELIS → OpenMRS · P0 · ⏸ (needs DH-011)
 Record observed `ServiceRequest` / `DiagnosticReport` shapes here → triggers the ADR-004 revisit.
 

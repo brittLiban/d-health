@@ -233,6 +233,18 @@ description, **left exactly as upstream ships them**: each transaction rolls bac
 has zero duplicate descriptions, and the endpoints answer. ADR-016 does not authorize disabling,
 renaming, repairing, or log-suppressing those tests. No test or mapping has ever been changed.
 
+### BLOCKER-6 — how an order actually enters OpenELIS · 🛑 OPEN 2026-08-16
+
+Found by probing before writing DH-011's transport code. OpenELIS **pulls** orders from a remote
+FHIR source it is configured to trust (`remote.source.uri`, currently empty, polled every 120s) — it
+does not accept a push into its own FHIR store, which is where every document here implicitly
+assumed the adapter would write. Its `electronic_order`, `sample` and `analysis` tables are all at
+**0 rows**: the laboratory has never received an order.
+
+The three options change what the adapter *is* — one of them removes the ledger/audit boundary
+ADR-005 made load-bearing for patient safety — so this is a human decision, recorded in
+`PROJECT_STATE.md` with the evidence. **No probe was written into the laboratory to resolve it.**
+
 ### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 
 The protocol/client plumbing is verified, and the role *types* are now decided: `clinician` →
@@ -313,7 +325,7 @@ disagree, the ticket table is right and this section is stale.
 
 | Ticket | Missing |
 |---|---|
-| DH-011 / DH-012 | The adapter's order and result transport. The safety core underneath it is built and verified; nothing moves between the two systems |
+| DH-011 / DH-012 | The adapter's order and result transport. The safety core underneath it is built and verified; nothing moves between the two systems. 🛑 **Blocked on BLOCKER-6** since 2026-08-16 — the mechanism by which an order reaches OpenELIS is not what the design assumed. The OpenMRS-side poller remains buildable |
 | DH-013 | The WhatsApp notifier. Not written, and gated on credentials nobody holds (ADR-003) |
 | DH-018 | The golden end-to-end demonstration — 1 of 8 steps |
 

@@ -103,6 +103,44 @@ poll(resource_type):
         watermark_ts = highest
 ```
 
+### ⚠️ Correction 2026-08-16 (DH-011) — `_sort` does not work on this server
+
+**The `_sort=_lastUpdated` in the pseudocode above cannot be relied on. `fhir2` 4.2.0 accepts the
+parameter, returns HTTP 200, and applies no ordering at all.** The pseudocode is left as written,
+per this file's convention, so the correction is auditable.
+
+Evidence, gathered against the running stack rather than from documentation:
+
+| Query | Result |
+|---|---|
+| `?_sort=_lastUpdated&_count=50` | 50 distinct entries, order-hash `3c42665a5178` |
+| `?_sort=-_lastUpdated&_count=50` | 50 distinct entries, order-hash `3c42665a5178` |
+| `?_sort=nonsense&_count=50` | 50 distinct entries, order-hash `3c42665a5178` |
+
+Ascending, **descending**, and a deliberately meaningless sort key all return the identical
+sequence. Descending matching ascending is the proof: no real sort implementation produces that.
+
+**The control is what makes this provable, and it nearly went the other way.** The first probe only
+compared HTTP status codes, and `_sort=nonsense` returned **200** — so a 200 on `_sort=_lastUpdated`
+proves nothing whatsoever about ordering. This server does not reject unknown search parameters.
+(OpenELIS's HAPI 6.6.0 behaves oppositely — an unknown parameter is rejected with
+`HAPI-0524`, so there a 200 *does* mean the parameter is supported. Do not carry an assumption from
+one server to the other; they are different products.)
+
+**What the implementation must do instead:**
+
+1. **Sort client-side**, on the `meta.lastUpdated` string the server sent, after fetching. §7 already
+   forbids parsing or reformatting that value; sorting the emitted strings is consistent with it
+   because the format is fixed-width and fixed-offset.
+2. **Assert the window is complete rather than paging blindly.** Compare the bundle's `total` against
+   the number of entries received. With `ge watermark` and a 15-second interval the normal window is
+   a handful of records, so this is cheap. If `total` exceeds what was received, the window was
+   truncated and the watermark **must not advance past the last contiguous processed record** — an
+   unordered server plus offset paging is a way to skip a record silently, which is the one failure
+   direction this document refuses.
+3. **Never infer ordering from the order the server happened to emit.** It is stable in probing, but
+   nothing documents it and nothing tests it upstream.
+
 Three rules that matter more than the code:
 
 1. **The watermark advances only after successful processing, never on fetch.** A crash mid-page
