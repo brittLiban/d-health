@@ -271,8 +271,11 @@ jobs:
           # correctly ships those values EMPTY.
           #
           # These are not secrets and are never used against a real service — they
-          # exist so interpolation can be checked at all. OE_ADMIN_PASSWORD honours
-          # OpenELIS's narrow alphabet (letters, digits, and * $ # ! only).
+          # exist so `${VAR:?}` has something to interpolate. `config` does not
+          # validate password content, so they are deliberately kept SHORT: under
+          # the tracked-secret scan's 12-character threshold, so this workflow does
+          # not trip its own check. Excluding .github/ from that scan would have
+          # been the lazy fix and would blind it to a real token pasted into CI.
           #
           # Written OUTSIDE the checkout and passed with --env-file, so running
           # this workflow locally (act) can never overwrite a developer's real
@@ -281,20 +284,20 @@ jobs:
           BASE_DOMAIN=localhost
           OMRS_DB_NAME=openmrs
           OMRS_DB_USER=openmrs
-          OMRS_DB_PASSWORD=ci-not-a-real-secret
-          OMRS_DB_ROOT_PASSWORD=ci-not-a-real-secret
-          OMRS_ADMIN_PASSWORD=CiNotARealSecret1
-          OE_DB_PASSWORD=ci-not-a-real-secret
-          OE_DB_SUPERUSER_PASSWORD=ci-not-a-real-secret
-          OE_POSTGRES_PASSWORD=ci-not-a-real-secret
+          OMRS_DB_PASSWORD=ci-dummy
+          OMRS_DB_ROOT_PASSWORD=ci-dummy
+          OMRS_ADMIN_PASSWORD=CiDummy1
+          OE_DB_PASSWORD=ci-dummy
+          OE_DB_SUPERUSER_PASSWORD=ci-dummy
+          OE_POSTGRES_PASSWORD=ci-dummy
           OE_ADMIN_PASSWORD=CiTest1!
-          OE_KEYSTORE_PASSWORD=ci-not-a-real-secret
-          OE_TRUSTSTORE_PASSWORD=ci-not-a-real-secret
-          KEYCLOAK_DB_PASSWORD=ci-not-a-real-secret
-          KEYCLOAK_ADMIN_PASSWORD=ci-not-a-real-secret
-          KEYCLOAK_OPENMRS_CLIENT_SECRET=ci-not-a-real-secret
-          KEYCLOAK_ADAPTER_CLIENT_SECRET=ci-not-a-real-secret
-          ADAPTER_DB_PASSWORD=ci-not-a-real-secret
+          OE_KEYSTORE_PASSWORD=ci-dummy
+          OE_TRUSTSTORE_PASSWORD=ci-dummy
+          KEYCLOAK_DB_PASSWORD=ci-dummy
+          KEYCLOAK_ADMIN_PASSWORD=ci-dummy
+          KEYCLOAK_OPENMRS_CLIENT_SECRET=ci-dummy
+          KEYCLOAK_ADAPTER_CLIENT_SECRET=ci-dummy
+          ADAPTER_DB_PASSWORD=ci-dummy
           ENVEOF
       - name: Default profile parses
         run: docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
