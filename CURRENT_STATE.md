@@ -1,6 +1,6 @@
 # Current State — Daher Health
 
-**Assessed:** 2026-08-14 · **Target:** pilot-ready by 2026-09-01
+**Assessed:** 2026-08-16 · **Target:** pilot-ready by 2026-09-01
 **Method:** inspection of the actual repository and running environment, not the plan.
 
 ---
@@ -17,7 +17,9 @@ The **DH-008 fail-closed SSO plumbing also runs and is runtime-verified**: the e
 realm reconciles idempotently to OpenMRS OIDC and OpenELIS SAML; official OpenMRS OAuth2 Login
 1.5.0 is installed in the persistent volume; and disabled mode preserves local authentication
 without persisting its client secret. SSO is not active and its one-login acceptance demonstration
-is not complete: native role/provider mapping is a human authorization decision (BLOCKER-5).
+is not complete. The native role/provider **types** are now decided (ADR-017); what is still missing
+is which staff hold them, which is a fact from the birth centre rather than a design choice
+(BLOCKER-5).
 
 **DH-003 now runs and is empty-volume verified:** French backend properties, the `Maternité`
 admission ward, both decided bed types, independent demo-patient/content controls, and a strictly
@@ -93,10 +95,11 @@ claimed; the webapp needs a Docker secret or its context dies while Tomcat still
 the FHIR container ignores `JAVA_OPTS`; and its FHIR endpoint requires **mutual TLS**.
 
 **The honest boundary:** substantial buildable work remains. OpenELIS local-admin authentication is
-form-verified, but its human browser workflow is unexercised until Caddy (DH-016); SSO activation
-and one-login proof, maternity clinical forms, adapter transport, notifications, complete
-backup/restore, and public TLS remain incomplete. The maternity ward/bed foundation itself is
-complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
+form-verified, but **no human has ever driven its browser workflow** — Caddy now gives it a host
+route (DH-016), so that check is possible and simply has not been done. SSO activation and one-login
+proof, maternity clinical forms, adapter transport, notifications, off-site backup and a re-run
+restore drill, and publicly trusted TLS all remain incomplete. The maternity ward/bed foundation
+itself is complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 
 ---
 
@@ -210,14 +213,17 @@ full HAPI server that advertises `Subscription`, but delivery and corrected-resu
 must be demonstrated before trusting the result path. DH-010 built and runtime-verified the safety
 foundation; the watermark and poller themselves remain DH-011.
 
-### BLOCKER-3 — DH-011 activation and cancellation contract · 🗓 TWO LEGS OPEN
+### BLOCKER-3 — DH-011 activation and cancellation contract · ✅ CLOSED BY DECISION 2026-08-14
 
-The polling algorithm is accepted, and the **first-sync boundary is now decided (ADR-015): no
-historical backfill, watermark starts at deployment time.** Two clinical/scope choices remain: the
-real requester identity attached to orders in OpenELIS, and the laboratory-side state transition
-for a `ServiceRequest.replaces` discontinuation. Upstream's reference bridge explicitly leaves panel
-support and discontinuation incomplete. Both wait on the birth-centre meeting; no default was
-inferred and no order transport was activated.
+All three legs are decided: **first sync** (ADR-015 — no historical backfill, watermark starts at
+deployment time), **requester** (interim 2026-08-14 — a controlled "Pilot Test Clinician" replaces
+upstream's sample until the meeting names the real one), and **cancellation** (ADR-018 — revoke if
+the laboratory has not accepted or started the test, leave in-progress work for manual handling).
+
+**DH-011 is therefore no longer blocked on decisions**, which makes it the critical path. What
+remains is implementation plus two *verification* gates: DH-025's correlation must be attached to
+the concrete OpenELIS resource, and ADR-018's "accepted or started" must map to a **verified**
+OpenELIS status rather than an assumed one. No poller or clinical order has been activated.
 
 ### BLOCKER-4 — OpenELIS Horiba Micros60/Pentra60 analyzer imports · ✅ CLOSED BY SCOPE (ADR-016)
 
@@ -227,12 +233,16 @@ description, **left exactly as upstream ships them**: each transaction rolls bac
 has zero duplicate descriptions, and the endpoints answer. ADR-016 does not authorize disabling,
 renaming, repairing, or log-suppressing those tests. No test or mapping has ever been changed.
 
-### BLOCKER-5 — SSO native authorization mapping · 🛑 OPEN
+### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
 
-The protocol/client plumbing is verified, but `clinician`, `lab-tech`, and `sys-admin` still need
-explicit mappings to native roles in each application, plus an OpenMRS-provider decision. Those
-choices grant clinical/laboratory access and affect attribution, so SSO remains fail-closed off.
-Exact evidence and the requested matrix are in `PROJECT_STATE.md`.
+The protocol/client plumbing is verified, and the role *types* are now decided: `clinician` →
+`Provider` + `Organizational: Nurse` (provider=yes); `lab-tech` → `Reception`, `Results`,
+`Validation`; `sys-admin` → `Organizational: System Administrator` + `Global Administrator`.
+
+**Only the staff names remain**, and they need the birth-centre meeting. Until real people are
+attached to those types, SSO stays fail-closed off and the one-login acceptance test is deliberately
+unperformed — turning it on would grant clinical and laboratory access to an unreviewed set of
+accounts. Exact evidence is in `PROJECT_STATE.md`.
 
 ---
 
@@ -295,10 +305,36 @@ file it runs — was fixed 2026-08-16 with per-verb bounds asserted against that
 
 ## 6. What is genuinely missing
 
-OpenMRS ANC and partograph forms; prenatal panel; SSO authorization mapping, activation, and proof; adapter
-order/result transport; WhatsApp notifier; the
-remaining backup layers **and a performed restore drill**; Caddy/TLS; the golden demonstration;
-and a README complete enough to hand the stack to another operator.
+Derived from `PROJECT_STATE.md`'s ticket table rather than maintained by hand — an earlier revision
+of this section still listed the restore drill as missing after it had been performed. If the two
+disagree, the ticket table is right and this section is stale.
+
+**Nothing built at all:**
+
+| Ticket | Missing |
+|---|---|
+| DH-011 / DH-012 | The adapter's order and result transport. The safety core underneath it is built and verified; nothing moves between the two systems |
+| DH-013 | The WhatsApp notifier. Not written, and gated on credentials nobody holds (ADR-003) |
+| DH-018 | The golden end-to-end demonstration — 1 of 8 steps |
+
+**Mechanism built, contents deliberately empty — these need a person, not an engineer:**
+
+| Ticket | State |
+|---|---|
+| DH-004 | Partograph/ANC forms. The ADR-006 guard is executable and refuses any form that interprets; **no form schema is committed** |
+| DH-006 | Prenatal panel. Seeded additively and ships with **0 members**, by design. `docs/CLINICAL-SIGNOFF.md` is the handover sheet |
+| DH-008 | SSO activation and the one-login proof. Plumbing verified; role *types* decided (ADR-017); staff **names** pending |
+
+**Built but not finished — the boundary is the point:**
+
+| Ticket | Done | Not done |
+|---|---|---|
+| DH-014 | Local encrypted path verified end to end | **Off-site upload never exercised** |
+| DH-015 | A restore was **actually performed** 2026-08-13 | Two acceptance legs (a lab result, an SSO login) could not run because that data does not exist yet. Must be re-run |
+| DH-016 | Routing, local HTTPS, verified TLS hop to OpenELIS | Publicly trusted certificates — needs the real domain and DNS |
+| DH-017 | README covers the whole stack | Never walked on a genuinely fresh VM |
+| DH-025 | Recovery core runtime-verified | Correlation not yet bound to a concrete OpenELIS resource (a DH-011 gate) |
+| DH-027 | Provisioning works end to end, and a stack starts from a job | **Against a stand-in compose file.** No clinical stack has ever booted this way |
 
 ---
 
@@ -307,7 +343,7 @@ and a README complete enough to hand the stack to another operator.
 | Risk | Severity | Why | Mitigation |
 |---|---|---|---|
 | **Restore drill gets squeezed last** | **Reduced 2026-08-13** | Was the top risk. A real restore has now been performed and documented, and it found two defects — `pg_restore --clean` silently losing rows over the pre-populated OpenELIS image, and a half-initialised Postgres at exit 127. | Largely mitigated. Residual: the drill must be **re-run** once a lab result exists and SSO is active, and off-site is still unexercised. Budget that re-run rather than assuming DH-015 is closed. |
-| SSO across two apps | High | Protocol/client plumbing is verified, but role/provider mapping grants clinical access and cannot be inferred. Public-origin cookies also need DH-016 HTTPS. | Keep fail-closed off; obtain BLOCKER-5's explicit authorization matrix, then activate and demonstrate the full two-app session after Caddy. |
+| SSO across two apps | **Reduced 2026-08-14** | Protocol/client plumbing is verified and the role *types* are decided (ADR-017), so the design question is answered. What is left is naming the staff who hold each type — a fact from the meeting, not a design problem. Caddy now provides the HTTPS origins the browser session needs. | Keep fail-closed off until the names exist, then activate and demonstrate the full two-app session. Budget the demonstration itself: it has never been performed. |
 | OpenMRS order polling safety | **High** | DH-025's recovery core and crash tests pass, but safety still depends on the concrete OpenELIS write carrying its correlation and a demonstrated exact target lookup. | Bind and demonstrate correlation attach/query in DH-011 before activation; multiple matches or unavailable lookup remain ambiguous and fail closed. |
 | O3 first-boot slowness | Medium | Liquibase on an empty database takes minutes; easy to misread as a hang and start "fixing" a working system. | Generous `start_period` already set. Watch logs, don't restart. |
 | WhatsApp credentials never arrive | Medium | Real risk given none exist today. | Already handled by design: mock now, `.env`-only swap, ticket stays `BLOCKED`. Does not block anything else. |

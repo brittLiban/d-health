@@ -1,14 +1,18 @@
 # Daher Health — v1 Pilot Architecture
 
 **Status:** DH-003's maternity foundation, build steps 1 and 3, the Keycloak provider, adapter
-safety skeleton, local backup path, PostgreSQL tenant isolation, and DH-008's fail-closed SSO
-plumbing are built and runtime-verified. SSO activation and the one-login demonstration remain
-blocked on the staff-to-native-role authorization matrix. DH-025's in-flight crash reconciliation
-core is runtime-verified; attaching/querying its correlation on the concrete OpenELIS resource
-remains a P0 gate before adapter transport activation. See `CURRENT_STATE.md` for the exact
-verification boundary.
-**Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti.
-**Last updated:** 2026-08-13 (Africa/Djibouti)
+safety skeleton, local backup path, PostgreSQL tenant isolation, DH-021's generated keystore,
+DH-016's reverse proxy, and DH-008's fail-closed SSO plumbing are built and runtime-verified. A
+restore has been **performed** with partial coverage (DH-015). SSO activation and the one-login
+demonstration remain blocked on staff names; the role types themselves are decided (ADR-017).
+DH-025's in-flight crash reconciliation core is runtime-verified; attaching/querying its correlation
+on the concrete OpenELIS resource remains a P0 gate before adapter transport activation. **DH-011 is
+no longer decision-blocked** (BLOCKER-3 closed 2026-08-14) and is the critical path. A separate
+multi-facility provisioning system exists under `provisioning/` — see §16. See `CURRENT_STATE.md`
+for the exact verification boundary.
+**Scope:** Single-facility pilot — one birth delivery centre + its laboratory, Djibouti. §16 is the
+one deliberate exception, and it deploys facilities rather than serving them.
+**Last updated:** 2026-08-16 (Africa/Djibouti)
 
 ---
 
@@ -59,7 +63,8 @@ template — see §8) and the encrypted nightly backup to object storage (§9).
 The target topology has twelve long-running containers in one `docker-compose.yml`: Caddy,
 OpenMRS backend, OpenMRS frontend, OpenMRS gateway, MariaDB, OpenELIS webapp, OpenELIS FHIR,
 OpenELIS frontend, PostgreSQL, Keycloak, the adapter, and the backup sidecar. The current foundation
-runs ten: Caddy is not built, and backup is an opt-in profile until production credentials exist.
+runs eleven: Caddy is built and locally verified (DH-016), and backup remains an opt-in profile
+until production credentials exist (DH-022).
 
 Compose also contains short-lived setup jobs: the OpenMRS demo-metadata preflight and maternity
 seed, OpenELIS certificate provisioning, DH-020 PostgreSQL tenant-grant hardening, DH-024 OpenELIS
@@ -479,8 +484,10 @@ environment reliably rather than depending on distro-specific cron environment b
 6. Write a success/failure marker the runbook tells you how to check
 
 **Both engines. Every time.** A restore drill that only restores PostgreSQL would come back with a
-working lab system and no patient records. That failure mode must be an explicit checklist item in
-`backup/restore-drill.md`; the file does not exist yet and DH-015 remains unperformed.
+working lab system and no patient records. That failure mode is an explicit checklist item in
+[`../backup/restore-drill.md`](../backup/restore-drill.md), which now exists: DH-015 was
+**performed** 2026-08-13 with partial coverage, and must be re-run once a lab result and an SSO
+login exist to check.
 
 Credentials from `.env`. The drill — restore into a scratch stack, verify a known test patient, a
 known lab result, and a working SSO login — is performed and its output recorded before this pilot
@@ -488,8 +495,9 @@ is called ready. Per your instruction, this is not deferred and not optional.
 
 **Verification boundary, 2026-08-13:** the complete local path above—including encryption and
 archive read-back—passed. Off-site upload was explicitly disabled so no data left the host; it is
-unverified and still requires an approved destination. The test archive was removed because its
-ephemeral key was not retained. No restore has been performed.
+unverified and still requires an approved destination. A restore **was** subsequently performed the
+same day (DH-015, partial coverage) and found two defects: `pg_restore --clean` silently losing rows
+over OpenELIS's pre-populated image, and a half-initialised PostgreSQL at exit 127.
 
 The scheduler is behind Compose's `backup` profile. This keeps the documented default
 `docker compose up -d` usable before the required key/destination exist instead of creating a
@@ -508,9 +516,10 @@ repository as:
 
 > ⚠️ **NEEDS SIGN-OFF FROM CLINICAL LEAD** — reference default, not validated for this facility.
 
-Nothing clinical is invented, extrapolated, or "sensibly adjusted". DH-004/DH-006 must create a
-`docs/CLINICAL-SIGNOFF.md` checklist tracking each item and signer; that file does not exist yet,
-and no clinical content is signed off.
+Nothing clinical is invented, extrapolated, or "sensibly adjusted".
+[`CLINICAL-SIGNOFF.md`](CLINICAL-SIGNOFF.md) now exists (created at DH-006) and inventories the 37
+lab sets actually installed in this stack for the clinical lead to tick. Nothing in it is
+pre-selected, proposed, or preferred, and **no clinical content is signed off**.
 
 ---
 
@@ -701,6 +710,14 @@ never "can an attacker get a shell" but "can an attacker cause an arbitrary spec
 transport — is the real boundary, so a job runs only if the target host is itself, the verb is in
 its fixed set, and every parameter matches a strict pattern.
 
+**Execution is bounded per verb, not per agent.** `up --detach` waits on this stack's health graph —
+`openmrs-backend` alone declares `start_period: 1800s`, and a cold boot is ≈49 minutes — so the
+verbs that wait on that graph get a bound sized to it, while `status` and `stop` stay tight enough
+that a genuine hang is visible quickly. A single bound was known bug 17: the first real provisioning
+would have been reported as failed while the stack came up correctly. The bound is asserted against
+this compose file in the provisioning test suite, so adding a slower gate here fails that suite
+rather than the next deployment.
+
 **Secrets are generated on the facility host**, not by the API. A breached API host has never held
 any facility's database passwords.
 
@@ -768,7 +785,7 @@ implementation or pilot acceptance:
 | Demo patients/content | **Resolved and empty-volume verified:** `OMRS_DEMO_PATIENTS=off|on` (default `off`) is independent of `OMRS_DEMO_CONTENT=on|off` (default upstream/as-shipped). `off` never deletes existing DB content | Closed; clinical vocabulary still needs sign-off |
 | Keycloak session lifetimes | **Resolved for pilot (ADR-013):** 1h idle / 10h maximum / 5m token | Revisit after observed pilot workflow |
 | **Cold-boot time** — ≈49 min on 4 vCPU, almost entirely OCL concept imports | Measured at build step 1. Warm boot ≈38s. Relevant to the restore drill (DH-015): a restore into a scratch stack inherits this cost | Noted; revisit if it affects DH-015 |
-| Clinical sign-off on all clinical content | Planned `docs/CLINICAL-SIGNOFF.md` does not exist yet (§11) | Clinically live — **hard gate** |
+| Clinical sign-off on all clinical content | [`CLINICAL-SIGNOFF.md`](CLINICAL-SIGNOFF.md) exists and lists the installed lab sets with nothing pre-selected (§11). No item is signed off | Clinically live — **hard gate** |
 | Horiba Micros60/Pentra60 analyzer test imports | Both upstream CBC CSVs repeatedly abort on the existing unique test description `LYM#(Whole Blood)`. Endpoints remain reachable, but neither analyzer configuration is verified. **Human Decision Required: Yes** — confirm whether either analyzer is in facility scope before changing laboratory tests | DH-023 / laboratory configuration |
 | Adapter in-flight crash reconciliation | DH-025's opaque correlation, process-lifetime fence, coordinator, and before/after-write crash tests pass. The concrete OpenELIS writer/probe binding is not yet possible because the target resource shape is not built | Bind and demonstrate in DH-011 before activation; timeout-based claim stealing remains forbidden |
 

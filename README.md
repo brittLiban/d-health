@@ -72,6 +72,8 @@ language, not a localisation afterthought.
 | [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks |
 | [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
 | [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |
+| [`docs/CLINICAL-SIGNOFF.md`](docs/CLINICAL-SIGNOFF.md) | The clinical lead's handover sheet. Inventories what this stack can already order; **nothing is pre-selected** |
+| [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md) | How the adapter will learn an order exists, written **before** any transport code (ADR-005 required it) |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---
@@ -226,7 +228,9 @@ docker compose --profile backup up -d backup
 ```
 
 Do not enable that profile merely to make the container list look complete. DH-014 still requires
-production key escrow and approved off-site settings, and DH-015 still requires a performed restore.
+production key escrow and approved off-site settings. DH-015's restore **was performed**
+2026-08-13, but with partial coverage — it must be re-run once a lab result and an SSO login exist
+to check against.
 Once those settings are provisioned, set `COMPOSE_PROFILES=backup` in `.env`; the normal
 one-command `docker compose up -d` then includes the scheduler.
 

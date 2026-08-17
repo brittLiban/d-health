@@ -40,6 +40,29 @@ VM; losing the VM and the only copy of its passphrase makes every off-site archi
 ## Verification boundary
 
 The complete local path passed on 2026-08-13, including archive encryption and read-back. External
-upload was deliberately disabled and no test archive was retained. **No restore has been
-performed.** DH-015 remains the pinned pilot-ready gate; this directory must not be described as a
-working backup system until that restore is actually run and documented.
+upload was deliberately disabled and no test archive was retained, so **off-site is still
+unexercised** and DH-014 is not closed.
+
+**A restore has now actually been performed** (DH-015, 2026-08-13 — see
+[`restore-drill.md`](restore-drill.md)): the archive was decrypted, all seven manifest hashes were
+re-verified independently, the data was restored into an isolated scratch stack, and patient
+`10001MJ` was read back **through the OpenMRS REST API** rather than out of a table. It found two
+real defects, which is what a drill is for.
+
+⚠️ **Performed is not done.** Two acceptance legs could not be exercised because the data does not
+exist yet — a known lab result and a working SSO login — so the drill **must be re-run** once
+DH-011/DH-012 and SSO activation land. Until then this directory is a verified local backup path
+with a partially verified restore, and must not be described as a working backup system.
+
+## Who holds the passphrase (ADR-025)
+
+For a facility provisioned through the control plane, the encryption passphrase is **supplied by the
+operator at host bootstrap**, never generated on the facility host. A passphrase generated on the
+machine being backed up dies with that machine — the exact disaster backups exist for — and every
+off-site archive becomes permanently undecryptable. Supplying it at bootstrap means it exists in at
+least two places by construction.
+
+For the same reason, backup is **scheduled only when it can succeed**: a passphrase *and* an
+off-site destination. Absent either, the scheduler is not enabled and the facility reports having no
+backup **as a problem**, rather than quietly producing local-only archives beside the data they are
+meant to protect.
