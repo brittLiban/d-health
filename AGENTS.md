@@ -77,6 +77,52 @@ If time runs short, cut elsewhere.
   "demonstrated" — this repo has been burned by tidy-looking work that had never been run.
 - **Update `PROJECT_STATE.md` before ending a session.** Continuity across sessions depends on it.
 
+## Evidence discipline — how to actually finish a ticket
+
+Distilled from repeated instances of the same failure: a check that passed for a reason
+unrelated to what it claimed to verify. Apply this to every ticket, not just the one that
+prompted writing it down.
+
+**Audit before coding.** Read `AGENTS.md` → `DECISIONS.md` → `PROJECT_STATE.md` →
+`docs/ARCHITECTURE.md` → `CURRENT_STATE.md`, then inspect current CI and **measure** test
+counts by running the suite — never copy a count from a doc without re-running it. If the
+ticket you were pointed at is already done, say so and stop; do not redo proven work to match
+a preferred style.
+
+**Test matrix, not just the happy path.** For any check whose claim matters (a health
+verdict, a security refusal, a persistence guarantee), also write the adjacent cases that
+would silently make the claim false: the input that looks successful but isn't (exit 0 with
+a failed component inside), the missing/malformed/stale case, the boundary a nearby rule
+carves out (a one-shot job that's supposed to exit and stop, an optional profile that's
+supposed to be absent).
+
+**Negative controls are mandatory, not optional polish.** After the tests pass, deliberately
+break the property each one claims to guard — comment out the check, invert the condition,
+restore the old behavior on a throwaway copy — and confirm the *specific* test goes red for
+the *specific* reason. Record what you broke and which tests failed, with real counts. Never
+write "control-tested" without having actually run one. A test that would pass regardless of
+whether the code is right proves nothing and should be strengthened or deleted.
+
+**Precision in what you claim.** Say what was actually observed, not the generalization a
+reader would make from it: "the latest check at 10:42:16 found every required service in the
+expected state," not "the facility is healthy." "Runs on demand," not "continuous
+monitoring." "Compensation on failure," not "transactional." If a claim needs a qualifier to
+stay true, keep the qualifier.
+
+**Before committing:** run the relevant tests, lint, and format check locally; review the
+diff for secrets, clinical data, unrelated files, and scope creep; confirm the commit is one
+logical unit. Full CI cannot run before a push-triggered commit — say so rather than implying
+it did, and verify against the real CI run afterward.
+
+**When a fix exposes a second bug**, close it in the same change if it's a direct, mechanical
+consequence of the fix (not a pre-existing, unrelated gap) — but if it touches a different
+ticket's already-shipped, tested surface (a lifecycle table, a security boundary), say so and
+get confirmation before touching it rather than deciding alone.
+
+**On handoff, state plainly what was NOT proven** — not exercised against a real boot, not
+verified through two real hosts, not measured against production data volume — rather than
+letting a passing test suite imply more than it showed.
+
 ## Non-negotiables from the project brief
 
 - All patient data stays in this stack's own databases. **No third-party AI/ML service ever
