@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from daher_agent.backup_observation import BackupStatusError, parse_last_run_status
 from daher_agent.infrastructure import (
     ComposeOutputError,
     derive_health,
@@ -99,6 +100,12 @@ DEFAULT_BACKUP_TIMEOUT_SECONDS = 3600
 # Absolute, so a PATH entry planted earlier in the search order cannot substitute a
 # different binary for the one this host means to run.
 DEFAULT_DOCKER_BINARY = "/usr/bin/docker"
+
+# Fixed and local, exactly like `compose_file` above: never derived from a job, never
+# supplied by a caller. `backup/backup.sh` writes exactly this path inside the container
+# (`${BACKUP_OUTPUT_DIR:-/backup}/last-run.status`); `backup/README.md` documents reading it
+# with this same command for a manual check (DH-027H).
+BACKUP_STATUS_PATH = "/backup/last-run.status"
 
 
 class ExecutorError(RuntimeError):
@@ -239,7 +246,18 @@ class ComposeExecutor:
         return self._argv(facility_id, "up", "--detach", "--force-recreate")
 
     def _status(self, facility_id: str) -> ExecutionResult:
-        """Observe the deployment. Two read-only compose commands, both fixed and local.
+        """Observe the deployment: infrastructure health, and now scheduled backup evidence
+        alongside it (DH-027H). Both are read-only, both run whether or not a mutating job is
+        also in flight (`poller.py`'s status slot), and combining them here — rather than a
+        new verb — reuses the fleet's one existing "what does this host actually look like
+        right now" seam instead of adding a second one beside it.
+        """
+        result = self._observe_infrastructure(facility_id)
+        backup = self._observe_backup(facility_id)
+        return ExecutionResult(result.succeeded, result.detail, result.infrastructure, backup)
+
+    def _observe_infrastructure(self, facility_id: str) -> ExecutionResult:
+        """Two read-only compose commands, both fixed and local.
 
         ⚠️ **A zero exit code is not health.** `docker compose ps` returns 0 while printing a
         service that is `exited` or `unhealthy`, so the verdict comes from the parsed states.
@@ -297,6 +315,71 @@ class ComposeExecutor:
             f"{report.health.value}: {report.services_running}/{report.services_expected} services",
             report,
         )
+
+    def _observe_backup(self, facility_id: str) -> BackupReport:
+        """Read the nightly scheduler's own evidence (DH-027H) — the same read-only pattern
+        `_observe_infrastructure` uses for `docker compose ps`/`config`, applied to the one
+        artifact `backup/scheduler.sh` actually produces: `last-run.status`, documented and
+        already used for exactly this manual check in `backup/README.md`.
+
+        Not configured is checked locally first, exactly like `_backup_now` — no point
+        exec'ing into a container that was never started because the profile was never
+        active. Every other failure path (exec fails, times out, the file is absent,
+        malformed, or unparseable) is fail-closed to `NEVER_RUN`, never `SUCCESS` — an
+        operator reading "no evidence of a successful run" is the honest answer to all of
+        those, and `BackupState` deliberately gains no new value to distinguish them further
+        (see the module docstring in `backup_observation.py`).
+        """
+        now = datetime.now(UTC)
+        if self.backup is None or not self.backup.schedulable:
+            return BackupReport(
+                state=BackupState.NOT_CONFIGURED,
+                checked_at=now,
+                reason="no passphrase and/or off-site destination configured on this host "
+                "(ADR-025) — the scheduler was never enabled",
+            )
+
+        timeout = self.timeout_for(JobVerb.STATUS)
+        try:
+            result = self._run(
+                self._argv(
+                    facility_id,
+                    "--profile",
+                    "backup",
+                    "exec",
+                    "-T",
+                    "backup",
+                    "cat",
+                    BACKUP_STATUS_PATH,
+                ),
+                cwd=self.compose_file.parent,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return BackupReport(
+                state=BackupState.NEVER_RUN, checked_at=now, reason="backup status check timed out"
+            )
+        except Exception as error:  # noqa: BLE001
+            return BackupReport(
+                state=BackupState.NEVER_RUN,
+                checked_at=now,
+                reason=f"backup status unavailable: {type(error).__name__}",
+            )
+
+        if result.returncode != 0:
+            # Covers both "genuinely never run" (the file does not exist yet) and "the
+            # container could not be reached" — the same NEVER_RUN answer either way,
+            # because both mean the same thing to an operator: no confirmed evidence.
+            return BackupReport(
+                state=BackupState.NEVER_RUN,
+                checked_at=now,
+                reason="no scheduled backup evidence found on this host",
+            )
+
+        try:
+            return parse_last_run_status(result.stdout, observed_at=now)
+        except BackupStatusError as error:
+            return BackupReport(state=BackupState.NEVER_RUN, checked_at=now, reason=str(error))
 
     def _backup_now(self, facility_id: str) -> ExecutionResult:
         """Run one backup cycle on demand, or report why none was attempted (DH-027G).

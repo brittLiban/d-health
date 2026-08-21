@@ -773,9 +773,15 @@ def create_app(
             if facility_id:
                 health_records.record(facility_id, infrastructure)
 
-        # DH-027G: structured backup evidence, the same fail-closed pattern as STATUS above.
-        # A malformed or absent report must never be read as a successful backup — the
-        # control plane never holds the passphrase, so it has no way to check this itself.
+        # DH-027G/H: structured backup evidence, the same fail-closed pattern as STATUS
+        # above — with one distinction. For BACKUP_NOW, producing backup evidence is the
+        # job's entire purpose, so absence is as untrustworthy as malformed content and both
+        # are recorded FAILED. For STATUS, backup evidence (the nightly scheduler's own
+        # `last-run.status`, observed alongside infrastructure — DH-027H) is additive: a
+        # mixed-version agent that has not been upgraded to send it yet must not make backup
+        # look FAILED merely because *this* check did not carry it. Present-but-malformed is
+        # still fail-closed either way — an agent that tried and produced garbage is exactly
+        # what must never be read as a working backup.
         backup: BackupReport | None = None
         raw_backup = body.get("backup")
         if verb is JobVerb.BACKUP_NOW:
@@ -786,6 +792,18 @@ def create_app(
                     backup = unknown_backup("agent sent a backup report that failed validation")
             else:
                 backup = unknown_backup("agent reported a BACKUP_NOW job without backup evidence")
+            if facility_id:
+                backup_records.record(facility_id, backup)
+        elif verb is JobVerb.STATUS and raw_backup is not None:
+            if isinstance(raw_backup, dict):
+                try:
+                    backup = BackupReport.model_validate(raw_backup)
+                except Exception:
+                    backup = unknown_backup(
+                        "agent sent a STATUS backup observation that failed validation"
+                    )
+            else:
+                backup = unknown_backup("agent sent a STATUS backup observation of the wrong type")
             if facility_id:
                 backup_records.record(facility_id, backup)
 

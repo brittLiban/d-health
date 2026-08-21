@@ -123,6 +123,29 @@ deliberately not built in this ticket. Not exercised against a real S3-compatibl
 `docker compose run --rm backup` — DH-014 already owns that verification boundary (local path
 verified, off-site unexercised) and this ticket proves the wiring reaches it, not backup mechanics.
 
+**DH-027H closed that exact gap: STATUS now observes the nightly scheduler's own evidence
+(2026-08-21).** `backup/scheduler.sh` runs inside the backup container, independent of the job
+queue — before this, the control plane only ever learned about backup from an explicitly-issued
+`BACKUP_NOW`, so a facility could show a green manual test from last week while the real nightly
+backup had silently failed every night since. `STATUS` now also reads
+`${BACKUP_OUTPUT_DIR:-/backup}/last-run.status` — the exact command `backup/README.md` already
+documented for a manual check — via one more fixed, read-only `docker compose exec` (no new job
+verb; unconfigured hosts skip it entirely, same as `BACKUP_NOW`'s existing check). Parsing is
+strict and fail-closed (`daher_agent/backup_observation.py`): anything malformed, absent, or
+future-dated beyond a 60s tolerance becomes `NEVER_RUN`, never `SUCCESS`. The reported timestamp
+is the backup's own run time parsed from the marker, not when the agent happened to check.
+`backup.sh`'s status write is now atomic (temp file + rename) rather than truncate-in-place, since
+the control plane reads it now, not just a human running `cat` by hand. Because two independent
+paths (manual and scheduled) can now report evidence out of order, `SqliteBackupStore`/
+`InMemoryBackupStore` reject a report older than what they already hold — real newer evidence,
+good or bad, always wins; a stale replay cannot regress the fleet's displayed state. 41 new
+tests, 549 provisioning tests total (508 before), Ruff clean. Control-tested, four deliberate
+breaks: the parser always returning SUCCESS fails 2; removing the out-of-order guard from both
+stores fails 5; trusting the exec command's exit code over the marker's actual content fails 5;
+a successful observation wrongly setting the restore-drill date fails 2. ⚠️ Not exercised against
+a real nightly run — proven against the documented command and file format with synthetic marker
+text. DH-014's off-site boundary is unchanged.
+
 **DH-027C gave facilities a real lifecycle (2026-08-17):** nothing ever set `RUNNING` or
 `DEGRADED`, so every facility stayed `PROVISIONING` forever. One explicit transition table now
 advances state, driven only by an agent report about work it actually ran — never by a job being
@@ -143,9 +166,9 @@ write-temp-then-rename with contents fsynced before the rename. ⚠️ Rotation 
 the write is atomic, so the file is never torn, but a failed `up` afterwards leaves the new file in
 place. Restoring the old one is a credential-custody question, not a code detail.
 
-**CI now exists (DH-027M, 2026-08-17) and currently gates 637 tests.** Until this landed, every
+**CI now exists (DH-027M, 2026-08-17) and currently gates 678 tests.** Until this landed, every
 verification claim in `PROJECT_STATE.md` depended on a human remembering to run something.
-`.github/workflows/ci.yml` runs the adapter (94), provisioning (508), seed (16) and form-safety
+`.github/workflows/ci.yml` runs the adapter (94), provisioning (549), seed (16) and form-safety
 (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking

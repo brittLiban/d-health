@@ -71,7 +71,17 @@ meant to protect.
 agent's own process environment at bootstrap; the agent forwards them into this facility's env file
 during `PROVISION` (never before, never by rewriting — `BACKUP_ENCRYPTION_PASSPHRASE` is
 unrotatable, see `facility_env.UNROTATABLE`). See `provisioning/README.md`'s "Backup wiring" section
-for the exact variables and what `/facilities/{id}/status` reports. What DH-027G does **not** cover:
-the nightly scheduler above runs inside this container, independent of the provisioning job queue,
-so the control plane learns an outcome only when a `BACKUP_NOW` job is explicitly issued — it does
-not yet read `last-run.status` on its own.
+for the exact variables and what `/facilities/{id}/status` reports.
+
+**The nightly scheduler's own result now reaches the control plane too (DH-027H, 2026-08-21).**
+`STATUS` reads `last-run.status` the same way an operator already could by hand —
+`docker compose exec backup cat /backup/last-run.status`, documented just above — through one
+more fixed, read-only command the agent runs, never a caller-supplied one. Parsing is strict:
+only a well-formed `<STATE> <TIMESTAMP>` line is ever read as evidence; anything else becomes
+`NEVER_RUN`. See `provisioning/README.md`'s matching section for the full design.
+
+**`status()` now writes atomically.** The old `printf ... > "$STATUS_FILE"` truncates before
+writing, so a reader landing in that window would see an empty file — tolerable when the only
+reader was a human running `cat` occasionally, not once the control plane reads this file too.
+Now written to a `.tmp` file and `mv -f`'d into place, a `rename(2)` and therefore atomic on
+POSIX: a reader always sees either the complete previous status or the complete new one.

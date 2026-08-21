@@ -12,7 +12,16 @@ FAILED=0
 
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 fail() { log "FAILED: $*"; FAILED=1; }
-status() { printf '%s %s\n' "$1" "$TS" > "$STATUS_FILE"; }
+# Written to a temp file and renamed into place, not truncated in place (DH-027H): `>
+# "$STATUS_FILE"` opens with O_TRUNC before the write, so a reader landing between the
+# truncate and the write completing would see an empty file — and the control plane now
+# reads this file, not just a human running `cat` by hand. `mv` within the same directory is
+# a rename(2), atomic on POSIX, so a reader always sees either the previous complete status
+# or the new one, never neither.
+status() {
+  printf '%s %s\n' "$1" "$TS" > "${STATUS_FILE}.tmp"
+  mv -f -- "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
 
 : "${BACKUP_ENCRYPTION_PASSPHRASE:?BACKUP_ENCRYPTION_PASSPHRASE not set}"
 : "${OMRS_DB_ROOT_PASSWORD:?OMRS_DB_ROOT_PASSWORD not set}"

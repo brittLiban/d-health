@@ -423,13 +423,55 @@ persisted the same durable way `STATUS`'s observation is (`SqliteBackupStore`, l
 outcome (`not_configured` / `success` / `failed`) and a short operator-language reason, exactly
 like `InfrastructureReport` carries container states rather than raw Docker output.
 
-⚠️ **What this does not do.** The nightly scheduler (`backup/scheduler.sh`) runs entirely inside
-the backup container, independent of the job queue — the control plane has no visibility into
-those autonomous runs unless a `BACKUP_NOW` job is explicitly issued. `backup_state` therefore
-reflects the last *requested* check, not "last night's backup," until something reads
-`last-run.status` (documented in `backup/README.md`) into a report. No API endpoint yet queues
-`BACKUP_NOW` on demand either — matching `STATUS`'s existing state; both currently require queuing
-a job directly (see the demo harness's `/demo/enqueue-raw`, or `tests/test_backup_status.py`).
+⚠️ **What this does not do — closed by DH-027H below.** No API endpoint yet queues `STATUS` or
+`BACKUP_NOW` on demand; both currently require queuing a job directly (see the demo harness's
+`/demo/enqueue-raw`, or `tests/test_backup_status.py`).
+
+### The nightly scheduler was still invisible to the control plane (DH-027H, 2026-08-21)
+
+`backup/scheduler.sh` runs entirely inside the backup container, independent of the job queue,
+calling `daher-backup` nightly at `BACKUP_HOUR_UTC`. Before this ticket the control plane had no
+way to see the result: `backup_state` only ever moved on an explicitly-issued `BACKUP_NOW`, so a
+facility could show a green manual test from last week while the real nightly backup had silently
+failed every night since.
+
+**`STATUS` now observes it too, rather than adding a second job verb.** `STATUS` is already the
+fleet's one read-only observation seam, running alongside a mutating job (bug 18's status slot).
+`_status` now composes the existing infrastructure check with a new `_observe_backup`, which —
+for a configured host — runs exactly one more fixed, read-only command:
+
+```
+docker compose --profile backup exec -T backup cat /backup/last-run.status
+```
+
+The service name and path are hard-coded constants in `executor.py`, never derived from a job or
+caller input — the same guarantee `compose_file` already has. This automates the exact manual
+check `backup/README.md` already documented; it adds no new capability, no new verb, and no
+change to the closed job vocabulary (`jobs.py`/`validation.py`/`queue.py` are untouched).
+
+**Parsing is strict and fail-closed** (`daher_agent/backup_observation.py`). `last-run.status` is
+`<STATE> <TIMESTAMP>` on one line; anything else — absent, empty, malformed, an unrecognised
+state word, an unparseable or future-dated (beyond 60s clock-skew tolerance, reusing
+`JobValidator`'s existing constant) timestamp — becomes `NEVER_RUN`, never `SUCCESS`.
+`BackupState` gained no new value for this: an absent file, a failed `exec`, and malformed
+content are all `NEVER_RUN`, because all three mean the same thing to an operator — no confirmed
+evidence — and the distinction lives in `reason`, not the type. **The reported timestamp is the
+backup's own run time, parsed from the marker — never the moment the agent happened to check.**
+
+`backup/backup.sh`'s status write is now atomic (temp file + `mv`, not truncate-in-place) — small
+and in scope, because the control plane reads this file now, not just a human running `cat`.
+
+**Out-of-order evidence cannot regress what is displayed.** A manual `BACKUP_NOW` and a scheduled
+`STATUS` observation can now both report, in either order, regardless of which backup actually
+happened more recently. `SqliteBackupStore`/`InMemoryBackupStore` only accept a report whose
+`checked_at` is at least as new as what they already hold — the same conditional-update pattern
+`SqliteHostStore.claim`/`release` use to avoid a read-then-write race, applied here to a
+document-then-write race. Real newer evidence, good or bad, always wins.
+
+For `BACKUP_NOW`, missing/malformed evidence is still `FAILED` (unchanged — that verb's entire
+purpose is producing this evidence). For `STATUS`, backup evidence is additive: a mixed-version
+agent that has not been upgraded to send it does not make backup look `FAILED` for a check that
+simply didn't carry it — the report is skipped, not fabricated.
 
 ## Credential rotation — what it will not do (ADR-024)
 

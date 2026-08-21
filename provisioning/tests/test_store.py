@@ -160,6 +160,91 @@ class TestSurvivesRestart:
         assert reopened.latest("daher-bc").state is BackupState.SUCCESS
 
 
+def sqlite_backup_store(tmp_path):
+    return SqliteBackupStore(Database(tmp_path / "state.db"))
+
+
+class TestBackupEvidenceIsMonotonicByActualBackupTimeNotArrivalOrder:
+    """DH-027H. Two independent paths report backup evidence now — an on-demand `BACKUP_NOW`
+    and a `STATUS` observation of the nightly scheduler's marker — and nothing guarantees
+    they arrive in the same order as the backups they describe. A `STATUS` poll that happens
+    to land after a fresher manual backup must not resurrect yesterday's marker as "current".
+    """
+
+    def test_an_older_report_does_not_overwrite_a_newer_one(self, tmp_path):
+        store = sqlite_backup_store(tmp_path)
+        newer = datetime(2026, 8, 21, 15, 0, tzinfo=UTC)
+        older = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        store.record("daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=newer))
+        store.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=older))
+        assert store.latest("daher-bc").checked_at == newer
+        assert store.latest("daher-bc").state is BackupState.SUCCESS
+
+    def test_an_older_stale_success_cannot_mask_a_newer_failure(self, tmp_path):
+        """The dangerous direction, named explicitly by the ticket: a stale SUCCESS must not
+        make a facility that just failed look healthy again."""
+        store = sqlite_backup_store(tmp_path)
+        newer_failure = datetime(2026, 8, 21, 15, 0, tzinfo=UTC)
+        older_success = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        store.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=newer_failure))
+        store.record("daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=older_success))
+        assert store.latest("daher-bc").state is BackupState.FAILED
+        assert store.latest("daher-bc").checked_at == newer_failure
+
+    def test_a_newer_report_does_supersede_an_older_one_in_either_direction(self, tmp_path):
+        """The reverse must also work: real, newer evidence — good or bad — always wins."""
+        store = sqlite_backup_store(tmp_path)
+        earlier = datetime(2026, 8, 20, 15, 0, tzinfo=UTC)
+        later = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        store.record("daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=earlier))
+        store.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=later))
+        assert store.latest("daher-bc").state is BackupState.FAILED
+
+        store2 = sqlite_backup_store(tmp_path.parent / (tmp_path.name + "-2"))
+        store2.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=earlier))
+        store2.record("daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=later))
+        assert store2.latest("daher-bc").state is BackupState.SUCCESS
+
+    def test_equal_timestamps_are_deterministic_incoming_wins(self, tmp_path):
+        store = sqlite_backup_store(tmp_path)
+        when = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        store.record(
+            "daher-bc", BackupReport(state=BackupState.FAILED, checked_at=when, reason="first")
+        )
+        store.record(
+            "daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=when, reason="second")
+        )
+        assert store.latest("daher-bc").reason == "second"
+
+    def test_the_guard_survives_a_restart(self, tmp_path):
+        """Not just an in-process invariant — persisted, so a stale report replayed after an
+        API restart still cannot regress what was already known."""
+        path = tmp_path / "state.db"
+        db = Database(path)
+        newer = datetime(2026, 8, 21, 15, 0, tzinfo=UTC)
+        older = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        SqliteBackupStore(db).record(
+            "daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=newer)
+        )
+        db.close()
+
+        reopened = SqliteBackupStore(Database(path))
+        reopened.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=older))
+        assert reopened.latest("daher-bc").state is BackupState.SUCCESS
+
+    def test_the_in_memory_store_enforces_the_same_guard(self, tmp_path):
+        """The in-memory variant (tests, default wiring) must not be a weaker twin of the
+        SQLite one — the same property, asserted against the same interface."""
+        from daher_provisioning.store import InMemoryBackupStore
+
+        store = InMemoryBackupStore()
+        newer = datetime(2026, 8, 21, 15, 0, tzinfo=UTC)
+        older = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        store.record("daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=newer))
+        store.record("daher-bc", BackupReport(state=BackupState.FAILED, checked_at=older))
+        assert store.latest("daher-bc").state is BackupState.SUCCESS
+
+
 class TestNoClinicalCredentialIsStored:
     """Facility secrets live on the facility host, never here (ADR-022)."""
 

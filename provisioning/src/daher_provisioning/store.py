@@ -213,12 +213,24 @@ class InMemoryHealthStore:
 
 
 class SqliteBackupStore:
-    """Latest BACKUP_NOW report per facility (DH-027G).
+    """Latest backup report per facility, by actual backup time — not by arrival order
+    (DH-027G/DH-027H).
 
-    Same shape as `SqliteHealthStore` on purpose: one durable fact per facility, replaced
-    on every new report, because "is this facility protected right now" is what an operator
-    needs — not a history of every backup attempt. Never holds a passphrase, bucket name, or
-    credential; `BackupReport` structurally cannot carry one (ADR-021's pattern, applied here).
+    Same shape as `SqliteHealthStore` on purpose: one durable fact per facility, because "is
+    this facility protected right now" is what an operator needs, not a history of every
+    backup attempt. Never holds a passphrase, bucket name, or credential; `BackupReport`
+    structurally cannot carry one (ADR-021's pattern, applied here).
+
+    ⚠️ **Two independent paths can now report here** — an on-demand `BACKUP_NOW` and a
+    `STATUS` observation of the nightly scheduler's own evidence (DH-027H) — and nothing
+    guarantees they arrive in chronological order of the backups they describe. A `STATUS`
+    poll can land after a fresher manual backup and still be carrying yesterday's marker.
+    Naive last-writer-wins would let that stale read regress the fleet's displayed state —
+    including turning a facility that just failed a manual backup back to "success" because
+    an old marker was re-observed. So the write is conditional, in SQL, on `checked_at`
+    (`WHERE excluded.checked_at >= facility_backup.checked_at`) — the same conditional-UPDATE
+    pattern `SqliteHostStore.claim`/`release` already use to avoid a read-then-write race,
+    applied here to avoid a document-then-write race instead. Ties go to the incoming report.
     """
 
     def __init__(self, db: Database) -> None:
@@ -229,7 +241,8 @@ class SqliteBackupStore:
             conn.execute(
                 "INSERT INTO facility_backup (facility_id, document, checked_at) VALUES (?,?,?) "
                 "ON CONFLICT(facility_id) DO UPDATE SET document=excluded.document, "
-                "checked_at=excluded.checked_at",
+                "checked_at=excluded.checked_at "
+                "WHERE excluded.checked_at >= facility_backup.checked_at",
                 (facility_id, report.model_dump_json(), report.checked_at.isoformat()),
             )
 
@@ -243,12 +256,15 @@ class SqliteBackupStore:
 
 
 class InMemoryBackupStore:
-    """Same interface, for tests and the default in-memory wiring."""
+    """Same interface, and the same out-of-order guard, for tests and in-memory wiring."""
 
     def __init__(self) -> None:
         self._latest: dict = {}
 
     def record(self, facility_id: str, report) -> None:
+        existing = self._latest.get(facility_id)
+        if existing is not None and report.checked_at < existing.checked_at:
+            return  # stale evidence — must not regress what is displayed as current
         self._latest[facility_id] = report
 
     def latest(self, facility_id: str):

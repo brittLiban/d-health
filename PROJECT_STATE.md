@@ -1,6 +1,9 @@
 # Project State — Daher Health
 
-**Updated:** 2026-08-16 · **Phase:** provisioning control plane works end to end on a stand-in; DH-011 transport is now the critical path and is unblocked
+**Updated:** 2026-08-21 · **Phase:** provisioning control plane works end to end on a stand-in;
+DH-011 transport is **blocked on BLOCKER-6** (target ingestion path — a human decision), not the
+unblocked critical path this line claimed until now (stale since BLOCKER-6 was raised 2026-08-16,
+the day after this line was written)
 
 **⚠️ Recorded schedule trade, made deliberately by Liban 2026-08-15.** The provisioning API and
 portal are being built *before* DH-011→012→013. The consequence, stated once and accepted: the
@@ -187,7 +190,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 637 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring; nightly-scheduler visibility still open) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 678 tests now gated, every check control-tested), **DH-027B** (compensated facility creation — not a single ACID transaction; see its entry), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring), **DH-027H** (nightly-scheduler backup evidence reaches the control plane) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -222,7 +225,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
 2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gated **582 tests** at
-   landing; it currently gates **637 tests across four suites** (adapter 94, provisioning 508, seed
+   landing; it currently gates **678 tests across four suites** (adapter 94, provisioning 549, seed
    16, form-safety 19 — measured against the real CI run, not copied) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
@@ -2020,6 +2023,100 @@ already established that boundary (local path verified 2026-08-13, off-site stil
 this ticket did not re-open it; verification here is at the wiring/executor level, proving
 configuration reaches the real path, not re-proving backup mechanics DH-014 already owns.
 
+### DH-027H · Scheduled backup evidence reaches the control plane · ✅ DONE 2026-08-21
+
+**The gap this closes — named explicitly in DH-027G's own boundary note above.** `backup/scheduler.sh`
+runs entirely inside the backup container, independent of the provisioning job queue, calling
+`/usr/local/bin/daher-backup` nightly at `BACKUP_HOUR_UTC` and writing
+`${BACKUP_OUTPUT_DIR:-/backup}/last-run.status`. Before this ticket the control plane had no way to
+see that file: `backup_state` only ever moved on an explicitly-issued `BACKUP_NOW`. A facility could
+show a green manual test run from last week while the actual nightly backup had been silently
+failing every night since.
+
+**Design: extend `STATUS`, not a new verb.** `STATUS` is already the fleet's one read-only
+observation seam — it runs alongside a mutating job (bug 18's status slot), and DH-027D's `config`/`ps`
+pair already reads compose state this same way. `_status` now composes two independent observations,
+`_observe_infrastructure` (renamed from the old `_status` body, unchanged logic) and the new
+`_observe_backup`, into one `ExecutionResult` carrying both `infrastructure` and `backup`. No new
+`JobVerb`, no new entry in the closed job vocabulary, no change to `validation.py`/`jobs.py`/`queue.py`.
+
+**How the read works, and why it cannot become arbitrary file access.** `_observe_backup` checks
+`self.backup` locally first — unconfigured hosts report `NOT_CONFIGURED` without ever touching Docker,
+exactly like `_backup_now` already does. A configured host runs exactly one more fixed, read-only
+command: `docker compose --profile backup exec -T backup cat /backup/last-run.status` — the service
+name (`backup`) and the path (`BACKUP_STATUS_PATH`, a module constant) are hard-coded in
+`executor.py`, never derived from a job or any caller input, the same guarantee `compose_file` already
+has. This is not a new capability; it automates the exact manual check `backup/README.md` already
+documented (`docker compose exec backup cat /backup/last-run.status`).
+
+**Parsing is a pure function, strict, fail-closed** (`daher_agent/backup_observation.py`,
+`parse_last_run_status`). `last-run.status` is `<STATE> <TIMESTAMP>` on exactly one line — anything
+else (empty, extra fields, an unrecognised state word, an unparseable or future-beyond-tolerance
+timestamp, more than one line) raises `BackupStatusError`, which `_observe_backup` converts to
+`NEVER_RUN`, never `SUCCESS`. The future-tolerance window (60s) reuses `JobValidator`'s existing
+clock-skew constant rather than inventing a second one. `BackupState` gained no new value: exec
+failures, an absent file, and malformed content all report the same `NEVER_RUN` — deliberately, since
+all three carry the identical actionable meaning to an operator ("no confirmed evidence"), and the
+`reason` field carries the specific truth. **The timestamp is the backup's own run time, parsed from
+the marker — never `datetime.now()`.** `backup.sh`'s `TS` is captured once at script start, so
+`BackupReport.checked_at` for a scheduled observation is when the backup actually ran, not when the
+agent happened to check; the portal's existing `_describe_age` now shows real backup age for exactly
+this reason.
+
+**`backup.sh` writes the marker atomically now** (`status()` in `backup/backup.sh`): the old `>
+"$STATUS_FILE"` truncates before writing, so a reader landing in that window would see an empty file.
+Now written to `${STATUS_FILE}.tmp` and `mv -f`'d into place — `mv` within one directory is a
+`rename(2)`, atomic on POSIX. Small, in-scope fix: this file is the one artifact this ticket's
+trustworthiness depends on.
+
+**Out-of-order evidence cannot regress the fleet's displayed state.** Two independent paths report
+backup evidence now — manual `BACKUP_NOW` and scheduled `STATUS` observation — with no guarantee they
+arrive in the order the backups they describe actually happened. `SqliteBackupStore.record` is now
+conditional in SQL (`WHERE excluded.checked_at >= facility_backup.checked_at`), the same
+conditional-UPDATE pattern `SqliteHostStore.claim`/`release` already use to avoid a read-then-write
+race — applied here to a document-then-write race instead. `InMemoryBackupStore` enforces the
+identical guard in Python. Ties go to the incoming report (a defined, if rare, choice). Real newer
+evidence — good or bad — always supersedes older evidence in either direction; only a genuinely stale
+report is dropped.
+
+**The API accepts backup evidence from `STATUS` too, but not on the same fail-closed terms as
+`BACKUP_NOW`.** For `BACKUP_NOW`, producing backup evidence is the job's entire purpose, so absence is
+as untrustworthy as malformed content — both record `FAILED`, unchanged from DH-027G. For `STATUS`,
+backup evidence is additive: a mixed-version agent that has not been upgraded to send it yet must not
+make backup look `FAILED` merely because *this particular check* did not carry it, so a `STATUS`
+report with no `backup` field simply does not touch `backup_records`. Present-but-malformed is
+fail-closed either way.
+
+**Restore-drill stays untouched and separate**, proven for the scheduled path the same way DH-027G
+proved it for the manual one: a test asserts a successful scheduled observation leaves
+`restore_drill_last_performed` at `None`.
+
+**Verified:** 41 new tests, **549 provisioning tests total** (from 508), Ruff clean, all four suites
+green (678 total: adapter 94, provisioning 549, seed 16, form-safety 19).
+
+**Control-tested, four deliberate breaks on a throwaway copy, each restored after:**
+
+| Control | Result |
+|---|---|
+| Parser always returns `SUCCESS` regardless of the marker's actual state word | **2 fail** |
+| Remove the out-of-order guard from both `SqliteBackupStore` and `InMemoryBackupStore` | **5 fail** |
+| Trust the `exec` command's own exit code instead of the marker's content | **5 fail** |
+| A successful backup observation sets `restore_drill_last_performed` | **2 fails** |
+
+Plus the existing secret-vocabulary guard (`test_no_clinical_data.py`, DH-027G) — unchanged and
+re-verified as still passing, since `BackupReport`'s shape did not change; a fifth deliberate break of
+that specific guard was not re-run because it is verb-agnostic and model-structural, not something
+this ticket's logic could plausibly disable as a side effect.
+
+⚠️ **Boundaries, stated rather than glossed.** No API endpoint yet queues `STATUS` or `BACKUP_NOW` on
+demand — unchanged from DH-027D/G; both still require enqueuing a job directly (demo harness or a
+test). `NEVER_RUN` is used as the fail-closed target for three different underlying causes (absent
+file, exec failure, malformed content) rather than a fourth `BackupState` value — a deliberate choice
+to avoid enum proliferation, with the distinction preserved in `reason` rather than in the type. Not
+exercised against a real backup container's `last-run.status` — proven against the exact documented
+command and file format, with a real (if synthetic) marker text, not a live nightly run. DH-014's
+off-site verification boundary is unchanged and not re-opened by this ticket.
+
 ### DH-027C · Facility lifecycle state machine · ✅ DONE 2026-08-17
 
 **The gap:** nothing in the codebase ever set `RUNNING` or `DEGRADED`. Every facility stayed
@@ -2123,7 +2220,7 @@ is never *torn* — but it is the new one. Restoring the previous file needs a r
 which is a credential-custody question (where does the old file live, and for how long?)
 rather than a code detail, so it is not invented here.
 
-### DH-027B · Transactional facility creation · ✅ DONE 2026-08-17
+### DH-027B · Compensated facility creation · ✅ DONE 2026-08-17
 
 **The orphan.** `POST /facilities` claims the host *before* inserting the facility record.
 If the insert failed, the claim survived — that host was marked occupied by a facility that

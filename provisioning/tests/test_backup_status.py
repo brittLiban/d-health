@@ -79,6 +79,20 @@ def queue_backup_now(app) -> str:
     return job.job_id
 
 
+def queue_status(app, job_id="job-status-000001") -> str:
+    from datetime import UTC, datetime
+
+    job = Job(
+        job_id=job_id,
+        host_id=HOST,
+        verb=JobVerb.STATUS,
+        params=JobParams(facility_id=FACILITY),
+        issued_at=datetime.now(UTC),
+    )
+    app.state.queue.enqueue(job)
+    return job.job_id
+
+
 def status_of(client, head, facility_id=FACILITY) -> dict:
     return client.get(f"/facilities/{facility_id}/status", headers=head).json()
 
@@ -278,3 +292,145 @@ class TestTheAuditLogRecordsBackupOutcomes:
         )
         messages = " ".join(e.message or "" for e in log.entries())
         assert "backup success" in messages
+
+
+class TestStatusAlsoCarriesScheduledBackupEvidence:
+    """DH-027H. `STATUS` observes the nightly scheduler's own `last-run.status` alongside
+    infrastructure health — reusing the fleet's one observation seam instead of adding a
+    second job verb beside it."""
+
+    def test_a_status_report_with_backup_evidence_updates_backup_state(self, wired):
+        client, head, _, app = wired
+        agent = agent_headers(app)
+        job_id = queue_status(app)
+        report(
+            client,
+            agent,
+            job_id,
+            {
+                "status": "succeeded",
+                "detail": "healthy: 1/1 services",
+                "backup": {"state": "success", "checked_at": "2026-08-21T02:00:00Z"},
+            },
+        )
+        status = status_of(client, head)
+        assert status["backup_state"] == "success"
+        assert status["backup_last_run"] == "2026-08-21T02:00:00Z"
+
+    def test_a_status_report_without_backup_evidence_leaves_backup_state_untouched(self, wired):
+        """Additive, not mandatory (unlike infrastructure evidence): a mixed-version agent
+        that has not been upgraded to observe backup yet must not make backup look FAILED
+        merely because this particular STATUS check did not carry it."""
+        client, head, _, app = wired
+        agent = agent_headers(app)
+        job_id = queue_status(app)
+        report(client, agent, job_id, {"status": "succeeded", "detail": "healthy: 1/1 services"})
+        assert status_of(client, head)["backup_state"] == "never_run"
+
+    def test_malformed_backup_evidence_on_a_status_report_still_fails_closed(self, wired):
+        client, head, _, app = wired
+        agent = agent_headers(app)
+        job_id = queue_status(app)
+        report(
+            client,
+            agent,
+            job_id,
+            {
+                "status": "succeeded",
+                "detail": "healthy: 1/1 services",
+                "backup": {"state": "not-a-real-state", "checked_at": "2026-08-21T00:00:00Z"},
+            },
+        )
+        assert status_of(client, head)["backup_state"] == "failed"
+
+    def test_a_scheduled_success_observation_does_not_imply_a_verified_restore(self, wired):
+        """The same ADR-025 separation as DH-027G's manual-path test, proven for the
+        scheduled-observation path too — a successful archive does not prove it restores."""
+        client, head, _, app = wired
+        agent = agent_headers(app)
+        job_id = queue_status(app)
+        report(
+            client,
+            agent,
+            job_id,
+            {
+                "status": "succeeded",
+                "detail": "healthy: 1/1 services",
+                "backup": {"state": "success", "checked_at": "2026-08-21T02:00:00Z"},
+            },
+        )
+        assert status_of(client, head)["restore_drill_last_performed"] is None
+
+
+class TestManualAndScheduledBackupPrecedence:
+    """The out-of-order property from `test_store.py`, now proven through the real report
+    endpoint end to end rather than only at the store."""
+
+    def test_a_stale_scheduled_observation_does_not_override_a_fresher_manual_result(self, wired):
+        client, head, _, app = wired
+        agent = agent_headers(app)
+
+        manual_job = queue_backup_now(app)
+        report(
+            client,
+            agent,
+            manual_job,
+            {
+                "status": "succeeded",
+                "detail": "ok",
+                "backup": {"state": "success", "checked_at": "2026-08-21T15:00:00Z"},
+            },
+        )
+
+        status_job = queue_status(app, "job-status-000002")
+        report(
+            client,
+            agent,
+            status_job,
+            {
+                "status": "succeeded",
+                "detail": "healthy: 1/1 services",
+                "backup": {"state": "failed", "checked_at": "2026-08-21T02:00:00Z"},
+            },
+        )
+
+        status = status_of(client, head)
+        assert status["backup_state"] == "success", (
+            "a stale nightly marker from before the manual run must not resurrect an older "
+            "result over a fresher one"
+        )
+        assert status["backup_last_run"] == "2026-08-21T15:00:00Z"
+
+    def test_a_fresher_scheduled_failure_does_supersede_an_older_manual_success(self, wired):
+        """The dangerous direction: real, newer bad news must win over old good news."""
+        client, head, _, app = wired
+        agent = agent_headers(app)
+
+        manual_job = queue_backup_now(app)
+        report(
+            client,
+            agent,
+            manual_job,
+            {
+                "status": "succeeded",
+                "detail": "ok",
+                "backup": {"state": "success", "checked_at": "2026-08-20T15:00:00Z"},
+            },
+        )
+
+        status_job = queue_status(app, "job-status-000002")
+        report(
+            client,
+            agent,
+            status_job,
+            {
+                "status": "succeeded",
+                "detail": "healthy: 1/1 services",
+                "backup": {"state": "failed", "checked_at": "2026-08-21T02:00:00Z"},
+            },
+        )
+
+        status = status_of(client, head)
+        assert status["backup_state"] == "failed", (
+            "a genuinely newer failure must not be masked by an older success"
+        )
