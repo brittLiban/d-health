@@ -83,6 +83,25 @@ surfaced rather than hidden. **Bug 20 was then diagnosed and fixed (2026-08-20)*
 now reports `healthy, 11/11`. ⚠️ No scheduler exists: an observation is only as fresh
 as the last request, and the portal shows its age for exactly that reason.
 
+**Bug 18 fixed — the agent now polls while a job executes (2026-08-20).** `execute` used to run
+inline inside the poll loop, so a `provision` blocked polling for up to 5400s and anything queued
+in that window was refused as stale once the loop resumed (900s replay window, ADR-022). `execute`
+now runs on a background thread; `status` (read-only) always runs, including alongside an in-flight
+mutating job, while every mutating verb shares one slot so at most one runs at a time — a second
+one claimed mid-flight is refused immediately rather than racing two `docker compose` invocations
+against the same project. `JobValidator` still runs synchronously before dispatch; the staleness
+window itself is unchanged. Fixing this exposed a real gap in DH-027C's lifecycle table: concurrent
+polling makes it possible for a duplicate `PROVISION` to be claimed and refused while the real
+attempt is still running, and the table previously treated any non-`succeeded` report as `DEGRADED`
+— which would have mislabeled a healthy facility, permanently, since that row only fires from
+`PROVISIONING`. `next_facility_state` now only degrades `PROVISION` on a genuine `failed` report;
+`refused` is a no-op, matching every other row. 11 new tests, 464 provisioning tests total (453
+before), Ruff clean. Control-tested, three deliberate breaks on a throwaway copy: disabling the
+busy-refusal check fails 3; restoring the old binary lifecycle row fails 2; reverting `poll_once`
+to call `execute` inline again — reproducing bug 18 exactly — fails 6 of 7 (the one unaffected
+test doesn't depend on concurrency). Not exercised against a real ~50-minute boot — proven at the poller/queue
+level, not against real `docker compose` timing.
+
 **DH-027C gave facilities a real lifecycle (2026-08-17):** nothing ever set `RUNNING` or
 `DEGRADED`, so every facility stayed `PROVISIONING` forever. One explicit transition table now
 advances state, driven only by an agent report about work it actually ran — never by a job being

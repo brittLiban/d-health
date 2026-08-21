@@ -17,32 +17,42 @@ Two properties the loop must hold, both of which are about *staying alive*:
 The executor is injected so that shelling out to `docker compose` is never exercised by a
 unit test pretending to be a deployment.
 
-⚠️ **This loop is synchronous, and that has a consequence worth knowing before it surprises
-someone.** `poll_once` runs the executor inline, so while a `provision` is bringing a stack
-up — up to `DEFAULT_STACK_TIMEOUT_SECONDS`, and a measured cold boot is ≈49 minutes — this
-agent is not polling at all. Two things follow:
+**Bug 18 — fixed.** `execute` used to run inline inside `poll_once`, so while a `provision`
+brought a stack up — up to 5400s — the agent did not poll at all, and anything queued in
+that window was refused as stale by the time the loop came back (`JobValidator` rejects any
+job older than 900s). `execute` now runs on a background thread, so `poll_once` returns as
+soon as the job is dispatched and the loop keeps calling `fetch` on its normal cadence.
 
-1. A `stop`, `status` or `backup_now` issued during that window is not acted on until the
-   provision finishes.
-2. By then it will usually be **refused as stale**, because `JobValidator` rejects any job
-   older than `DEFAULT_MAX_AGE_SECONDS` (900s). That refusal is loud, audited, and safe —
-   nothing is silently skipped — but the operator must re-issue the job.
+**What did *not* change:** the fixed command/security model. `JobValidator` still runs
+synchronously, on the calling thread, before anything is dispatched — a job is validated
+exactly once, by exactly one thread, with the same rules as before. Nothing here builds a
+command, touches `subprocess`, or widens the staleness window; those all remain
+`executor.py` and `validation.py`, untouched. The queue's per-host FIFO dispatch order
+(`JobQueue.claim`) is unchanged too — this only changes when the *agent* finishes acting on
+what it already claimed, never the order the *API* hands work out in.
 
-This is an accepted limit of bug 17's fix, not an oversight: widening the staleness window
-to paper over it would weaken ADR-022's replay protection, which is a security property and
-therefore a decision rather than a tuning constant. Removing the limit properly means
-running the long verb off this thread, which puts concurrency into the component whose value
-is partly that it is simple. Recorded as known bug 18.
+**The concurrency this buys, and the limit that stays on purpose.** `STATUS` is read-only
+(`docker compose ps`/`config`), so it can run at any time, including while a mutating verb
+is executing against the same compose project. Every other verb (`provision`, `start`,
+`stop`, `rotate_tls`, `backup_now`) mutates that project, so **at most one runs at a time**
+— a second one claimed while the first is still in flight is refused immediately, loudly,
+rather than racing two `docker compose` invocations against the same project. That refusal
+is reported the same way a validation refusal is: audited, and safe, and the operator must
+re-issue the job — this was already an accepted cost of bug 17's fix; only the timing and
+the reason are better now. Two slots (one mutating, one status) also bounds the thread
+count: a flood of queued jobs cannot make this agent spawn unboundedly many threads.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from daher_agent.validation import JobRefused, JobValidator
-from daher_provisioning.jobs import Job
+from daher_provisioning.jobs import Job, JobVerb
 from daher_provisioning.models import InfrastructureReport
 
 logger = logging.getLogger("daher_agent.poller")
@@ -69,6 +79,32 @@ ExecuteJob = Callable[[Job], ExecutionResult]
 ReportOutcome = Callable[..., None]
 
 
+@dataclass
+class _Slot:
+    """One background execution slot. `job` is set while something occupies it."""
+
+    job: Job | None = None
+    thread: threading.Thread | None = None
+
+
+@dataclass
+class _Slots:
+    """The agent's two execution slots (bug 18).
+
+    `status` is read-only and never blocks or is blocked by anything. `mutating` covers
+    every verb that runs `docker compose` against the facility's project — only one may be
+    in flight, because two concurrent invocations against the same compose project is
+    exactly the race ADR-022's "the compose file lives on the facility host" guarantee
+    exists alongside, not a concurrency question that guarantee answers on its own.
+    """
+
+    status: _Slot = field(default_factory=_Slot)
+    mutating: _Slot = field(default_factory=_Slot)
+
+    def for_verb(self, verb: JobVerb) -> _Slot:
+        return self.status if verb is JobVerb.STATUS else self.mutating
+
+
 class AgentPoller:
     def __init__(
         self,
@@ -82,9 +118,23 @@ class AgentPoller:
         self._fetch = fetch
         self._execute = execute
         self._report = report or (lambda job_id, status, detail: None)
+        self._lock = threading.Lock()
+        self._report_lock = threading.Lock()
+        self._slots = _Slots()
 
     def poll_once(self) -> str | None:
-        """Fetch, validate and run at most one job. Returns the outcome, or None if idle.
+        """Fetch, validate and dispatch at most one job. Never blocks on execution.
+
+        Returns immediately once a job is handed to its execution slot — the outcome is
+        reported asynchronously, on the thread that ran it, when it finishes. Return values:
+
+        * ``None`` — nothing was waiting.
+        * ``"refused"`` — validation refused the job before it ever reached execution.
+        * ``"busy"`` — the job's slot (mutating or status) is already occupied; refused
+          without executing, for the same reason a hostile job is refused: loudly, and
+          without racing the thing already running.
+        * ``"dispatched"`` — handed to a background thread. Not an outcome; call `join` (as
+          tests do) to observe what it reports.
 
         This never raises. Every failure mode — an unreachable API, a malformed payload, a
         hostile parameter, an executor that blew up — is caught, reported and survived,
@@ -113,16 +163,67 @@ class AgentPoller:
             logger.error("validation_error", exc_info=True)
             return "refused"
 
+        slot = self._slots.for_verb(job.verb)
+        is_status = job.verb is JobVerb.STATUS
+        with self._lock:
+            blocker = slot.job
+            if blocker is None:
+                slot.job = job
+
+        # Reported outside the lock: `_safe_report` calls into a network client in
+        # production, and a poll thread must never hold `self._lock` across I/O — a worker
+        # finishing at the same moment would otherwise stall in its own `finally` waiting for
+        # this lock, for as long as the report takes.
+        if blocker is not None:
+            kind = "a status check" if is_status else "a mutating operation"
+            detail = (
+                f"refused: {blocker.verb.value} job {blocker.job_id} is still executing on "
+                f"this host; only one {kind} runs at a time (bug 18)"
+            )
+            logger.warning("job_busy job_id=%s blocked_by=%s", job.job_id, blocker.job_id)
+            self._safe_report(job.job_id, "refused", detail)
+            return "busy"
+
+        thread = threading.Thread(target=self._run, args=(job, slot), daemon=True)
+        slot.thread = thread
+        thread.start()
+        return "dispatched"
+
+    def _run(self, job: Job, slot: _Slot) -> None:
+        """Execute one dispatched job off the poll loop's thread, then report it."""
         try:
             result = self._execute(job)
         except Exception as exc:
             logger.error("execution_failed job_id=%s", job.job_id, exc_info=True)
             self._safe_report(job.job_id, "failed", f"executor raised: {type(exc).__name__}")
-            return "failed"
-
+            return
+        finally:
+            with self._lock:
+                slot.job = None
         status = "succeeded" if result.succeeded else "failed"
+        logger.info("job_finished job_id=%s status=%s", job.job_id, status)
         self._safe_report(job.job_id, status, result.detail, result.infrastructure)
-        return status
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait for whatever is currently executing to finish.
+
+        Used by tests to observe an async outcome deterministically, and by graceful
+        shutdown (`run_forever`) so the transport is not closed under a report still in
+        flight. Returns ``True`` once both slots are idle, ``False`` if `timeout` elapsed
+        first. Untimed (the default) matches the pre-bug-18 behaviour, where the loop could
+        not shut down mid-job either.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for slot in (self._slots.status, self._slots.mutating):
+            thread = slot.thread
+            if thread is None:
+                continue
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+        return not any(
+            slot.thread is not None and slot.thread.is_alive()
+            for slot in (self._slots.status, self._slots.mutating)
+        )
 
     def _safe_report(
         self,
@@ -131,14 +232,21 @@ class AgentPoller:
         detail: str,
         infrastructure: InfrastructureReport | None = None,
     ) -> None:
-        """Reporting is best effort. A failure to report must not stop the loop."""
+        """Reporting is best effort. A failure to report must not stop the loop.
+
+        Serialised by its own lock: two slots can finish close together and both call this
+        from different threads, and the reporter (an HTTP client in production) is not
+        asked to prove it tolerates concurrent calls.
+        """
         try:
-            try:
-                self._report(job_id, status, detail, infrastructure)
-            except TypeError:
-                # A reporter written before DH-027D takes three arguments. Falling back keeps
-                # a mixed-version fleet reporting outcomes rather than silently failing every
-                # report — the outcome still lands, only the structured evidence is dropped.
-                self._report(job_id, status, detail)
+            with self._report_lock:
+                try:
+                    self._report(job_id, status, detail, infrastructure)
+                except TypeError:
+                    # A reporter written before DH-027D takes three arguments. Falling back
+                    # keeps a mixed-version fleet reporting outcomes rather than silently
+                    # failing every report — the outcome still lands, only the structured
+                    # evidence is dropped.
+                    self._report(job_id, status, detail)
         except Exception:
             logger.warning("report_failed job_id=%s", job_id, exc_info=True)

@@ -7,6 +7,12 @@ It listens on no port, which is the property the whole pull design exists to buy
 reads the whole body and hands a fully-parsed object to validation, so a payload split
 across TCP segments cannot be half-parsed — `httpx` reassembles before `.json()` returns.
 That assumption is now checked by the two-container demonstration rather than assumed.
+
+`poll_once` no longer blocks for the duration of a job (bug 18, `poller.py`), so this loop's
+`time.sleep(poll_seconds)` cadence keeps claiming work even while a long `provision` runs in
+the background. `poller.join()` is called before `transport.close()` below for exactly the
+reason that fix creates: a job can still be executing, and reporting its outcome, after
+`max_iterations` is reached, and closing the HTTP client under that report would lose it.
 """
 
 from __future__ import annotations
@@ -140,6 +146,7 @@ def run_forever(
             iterations += 1
             time.sleep(poll_seconds)
     finally:
+        poller.join()
         transport.close()
 
 

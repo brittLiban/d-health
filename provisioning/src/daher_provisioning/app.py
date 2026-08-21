@@ -90,7 +90,22 @@ def next_facility_state(
     succeeded = reported == "succeeded"
 
     if verb is JobVerb.PROVISION and current is FacilityState.PROVISIONING:
-        return FacilityState.RUNNING if succeeded else FacilityState.DEGRADED
+        if succeeded:
+            return FacilityState.RUNNING
+        if reported == "failed":
+            return FacilityState.DEGRADED
+        # `refused` is the agent's own boundary declining to run this instruction — it is
+        # not a fact about a deployment attempt. Bug 18's fix lets the agent poll while a
+        # job executes, which makes it possible for a second PROVISION targeting a facility
+        # that is still PROVISIONING to be claimed and refused (busy, or `FacilityExistsLocally`
+        # once the first job's env file exists) *while the first one is genuinely still
+        # running*. Treating that refusal as DEGRADED here would be exactly the lifecycle
+        # lie DH-027D exists to prevent — and, because this row only fires from
+        # PROVISIONING, it would never self-correct: the real attempt's later `succeeded`
+        # report would no longer match `current is PROVISIONING`. Every other row already
+        # treats a non-`succeeded` report as no change (falls through to `None` below); this
+        # makes PROVISION's row do the same for a refusal, and keeps `failed` degrading.
+        return None
 
     if (
         verb is JobVerb.START

@@ -191,12 +191,22 @@ class TestTheLifecycleTable:
             is FacilityState.RUNNING
         )
 
-    @pytest.mark.parametrize("reported", ["failed", "refused"])
-    def test_a_failed_provision_report_is_degraded_not_running(self, reported):
+    def test_a_failed_provision_report_is_degraded_not_running(self):
         assert (
-            next_facility_state(JobVerb.PROVISION, reported, FacilityState.PROVISIONING)
+            next_facility_state(JobVerb.PROVISION, "failed", FacilityState.PROVISIONING)
             is FacilityState.DEGRADED
         )
+
+    def test_a_refused_provision_report_leaves_it_provisioning(self):
+        """Bug 18: the agent now polls while a job executes, so a duplicate PROVISION for a
+        facility that is still provisioning can be claimed and refused (busy, or
+        `FacilityExistsLocally`) while the real attempt is genuinely still running. A refusal
+        says nothing about that attempt, so — unlike `failed` — it must not degrade the
+        facility. If it did, the row would never self-correct: it only fires from
+        PROVISIONING, and the real attempt's later `succeeded` report would arrive too late
+        to match it.
+        """
+        assert next_facility_state(JobVerb.PROVISION, "refused", FacilityState.PROVISIONING) is None
 
     def test_a_successful_start_recovers_a_degraded_facility(self):
         assert (
@@ -264,6 +274,21 @@ class TestTheLifecycleThroughTheApi:
             headers=agent,
         )
         assert state_of(client, head) == FacilityState.DEGRADED.value
+
+    def test_a_refused_provision_leaves_it_provisioning_not_degraded(self, wired):
+        """Bug 18 companion: a busy/duplicate refusal is not evidence the real attempt
+        failed, so it must not do what a genuine failure does."""
+        client, head, _, _, app = wired
+        agent = TestOnlyAnAgentReportReachesTheTerminalState._agent_headers(app)
+        job = TestOnlyAnAgentReportReachesTheTerminalState._claim_until(
+            client, agent, JobVerb.PROVISION
+        )
+        client.post(
+            f"/agent/jobs/{job['job_id']}/report",
+            json={"status": "refused", "detail": "busy: another job is executing"},
+            headers=agent,
+        )
+        assert state_of(client, head) == FacilityState.PROVISIONING.value
 
     def test_the_state_change_appears_in_the_audit_log(self, wired):
         client, head, _, log, app = wired

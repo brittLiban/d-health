@@ -143,12 +143,17 @@ Control-verified three ways — putting 900s back fails the two guards by name, 
 the fast bound fails the per-verb tests, and running without the compose file mounted **fails**
 rather than skipping.
 
-⚠️ **What the fix does not solve — known bug 18.** The poll loop is synchronous, so the agent does
-not poll while a provision runs. A `stop` or `status` issued during that window is refused as stale
-when it is finally claimed, because `JobValidator` rejects jobs older than 900s. That refusal is
-loud and audited — nothing is silently skipped — but the operator must re-issue. Widening the
-staleness window would weaken ADR-022's replay protection, which is a security property rather than
-a tuning constant, so it was not done as a side effect of this fix.
+✅ **Known bug 18 is fixed (2026-08-20): the poll loop no longer blocks on a running job.**
+`execute` now runs on a background thread, so `poll_once` returns as soon as a job is dispatched
+and the loop keeps calling `fetch` on its normal cadence — a job issued while a `provision` is up
+is validated promptly instead of only after the provision returns. `status` is read-only and always
+runs, including alongside an in-flight mutating job; every other verb shares one **mutating** slot,
+so at most one runs at a time — a second one claimed mid-flight is refused immediately (`"busy"`,
+reported the same way a validation refusal is) rather than racing two `docker compose` invocations
+against the same project. `JobValidator` still runs synchronously, before dispatch, with the same
+900s window — ADR-022's replay protection was not touched, and does not need to be: the fix is that
+the loop stops being blocked long enough to hit it in the ordinary case. `executor.py`,
+`validation.py`, `jobs.py` and `queue.py` are all unchanged.
 
 ⚠️ **The backup bound is unmeasured.** No backup has ever been timed against a real clinical
 database, and DH-014's off-site leg is still unexercised. It is set above the fast bound only so a
