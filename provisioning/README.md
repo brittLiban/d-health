@@ -15,20 +15,21 @@ independently provisionable; neither implies the other.
 
 ## Status
 
-**The API surface exists and enforces its boundary. It does not deploy anything.**
+**The API, portal, agent and Compose executor all exist and have been demonstrated end to end —
+against a stand-in compose file.** No OpenMRS, OpenELIS, Keycloak or adapter has ever booted through
+this path; that is DH-027J and remains the Provisioning V1 gate.
 
-`POST /facilities` registers a facility record, generates its credentials, and reports what did
-*not* happen in `incomplete_steps`. **A 201 means "recorded", not "running"** — the Compose deploy
-driver and DNS provisioning do not exist, and the response says so rather than leaving a caller to
-infer success. The portal itself is not built.
+`POST /facilities` registers a facility record and queues a provisioning job, reporting what did
+*not* happen in `incomplete_steps`. **A 201 means "recorded and queued", not "running"** — DNS
+provisioning does not exist, and the response says so rather than leaving a caller to infer success.
 
 | Endpoint | State |
 |---|---|
 | `GET /health` | Works. Unauthenticated, reveals nothing |
 | `POST /facilities` | Records a facility; **deploys nothing** |
 | `GET /facilities` | Works |
-| `GET /facilities/{id}/status` | Works; counts are zero because nothing is deployed |
-| `POST /facilities/{id}/decommission` | Soft only; records state |
+| `GET /facilities/{id}/status` | Works. Reports **lifecycle state and observed infrastructure health separately** (DH-027D). Counts and health come from the last real STATUS check; `checked_at` is `null` and health is `unknown` when none has been reported |
+| `POST /facilities/{id}/decommission` | Soft only. Sets `decommissioning`, queues a STOP; `decommissioned` only on the agent's confirmed report (DH-027E) |
 | `POST /facilities/{id}/rotate-credentials` | Rotates TLS + client secrets; **refuses the rest** (ADR-024) |
 
 ### ⚠️ The poll loop is WRITTEN, NOT DEMONSTRATED
@@ -247,6 +248,59 @@ docker run --rm \
   -v "$PWD/provisioning/tests:/app/tests:ro" \
   daher-provisioning-test pytest -q
 ```
+
+## Observed infrastructure status (DH-027D)
+
+The control plane answers **two different questions** and never merges them:
+
+| Field | Question | Source |
+|---|---|---|
+| `state` | What lifecycle phase is this facility in? | Requests and confirmed agent reports over time |
+| `health` | What did the **last real check** see? | One STATUS observation |
+| `checked_at` | When was that check? | `null` when none has ever been reported |
+
+A facility can be lifecycle `running` while its stack is `degraded` right now. One badge for
+both is how a dashboard reports a stack that has been down all day.
+
+**How a check is made.** The API queues a `STATUS` job; the facility's agent claims it and runs
+two read-only commands through the fixed local compose file — `docker compose config --format
+json` and `docker compose ps --all --format json` — then reports a normalised result. The
+control plane never touches the host (ADR-022).
+
+`config` is consulted as well as `ps` for two reasons: `ps` can only show containers that
+*exist*, so a declared-but-absent service would be invisible; and `config` respects active
+profiles, so a facility without off-site backup is not marked degraded for lacking a backup
+container it was never meant to run.
+
+**Health values.** `healthy` · `degraded` · `unknown`. `unknown` is **not** a synonym for
+healthy and is shown as a warning: never checked, the agent could not run the check, the output
+was unreadable, or the report failed validation.
+
+**A zero exit code is not health.** `docker compose ps` returns 0 while printing an `exited` or
+`unhealthy` service, so the verdict comes from parsed service states. A long-running service
+that is missing, unhealthy, or exited — **including exited(0)** — degrades the deployment. A
+one-shot setup job that exited(0) does **not**: that is its correct terminal state. Setup jobs
+are identified from the compose file's own `depends_on: service_completed_successfully`, not
+from a hand-maintained list, and not from restart policies — every service in the clinical
+compose file declares one, including the one-shots.
+
+**Health cannot be asserted by omission.** A STATUS report with no infrastructure evidence, or
+with evidence that fails schema validation, is persisted as `unknown` with the reason. A buggy
+or compromised agent cannot report `healthy=true` and bypass the service-state schema.
+
+**Infrastructure only.** Service names, container states, counts, an image reference, a
+timestamp. Never a patient count, encounter, result, specimen or anything else derived from a
+patient record — `tests/test_no_clinical_data.py` walks these models and is control-verified
+against them.
+
+⚠️ **Freshness is displayed, not enforced.** There is no scheduler: a STATUS job is queued when
+something asks for one, so an observation is only as fresh as the last request. The portal shows
+its age ("31s ago", "3 h ago", "never checked") rather than a green badge that stays reassuring
+indefinitely. How often a fleet should be polled is an operations decision, not one made here.
+
+⚠️ **Only the latest check is kept.** A dashboard needs what is true now; a history of container
+states is a metrics problem and building one here would turn the control plane into a telemetry
+platform for no current need. The audit log still records that each check happened.
 
 ## Enrolling a facility host — the one manual step
 

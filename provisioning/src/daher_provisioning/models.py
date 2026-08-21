@@ -101,6 +101,74 @@ class Facility(ClosedModel):
     created_at: datetime
 
 
+class ServiceState(StrEnum):
+    """One container's state, normalised from `docker compose ps` (DH-027D).
+
+    Normalised rather than passed through raw so the control plane stores a small vocabulary
+    it understands, not whatever a Docker version happened to print. `UNKNOWN` exists because
+    an unrecognised state must not be silently read as working.
+    """
+
+    HEALTHY = "healthy"
+    # Running with no healthcheck declared. Not the same as healthy, and not treated as it.
+    RUNNING = "running"
+    UNHEALTHY = "unhealthy"
+    STARTING = "starting"
+    # Exited 0. Correct and expected for a one-shot setup job; a problem for anything else.
+    EXITED_OK = "exited_ok"
+    EXITED_ERROR = "exited_error"
+    # Declared by the compose file but no container exists for it at all.
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
+class InfrastructureHealth(StrEnum):
+    """What the last real check said about the deployment — NOT its lifecycle phase.
+
+    Deliberately separate from `FacilityState` (DH-027D). "Provisioning succeeded yesterday"
+    and "the stack is healthy right now" are different claims, and collapsing them is how a
+    dashboard ends up showing a green badge for a facility that has been down for a day.
+    """
+
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    # No usable check: never run, the agent could not run it, or the output was unparseable.
+    # Never a synonym for healthy.
+    UNKNOWN = "unknown"
+
+
+class ServiceHealth(ClosedModel):
+    """One service's observed state. Infrastructure only."""
+
+    name: str = Field(min_length=1, max_length=128)
+    state: ServiceState
+    # Compose's own `Health` string is kept only when present; absence means no healthcheck.
+    image: str | None = Field(default=None, max_length=256)
+    exit_code: int | None = None
+
+
+class InfrastructureReport(ClosedModel):
+    """A single real check of one facility's deployment (DH-027D).
+
+    ⚠️ **Infrastructure only, and the no-clinical-data test walks this model.** Service names,
+    container states, counts and an image reference. Never a patient count, an encounter, a
+    result, a specimen or anything else derived from a patient record — the "just one summary
+    stat" request is exactly what ADR-021 forbids.
+
+    Note the field naming: `checked_at` rather than anything containing "observation", because
+    the clinical-vocabulary guard substring-matches "observation" and would flag it. That is
+    the guard working, not an obstacle to route around.
+    """
+
+    health: InfrastructureHealth
+    services_expected: int = Field(ge=0)
+    services_running: int = Field(ge=0)
+    services: list[ServiceHealth] = Field(default_factory=list)
+    checked_at: datetime
+    # Why the health is what it is, in operator language. Never raw Docker JSON.
+    reason: str | None = Field(default=None, max_length=512)
+
+
 class FacilityStatus(ClosedModel):
     """Operational status. Health, backup, versions — never anything clinical.
 
@@ -110,7 +178,14 @@ class FacilityStatus(ClosedModel):
     """
 
     facility_id: str
+    # Lifecycle phase — what was requested and confirmed for this facility over time.
     state: FacilityState
+    # What the LAST REAL CHECK said about the deployment. Deliberately separate from `state`
+    # (DH-027D): "provisioning succeeded yesterday" and "the stack is healthy now" are
+    # different claims, and one green badge for both is how a dashboard lies.
+    health: InfrastructureHealth = InfrastructureHealth.UNKNOWN
+    health_reason: str | None = Field(default=None, max_length=512)
+    services: list[ServiceHealth] = Field(default_factory=list)
     services_running: int = Field(ge=0)
     services_expected: int = Field(ge=0)
     backup_state: BackupState
@@ -120,7 +195,9 @@ class FacilityStatus(ClosedModel):
         description="A backup with no performed restore is not a verified backup.",
     )
     image_versions: dict[str, str] = Field(default_factory=dict)
-    checked_at: datetime
+    # None when no check has ever been reported. Never `now()` — a fresh timestamp for an
+    # observation that never happened is the exact false green this ticket exists to remove.
+    checked_at: datetime | None = None
 
 
 class CredentialReference(ClosedModel):

@@ -71,6 +71,17 @@ cancellation remain unverified.
 
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
+**DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now
+truthfully answer "is this facility's stack healthy *right now*", separately from "what lifecycle
+phase is it in". Previously `/status` fabricated its answer — zero counts with a **fresh
+`checked_at`**, implying a check that had never happened. A real check now runs two read-only
+compose commands through the existing agent, derives health from parsed service states rather than
+the command's exit code, and is persisted durably. A STATUS report carrying no evidence, or evidence
+that fails validation, is stored as **UNKNOWN, never HEALTHY** — health cannot be asserted by
+omission. Run against the live stack it reports `degraded, 10/11, caddy unhealthy`, which is bug 20
+surfacing honestly rather than being hidden. ⚠️ No scheduler exists: an observation is only as fresh
+as the last request, and the portal shows its age for exactly that reason.
+
 **DH-027C gave facilities a real lifecycle (2026-08-17):** nothing ever set `RUNNING` or
 `DEGRADED`, so every facility stayed `PROVISIONING` forever. One explicit transition table now
 advances state, driven only by an agent report about work it actually ran — never by a job being
@@ -91,9 +102,9 @@ write-temp-then-rename with contents fsynced before the rename. ⚠️ Rotation 
 the write is atomic, so the file is never torn, but a failed `up` afterwards leaves the new file in
 place. Restoring the old one is a credential-custody question, not a code detail.
 
-**CI now exists and gates 551 tests (DH-027M, 2026-08-17).** Until this landed, every verification
+**CI now exists and gates 582 tests (DH-027M, 2026-08-17).** Until this landed, every verification
 claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.github/workflows/ci.yml`
-runs the adapter (94), provisioning (422), seed (16) and form-safety (19) suites plus Ruff, compose
+runs the adapter (94), provisioning (453), seed (16) and form-safety (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
 them, and running the checks found **three** defects in the checks themselves — the third being that

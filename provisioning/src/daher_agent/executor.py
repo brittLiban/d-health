@@ -30,6 +30,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from daher_agent.infrastructure import (
+    ComposeOutputError,
+    derive_health,
+    expected_services,
+    one_shot_services,
+    parse_ps,
+    unknown_report,
+)
 from daher_agent.poller import ExecutionResult
 from daher_agent.validation import revalidate_params
 from daher_provisioning.facility_env import (
@@ -107,7 +115,9 @@ def run_command(argv: list[str], *, cwd: Path, timeout: int) -> CommandResult:
         shell=False,
         check=False,
     )
-    return CommandResult(completed.returncode, completed.stdout[-4000:], completed.stderr[-4000:])
+    # 64 KiB of stdout: `docker compose ps --all --format json` for a full clinical
+    # stack is a few KiB, and truncating it would corrupt the JSON the parser needs.
+    return CommandResult(completed.returncode, completed.stdout[-65536:], completed.stderr[-4000:])
 
 
 class ComposeExecutor:
@@ -211,6 +221,66 @@ class ComposeExecutor:
         # regenerates it, and re-runs Keycloak reconciliation with the new client secrets.
         return self._argv(facility_id, "up", "--detach", "--force-recreate")
 
+    def _status(self, facility_id: str) -> ExecutionResult:
+        """Observe the deployment. Two read-only compose commands, both fixed and local.
+
+        ⚠️ **A zero exit code is not health.** `docker compose ps` returns 0 while printing a
+        service that is `exited` or `unhealthy`, so the verdict comes from the parsed states.
+        This method therefore returns `succeeded=True` whenever the *observation* was made —
+        including when that observation is DEGRADED. "The check ran" and "the stack is fine"
+        are different facts and the report carries the second one.
+
+        `config` is needed as well as `ps`, because `ps` can only show containers that exist;
+        a service declared by the compose file and entirely absent is invisible without it.
+        `config` also respects active profiles, so an unconfigured backup service is not
+        counted as missing.
+        """
+        timeout = self.timeout_for(JobVerb.STATUS)
+        try:
+            config = self._run(
+                self._argv(facility_id, "config", "--format", "json"),
+                cwd=self.compose_file.parent,
+                timeout=timeout,
+            )
+            listing = self._run(
+                self._argv(facility_id, "ps", "--all", "--format", "json"),
+                cwd=self.compose_file.parent,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                True, "status timed out", unknown_report("compose did not respond in time")
+            )
+        except Exception as error:  # noqa: BLE001
+            return ExecutionResult(
+                True,
+                "status failed",
+                unknown_report(f"compose unavailable: {type(error).__name__}"),
+            )
+
+        if config.returncode != 0:
+            return ExecutionResult(
+                True, "status failed", unknown_report("compose config failed; expected set unknown")
+            )
+        if listing.returncode != 0:
+            return ExecutionResult(True, "status failed", unknown_report("compose ps failed"))
+
+        try:
+            report = derive_health(
+                parse_ps(listing.stdout),
+                expected=expected_services(config.stdout),
+                one_shots=one_shot_services(config.stdout),
+            )
+        except ComposeOutputError as error:
+            # Unreadable output is UNKNOWN, never healthy.
+            return ExecutionResult(True, "status unparseable", unknown_report(str(error)))
+
+        return ExecutionResult(
+            True,
+            f"{report.health.value}: {report.services_running}/{report.services_expected} services",
+            report,
+        )
+
     def execute(self, job: Job) -> ExecutionResult:
         """Run one validated job. Returns a result; never raises into the poll loop."""
         try:
@@ -240,7 +310,9 @@ class ComposeExecutor:
                 # careless flag away from removing volumes. Decommission is soft (ADR-021).
                 argv = self._argv(facility_id, "stop")
             elif job.verb is JobVerb.STATUS:
-                argv = self._argv(facility_id, "ps", "--format", "json")
+                # Handled separately: STATUS is the one verb whose answer is a parsed
+                # structure rather than a command outcome (DH-027D).
+                return self._status(facility_id)
             elif job.verb is JobVerb.BACKUP_NOW:
                 argv = self._argv(facility_id, "--profile", "backup", "run", "--rm", "backup")
             else:  # pragma: no cover - the enum makes this unreachable

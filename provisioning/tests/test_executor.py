@@ -175,9 +175,20 @@ class TestVerbMapping:
                 assert "rm" not in argv or "--rm" in argv  # `run --rm` is fine
 
     def test_status_asks_for_machine_readable_output(self, wired):
+        """DH-027D: STATUS now runs TWO read-only commands, not one.
+
+        `ps` can only show containers that exist, so a service the compose file declares and
+        which is entirely absent is invisible without `config`. `config` also respects active
+        profiles, so an unconfigured backup service is not counted as missing.
+        """
         executor, recorder = wired
         executor.execute(a_job(JobVerb.STATUS))
-        assert recorder.calls[0][-3:] == ["ps", "--format", "json"]
+        issued = [" ".join(call) for call in recorder.calls]
+        assert any(c.endswith("config --format json") for c in issued), issued
+        assert any(c.endswith("ps --all --format json") for c in issued), issued
+        # Both are read-only. Neither may mutate the stack while merely observing it.
+        for call in recorder.calls:
+            assert "up" not in call and "stop" not in call and "down" not in call
 
 
 class TestProvisioning:

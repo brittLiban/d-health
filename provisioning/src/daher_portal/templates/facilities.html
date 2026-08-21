@@ -6,21 +6,28 @@
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 
 <table>
-  <tr><th>Facility</th><th>Type</th><th>State</th><th>Services</th><th>Backup</th>
-      <th>Restore drill</th></tr>
+  <tr><th>Facility</th><th>Type</th><th>Lifecycle</th><th>Infrastructure</th><th>Last checked</th>
+      <th>Services</th><th>Backup</th><th>Restore drill</th></tr>
   {% for f in facilities %}
   <tr>
     <td><strong>{{ f.display_name }}</strong><br>
         <span style="color:var(--muted);font-size:.82rem">{{ f.facility_id }}</span></td>
     <td>{{ f.type }}</td>
     <td><span class="pill">{{ f.state }}</span></td>
+    {# Lifecycle and observed health are separate columns on purpose (DH-027D): one says
+       what phase the facility is in, the other what the last real check saw. A single green
+       badge covering both is how a dashboard reports a stack that has been down all day. #}
+    <td class="{{ f.health_class }}">{{ f.health }}
+        {% if f.health_reason %}<br><span style="font-size:.78rem">{{ f.health_reason }}</span>
+        {% endif %}</td>
+    <td style="color:var(--muted);font-size:.85rem">{{ f.checked_at }}</td>
     <td>{{ f.services_running }}/{{ f.services_expected }}</td>
     <td class="{{ f.backup_class }}">{{ f.backup_state }}{% if f.at_risk %}
         <br><span style="font-size:.78rem">⚠ not protected</span>{% endif %}</td>
     <td class="{{ f.drill_class }}">{{ f.restore_drill }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" style="color:var(--muted)">No facilities yet.</td></tr>
+  <tr><td colspan="8" style="color:var(--muted)">No facilities yet.</td></tr>
   {% endfor %}
 </table>
 

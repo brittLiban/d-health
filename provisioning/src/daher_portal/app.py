@@ -13,6 +13,7 @@ closed (ADR-021).
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -36,6 +37,45 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 # A facility with no backup is one disk failure from losing patient records, so
 # `never_run` is shown as a problem rather than a neutral "nothing yet" (ADR-025).
+# Observed infrastructure health (DH-027D). UNKNOWN is deliberately "warn", not "ok":
+# "we have not checked" must never be presented in the same colour as "we checked and it is
+# fine". A green badge for an unobserved facility is the exact false comfort this ticket
+# exists to remove.
+HEALTH_CLASSES = {
+    "healthy": "ok",
+    "degraded": "bad",
+    "unknown": "warn",
+}
+
+
+def _describe_age(checked_at: str | None) -> str:
+    """How old the last infrastructure check is, in words.
+
+    `None` means no check has ever been reported, and it says so rather than showing a
+    timestamp or a dash — an operator reading a blank cell assumes the check is pending, not
+    that it has never happened. Freshness is shown because a health verdict from three hours
+    ago is not evidence about now (DH-027D).
+    """
+    if not checked_at:
+        return "never checked"
+    try:
+        when = datetime.fromisoformat(checked_at)
+    except ValueError:
+        return "unknown"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    seconds = int((datetime.now(UTC) - when).total_seconds())
+    if seconds < 0:
+        return "just now"
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{seconds // 60} min ago"
+    if seconds < 172800:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} days ago"
+
+
 BACKUP_CLASSES = {
     "success": "ok",
     "failed": "bad",
@@ -163,7 +203,15 @@ def create_portal(
                         "facility_id": facility["facility_id"],
                         "display_name": facility["display_name"],
                         "type": facility["type"],
+                        # ⚠️ Two different facts, shown separately (DH-027D). `state` is the
+                        # lifecycle phase — what was requested and confirmed over time.
+                        # `health` is what the LAST REAL CHECK saw. A facility can sit in
+                        # lifecycle RUNNING while its stack is degraded right now.
                         "state": status["state"],
+                        "health": status.get("health", "unknown"),
+                        "health_class": HEALTH_CLASSES.get(status.get("health"), "warn"),
+                        "health_reason": status.get("health_reason") or "",
+                        "checked_at": _describe_age(status.get("checked_at")),
                         "services_running": status["services_running"],
                         "services_expected": status["services_expected"],
                         "backup_state": status["backup_state"].replace("_", " "),

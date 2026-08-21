@@ -39,12 +39,15 @@ from daher_provisioning.models import (
     FacilityCreateResponse,
     FacilityState,
     FacilityStatus,
+    InfrastructureHealth,
+    InfrastructureReport,
 )
 from daher_provisioning.network import SourceAllowlist, SourceNotAllowed
 from daher_provisioning.queue import JobQueue, JobStatus
 from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 from daher_provisioning.repository import FacilityExists, FacilityNotFound, FacilityRepository
 from daher_provisioning.secrets import SecretGenerationError, validate_facility_id
+from daher_provisioning.store import InMemoryHealthStore
 
 # What a caller is told did not happen. Keeping these as explicit strings rather than
 # leaving the list empty is the difference between "provisioned" and "recorded".
@@ -108,6 +111,18 @@ def next_facility_state(
     return None
 
 
+def unknown_health(reason: str) -> InfrastructureReport:
+    """An infrastructure check we cannot trust. UNKNOWN, never HEALTHY (DH-027D)."""
+    return InfrastructureReport(
+        health=InfrastructureHealth.UNKNOWN,
+        services_expected=0,
+        services_running=0,
+        services=[],
+        checked_at=datetime.now(UTC),
+        reason=reason[:512],
+    )
+
+
 def _slugify(display_name: str) -> str:
     allowed = [c.lower() if c.isalnum() else "-" for c in display_name]
     slug = "".join(allowed).strip("-")
@@ -125,6 +140,7 @@ def create_app(
     hosts: HostRegistry | None = None,
     job_queue: JobQueue | None = None,
     enrolment: EnrolmentService | None = None,
+    health_store=None,
     allowed_source_cidrs: list[str] | None = None,
     base_domain: str = "localhost",
 ) -> FastAPI:
@@ -132,6 +148,7 @@ def create_app(
     host_registry = hosts or HostRegistry()
     queue = job_queue or JobQueue()
     enrolments = enrolment or EnrolmentService()
+    health_records = health_store if health_store is not None else InMemoryHealthStore()
     rate_limiter = limiter or TokenBucketLimiter(rate_per_second=1.0, burst=20)
     allowlist = SourceAllowlist(allowed_source_cidrs)
 
@@ -404,17 +421,31 @@ def create_app(
             facility_id=facility_id,
             source_ip=_client_ip(request),
         )
-        # Counts are zero because nothing is deployed. When the driver lands these come
-        # from the deployment surface — never from a clinical database.
+        # ⚠️ Two different questions, answered separately (DH-027D):
+        #   `state`  — lifecycle: what phase is this facility in?
+        #   `health` — what did the last REAL check say about the deployment?
+        # This endpoint previously fabricated both, returning zero counts with a fresh
+        # `checked_at` — a timestamp implying a check that had never happened. It now reports
+        # the last persisted observation, or UNKNOWN when there is none.
         from daher_provisioning.models import BackupState
 
+        latest = health_records.latest(facility_id)
         return FacilityStatus(
             facility_id=facility_id,
             state=facility.state,
-            services_running=0,
-            services_expected=0,
+            health=latest.health if latest else InfrastructureHealth.UNKNOWN,
+            services_running=latest.services_running if latest else 0,
+            services_expected=latest.services_expected if latest else 0,
+            services=list(latest.services) if latest else [],
+            health_reason=(
+                latest.reason
+                if latest
+                else "no infrastructure check has been reported for this facility yet"
+            ),
             backup_state=BackupState.NEVER_RUN,
-            checked_at=datetime.now(UTC),
+            # None, not now(). A timestamp for a check that never happened is a lie an
+            # operator would reasonably act on.
+            checked_at=latest.checked_at if latest else None,
         )
 
     @app.post("/facilities/{facility_id}/rotate-credentials")
@@ -678,6 +709,28 @@ def create_app(
         # than no audit, because the gap is invisible.
         facility_id = getattr(getattr(record.job, "params", None), "facility_id", None)
         verb = getattr(record.job, "verb", None)
+
+        # DH-027D: structured infrastructure evidence, validated before it is persisted.
+        # ⚠️ A malformed or absent report must never be read as healthy — an agent that is
+        # buggy or compromised must not be able to assert health by omission. Anything that
+        # fails validation is recorded as UNKNOWN with the reason.
+        infrastructure: InfrastructureReport | None = None
+        raw_infrastructure = body.get("infrastructure")
+        if verb is JobVerb.STATUS:
+            if isinstance(raw_infrastructure, dict):
+                try:
+                    infrastructure = InfrastructureReport.model_validate(raw_infrastructure)
+                except Exception:
+                    infrastructure = unknown_health(
+                        "agent sent an infrastructure report that failed validation"
+                    )
+            else:
+                infrastructure = unknown_health(
+                    "agent reported a STATUS job without infrastructure evidence"
+                )
+            if facility_id:
+                health_records.record(facility_id, infrastructure)
+
         queue.finish(job_id, mapping[reported], detail)
 
         # DH-027C/E: the facility lifecycle advances here and nowhere else, because this is
@@ -702,6 +755,12 @@ def create_app(
             message=(
                 f"agent reported {reported}: {detail}"
                 + (f" [facility state {state_change}]" if state_change else "")
+                + (
+                    f" [infrastructure {infrastructure.health.value}"
+                    f" {infrastructure.services_running}/{infrastructure.services_expected}]"
+                    if infrastructure
+                    else ""
+                )
             )[:512],
             source_ip=_client_ip(request),
         )

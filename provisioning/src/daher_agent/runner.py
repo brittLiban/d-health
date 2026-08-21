@@ -51,11 +51,16 @@ class HttpTransport:
         job = body.get("job")
         return job if isinstance(job, dict) else None
 
-    def report(self, job_id: str, status: str, detail: str) -> None:
+    def report(self, job_id: str, status: str, detail: str, infrastructure=None) -> None:
+        body: dict = {"status": status, "detail": detail}
+        if infrastructure is not None:
+            # Structured infrastructure evidence (DH-027D). Sent as its validated model dump,
+            # never as raw Docker output — the control plane persists a schema it understands.
+            body["infrastructure"] = infrastructure.model_dump(mode="json")
         self._client.post(
             f"{self._base}/agent/jobs/{job_id}/report",
             headers=self._headers,
-            json={"status": status, "detail": detail},
+            json=body,
         ).raise_for_status()
 
     def close(self) -> None:

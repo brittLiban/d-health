@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
     actor    TEXT NOT NULL,
     active   INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS facility_health (
+    facility_id TEXT PRIMARY KEY,
+    document    TEXT NOT NULL,
+    checked_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,
     host_id      TEXT NOT NULL,
@@ -156,6 +162,49 @@ class SqliteFacilityStore:
                 (updated.model_dump_json(), facility_id),
             )
         return updated
+
+
+class SqliteHealthStore:
+    """Latest infrastructure check per facility (DH-027D).
+
+    **Latest only, deliberately.** A fleet dashboard needs "what is true now"; a history of
+    container states is a metrics problem, and building one here would turn the control plane
+    into a telemetry platform for no current need. The audit log already records that each
+    check happened.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record(self, facility_id: str, report) -> None:
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO facility_health (facility_id, document, checked_at) VALUES (?,?,?) "
+                "ON CONFLICT(facility_id) DO UPDATE SET document=excluded.document, "
+                "checked_at=excluded.checked_at",
+                (facility_id, report.model_dump_json(), report.checked_at.isoformat()),
+            )
+
+    def latest(self, facility_id: str):
+        from daher_provisioning.models import InfrastructureReport
+
+        rows = self._db.query(
+            "SELECT document FROM facility_health WHERE facility_id=?", (facility_id,)
+        )
+        return InfrastructureReport.model_validate_json(rows[0]["document"]) if rows else None
+
+
+class InMemoryHealthStore:
+    """Same interface, for tests and the default in-memory wiring."""
+
+    def __init__(self) -> None:
+        self._latest: dict = {}
+
+    def record(self, facility_id: str, report) -> None:
+        self._latest[facility_id] = report
+
+    def latest(self, facility_id: str):
+        return self._latest.get(facility_id)
 
 
 class SqliteHostStore:

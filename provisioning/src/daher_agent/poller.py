@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 from daher_agent.validation import JobRefused, JobValidator
 from daher_provisioning.jobs import Job
+from daher_provisioning.models import InfrastructureReport
 
 logger = logging.getLogger("daher_agent.poller")
 
@@ -51,6 +52,10 @@ logger = logging.getLogger("daher_agent.poller")
 class ExecutionResult:
     succeeded: bool
     detail: str = ""
+    # Structured infrastructure evidence for STATUS (DH-027D). None for every other verb.
+    # Deliberately typed rather than stuffed into `detail`: `detail` is a truncated string
+    # and the control plane must validate what it persists, not scrape it.
+    infrastructure: InfrastructureReport | None = None
 
 
 # Fetch one job payload addressed to this host, or None. Raising is allowed and expected —
@@ -59,7 +64,9 @@ FetchJob = Callable[[], dict | None]
 # Run a validated job. Only ever called with a job that passed every local refusal.
 ExecuteJob = Callable[[Job], ExecutionResult]
 # Report an outcome upstream. Best effort; failing to report must not stop the loop.
-ReportOutcome = Callable[[str, str, str], None]
+# (job_id, status, detail, infrastructure|None). The fourth argument is DH-027D's structured
+# evidence; reporters that predate it are still accepted, see `_safe_report`.
+ReportOutcome = Callable[..., None]
 
 
 class AgentPoller:
@@ -114,12 +121,24 @@ class AgentPoller:
             return "failed"
 
         status = "succeeded" if result.succeeded else "failed"
-        self._safe_report(job.job_id, status, result.detail)
+        self._safe_report(job.job_id, status, result.detail, result.infrastructure)
         return status
 
-    def _safe_report(self, job_id: str, status: str, detail: str) -> None:
+    def _safe_report(
+        self,
+        job_id: str,
+        status: str,
+        detail: str,
+        infrastructure: InfrastructureReport | None = None,
+    ) -> None:
         """Reporting is best effort. A failure to report must not stop the loop."""
         try:
-            self._report(job_id, status, detail)
+            try:
+                self._report(job_id, status, detail, infrastructure)
+            except TypeError:
+                # A reporter written before DH-027D takes three arguments. Falling back keeps
+                # a mixed-version fleet reporting outcomes rather than silently failing every
+                # report — the outcome still lands, only the structured evidence is dropped.
+                self._report(job_id, status, detail)
         except Exception:
             logger.warning("report_failed job_id=%s", job_id, exc_info=True)

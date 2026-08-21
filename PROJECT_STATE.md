@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -221,7 +221,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **551 tests across four suites** (adapter 94, provisioning 422, seed 16, form-safety 19) plus Ruff, compose
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **582 tests across four suites** (adapter 94, provisioning 453, seed 16, form-safety 19) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
    ticket entry below.
@@ -1855,6 +1855,80 @@ fixed: bug 18, and the backup bound is unmeasured.
 "polls a separate host and refuses hostile input" needs two hosts, or two containers on separate
 networks standing in for them. Validation is unit-tested hard; the transport will be marked
 *written* rather than *demonstrated* until that exists.
+
+### DH-027D · Observed infrastructure status · ✅ DONE 2026-08-20
+
+**The problem this closes.** A facility could read `RUNNING` because an agent once reported
+that `docker compose up` returned 0. That is lifecycle evidence, not health. Worse, the
+`/status` endpoint **fabricated** its answer — zero service counts with a **fresh
+`checked_at`**, a timestamp implying a check that had never happened.
+
+**Two concepts, kept apart (§2).** `state` is the lifecycle phase; `health` is what the last
+real check saw. A facility can sit in lifecycle `RUNNING` while its stack is `DEGRADED` right
+now, and the portal shows both in separate columns. `checked_at` is `None` — never `now()` —
+when no check has been reported, and the portal renders that as **"never checked"**.
+
+**How the check is made.** `docker compose ps --all --format json` **plus**
+`docker compose config --format json`, both read-only, both fixed and local, run by the
+existing agent through the existing `ComposeExecutor`. The control plane never touches the
+host (ADR-022 unchanged). `config` is needed as well as `ps` because `ps` can only show
+containers that *exist* — a declared-but-absent service is invisible without it — and because
+`config` respects active profiles, so a facility with no off-site backup is not marked
+degraded for lacking a backup container it was never meant to run (§6).
+
+**One-shots are derived, not listed.** A setup job is any service another service waits on with
+`condition: service_completed_successfully` — seven of them on the clinical stack. ⚠️ A restart
+policy does **not** distinguish them: every service in the real compose file declares one,
+including the one-shots. That was checked rather than assumed, and a hand-maintained list would
+be wrong the first time someone adds a setup job.
+
+**Runtime evidence — the real clinical stack, read-only, nothing restarted:**
+
+```
+health   : degraded
+services : 10/11 long-running
+reason   : caddy unhealthy
+```
+
+with all seven one-shots correctly `exited_ok` and **not** degrading anything. ⚠️ The real `ps`
+output is **28 KB** — the executor's previous 4000-character stdout cap would have truncated
+the JSON into something unparseable, so the cap was raised to 64 KiB.
+
+**Caddy / bug 20 handled honestly (§7).** Caddy's routes serve correctly while its healthcheck
+cannot `exec`, so Compose reports `unhealthy`. DH-027D reports exactly that and **does not**
+conclude the facility is unusable, hide it, or restart it. The live stack therefore reads
+`degraded` — which is the truthful answer, and it is bug 20 that needs fixing, not the reporting.
+
+**Controls — three, each breaking a load-bearing property:**
+
+| Control | Result |
+|---|---|
+| Trust the exit code; ignore parsed states | **10 fail** |
+| Let an agent assert health by omission | **1 fails** — the security-shaped one |
+| Treat a one-shot `exited(0)` as a failure | **5 fail** |
+
+Plus the existing clinical-vocabulary guard, control-verified against the *new* models: adding
+`patient_count` to `InfrastructureReport` fails `test_no_clinical_data` by name (§12).
+
+**A buggy or compromised agent cannot assert health.** A STATUS report with no infrastructure
+evidence, or with evidence that fails schema validation, is persisted as **UNKNOWN with the
+reason** — never HEALTHY. `UNKNOWN` is rendered "warn", not "ok", because "we have not checked"
+must not look like "we checked and it is fine".
+
+**Lifecycle is not rewritten by a check (§14).** No STATUS observation moves `FacilityState`; a
+transient unhealthy reading cannot drive a lifecycle transition. If that should ever change it
+needs a transition table and a decision, not an implicit side effect.
+
+**Verified:** 27 new tests, **453 provisioning tests total** (from 426), Ruff clean, all four
+suites green.
+
+⚠️ **Boundaries.** There is **no scheduler** — a STATUS job is queued when something asks for
+one, so an observation is only as fresh as the last request; the portal shows the age precisely
+so that is visible rather than assumed. Freshness is *displayed*, not enforced by a staleness
+threshold, because how often a fleet should be polled is an operations decision. Only the
+**latest** check is persisted; history is deliberately not a metrics database. And this is
+verified against real `ps`/`config` output plus unit tests — **not** against a facility
+provisioned through the control plane, which remains DH-027J.
 
 ### DH-027C · Facility lifecycle state machine · ✅ DONE 2026-08-17
 
