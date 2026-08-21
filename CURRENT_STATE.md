@@ -78,8 +78,9 @@ phase is it in". Previously `/status` fabricated its answer — zero counts with
 compose commands through the existing agent, derives health from parsed service states rather than
 the command's exit code, and is persisted durably. A STATUS report carrying no evidence, or evidence
 that fails validation, is stored as **UNKNOWN, never HEALTHY** — health cannot be asserted by
-omission. Run against the live stack it reports `degraded, 10/11, caddy unhealthy`, which is bug 20
-surfacing honestly rather than being hidden. ⚠️ No scheduler exists: an observation is only as fresh
+omission. Run against the live stack it first reported `degraded, 10/11, caddy unhealthy` — a real fault,
+surfaced rather than hidden. **Bug 20 was then diagnosed and fixed (2026-08-20)**, and the same parser
+now reports `healthy, 11/11`. ⚠️ No scheduler exists: an observation is only as fresh
 as the last request, and the portal shows its age for exactly that reason.
 
 **DH-027C gave facilities a real lifecycle (2026-08-17):** nothing ever set `RUNNING` or

@@ -207,6 +207,35 @@ jobs:
           print("ok — every external image reference is digest-pinned")
           PY
 
+      - name: Compose invariants that a regression would silently undo
+        run: |
+          python - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          text = Path("docker-compose.yml").read_text()
+          bad = []
+
+          # Known bug 20. The caddy image runs `caddy` as PID 1 and Caddy does not reap
+          # orphaned children, so every exec healthcheck leaked a zombie — ~5,760 PIDs a day
+          # — until the cgroup pids limit was reached and NO process could start. The
+          # container then reported UNHEALTHY for seven days while serving perfectly.
+          # `init: true` puts docker-init at PID 1, which reaps. Removing it re-opens a fault
+          # that takes days to appear and looks like something else entirely.
+          block = re.search(r"\n  caddy:\n(.*?)(?=\n  [a-z0-9-]+:\n)", text, re.S)
+          if block is None:
+              bad.append("caddy service not found in docker-compose.yml")
+          elif not re.search(r"^\s+init:\s*true\s*$", block.group(1), re.M):
+              bad.append(
+                  "caddy must keep `init: true` (known bug 20): without an init at PID 1, "
+                  "exec healthchecks leak zombies until the container cannot start a process"
+              )
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — compose invariants hold")
+          PY
+
       - name: Shell syntax
         run: |
           fail=0

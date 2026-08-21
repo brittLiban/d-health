@@ -885,6 +885,21 @@ services:
   caddy:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    # ⚠️ REQUIRED, not a nicety — this is known bug 20 (2026-08-17 → fixed 2026-08-20).
+    #
+    # This image runs `caddy` directly as PID 1, and Caddy does not reap orphaned children.
+    # Every healthcheck is a `docker exec`, whose process is reparented to PID 1 when it
+    # exits; with nothing calling wait(), each one leaks a zombie. At one probe per 15s that
+    # is ~5,760 leaked PIDs a day. After seven days the container sat at pids.current 37,499
+    # against a cgroup pids.max of 37,503 — so no new process could start at all, every
+    # healthcheck failed with `procReady not received`, and the container reported UNHEALTHY
+    # while its routes were serving perfectly.
+    #
+    # `init: true` puts docker-init (tini) at PID 1, which reaps. The evidence that this is
+    # the right diagnosis rather than a plausible one: cgroup.threads was 17 while
+    # pids.current was 37,499, every other container in this stack had threads ==
+    # pids.current, and 37,499 matches the ~40,460 healthchecks the container had run.
+    init: true
     depends_on:
       openmrs-gateway:
         condition: service_started
