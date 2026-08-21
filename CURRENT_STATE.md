@@ -122,9 +122,10 @@ write-temp-then-rename with contents fsynced before the rename. ⚠️ Rotation 
 the write is atomic, so the file is never torn, but a failed `up` afterwards leaves the new file in
 place. Restoring the old one is a credential-custody question, not a code detail.
 
-**CI now exists and gates 582 tests (DH-027M, 2026-08-17).** Until this landed, every verification
-claim in `PROJECT_STATE.md` depended on a human remembering to run something. `.github/workflows/ci.yml`
-runs the adapter (94), provisioning (453), seed (16) and form-safety (19) suites plus Ruff, compose
+**CI now exists (DH-027M, 2026-08-17) and currently gates 593 tests.** Until this landed, every
+verification claim in `PROJECT_STATE.md` depended on a human remembering to run something.
+`.github/workflows/ci.yml` runs the adapter (94), provisioning (464), seed (16) and form-safety
+(19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking
 them, and running the checks found **three** defects in the checks themselves — the third being that

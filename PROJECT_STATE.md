@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 523 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 593 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -221,7 +221,9 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    *is*, and one option adds a second system storing patient data, so it is yours.
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
-2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gates **582 tests across four suites** (adapter 94, provisioning 453, seed 16, form-safety 19) plus Ruff, compose
+2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gated **582 tests** at
+   landing; it currently gates **593 tests across four suites** (adapter 94, provisioning 464, seed
+   16, form-safety 19 — measured against the real CI run, not copied) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
    ticket entry below.
