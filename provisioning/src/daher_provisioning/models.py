@@ -44,10 +44,18 @@ class FacilityState(StrEnum):
 
 
 class BackupState(StrEnum):
+    # No passphrase and/or off-site destination exist on the facility host, so the scheduler
+    # was never enabled (ADR-025) — reported by the agent, never inferred by the control
+    # plane, which never holds the passphrase and so cannot know this on its own (DH-027G).
+    NOT_CONFIGURED = "not_configured"
     NEVER_RUN = "never_run"
     SUCCESS = "success"
     FAILED = "failed"
-    # A backup whose restore has never been exercised is not a backup you can rely on.
+    # A backup whose restore has never been exercised is not a backup you can rely on. Kept
+    # for wire compatibility; restore-drill verification is represented instead by the
+    # separate `restore_drill_last_performed` field below (DH-027G keeps that separation —
+    # see the ticket's "restore drill status remains a separate property"), so this value is
+    # never assigned by anything in this codebase.
     UNVERIFIED_NO_RESTORE_DRILL = "unverified_no_restore_drill"
 
 
@@ -169,6 +177,20 @@ class InfrastructureReport(ClosedModel):
     reason: str | None = Field(default=None, max_length=512)
 
 
+class BackupReport(ClosedModel):
+    """A single BACKUP_NOW outcome (DH-027G), reported by the agent that ran it.
+
+    Infrastructure-only, exactly like `InfrastructureReport`: never an archive path, a
+    bucket name, a passphrase, an access key, or anything patient-derived. The control
+    plane learns *whether* backup is configured only through this report — it never holds
+    the passphrase itself (ADR-025), so it cannot determine `NOT_CONFIGURED` on its own.
+    """
+
+    state: BackupState
+    checked_at: datetime
+    reason: str | None = Field(default=None, max_length=512)
+
+
 class FacilityStatus(ClosedModel):
     """Operational status. Health, backup, versions — never anything clinical.
 
@@ -188,6 +210,10 @@ class FacilityStatus(ClosedModel):
     services: list[ServiceHealth] = Field(default_factory=list)
     services_running: int = Field(ge=0)
     services_expected: int = Field(ge=0)
+    # What the LAST BACKUP_NOW REPORT said (DH-027G) — never inferred, since the control
+    # plane never holds the passphrase that would let it know whether backup is configured
+    # (ADR-025). Defaults to NEVER_RUN when no such report has ever arrived; that default is
+    # a "no evidence yet" state, not a claim that backup is either working or absent.
     backup_state: BackupState
     backup_last_run: datetime | None = None
     restore_drill_last_performed: datetime | None = Field(

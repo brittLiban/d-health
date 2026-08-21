@@ -22,7 +22,13 @@ from daher_agent.executor import (
     CommandResult,
     ComposeExecutor,
 )
+from daher_provisioning.facility_env import BackupSettings
 from daher_provisioning.jobs import Job, JobParams, JobVerb
+
+
+def configured_backup() -> BackupSettings:
+    return BackupSettings(passphrase="x" * 32, s3_bucket="daher-backups")
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
@@ -308,9 +314,22 @@ class TestTheBoundMatchesTheWorkTheVerbActuallyDoes:
             executor.execute(a_job(verb))
             assert recorder.kwargs[0]["timeout"] == DEFAULT_TIMEOUT_SECONDS
 
-    def test_backup_is_bounded_by_data_size_not_boot_time(self, wired):
-        """⚠️ Unmeasured — no backup has been timed against a real clinical database."""
-        executor, recorder = wired
+    def test_backup_is_bounded_by_data_size_not_boot_time(self, tmp_path):
+        """⚠️ Unmeasured — no backup has been timed against a real clinical database.
+
+        Needs a configured backup (DH-027G): an unconfigured one is refused before the
+        command is ever built, which is `TestBackupNow`'s property, not this one's.
+        """
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        recorder = Recorder()
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "f",
+            base_domain="example.org",
+            runner=recorder,
+            backup=configured_backup(),
+        )
         executor.execute(a_job(JobVerb.BACKUP_NOW))
         assert recorder.kwargs[0]["timeout"] == DEFAULT_BACKUP_TIMEOUT_SECONDS
 

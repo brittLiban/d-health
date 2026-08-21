@@ -28,6 +28,7 @@ import logging
 import subprocess  # noqa: S404 - argv lists only, never a shell; see module docstring
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from daher_agent.infrastructure import (
@@ -42,13 +43,20 @@ from daher_agent.poller import ExecutionResult
 from daher_agent.validation import revalidate_params
 from daher_provisioning.facility_env import (
     ROTATABLE,
+    BackupSettings,
     FacilityEnvError,
     render_env,
     rotate_env_values,
     write_env,
 )
 from daher_provisioning.jobs import Job, JobVerb
-from daher_provisioning.models import DeployTarget, Facility, FacilityType
+from daher_provisioning.models import (
+    BackupReport,
+    BackupState,
+    DeployTarget,
+    Facility,
+    FacilityType,
+)
 from daher_provisioning.secrets import generate_facility_secrets, validate_facility_id
 
 logger = logging.getLogger("daher_agent.executor")
@@ -131,6 +139,7 @@ class ComposeExecutor:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         stack_timeout_seconds: int = DEFAULT_STACK_TIMEOUT_SECONDS,
         backup_timeout_seconds: int = DEFAULT_BACKUP_TIMEOUT_SECONDS,
+        backup: BackupSettings | None = None,
         runner: Callable[..., CommandResult] = run_command,
     ) -> None:
         self.compose_file = Path(compose_file)
@@ -140,6 +149,10 @@ class ComposeExecutor:
         self.timeout_seconds = timeout_seconds
         self.stack_timeout_seconds = stack_timeout_seconds
         self.backup_timeout_seconds = backup_timeout_seconds
+        # Operator-supplied at host bootstrap, never generated here (ADR-025, DH-027G). May
+        # be None, or present but not `schedulable` (one half only) — either way, "backup is
+        # actually protected" is `self.backup is not None and self.backup.schedulable`.
+        self.backup = backup
         self._run = runner
 
     def timeout_for(self, verb: JobVerb) -> int:
@@ -192,9 +205,13 @@ class ComposeExecutor:
             display_name=facility_id,
             type=FacilityType(facility_type),
             deploy_target=DeployTarget(host="localhost"),
-            created_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+            created_at=datetime.now(UTC),
         )
-        contents = render_env(facility, secrets, base_domain=self.base_domain)
+        # `self.backup` is this host's operator-supplied configuration (ADR-025, DH-027G) —
+        # never from the job, which carries none. `render_env` wires it only when it can
+        # actually succeed (a passphrase AND an off-site destination); otherwise the backup
+        # profile is simply absent from the rendered file, exactly as if `backup=None`.
+        contents = render_env(facility, secrets, base_domain=self.base_domain, backup=self.backup)
         # Refuses to overwrite. The agent already refuses to provision over an existing
         # facility; this is the same guarantee one layer lower, where the file actually is.
         write_env(self.env_path(facility_id), contents)
@@ -281,6 +298,76 @@ class ComposeExecutor:
             report,
         )
 
+    def _backup_now(self, facility_id: str) -> ExecutionResult:
+        """Run one backup cycle on demand, or report why none was attempted (DH-027G).
+
+        ⚠️ **Not configured is not a failure of the agent.** The agent correctly determined
+        that this host has no passphrase and/or off-site destination, and — per ADR-025 —
+        it must never *guess* or fall back to a local-only run to make this job "succeed".
+        `succeeded=True` here means "the check was made and is trustworthy", exactly the
+        convention `_status` already uses; it says nothing about whether the facility's data
+        is actually protected. That verdict is `report.state`, not `ExecutionResult.succeeded`.
+
+        A real attempt reuses the exact command `backup/README.md` documents for a manual
+        run: `docker compose --profile backup run --rm backup`. `backup.sh` itself refuses to
+        run without every required credential (`: "${VAR:?}"` guards) and to report an
+        off-site upload as anything but `FAILED` when `BACKUP_REQUIRE_OFFSITE=true` (the
+        pilot default) and no bucket is reachable — this method does not re-implement any of
+        that; it only observes the exit code, the same boundary `_status` keeps around
+        `docker compose`.
+        """
+        now = datetime.now(UTC)
+        if self.backup is None or not self.backup.schedulable:
+            return ExecutionResult(
+                True,
+                "backup not configured on this host",
+                backup=BackupReport(
+                    state=BackupState.NOT_CONFIGURED,
+                    checked_at=now,
+                    reason="no passphrase and/or off-site destination configured on this "
+                    "host (ADR-025) — the scheduler was never enabled",
+                ),
+            )
+
+        timeout = self.timeout_for(JobVerb.BACKUP_NOW)
+        argv = self._argv(facility_id, "--profile", "backup", "run", "--rm", "backup")
+        try:
+            result = self._run(argv, cwd=self.compose_file.parent, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                False,
+                f"backup_now timed out after {timeout}s",
+                backup=BackupReport(
+                    state=BackupState.FAILED, checked_at=now, reason=f"timed out after {timeout}s"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ExecutionResult(
+                False,
+                f"execution error: {type(exc).__name__}",
+                backup=BackupReport(
+                    state=BackupState.FAILED,
+                    checked_at=now,
+                    reason=f"execution error: {type(exc).__name__}",
+                ),
+            )
+
+        if result.returncode != 0:
+            return ExecutionResult(
+                False,
+                f"exit {result.returncode}: {result.stderr[-300:]}",
+                backup=BackupReport(
+                    state=BackupState.FAILED,
+                    checked_at=now,
+                    reason=f"backup command exited {result.returncode}",
+                ),
+            )
+        return ExecutionResult(
+            True,
+            result.stdout[-300:],
+            backup=BackupReport(state=BackupState.SUCCESS, checked_at=now),
+        )
+
     def execute(self, job: Job) -> ExecutionResult:
         """Run one validated job. Returns a result; never raises into the poll loop."""
         try:
@@ -314,7 +401,10 @@ class ComposeExecutor:
                 # structure rather than a command outcome (DH-027D).
                 return self._status(facility_id)
             elif job.verb is JobVerb.BACKUP_NOW:
-                argv = self._argv(facility_id, "--profile", "backup", "run", "--rm", "backup")
+                # Handled separately, like STATUS: BACKUP_NOW's answer is a parsed evidence
+                # report (DH-027G), and "not configured" must never fall through to a
+                # generic `docker compose` invocation that would only fail loudly later.
+                return self._backup_now(facility_id)
             else:  # pragma: no cover - the enum makes this unreachable
                 return ExecutionResult(False, f"unsupported verb {job.verb!r}")
         except FacilityEnvError as exc:

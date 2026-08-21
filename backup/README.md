@@ -66,3 +66,12 @@ For the same reason, backup is **scheduled only when it can succeed**: a passphr
 off-site destination. Absent either, the scheduler is not enabled and the facility reports having no
 backup **as a problem**, rather than quietly producing local-only archives beside the data they are
 meant to protect.
+
+**This is wired end to end (DH-027G, 2026-08-21).** The operator places both values in the facility
+agent's own process environment at bootstrap; the agent forwards them into this facility's env file
+during `PROVISION` (never before, never by rewriting — `BACKUP_ENCRYPTION_PASSPHRASE` is
+unrotatable, see `facility_env.UNROTATABLE`). See `provisioning/README.md`'s "Backup wiring" section
+for the exact variables and what `/facilities/{id}/status` reports. What DH-027G does **not** cover:
+the nightly scheduler above runs inside this container, independent of the provisioning job queue,
+so the control plane learns an outcome only when a `BACKUP_NOW` job is explicitly issued — it does
+not yet read `last-run.status` on its own.

@@ -15,12 +15,20 @@ from daher_provisioning.auth import PORTAL_SCOPES, Scope, issue_key
 from daher_provisioning.enrolment import EnrolmentError, generate_agent_credential
 from daher_provisioning.hosts import HostError
 from daher_provisioning.jobs import Job, JobParams, JobVerb
-from daher_provisioning.models import DeployTarget, Facility, FacilityState, FacilityType
+from daher_provisioning.models import (
+    BackupReport,
+    BackupState,
+    DeployTarget,
+    Facility,
+    FacilityState,
+    FacilityType,
+)
 from daher_provisioning.queue import JobStatus
 from daher_provisioning.repository import FacilityExists, FacilityNotFound
 from daher_provisioning.store import (
     SCHEMA,
     Database,
+    SqliteBackupStore,
     SqliteEnrolmentStore,
     SqliteFacilityStore,
     SqliteHostStore,
@@ -111,6 +119,45 @@ class TestSurvivesRestart:
         assert record.status is JobStatus.CLAIMED
         assert record.delivered_to == "host-a"
         assert reopened.claim("host-a") is None, "a claimed job must not be re-handed out"
+
+    def test_a_backup_report_survives(self, tmp_path):
+        """DH-027G. Same shape as the health-store restart guarantee: 'is this facility
+        protected' must not reset to unknown just because the API process restarted."""
+        path = tmp_path / "state.db"
+        db = Database(path)
+        SqliteBackupStore(db).record(
+            "daher-bc",
+            BackupReport(
+                state=BackupState.NOT_CONFIGURED,
+                checked_at=datetime.now(UTC),
+                reason="no passphrase and/or off-site destination configured on this host",
+            ),
+        )
+        db.close()
+
+        reopened = SqliteBackupStore(Database(path))
+        latest = reopened.latest("daher-bc")
+        assert latest is not None
+        assert latest.state is BackupState.NOT_CONFIGURED
+        assert "passphrase" in latest.reason
+
+    def test_a_second_backup_report_replaces_the_first(self, tmp_path):
+        """Latest only, deliberately (same policy as the health store) — a fleet dashboard
+        needs what is true now, not a history of every backup attempt."""
+        path = tmp_path / "state.db"
+        db = Database(path)
+        store = SqliteBackupStore(db)
+        store.record(
+            "daher-bc",
+            BackupReport(state=BackupState.FAILED, checked_at=datetime.now(UTC), reason="x"),
+        )
+        store.record(
+            "daher-bc", BackupReport(state=BackupState.SUCCESS, checked_at=datetime.now(UTC))
+        )
+        db.close()
+
+        reopened = SqliteBackupStore(Database(path))
+        assert reopened.latest("daher-bc").state is BackupState.SUCCESS
 
 
 class TestNoClinicalCredentialIsStored:

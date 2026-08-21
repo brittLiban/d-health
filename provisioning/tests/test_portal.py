@@ -316,6 +316,15 @@ class TestBackupRisk:
         sign_in(client)
         assert "not protected" in client.get("/").text
 
+    def test_an_unconfigured_backup_is_shown_as_a_problem(self):
+        """DH-027G. The state most likely to be missed if `at_risk`'s tuple silently stayed
+        the pre-DH-027G three (never_run, failed) — `not_configured` is the agent's own
+        report that no passphrase and/or destination exist on the host, which is exactly
+        the case ADR-025 says must never be shown as a neutral or working state."""
+        client = self._portal_with("not_configured")
+        sign_in(client)
+        assert "not protected" in client.get("/").text
+
     def test_a_working_backup_is_not_flagged(self):
         client = self._portal_with("success")
         sign_in(client)

@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 
 from daher_agent.validation import JobRefused, JobValidator
 from daher_provisioning.jobs import Job, JobVerb
-from daher_provisioning.models import InfrastructureReport
+from daher_provisioning.models import BackupReport, InfrastructureReport
 
 logger = logging.getLogger("daher_agent.poller")
 
@@ -66,6 +66,9 @@ class ExecutionResult:
     # Deliberately typed rather than stuffed into `detail`: `detail` is a truncated string
     # and the control plane must validate what it persists, not scrape it.
     infrastructure: InfrastructureReport | None = None
+    # Structured backup evidence for BACKUP_NOW (DH-027G). None for every other verb. Never
+    # a passphrase, bucket name, or credential — see `BackupReport`.
+    backup: BackupReport | None = None
 
 
 # Fetch one job payload addressed to this host, or None. Raising is allowed and expected —
@@ -74,8 +77,9 @@ FetchJob = Callable[[], dict | None]
 # Run a validated job. Only ever called with a job that passed every local refusal.
 ExecuteJob = Callable[[Job], ExecutionResult]
 # Report an outcome upstream. Best effort; failing to report must not stop the loop.
-# (job_id, status, detail, infrastructure|None). The fourth argument is DH-027D's structured
-# evidence; reporters that predate it are still accepted, see `_safe_report`.
+# (job_id, status, detail, infrastructure|None, backup|None). The fourth argument is
+# DH-027D's structured evidence, the fifth is DH-027G's; reporters that predate either are
+# still accepted, see `_safe_report`.
 ReportOutcome = Callable[..., None]
 
 
@@ -202,7 +206,7 @@ class AgentPoller:
                 slot.job = None
         status = "succeeded" if result.succeeded else "failed"
         logger.info("job_finished job_id=%s status=%s", job.job_id, status)
-        self._safe_report(job.job_id, status, result.detail, result.infrastructure)
+        self._safe_report(job.job_id, status, result.detail, result.infrastructure, result.backup)
 
     def join(self, timeout: float | None = None) -> bool:
         """Wait for whatever is currently executing to finish.
@@ -231,6 +235,7 @@ class AgentPoller:
         status: str,
         detail: str,
         infrastructure: InfrastructureReport | None = None,
+        backup: BackupReport | None = None,
     ) -> None:
         """Reporting is best effort. A failure to report must not stop the loop.
 
@@ -241,12 +246,17 @@ class AgentPoller:
         try:
             with self._report_lock:
                 try:
-                    self._report(job_id, status, detail, infrastructure)
+                    self._report(job_id, status, detail, infrastructure, backup)
                 except TypeError:
-                    # A reporter written before DH-027D takes three arguments. Falling back
-                    # keeps a mixed-version fleet reporting outcomes rather than silently
-                    # failing every report — the outcome still lands, only the structured
-                    # evidence is dropped.
-                    self._report(job_id, status, detail)
+                    try:
+                        # A reporter written for DH-027D takes four arguments (no backup
+                        # evidence yet).
+                        self._report(job_id, status, detail, infrastructure)
+                    except TypeError:
+                        # A reporter written before DH-027D takes three. Falling back keeps
+                        # a mixed-version fleet reporting outcomes rather than silently
+                        # failing every report — the outcome still lands, only the
+                        # structured evidence is dropped.
+                        self._report(job_id, status, detail)
         except Exception:
             logger.warning("report_failed job_id=%s", job_id, exc_info=True)

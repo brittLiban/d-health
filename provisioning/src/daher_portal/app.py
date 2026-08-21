@@ -80,6 +80,7 @@ BACKUP_CLASSES = {
     "success": "ok",
     "failed": "bad",
     "never_run": "bad",
+    "not_configured": "bad",
     "unverified_no_restore_drill": "warn",
 }
 
@@ -222,7 +223,12 @@ def create_portal(
                         else "bad",
                         # Separate from the state so "scheduled" and "verified" are never
                         # conflated: a scheduled backup is not a tested one (ADR-025).
-                        "at_risk": status["backup_state"] in ("never_run", "failed"),
+                        # `not_configured` (DH-027G) is the agent's own report that no
+                        # passphrase and/or off-site destination exist on the host — the
+                        # clearest "at risk" of the four, and the one most likely to be
+                        # missed if this tuple silently stayed the pre-DH-027G three.
+                        "at_risk": status["backup_state"]
+                        in ("never_run", "failed", "not_configured"),
                     }
                 )
         except Exception:

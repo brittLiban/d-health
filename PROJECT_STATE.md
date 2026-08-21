@@ -187,7 +187,7 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 593 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 637 tests now gated, every check control-tested), **DH-027B** (transactional facility creation), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring; nightly-scheduler visibility still open) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 
@@ -222,7 +222,7 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
 2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gated **582 tests** at
-   landing; it currently gates **593 tests across four suites** (adapter 94, provisioning 464, seed
+   landing; it currently gates **637 tests across four suites** (adapter 94, provisioning 508, seed
    16, form-safety 19 — measured against the real CI run, not copied) plus Ruff, compose
    interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
    the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
@@ -1023,6 +1023,13 @@ rather than left looking like a usable backup.
 **NOT yet done:** no S3-compatible upload has run, no production encryption key has been placed in
 escrow, and **no restore has been attempted**. Supplying an external bucket changes where encrypted
 patient data leaves the system and requires Liban's explicit approval.
+
+⚠️ **DH-027G (2026-08-21) wired this sidecar's configuration into provisioning** — a facility
+created through the control plane now actually gets `BACKUP_ENCRYPTION_PASSPHRASE`/`BACKUP_S3_*`
+in its env file when the operator supplies them, and the fleet's `backup_state` reflects a real
+`BACKUP_NOW` report instead of a hard-coded placeholder. That is a provisioning-wiring fix, not new
+evidence for the boundaries above: off-site upload is still unexercised and no restore against a
+provisioned (rather than hand-built) facility has happened. See DH-027G's own entry, below DH-027D.
 Per AGENTS.md the pinned item is "backup **plus a performed restore drill**" — this is neither
 finished nor a substitute for DH-015.
 `mariadb-dump` + `pg_dump` (all three DBs) + adapter audit volume + OpenMRS data volume +
@@ -1935,6 +1942,83 @@ threshold, because how often a fleet should be polled is an operations decision.
 **latest** check is persisted; history is deliberately not a metrics database. And this is
 verified against real `ps`/`config` output plus unit tests — **not** against a facility
 provisioned through the control plane, which remains DH-027J.
+
+### DH-027G · Backup bootstrap / off-site protection wiring · ✅ DONE 2026-08-21
+
+**The problem this closes.** `BackupSettings`/`render_env` (ADR-025) were fully built and
+unit-tested, but `ComposeExecutor._provision()` never passed `backup=` to `render_env` — a real
+provisioning run wrote an env file with no backup section no matter what an operator had
+configured on the host. Separately, `BACKUP_NOW` ran `docker compose --profile backup run --rm
+backup` unconditionally (would fail loudly and confusingly on an unconfigured host), and
+`/facilities/{id}/status` **hard-coded** `backup_state=BackupState.NEVER_RUN` regardless of
+anything an agent ever reported — a placeholder wired to nothing, the exact DH-027D-shaped defect
+applied to backup instead of health.
+
+**Where the passphrase lives, and where it explicitly does not (ADR-025, unchanged by this
+ticket).** The operator places it — and the off-site destination — in the facility agent's own
+process environment at bootstrap, the same manual step that already delivers `AGENT_CREDENTIAL`.
+`backup_settings_from_env()` (`daher_agent/runner.py`) reads `BACKUP_ENCRYPTION_PASSPHRASE`,
+`BACKUP_S3_BUCKET`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`,
+`BACKUP_RETENTION_DAYS` and builds a `BackupSettings` (or `None`), passed into `ComposeExecutor`.
+The control plane **never receives any of it** — not transiently, not for validation — because
+ADR-025 already decided delivery happens at bootstrap, not through a job or the API; this ticket
+did not re-litigate that. What the control plane learns is a three-value outcome only
+(`not_configured` / `success` / `failed`) plus a short operator-language reason, via a new
+`BackupReport` model structurally identical in spirit to `InfrastructureReport` — no bucket name,
+no archive path, no credential, covered automatically by the existing clinical-data guard
+(`response_models()` auto-discovers every model in `models.py`) and by a new parallel
+secret-vocabulary guard added alongside it for exactly this ticket.
+
+**BACKUP_NOW now answers honestly, mirroring `_status`'s convention exactly:** `succeeded=True`
+means "the agent correctly determined the state," not "the facility is protected" — so an
+unconfigured host reports `not_configured` with `succeeded=True` and the command is never
+attempted (control-tested: see below), while a real attempt that fails reports `failed` with
+`succeeded=False`. `/facilities/{id}/status` now derives `backup_state` from the latest such
+report (`SqliteBackupStore`, latest-only, same pattern and same table shape as
+`SqliteHealthStore`), defaulting to `NEVER_RUN` — "no evidence yet" — when none has ever arrived.
+A malformed or missing report is persisted as `FAILED`, never `SUCCESS` (DH-027D's fail-closed
+rule, applied here). Portal's `at_risk`/`BACKUP_CLASSES` — which pre-date this ticket — did not
+know about the new `NOT_CONFIGURED` value; both were extended, found and closed in this same
+change rather than left silently unreachable.
+
+**Persistence.** `SqliteBackupStore`/`InMemoryBackupStore` (`store.py`), a new `facility_backup`
+table, wired into `create_app(backup_store=...)`. Directly restart-tested (open, write, close,
+reopen, read back) — worth noting because auditing this ticket found `SqliteHealthStore` itself,
+DH-027D's equivalent, has **zero** test coverage; this one does not repeat that gap.
+
+**Restore-drill stays untouched and separate, by design.** `restore_drill_last_performed` is not
+set by anything in this ticket — a human-performed drill (`backup/restore-drill.md`) is out of
+scope here, and a test asserts a successful `BACKUP_NOW` report leaves it `None`.
+
+**Verified:** 44 new tests, **508 provisioning tests total** (from 464), Ruff clean, all four
+suites green (637 total: adapter 94, provisioning 508, seed 16, form-safety 19).
+
+**Control-tested, four deliberate breaks on a throwaway copy, each restored after:**
+
+| Control | Result |
+|---|---|
+| Disable the `NOT_CONFIGURED` refusal in `_backup_now` (always attempt the command) | **5 fail** |
+| Malformed/missing evidence reported as `SUCCESS` instead of fail-closed `FAILED` | **2 fail** |
+| Revert `_provision()` to not pass `backup=` to `render_env` (the exact original defect) | **1 fails** |
+| Revert the portal's `at_risk` tuple to the pre-ticket three values (drop `not_configured`) | **1 fails** |
+
+Plus the existing secret-vocabulary guard, control-verified the same way DH-027D's clinical guard
+was: a throwaway model with a literal `passphrase` field fails the check by name.
+
+⚠️ **Boundaries, stated rather than glossed.** No API endpoint yet queues `BACKUP_NOW` on demand —
+matches `STATUS`'s existing state (DH-027D never built one either); both currently require
+enqueuing a job directly (demo harness or a test, as `tests/test_backup_status.py` does). More
+significantly: `backup/scheduler.sh`'s nightly run is autonomous, inside the backup container,
+**independent of the provisioning job queue** — the control plane has no visibility into those
+runs unless a `BACKUP_NOW` job is explicitly issued, so `backup_state` reflects the last
+*requested* check, not necessarily last night's real backup. Reading `last-run.status`
+(`backup/README.md`) into a report would close that gap; deliberately not built here — it is a
+second, separable piece of surface (a new read-only executor command, new parsing, new tests), and
+DH-027G's own scope was the wiring gap the ticket named, not every path to full visibility. Not
+exercised against a real S3-compatible target or a real `docker compose run --rm backup` — DH-014
+already established that boundary (local path verified 2026-08-13, off-site still unexercised) and
+this ticket did not re-open it; verification here is at the wiring/executor level, proving
+configuration reaches the real path, not re-proving backup mechanics DH-014 already owns.
 
 ### DH-027C · Facility lifecycle state machine · ✅ DONE 2026-08-17
 

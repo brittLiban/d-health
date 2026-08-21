@@ -33,6 +33,8 @@ from daher_provisioning.facility_env import ROTATABLE, UNROTATABLE
 from daher_provisioning.hosts import HostError, HostRegistry
 from daher_provisioning.jobs import Job, JobParams, JobVerb
 from daher_provisioning.models import (
+    BackupReport,
+    BackupState,
     CredentialReference,
     Facility,
     FacilityCreateRequest,
@@ -47,7 +49,7 @@ from daher_provisioning.queue import JobQueue, JobStatus
 from daher_provisioning.ratelimit import RateLimitExceeded, TokenBucketLimiter
 from daher_provisioning.repository import FacilityExists, FacilityNotFound, FacilityRepository
 from daher_provisioning.secrets import SecretGenerationError, validate_facility_id
-from daher_provisioning.store import InMemoryHealthStore
+from daher_provisioning.store import InMemoryBackupStore, InMemoryHealthStore
 
 # What a caller is told did not happen. Keeping these as explicit strings rather than
 # leaving the list empty is the difference between "provisioned" and "recorded".
@@ -138,6 +140,17 @@ def unknown_health(reason: str) -> InfrastructureReport:
     )
 
 
+def unknown_backup(reason: str) -> BackupReport:
+    """A BACKUP_NOW report we cannot trust. FAILED, never SUCCESS (DH-027G).
+
+    Mirrors `unknown_health`'s fail-closed default: a malformed or missing report must never
+    read as a working backup. `FAILED` rather than a distinct "unknown" value because the
+    vocabulary this ticket asks for is `not_configured` / `never_run` / `success` / `failed` —
+    adding a fifth just for this would duplicate `reason` carrying the same information.
+    """
+    return BackupReport(state=BackupState.FAILED, checked_at=datetime.now(UTC), reason=reason[:512])
+
+
 def _slugify(display_name: str) -> str:
     allowed = [c.lower() if c.isalnum() else "-" for c in display_name]
     slug = "".join(allowed).strip("-")
@@ -156,6 +169,7 @@ def create_app(
     job_queue: JobQueue | None = None,
     enrolment: EnrolmentService | None = None,
     health_store=None,
+    backup_store=None,
     allowed_source_cidrs: list[str] | None = None,
     base_domain: str = "localhost",
 ) -> FastAPI:
@@ -164,6 +178,7 @@ def create_app(
     queue = job_queue or JobQueue()
     enrolments = enrolment or EnrolmentService()
     health_records = health_store if health_store is not None else InMemoryHealthStore()
+    backup_records = backup_store if backup_store is not None else InMemoryBackupStore()
     rate_limiter = limiter or TokenBucketLimiter(rate_per_second=1.0, burst=20)
     allowlist = SourceAllowlist(allowed_source_cidrs)
 
@@ -442,9 +457,13 @@ def create_app(
         # This endpoint previously fabricated both, returning zero counts with a fresh
         # `checked_at` — a timestamp implying a check that had never happened. It now reports
         # the last persisted observation, or UNKNOWN when there is none.
-        from daher_provisioning.models import BackupState
-
         latest = health_records.latest(facility_id)
+        # Backup, the same way (DH-027G): reported by the agent, never inferred here — this
+        # service never holds the passphrase that would let it know whether backup is even
+        # configured (ADR-025). NEVER_RUN before any BACKUP_NOW report has ever arrived is a
+        # "no evidence yet" default, not a claim that the facility is unprotected specifically
+        # because it lacks configuration — see `BackupState.NOT_CONFIGURED` for that claim.
+        latest_backup = backup_records.latest(facility_id)
         return FacilityStatus(
             facility_id=facility_id,
             state=facility.state,
@@ -457,7 +476,15 @@ def create_app(
                 if latest
                 else "no infrastructure check has been reported for this facility yet"
             ),
-            backup_state=BackupState.NEVER_RUN,
+            backup_state=latest_backup.state if latest_backup else BackupState.NEVER_RUN,
+            # Only a genuine attempt counts as a "run" — NOT_CONFIGURED means the agent
+            # correctly declined to run one at all, which `backup_last_run` must not imply.
+            backup_last_run=(
+                latest_backup.checked_at
+                if latest_backup
+                and latest_backup.state in (BackupState.SUCCESS, BackupState.FAILED)
+                else None
+            ),
             # None, not now(). A timestamp for a check that never happened is a lie an
             # operator would reasonably act on.
             checked_at=latest.checked_at if latest else None,
@@ -746,6 +773,22 @@ def create_app(
             if facility_id:
                 health_records.record(facility_id, infrastructure)
 
+        # DH-027G: structured backup evidence, the same fail-closed pattern as STATUS above.
+        # A malformed or absent report must never be read as a successful backup — the
+        # control plane never holds the passphrase, so it has no way to check this itself.
+        backup: BackupReport | None = None
+        raw_backup = body.get("backup")
+        if verb is JobVerb.BACKUP_NOW:
+            if isinstance(raw_backup, dict):
+                try:
+                    backup = BackupReport.model_validate(raw_backup)
+                except Exception:
+                    backup = unknown_backup("agent sent a backup report that failed validation")
+            else:
+                backup = unknown_backup("agent reported a BACKUP_NOW job without backup evidence")
+            if facility_id:
+                backup_records.record(facility_id, backup)
+
         queue.finish(job_id, mapping[reported], detail)
 
         # DH-027C/E: the facility lifecycle advances here and nowhere else, because this is
@@ -776,6 +819,7 @@ def create_app(
                     if infrastructure
                     else ""
                 )
+                + (f" [backup {backup.state.value}]" if backup else "")
             )[:512],
             source_ip=_client_ip(request),
         )

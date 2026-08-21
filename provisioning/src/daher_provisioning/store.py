@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS facility_health (
     document    TEXT NOT NULL,
     checked_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS facility_backup (
+    facility_id TEXT PRIMARY KEY,
+    document    TEXT NOT NULL,
+    checked_at  TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,
@@ -195,6 +200,49 @@ class SqliteHealthStore:
 
 
 class InMemoryHealthStore:
+    """Same interface, for tests and the default in-memory wiring."""
+
+    def __init__(self) -> None:
+        self._latest: dict = {}
+
+    def record(self, facility_id: str, report) -> None:
+        self._latest[facility_id] = report
+
+    def latest(self, facility_id: str):
+        return self._latest.get(facility_id)
+
+
+class SqliteBackupStore:
+    """Latest BACKUP_NOW report per facility (DH-027G).
+
+    Same shape as `SqliteHealthStore` on purpose: one durable fact per facility, replaced
+    on every new report, because "is this facility protected right now" is what an operator
+    needs — not a history of every backup attempt. Never holds a passphrase, bucket name, or
+    credential; `BackupReport` structurally cannot carry one (ADR-021's pattern, applied here).
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record(self, facility_id: str, report) -> None:
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO facility_backup (facility_id, document, checked_at) VALUES (?,?,?) "
+                "ON CONFLICT(facility_id) DO UPDATE SET document=excluded.document, "
+                "checked_at=excluded.checked_at",
+                (facility_id, report.model_dump_json(), report.checked_at.isoformat()),
+            )
+
+    def latest(self, facility_id: str):
+        from daher_provisioning.models import BackupReport
+
+        rows = self._db.query(
+            "SELECT document FROM facility_backup WHERE facility_id=?", (facility_id,)
+        )
+        return BackupReport.model_validate_json(rows[0]["document"]) if rows else None
+
+
+class InMemoryBackupStore:
     """Same interface, for tests and the default in-memory wiring."""
 
     def __init__(self) -> None:

@@ -12,7 +12,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from daher_agent.executor import CommandResult, ComposeExecutor
 from daher_provisioning.facility_env import BackupSettings, FacilityEnvError, render_env
+from daher_provisioning.jobs import Job, JobParams, JobVerb
 from daher_provisioning.models import DeployTarget, Facility, FacilityType
 from daher_provisioning.secrets import generate_facility_secrets
 
@@ -84,3 +86,78 @@ class TestThePassphraseComesFromTheOperator:
     def test_a_configured_facility_uses_the_supplied_value(self):
         text = rendered(complete())
         assert "BACKUP_ENCRYPTION_PASSPHRASE=a-long-operator-supplied-passphrase" in text
+
+
+def a_provision_job(facility_id: str = "daher-bc") -> Job:
+    return Job(
+        job_id="job-00000001",
+        host_id="host-a",
+        verb=JobVerb.PROVISION,
+        params=JobParams(facility_id=facility_id),
+        issued_at=datetime.now(UTC),
+    )
+
+
+class TestTheExecutorActuallyWiresItThrough:
+    """DH-027G. `BackupSettings`/`render_env` were fully built and unit-tested (above), but
+    `ComposeExecutor._provision()` never passed `backup=` to `render_env` — so a real
+    provisioning run wrote an env file with no backup section no matter what the operator
+    had configured on the host. That gap, not the rendering logic, is what this class proves
+    closed: it runs the *real* executor, the same object `execute()` uses in production, and
+    reads back the file it actually wrote.
+    """
+
+    def test_a_configured_host_writes_a_schedulable_env_file(self, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "facilities",
+            base_domain="example.org",
+            runner=lambda argv, *, cwd, timeout: CommandResult(0, "", ""),
+            backup=complete(),
+        )
+        result = executor.execute(a_provision_job())
+        assert result.succeeded
+
+        written = (tmp_path / "facilities" / "daher-bc" / ".env").read_text(encoding="utf-8")
+        assert "COMPOSE_PROFILES=backup" in written
+        assert "BACKUP_S3_BUCKET=daher-backups" in written
+        assert "BACKUP_ENCRYPTION_PASSPHRASE=a-long-operator-supplied-passphrase" in written
+
+    def test_an_unconfigured_host_writes_no_backup_section(self, tmp_path):
+        """The regression this class exists for: before the fix, this test would have
+        passed too, for the wrong reason — `self.backup` was never read at all."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "facilities",
+            base_domain="example.org",
+            runner=lambda argv, *, cwd, timeout: CommandResult(0, "", ""),
+        )
+        assert executor.backup is None
+        result = executor.execute(a_provision_job())
+        assert result.succeeded
+
+        written = (tmp_path / "facilities" / "daher-bc" / ".env").read_text(encoding="utf-8")
+        assert "COMPOSE_PROFILES=backup" not in written
+        assert "BACKUP_ENCRYPTION_PASSPHRASE=" not in written
+
+    def test_a_partially_configured_host_also_writes_no_backup_section(self, tmp_path):
+        """Half a configuration is not a backup (ADR-025) — proven here through the same
+        executor path a real deployment uses, not just `BackupSettings.schedulable`."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        executor = ComposeExecutor(
+            compose_file=compose,
+            facility_root=tmp_path / "facilities",
+            base_domain="example.org",
+            runner=lambda argv, *, cwd, timeout: CommandResult(0, "", ""),
+            backup=BackupSettings(passphrase="x" * 32, s3_bucket=""),
+        )
+        result = executor.execute(a_provision_job())
+        assert result.succeeded
+
+        written = (tmp_path / "facilities" / "daher-bc" / ".env").read_text(encoding="utf-8")
+        assert "COMPOSE_PROFILES=backup" not in written

@@ -102,6 +102,27 @@ to call `execute` inline again — reproducing bug 18 exactly — fails 6 of 7 (
 test doesn't depend on concurrency). Not exercised against a real ~50-minute boot — proven at the poller/queue
 level, not against real `docker compose` timing.
 
+**DH-027G wired backup configuration through to the real path (2026-08-21).**
+`BackupSettings`/`render_env` (ADR-025) were fully built, but `ComposeExecutor._provision()` never
+passed `backup=` to `render_env` — a real provisioning run wrote no backup section regardless of
+host configuration. Closed: the operator's passphrase and off-site destination now reach the agent
+through its own process environment at bootstrap (same manual step as `AGENT_CREDENTIAL`), and
+`ComposeExecutor` forwards them. `BACKUP_NOW` now checks first and answers honestly — `not_configured`
+without ever attempting the command on an unconfigured host, `success`/`failed` from a real attempt
+otherwise — the same convention DH-027D's `STATUS` already uses. `/facilities/{id}/status`'s
+`backup_state` was **hard-coded** to `never_run`; it now reflects the latest such report, persisted
+durably (`SqliteBackupStore`). The control plane still never receives the passphrase or bucket name
+— only a three-value outcome and a reason. 44 new tests, 508 provisioning tests total (464 before),
+Ruff clean. Control-tested, four deliberate breaks: disabling the not-configured refusal fails 5;
+malformed evidence reported as success instead of fail-closed failure fails 2; reverting the
+`_provision()` wiring (the exact original defect) fails 1; reverting the portal's risk banner to not
+recognise the new state fails 1. ⚠️ Still not covered: the nightly scheduler inside the backup
+container runs independent of the job queue, so `backup_state` reflects the last *requested* check,
+not necessarily last night's real backup, until something reads `last-run.status` into a report —
+deliberately not built in this ticket. Not exercised against a real S3-compatible target or a real
+`docker compose run --rm backup` — DH-014 already owns that verification boundary (local path
+verified, off-site unexercised) and this ticket proves the wiring reaches it, not backup mechanics.
+
 **DH-027C gave facilities a real lifecycle (2026-08-17):** nothing ever set `RUNNING` or
 `DEGRADED`, so every facility stayed `PROVISIONING` forever. One explicit transition table now
 advances state, driven only by an agent report about work it actually ran — never by a job being
@@ -122,9 +143,9 @@ write-temp-then-rename with contents fsynced before the rename. ⚠️ Rotation 
 the write is atomic, so the file is never torn, but a failed `up` afterwards leaves the new file in
 place. Restoring the old one is a credential-custody question, not a code detail.
 
-**CI now exists (DH-027M, 2026-08-17) and currently gates 593 tests.** Until this landed, every
+**CI now exists (DH-027M, 2026-08-17) and currently gates 637 tests.** Until this landed, every
 verification claim in `PROJECT_STATE.md` depended on a human remembering to run something.
-`.github/workflows/ci.yml` runs the adapter (94), provisioning (464), seed (16) and form-safety
+`.github/workflows/ci.yml` runs the adapter (94), provisioning (508), seed (16) and form-safety
 (19) suites plus Ruff, compose
 interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
 `.env`-untracked check, and relative-link resolution. Four guards were control-tested by breaking

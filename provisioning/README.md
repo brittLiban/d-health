@@ -386,6 +386,51 @@ losing patient records, not a neutral "nothing yet".
 Scheduled is still never presented as verified: the restore-drill date sits beside the backup state
 in the fleet list, and a facility that has never had one says `never`.
 
+### The wiring that was still missing (DH-027G, 2026-08-21)
+
+Everything above was true of `BackupSettings`/`render_env` in isolation, but `ComposeExecutor`
+never called either with the operator's configuration: `_provision()` called `render_env(...)`
+with no `backup=` argument at all, so a real provisioning run wrote an env file with no backup
+section regardless of what an operator had configured on the host. Closed by:
+
+**The operator's configuration reaches the agent through its own process environment**, read once
+at startup — the same place `AGENT_CREDENTIAL` already comes from, because both are supplied at
+the same manual bootstrap step (ADR-025):
+
+| Variable | What it does |
+|---|---|
+| `BACKUP_ENCRYPTION_PASSPHRASE` | Operator-supplied. Never generated here |
+| `BACKUP_S3_BUCKET` | Off-site destination. Both this and the passphrase are required before anything is scheduled |
+| `BACKUP_S3_ENDPOINT` | Optional — an S3-compatible endpoint (e.g. MinIO), not AWS-specific |
+| `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | Optional, for the destination above |
+| `BACKUP_RETENTION_DAYS` | Optional, default 30 |
+
+`backup_settings_from_env()` in `daher_agent/runner.py` builds a `BackupSettings` from these (or
+`None` if both the passphrase and bucket are absent) and passes it into `ComposeExecutor`, which
+now actually forwards it to `render_env` during `PROVISION`.
+
+**BACKUP_NOW now answers honestly, the same way `STATUS` does (DH-027D).** It used to run
+`docker compose --profile backup run --rm backup` unconditionally, which — on an unconfigured host
+— would just fail loudly with a confusing error from inside `backup.sh`'s own `${VAR:?}` guards.
+It now checks first: unconfigured reports `not_configured` (a *correct* answer, not a failure —
+`ExecutionResult.succeeded=True`, the same convention `_status` uses for a degraded-but-trustworthy
+check) without ever attempting the command; configured runs it for real and reports `success` or
+`failed` from the exit code. `/facilities/{id}/status`'s `backup_state` used to be hard-coded to
+`never_run` regardless of anything an agent ever reported — it now reflects the last such report,
+persisted the same durable way `STATUS`'s observation is (`SqliteBackupStore`, latest-only).
+
+**The control plane still never learns the passphrase or the bucket name** — only the three-value
+outcome (`not_configured` / `success` / `failed`) and a short operator-language reason, exactly
+like `InfrastructureReport` carries container states rather than raw Docker output.
+
+⚠️ **What this does not do.** The nightly scheduler (`backup/scheduler.sh`) runs entirely inside
+the backup container, independent of the job queue — the control plane has no visibility into
+those autonomous runs unless a `BACKUP_NOW` job is explicitly issued. `backup_state` therefore
+reflects the last *requested* check, not "last night's backup," until something reads
+`last-run.status` (documented in `backup/README.md`) into a report. No API endpoint yet queues
+`BACKUP_NOW` on demand either — matching `STATUS`'s existing state; both currently require queuing
+a job directly (see the demo harness's `/demo/enqueue-raw`, or `tests/test_backup_status.py`).
+
 ## Credential rotation — what it will not do (ADR-024)
 
 "Rotate this facility's credentials" is not one operation, and the obvious implementation would
