@@ -228,11 +228,13 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
 2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gated **582 tests** at
-   landing; it currently gates **678 tests across four suites** (adapter 94, provisioning 549, seed
-   16, form-safety 19 — measured against the real CI run, not copied) plus Ruff, compose
-   interpolation on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan,
-   the `.env`-untracked check, and relative-link resolution. Details and the honest limits are in the
-   ticket entry below.
+   landing; it currently gates **699 tests across five suites** (adapter 94, provisioning 549, seed
+   16, form-safety 19, `ui/` frontend 21 — measured against the real CI run, not copied) plus Ruff,
+   `ui/`'s lint/typecheck/build (including its own secrets-in-bundle check), compose interpolation
+   on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
+   `.env`-untracked check, and relative-link resolution. The `ui-frontend` job was added in UI-002 —
+   before that, the new frontend's own tests ran locally but nothing gated them on push. Details and
+   the honest limits are in the ticket entry below.
 3. **DH-017** — the README needs a walk-through on a genuinely fresh VM. Documentation verified only
    against an already-working machine is the weakest kind. ⚠️ Now partly entangled with the
    cloud-primary direction, which is itself an open decision (data residency). **This is the next
@@ -2568,6 +2570,13 @@ build` (which runs the secrets-in-bundle check as its own `postbuild` step), and
 build` of `ui/Dockerfile` all pass locally. The repo-wide checks that would otherwise only run in
 CI were also run locally first: tracked-secret scan, image-pinning/digest check, JSON/XML/CSV
 parse, and the relative-documentation-link check — all clean against the staged changes.
+
+**CI itself extended, not just satisfied.** `.github/workflows/ci.yml` had no job that ran anything
+under `ui/` — landing this ticket without one would mean 21 new tests ran locally once and then
+never again on any future push, exactly the gap DH-027M existed to close for the Python suites. A
+new `ui-frontend` job (lint, typecheck, `vitest`, `build`) was added in the same commit, following
+the existing `adapter`/`provisioning` jobs' shape. CI now gates 699 tests across five suites, not
+678 across four — this file's own "678 tests" claim above is updated to match.
 
 **Not done, by instruction:** no clinical write of any kind; no BFF; no SSO activation; no
 reception-facing production workflow; no HIE; no ANC/partograph forms; no routing/domain wiring

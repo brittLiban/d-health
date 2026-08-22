@@ -93,6 +93,36 @@ jobs:
         run: PYTHONPATH=src python -m pytest -q
         working-directory: provisioning
 
+  ui-frontend:
+    name: ui — lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - name: Lint
+        run: npm run lint
+        working-directory: ui
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: ui
+      - name: Vitest
+        run: npm run test
+        working-directory: ui
+      - name: Build
+        # Also runs scripts/check-no-secrets-in-bundle.mjs as its own
+        # `postbuild` step — a build with a secret in the shipped bundle
+        # fails here, not in a later manual review (docs/UI-001-CLINICAL-UX.md
+        # §8's boundary: no privileged credential in frontend JavaScript,
+        # browser storage, or build artifacts).
+        run: npm run build
+        working-directory: ui
+
   clinical-config:
     name: seed + form-safety suites
     runs-on: ubuntu-latest
