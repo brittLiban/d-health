@@ -19,17 +19,24 @@ function asErrorCode(value: string | undefined): ErrorCode {
 }
 
 /**
- * Searches patients through the dev-only proxy in vite.config.ts, which is the
- * only thing that ever holds the OpenMRS credential (never this client, never
- * the bundle). See docs/UI-001-CLINICAL-UX.md §13a.1 for the runtime-verified
- * contract this wraps: name and identifier share one `q=` parameter, an empty
- * result set is a normal 200, and the raw error envelope can carry a full Java
- * stack trace — which the proxy strips before this function ever sees it.
+ * Fetches `/openmrs/*` same-origin — in production this is Caddy's
+ * app.$BASE_DOMAIN route straight to openmrs-gateway (ADR-027), authenticated
+ * by whatever real OpenMRS session cookie the browser already holds; this
+ * code has no notion of a credential. In development, the identical path is
+ * caught by vite.devOpenmrsProxy.ts, which is the only thing that ever holds
+ * OMRS_ADMIN_PASSWORD (never this client, never the bundle) and forwards
+ * with Basic Auth added server-side. See docs/UI-001-CLINICAL-UX.md §13a.1
+ * for the runtime-verified contract this wraps: name and identifier share
+ * one `q=` parameter, an empty result set is a normal 200, and the raw error
+ * envelope can carry a full Java stack trace — the dev proxy strips this
+ * before it ever reaches the browser; the production Caddy route (UI-004)
+ * does not yet do the equivalent body rewrite, a known gap this ticket does
+ * not close (see ui/README.md).
  */
 export async function searchPatients(query: string): Promise<OpenMrsPatient[]> {
   let response: Response
   try {
-    response = await fetch(`/api/openmrs/patient?q=${encodeURIComponent(query)}`, {
+    response = await fetch(`/openmrs/ws/rest/v1/patient?q=${encodeURIComponent(query)}`, {
       headers: { Accept: 'application/json' },
     })
   } catch {

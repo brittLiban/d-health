@@ -13,8 +13,13 @@ kcadm=/opt/keycloak/bin/kcadm.sh
 
 openmrs_public_url=${OPENMRS_PUBLIC_URL:-https://emr.${BASE_DOMAIN}}
 openelis_public_url=${OPENELIS_PUBLIC_URL:-https://lab.${BASE_DOMAIN}}
+# UI-004 (ADR-027): the Daher UI's own origin, added to the openmrs client's
+# existing redirect/web-origin lists — never replacing emr.'s entries, never
+# a second OpenMRS client, and never touching the openelis SAML client at
+# all (its SAML ACS-URL derivation is unresolved; see ADR-027's "open risk").
+daher_app_url=${DAHER_APP_PUBLIC_URL:-https://app.${BASE_DOMAIN}}
 
-for value in "$BASE_DOMAIN" "$openmrs_public_url" "$openelis_public_url"; do
+for value in "$BASE_DOMAIN" "$openmrs_public_url" "$openelis_public_url" "$daher_app_url"; do
     if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9:./_-]*$ ]]; then
         echo "Unsafe URL/domain value in SSO configuration" >&2
         exit 1
@@ -81,8 +86,8 @@ openmrs_id=$(client_uuid openmrs)
     -s "secret=$KEYCLOAK_OPENMRS_CLIENT_SECRET" \
     -s "rootUrl=$openmrs_public_url" \
     -s "baseUrl=$openmrs_public_url" \
-    -s "redirectUris=[\"$openmrs_public_url/*\",\"http://127.0.0.1:8080/*\",\"http://openmrs-gateway/*\"]" \
-    -s "webOrigins=[\"$openmrs_public_url\",\"http://127.0.0.1:8080\",\"http://openmrs-gateway\"]" \
+    -s "redirectUris=[\"$openmrs_public_url/*\",\"$daher_app_url/*\",\"http://127.0.0.1:8080/*\",\"http://openmrs-gateway/*\"]" \
+    -s "webOrigins=[\"$openmrs_public_url\",\"$daher_app_url\",\"http://127.0.0.1:8080\",\"http://openmrs-gateway\"]" \
     -s 'attributes."post.logout.redirect.uris"=+' >/dev/null
 
 reconcile_mapper "$openmrs_id" "client roles" \

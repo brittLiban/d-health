@@ -111,3 +111,72 @@ id.{$BASE_DOMAIN} {
 		header_up X-Forwarded-Port 443
 	}
 }
+
+# ---------------------------------------------------------------------------
+# app.<domain> — the Daher clinical UI (UI-004, DECISIONS.md ADR-027).
+#
+# Same-origin by construction, not convenience: ADR-027 decided the browser
+# holds OpenMRS's own session directly rather than a BFF minting one, which
+# only works if the cookie OpenMRS sets on login lands on the same origin
+# this app's own fetch() calls use. So this proxies OpenMRS's own API prefix
+# (/openmrs/*) — not its SPA, which stays at emr. untouched — under this
+# app's origin. This is safe because UI-003 measured that openmrs-gateway
+# routes by path, not Host header: an arbitrary, unconfigured Host still
+# reaches the real backend, so one backend instance legitimately answers for
+# two origins without any upstream reconfiguration.
+#
+# OpenELIS is deliberately NOT mounted here. Its SAML ACS-URL derivation
+# (fixed to lab.$BASE_DOMAIN vs. per-request like OpenMRS's OIDC) could not be
+# confirmed live without enabling SAML on the running stack, which UI-004 was
+# not permitted to do (see ADR-027's "open risk"). Until resolved,
+# OpenELIS-touching actions stay native at lab.$BASE_DOMAIN.
+# ---------------------------------------------------------------------------
+app.{$BASE_DOMAIN} {
+	import common
+
+	# `route` (not the default directive ordering) so this CSRF check is
+	# guaranteed to run before either handle block below, in the exact order
+	# written — load-bearing here, unlike everywhere else in this file where
+	# Caddy's default ordering was never something a mistake could hide in.
+	route {
+		# Defense-in-depth against the CSRF gap ADR-027 measured directly:
+		# a cookie-authenticated POST /openmrs/patient with no CSRF token
+		# reached real validation logic despite an org.owasp.csrfguard filter
+		# already in OpenMRS's own chain — that filter does not cover this
+		# path. A plain cross-site HTML form cannot set a custom header, and
+		# neither OpenMRS nor its gateway emit any Access-Control-* headers
+		# (verified directly against both — nothing here adds any either), so
+		# a foreign script cannot set one via a CORS-preflighted fetch either.
+		# This is defense-in-depth, not authorization — OpenMRS's own
+		# privilege checks remain the real boundary; GET/HEAD are untouched.
+		@openmrs_mutation_unprotected {
+			path /openmrs/*
+			method POST PUT PATCH DELETE
+			not header X-Daher-App-Request 1
+		}
+		respond @openmrs_mutation_unprotected 403
+
+		handle /openmrs/* {
+			reverse_proxy openmrs-gateway:80 {
+				# Hardens OpenMRS's own JSESSIONID (measured HttpOnly-only,
+				# ADR-027) in transit, without touching emr.'s cookie or
+				# OpenMRS's own Tomcat config. SameSite=Lax, not Strict: this
+				# cookie must survive the top-level redirect back from
+				# Keycloak a real OIDC login performs, and Lax — unlike
+				# Strict — still sends a cookie on a cross-site top-level GET
+				# navigation (exactly what following a redirect is) while
+				# withholding it from a cross-site POST, the actual CSRF
+				# vector. The rewrite mechanism itself is proven against this
+				# route using the existing local-login session, which sets
+				# the identical cookie; compatibility with a real SSO
+				# handshake is reasoned from how SameSite is specified to
+				# behave, not observed live — that needs BLOCKER-5.
+				header_down Set-Cookie "HttpOnly" "HttpOnly; Secure; SameSite=Lax"
+			}
+		}
+
+		handle {
+			reverse_proxy daher-ui:80
+		}
+	}
+}

@@ -1403,3 +1403,17 @@ named additions a future ticket makes once BLOCKER-5's role mapping is approved.
   Whatever the human decision there turns out to be, this architecture enforces it exactly the way it
   enforces every other role today: server-side, by OpenMRS/Keycloak, never by the Daher UI's own
   navigation.
+
+### Implementation note (UI-004, 2026-08-22)
+
+The mechanical foundation this ADR specified is now built and verified live against the pinned
+stack: `app.$BASE_DOMAIN` exists in `caddy/Caddyfile`, proxying `/openmrs/*` to `openmrs-gateway:80`
+with the session cookie hardened in transit (`Secure; SameSite=Lax`, verified via a real
+`Set-Cookie` header) and a CSRF guard (`X-Daher-App-Request: 1` required for `POST`/`PUT`/`PATCH`/
+`DELETE`, verified: absent → `403` before reaching OpenMRS; present → reaches OpenMRS's own
+validation). `keycloak/reconcile-sso.sh` now adds `app.$BASE_DOMAIN` to the `openmrs` client's
+`redirectUris`/`webOrigins` alongside — not replacing — `emr.$BASE_DOMAIN`'s entries, run twice
+against the live realm to confirm idempotency. `emr.`/`lab.`/`id.` and the `openelis` client are
+confirmed byte-for-byte unaffected. Full detail, including the OpenELIS SAML ACS-URL investigation
+(still `UNRESOLVED`, so OpenELIS is not mounted under `app.`), is in `PROJECT_STATE.md`'s UI-004
+entry. No clinical write was enabled and `SSO_ENABLED` was not touched.

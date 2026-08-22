@@ -190,17 +190,18 @@ present with **0 members** exactly as intended.
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
 | 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
-| ✅ Done (infrastructure) | **DH-027M** (CI — 678 tests now gated, every check control-tested), **DH-027B** (compensated facility creation — not a single ACID transaction; see its entry), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring), **DH-027H** (nightly-scheduler backup evidence reaches the control plane) |
+| ✅ Done (infrastructure) | **DH-027M** (CI — 700 tests now gated, every check control-tested), **DH-027B** (compensated facility creation — not a single ACID transaction; see its entry), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring), **DH-027H** (nightly-scheduler backup evidence reaches the control plane) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 | ✅ Done (architecture/product) | **UI-001** (unified clinical UX + data-contract map — no frontend built; see `docs/UI-001-CLINICAL-UX.md`) |
 | ✅ Done (verification spike) | **UI-001A** (turned UI-001's UNVERIFIED backend assumptions into runtime-measured facts against the synthetic stack — patient search/registration, bed assignment, admission shape, and audit identity now RUNTIME VERIFIED; order-write PARTIALLY VERIFIED, stopped at the clinical-concept boundary by instruction; BFF/SSO identity remains UNRESOLVED pending SSO activation) |
 | ✅ Done (first frontend) | **UI-002** (`ui/` — Vite + React + TypeScript app shell, small design system, functional read-only patient search against the pinned stack via a dev-only proxy that never exposes the OpenMRS credential to the browser; no clinical write; no SSO; 21 tests passing, real container build verified) |
 | ✅ Done (architecture decided) | **UI-003** (production identity — ADR-027: no BFF in V1, browser holds real OpenMRS/OpenELIS sessions directly, same-origin under a future `app.$BASE_DOMAIN` proxying each backend's API prefix; a read-only service-account BFF was considered and explicitly rejected; coordinated logout across Keycloak/OpenMRS/OpenELIS recorded as an open gap; live end-to-end proof stays UNRESOLVED pending BLOCKER-5) |
+| ✅ Done (foundation built) | **UI-004** (`app.$BASE_DOMAIN` real and verified live — `/openmrs/*` same-origin, OpenMRS session cookie hardened `Secure`+`SameSite=Lax` on that route only, a real Caddy-level CSRF guard control-tested with 5 deliberate breaks, `openmrs` Keycloak client reconciliation extended idempotently; OpenELIS's SAML ACS derivation stays `UNRESOLVED` so it is not mounted; no clinical write; `SSO_ENABLED` untouched) |
 
 ## ▶ START HERE (next session)
 
-**Read `DECISIONS.md` first — 26 ADRs, several load-bearing.** Then this section.
+**Read `DECISIONS.md` first — 27 ADRs, several load-bearing.** Then this section.
 
 ### Where things actually are
 
@@ -229,10 +230,11 @@ this section — it is the decision that unblocks five of the eight golden-flow 
    ✅ **Already done meanwhile:** DH-011A (ADR-026), DH-011B (spike), **DH-011E** (poller + watermark,
    built and verified, deliberately not activated).
 2. ~~**DH-027M — CI**~~ — ✅ **DONE 2026-08-17.** `.github/workflows/ci.yml` gated **582 tests** at
-   landing; it currently gates **699 tests across five suites** (adapter 94, provisioning 549, seed
-   16, form-safety 19, `ui/` frontend 21 — measured against the real CI run, not copied) plus Ruff,
-   `ui/`'s lint/typecheck/build (including its own secrets-in-bundle check), compose interpolation
-   on both profiles, shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
+   landing; it currently gates **700 tests across five suites** (adapter 94, provisioning 549, seed
+   16, form-safety 19, `ui/` frontend 22 — measured against the real CI run, not copied) plus Ruff,
+   `ui/`'s lint/typecheck/build (including its own secrets-in-bundle check), the app.$BASE_DOMAIN/
+   OpenMRS-reconciliation structural check (UI-004), compose interpolation on both profiles,
+   shell/JSON/XML/CSV syntax, image pinning, a tracked-secret scan, the
    `.env`-untracked check, and relative-link resolution. The `ui-frontend` job was added in UI-002 —
    before that, the new frontend's own tests ran locally but nothing gated them on push. Details and
    the honest limits are in the ticket entry below.
@@ -2685,6 +2687,125 @@ ADR-027 specifies are buildable now (they are config, not clinical content, and 
 `SSO_ENABLED=true`) and would let a future ticket demonstrate the same-origin OpenMRS leg for real;
 the OpenELIS leg's ACS-derivation question should be verified before committing engineering time to
 its side of the same design.
+
+---
+
+### UI-004 · Production app origin + identity plumbing · ✅ DONE 2026-08-22 (foundation built; no writes, SSO still unactivated)
+
+**Why now.** ADR-027 decided the architecture; nothing implemented it yet. Re-audited first: neither
+DH-011's site code nor DH-017/DH-027J's fresh VM had cleared. Also corrected two stale claims this
+ticket flagged: PROJECT_STATE.md's own infrastructure-status row still said "678 tests" (now 699,
+matching the real CI count already recorded elsewhere in this file) and "Read DECISIONS.md first —
+26 ADRs" (now 27, since ADR-027 exists).
+
+**§2's priority first: OpenELIS SAML ACS derivation — UNRESOLVED, evidence recorded.** The library
+underneath `org.itech.login.saml` is the genuine, unforked
+`spring-security-saml2-service-provider-6.2.8.jar` (confirmed by listing the deployed WAR's
+`WEB-INF/lib`), whose documented default derives the ACS URL per-request rather than from a fixed
+configured origin — the same shape OpenMRS's OIDC module already uses in this codebase. No property
+in `org.itech.login.saml.*`'s schema fixes a base URL either, which is itself evidence: if itech
+needed one, the same pattern as `metadatalocation` would exist for it. But direct proof was not
+obtainable: with `org.itech.login.saml=false` (this deployment's real, unchanged state), Spring's
+SAML2 filter chain — including its metadata endpoints — is not registered at all; both
+`/saml2/service-provider-metadata/keycloak` and `/saml2/metadata/keycloak` fell through to the
+generic login-required redirect rather than returning metadata. Enabling SAML to get a direct answer
+would mean flipping this deployment into an SSO-active state, which this ticket was explicitly
+forbidden to do. **Per instruction, OpenELIS is not mounted under `app.$BASE_DOMAIN` and the
+`openelis` Keycloak client was not touched at all** — ADR-027's fallback preserved exactly as
+written.
+
+**§3–§4 built and verified live against the pinned stack, not just written:**
+- `app.$BASE_DOMAIN` added to `caddy/Caddyfile`, serving a new `daher-ui` container (the UI-002
+  production build, `ui/Dockerfile`, added to `docker-compose.yml`) and reverse-proxying `/openmrs/*`
+  to `openmrs-gateway:80`. Verified: `GET https://app.localhost:8443/` returns the real UI shell;
+  `GET .../openmrs/ws/rest/v1/patient?q=10001MJ` returns the real fixture, same-origin.
+- `keycloak/reconcile-sso.sh` now adds `https://app.$BASE_DOMAIN/*` to the `openmrs` client's
+  `redirectUris`/`webOrigins` **alongside** its existing `emr.$BASE_DOMAIN` entries — verified by
+  running the script twice against the live realm via a throwaway container (not through
+  `docker compose`, see the incident note below) and reading the client back: both origins present,
+  `openelis`'s own client completely unchanged.
+
+**§6 cookie hardening — proven, not asserted:** `header_down Set-Cookie "HttpOnly" "HttpOnly;
+Secure; SameSite=Lax"` on the `app.` route's `/openmrs/*` handler. Verified: a session established
+through `app.` now sets `JSESSIONID=...; Path=/openmrs; HttpOnly; Secure; SameSite=Lax`; the
+identical request through `emr.` still sets only `HttpOnly` — hardening is scoped to `app.` alone,
+by design, exactly as instructed. `SameSite=Lax` (not `Strict`) was chosen because `Strict` would
+withhold the cookie on the top-level cross-site GET that following a redirect back from Keycloak is,
+which would break the OIDC callback; `Lax` still withholds it from a cross-site `POST`, the actual
+CSRF vector. The rewrite mechanism itself is proven live; compatibility with a real OIDC handshake is
+reasoned from documented `SameSite` semantics, not observed, since proving that needs BLOCKER-5.
+
+**§7 CSRF boundary — built and control-tested with real deliberate breaks, not just designed:** a
+`route` block requires `X-Daher-App-Request: 1` on `POST`/`PUT`/`PATCH`/`DELETE` under `/openmrs/*`,
+implemented before either `handle` block so ordering is explicit rather than relying on Caddy's
+default directive sort. Verified live: without the header, `POST /openmrs/ws/rest/v1/patient` →
+`403`, never reaching OpenMRS; with it, the identical request reaches OpenMRS's own validation
+(`400`, "the person property is missing" — the same finding ADR-027 measured directly). `GET`
+unaffected (`200`, no header needed). Neither OpenMRS nor its gateway emit any `Access-Control-*`
+header (verified directly), and this route adds none either, so a foreign origin's CORS-preflighted
+`fetch` cannot obtain permission to set the header — confirmed: an `OPTIONS` preflight from
+`Origin: https://evil.example` got no `Access-Control-Allow-Origin` in response.
+
+**§9 production read path connected, dev scaffolding kept, not replaced.** `ui/src/api/client.ts`
+now fetches `/openmrs/ws/rest/v1/patient` — the exact same relative path in every environment.
+`vite.devOpenmrsProxy.ts` (kept, per instruction — `SSO_ENABLED=false` locally still needs something
+to authenticate with) now listens on that identical path instead of the old `/api/openmrs/patient`,
+so only the auth mechanism differs by environment, never the URL the UI code calls. The production
+bundle was rebuilt and re-checked against the existing `check-no-secrets-in-bundle.mjs` guard, which
+still passes and was re-verified to still catch an injected fake credential.
+
+**§10/§11 — held exactly where instructed.** No clinical write of any kind is enabled anywhere.
+Coordinated logout remains exactly the open gap ADR-027 recorded; no logout mechanism was discovered
+or built this ticket, and none was claimed.
+
+**An incident during this ticket's own infrastructure work, recorded rather than smoothed over:**
+`docker stop`/`kill`/`restart` on running containers are permission-denied in this environment (the
+same restriction noted in UI-002's leftover test container). Reloading Caddy after editing its
+Caddyfile therefore could not use `docker compose restart caddy` — sending it directly triggered
+Compose to re-evaluate the *entire* dependency graph, which re-ran several one-shot init jobs
+(`openelis-certs`, `openelis-db-hardening`, `keycloak-sso-config`, `openmrs-demo-preflight`,
+`openmrs-maternity-config`). All of them are designed to be safely re-run — except
+`openmrs-maternity-config`, which correctly *refused* to continue ("Bed 'DEL-0001' conflicts with
+committed type or position"): a pre-existing discrepancy between the committed seed and live bed
+state, not something this ticket's work caused, and exactly ADR-007's additive-only guard behaving
+as designed (fail closed, not silently overwrite). Caddy itself ended up briefly fully down (it is
+the only container publishing host ports) before being recovered with a direct `docker start` on the
+container Compose had already created — verified healthy and correctly configured afterward. Two
+lessons applied for the rest of this ticket: never invoke `docker compose up/restart` again this
+session (subsequent verification used `docker exec` and standalone `docker run --rm` only), and the
+running `daher-ui` container's healthcheck was found to fail (`wget http://localhost/` resolves to
+`::1` first on this image's musl libc, which nginx doesn't bind) — fixed in `docker-compose.yml` to
+use `127.0.0.1` explicitly, verified correct, but not yet re-deployed to the live container for the
+same reason (a recreate would risk repeating the cascade for a cosmetic health-status fix). The
+pre-existing bed-seed conflict was not investigated further or fixed — out of scope for this ticket
+and exactly the kind of change AGENTS.md reserves from being touched casually.
+
+**Tests/CI:** `ui/` — 22 tests (21 + one new same-origin-path regression test), typecheck, lint,
+build all pass; the secrets-in-bundle guard re-verified against a deliberately injected fake
+credential. A new CI step (`app.$BASE_DOMAIN origin and OpenMRS redirect reconciliation invariants`)
+statically asserts the Caddyfile and `reconcile-sso.sh` structure, since CI cannot boot the real
+stack to test this live (the ~50-minute cold boot DH-027M's own header deliberately excludes). Five
+deliberate breaks were run against this check before landing it, each caught: the CSRF guard
+removed, `daher_app_url` removed from the `openmrs` reconciliation, cookie hardening removed,
+`/openmrs/*` routed to the wrong service, and `daher_app_url` wrongly added to the `openelis`
+reconciliation — all five failed the check exactly as intended. Test counts unchanged elsewhere:
+adapter 94, provisioning 549, seed 16, form-safety 19, ui 22 = **700 total**, re-measured against
+`python:3.13-slim-bookworm`/live `vitest`, not copied.
+
+**Still blocked, and why:** the live end-to-end proof (a real browser, a real Keycloak login,
+OpenMRS recognizing that same human through `app.$BASE_DOMAIN`) needs `SSO_ENABLED=true` and
+BLOCKER-5's approved role mapping — this ticket touches neither. OpenELIS's ACS derivation is
+unresolved for the reasons above. Coordinated logout is still undesigned. No clinical write exists
+to protect yet — the CSRF boundary is real infrastructure waiting for one.
+
+**Human decisions required:** none new. BLOCKER-5 remains the gate on activation.
+
+**Recommended next ticket:** re-audit for DH-011/DH-014/DH-017 first. If none cleared, the two
+highest-leverage follow-ups are (a) a narrow, disposable-stack spike to resolve OpenELIS's ACS
+question definitively, since everything else in ADR-027 is now built and only that leg is still
+open, and (b) a coordinated-logout design — real Keycloak front-channel/back-channel logout wired to
+the `openmrs` client, since that's the one piece of ADR-027 with no design yet at all, not just no
+implementation.
 
 ---
 

@@ -317,6 +317,85 @@ jobs:
           print(f"ok — every relative link in {len(md)} documents resolves")
           PY
 
+      - name: app.$BASE_DOMAIN origin and OpenMRS redirect reconciliation invariants
+        # UI-004 (ADR-027). This cannot boot the real stack (a fresh clinical
+        # cold boot is deliberately not part of CI — see this file's header),
+        # so it asserts on the Caddyfile/reconcile-sso.sh text directly. The
+        # live behavior (cookie hardening, the CSRF guard's actual 403/200
+        # split, reconciliation's real idempotency against a running
+        # Keycloak) was verified by hand against the pinned stack — see
+        # PROJECT_STATE.md's UI-004 entry — and is not re-proven here on
+        # every push, only guarded against silently regressing in the config
+        # that produces it.
+        run: |
+          python - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          caddyfile = Path("caddy/Caddyfile").read_text()
+          reconcile = Path("keycloak/reconcile-sso.sh").read_text()
+          bad = []
+
+          app_block_match = re.search(r"\napp\.\{\$BASE_DOMAIN\} \{(.*?)\n\}\n", caddyfile, re.S)
+          if not app_block_match:
+              bad.append("caddy/Caddyfile: no app.{$BASE_DOMAIN} block found")
+          else:
+              app_block = app_block_match.group(1)
+              if "reverse_proxy openmrs-gateway:80" not in app_block:
+                  bad.append("app. block does not reverse_proxy to openmrs-gateway:80")
+              if "/openmrs/*" not in app_block:
+                  bad.append("app. block does not handle /openmrs/*")
+              if "X-Daher-App-Request" not in app_block:
+                  bad.append("app. block is missing the CSRF custom-header guard")
+              if not re.search(r"method\s+POST\s+PUT\s+PATCH\s+DELETE", app_block):
+                  bad.append("app. block's CSRF guard does not cover POST/PUT/PATCH/DELETE")
+              if "header_down Set-Cookie" not in app_block or "Secure" not in app_block or "SameSite=Lax" not in app_block:
+                  bad.append("app. block does not harden OpenMRS's session cookie (Secure + SameSite=Lax)")
+              if "daher-ui:80" not in app_block:
+                  bad.append("app. block does not serve the daher-ui container as its fallback handler")
+
+          for host in ["emr.{$BASE_DOMAIN}", "lab.{$BASE_DOMAIN}", "id.{$BASE_DOMAIN}"]:
+              if host not in caddyfile:
+                  bad.append(f"caddy/Caddyfile: {host} block is missing — a native origin regressed")
+
+          # Cookie hardening must stay scoped to app. — emr.'s own session is
+          # deliberately left as ADR-027 measured it, unhardened.
+          emr_block_match = re.search(r"\nemr\.\{\$BASE_DOMAIN\} \{(.*?)\n\}\n", caddyfile, re.S)
+          if emr_block_match and "SameSite=Lax" in emr_block_match.group(1):
+              bad.append("emr. block appears to also rewrite cookies — hardening must stay scoped to app. only")
+
+          if "daher_app_url" not in reconcile:
+              bad.append("keycloak/reconcile-sso.sh: daher_app_url variable is missing")
+
+          openmrs_block_match = re.search(r"openmrs_id=.*?>/dev/null", reconcile, re.S)
+          if not openmrs_block_match or "$daher_app_url" not in openmrs_block_match.group(0):
+              bad.append("reconcile-sso.sh: the openmrs client update does not include $daher_app_url")
+          if openmrs_block_match and "$openmrs_public_url/*" not in openmrs_block_match.group(0):
+              bad.append("reconcile-sso.sh: the openmrs client update lost its own emr. redirect entry")
+
+          # The openelis SAML client's ACS-URL derivation is unresolved
+          # (ADR-027's open risk) — it must never gain the app. origin until
+          # that's proven safe, so this asserts absence, not just presence
+          # elsewhere.
+          openelis_block_match = re.search(r"openelis_id=.*?reconcile_mapper", reconcile, re.S)
+          if openelis_block_match and "daher_app_url" in openelis_block_match.group(0):
+              bad.append("reconcile-sso.sh: the openelis client update must not reference daher_app_url (ACS derivation unresolved, ADR-027)")
+
+          # daher-ui must only be reachable through Caddy's app. route — a
+          # published host port would let a client bypass the CSRF guard
+          # above entirely by talking to the container directly.
+          compose = Path("docker-compose.yml").read_text()
+          daher_ui_block = re.search(r"\n  daher-ui:\n(.*?)(?=\n  [a-z0-9-]+:\n)", compose, re.S)
+          if not daher_ui_block:
+              bad.append("docker-compose.yml: daher-ui service not found")
+          elif re.search(r"^\s*ports:\s*$", daher_ui_block.group(1), re.M):
+              bad.append("docker-compose.yml: daher-ui must not publish host ports — only Caddy may")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — app. origin, OpenMRS redirect reconciliation, and native-origin regressions all check out")
+          PY
+
   compose:
     name: compose interpolates and parses
     runs-on: ubuntu-latest

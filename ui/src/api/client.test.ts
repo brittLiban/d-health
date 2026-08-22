@@ -21,6 +21,14 @@ describe('searchPatients', () => {
     expect(results).toEqual([{ uuid: '1', display: 'Test Patient' }])
   })
 
+  it('fetches the same-origin /openmrs/* path UI-004 wires through Caddy in production, not a /api/* dev-only path', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ results: [] }) })
+    vi.stubGlobal('fetch', fetchSpy)
+    await searchPatients('Test')
+    const [url] = fetchSpy.mock.calls[0] as [string]
+    expect(url.startsWith('/openmrs/ws/rest/v1/patient?q=')).toBe(true)
+  })
+
   it('returns an empty array for a nonexistent term rather than throwing', async () => {
     mockFetchOnce({ ok: true, status: 200, json: async () => ({ results: [] }) })
     const results = await searchPatients('nobody')

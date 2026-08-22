@@ -13,19 +13,23 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
  * holds it in the Vite dev server's own Node process (never sent to the
  * client) and forwards exactly one whitelisted, GET-only, read-only path.
  *
- * This is explicitly NOT the production identity path. UI-001A
- * (docs/UI-001-CLINICAL-UX.md §15a) found that path UNRESOLVED — it requires
- * either SSO activation or a BFF design neither of which this ticket builds.
- * This proxy exists only so the search screen can be demonstrated against the
- * real pinned stack in development.
+ * This is explicitly NOT the production identity path. ADR-027 (UI-003)
+ * decided that path instead: the browser holds its own real OpenMRS session,
+ * reached same-origin through Caddy's app.$BASE_DOMAIN → openmrs-gateway
+ * route (UI-004). This plugin listens on the exact same relative path
+ * (`/openmrs/ws/rest/v1/patient`) that production route serves, so
+ * src/api/client.ts's fetch call is identical in both environments — only
+ * the auth mechanism differs, and only this dev-only file ever knows it.
  *
  * It also implements §13a.1's finding in real code: a raw OpenMRS error
  * response can carry a full Java stack trace in `detail`/`rawMessage`. That
  * must never reach a browser, so every non-2xx response is rewritten down to
  * the fixed {code, message} vocabulary (§20) before it leaves this process.
+ * The production Caddy route does not yet do the equivalent rewrite — see
+ * ui/README.md.
  */
 
-const WHITELISTED_PATH = '/api/openmrs/patient'
+const WHITELISTED_PATH = '/openmrs/ws/rest/v1/patient'
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status

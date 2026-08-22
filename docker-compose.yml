@@ -763,6 +763,9 @@ services:
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       OPENMRS_PUBLIC_URL: ${OPENMRS_PUBLIC_URL:-https://emr.${BASE_DOMAIN:-localhost}}
       OPENELIS_PUBLIC_URL: ${OPENELIS_PUBLIC_URL:-https://lab.${BASE_DOMAIN:-localhost}}
+      # UI-004/ADR-027 — added to the openmrs client's own redirect/web-origin
+      # lists only. The openelis client is untouched (see reconcile-sso.sh).
+      DAHER_APP_PUBLIC_URL: ${DAHER_APP_PUBLIC_URL:-https://app.${BASE_DOMAIN:-localhost}}
     volumes:
       - ./keycloak/reconcile-sso.sh:/opt/daher/reconcile-sso.sh:ro
       # Mapper fragments must stay outside Keycloak's realm import directory:
@@ -882,6 +885,30 @@ services:
   # routing, origins and cookies; it does NOT prove public certificate
   # issuance, which needs the facility's real domain and DNS (NEEDS LIBAN #15).
   # ---------------------------------------------------------------------------
+
+  # ===========================================================================
+  # Daher clinical UI static build (UI-002/UI-004). Serves nothing on its own —
+  # Caddy's app.$BASE_DOMAIN route is what makes it reachable and what adds the
+  # /openmrs/* same-origin proxy ADR-027 specifies. This container holds no
+  # OpenMRS credential; it is exactly the static output of `npm run build`.
+  # ---------------------------------------------------------------------------
+  daher-ui:
+    image: daher-health/ui:0.1.0
+    build:
+      context: ./ui
+      target: runtime
+    restart: unless-stopped
+    healthcheck:
+      # 127.0.0.1, not localhost: this image's musl libc resolves localhost
+      # to ::1 first, and nginx here only binds 0.0.0.0 — verified directly
+      # (localhost: connection refused; 127.0.0.1: succeeds).
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [internal]
+
   caddy:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
@@ -905,6 +932,8 @@ services:
         condition: service_started
       openelis-frontend:
         condition: service_started
+      daher-ui:
+        condition: service_healthy
       keycloak:
         condition: service_healthy
       # Needs the exported CA PEM before it can verify the OpenELIS API leg.

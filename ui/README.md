@@ -1,4 +1,4 @@
-# Daher Health — clinical UI (UI-002)
+# Daher Health — clinical UI (UI-002 / UI-003 / UI-004)
 
 The first real Daher clinical frontend: an app shell, a small design system, and
 a functional, French-first, **read-only** patient search. Everything else
@@ -38,8 +38,8 @@ fetch header, not in the bundle, not in devtools' network tab
 own Node process. It reads `OMRS_ADMIN_PASSWORD` from the repository's root
 `.env` (via `envDir` in `vite.config.ts` — no second `.env` file under `ui/`)
 and attaches Basic Auth itself when forwarding exactly one whitelisted,
-GET-only path (`/api/openmrs/patient`) to OpenMRS through Caddy's already
--published HTTPS port (`https://emr.localhost:8443`, ADR-008/ADR-010's
+GET-only path — `/openmrs/ws/rest/v1/patient` — to OpenMRS through Caddy's
+already-published HTTPS port (`https://emr.localhost:8443`, ADR-008/ADR-010's
 existing subdomain routing — no new port is opened). The browser only ever
 talks same-origin to the Vite dev server; the credential never leaves that
 Node process.
@@ -48,19 +48,61 @@ It also strips every OpenMRS error response down to the fixed `{code,
 message}` vocabulary (`docs/UI-001-CLINICAL-UX.md` §20) before it reaches the
 browser — UI-001A found that a raw OpenMRS error can carry a full Java stack
 trace (§13a.1), and that must never reach a clinical user or even a browser
-network tab.
+network tab. **The production route (below) does not yet do this rewrite** —
+a known gap, not closed by UI-004.
 
-**This is a development convenience, not the production identity path.**
-UI-001A left that path `UNRESOLVED` (§15a); UI-003 has since decided it
-(`DECISIONS.md` ADR-027, `docs/UI-001-CLINICAL-UX.md` §15b): no BFF, ever,
-authenticating as a shared account — the browser holds the real OpenMRS and
-OpenELIS sessions directly, same-origin under a future `app.$BASE_DOMAIN`
-that proxies each backend's own API prefix, not this dev-only proxy's shared
-credential. See "Next integration step" below for exactly what that requires.
+**This is a development convenience, not the production identity path — and
+it is deliberately kept, not replaced.** UI-001A left production
+`UNRESOLVED` (§15a); UI-003 decided it (`DECISIONS.md` ADR-027,
+`docs/UI-001-CLINICAL-UX.md` §15b): no BFF, ever, authenticating as a shared
+account — the browser holds the real OpenMRS session directly. UI-004 built
+that production path (below) *alongside* this dev proxy, not instead of it:
+`SSO_ENABLED=false` remains the local default, so `npm run dev` still needs
+something to authenticate with OpenMRS locally. `src/api/client.ts` fetches
+the exact same relative path — `/openmrs/ws/rest/v1/patient` — in both
+environments; only the mechanism behind that path differs, and only this
+dev-only file ever sees a credential.
 
 The production build (`npm run build` / the `Dockerfile`) does **not**
 include this proxy at all — it is dev-only code, and the shipped container is
-static files served by nginx with nothing that could reach OpenMRS.
+static files served by nginx with nothing that could reach OpenMRS on its
+own. Reaching OpenMRS in production is Caddy's job, not this container's —
+see "Production routing" below.
+
+## Production routing (UI-004, ADR-027)
+
+`caddy/Caddyfile` now has an `app.$BASE_DOMAIN` origin that:
+
+- Serves this container's static build at `/`.
+- Reverse-proxies `/openmrs/*` to `openmrs-gateway:80` — the same prefix
+  OpenMRS's own session cookie is scoped to (`Path=/openmrs`), so a session
+  established via a real OIDC login lands on this origin and this app's own
+  `fetch('/openmrs/...')` calls use it automatically. No credential, no
+  token, and no cookie value is ever known to this app's own JavaScript.
+- Hardens that cookie in transit (`Secure`, `SameSite=Lax` — see the ADR and
+  the Caddyfile's own comments for why `Lax`, not `Strict`, is the value
+  compatible with a redirect-based OIDC login) without touching `emr.
+  $BASE_DOMAIN`'s native, unhardened cookie.
+- Rejects `POST`/`PUT`/`PATCH`/`DELETE` under `/openmrs/*` unless the request
+  carries `X-Daher-App-Request: 1` — a header a plain cross-site HTML form
+  cannot set, and that CORS (deliberately not relaxed here) stops a foreign
+  script from setting either. Defense-in-depth, not authorization: OpenMRS's
+  own privilege checks are still the actual authorization boundary.
+
+`OpenELIS` is **not** under `app.$BASE_DOMAIN`. Its SAML SP's ACS-URL
+derivation (fixed to `lab.$BASE_DOMAIN`, or dynamic like OpenMRS's OIDC) is
+**unresolved** — the underlying `spring-security-saml2-service-provider`
+library defaults to per-request derivation and no fixed-URL property exists
+in its config schema, but this could not be confirmed live without enabling
+SAML on the running stack, which UI-004 was not permitted to do. Until
+resolved, OpenELIS-touching actions stay native at `lab.$BASE_DOMAIN` — see
+the ADR for the exact fallback.
+
+**Still not done by this route:** no clinical write is enabled anywhere in
+this app; the error-body stack-trace rewrite the dev proxy does is not
+mirrored here; `SSO_ENABLED` stays `false`, so nothing served at `app.` can
+demonstrate a real authenticated session end-to-end yet — that is BLOCKER-5,
+not a UI-004 gap.
 
 ## PHI storage
 
@@ -71,26 +113,20 @@ re-fetches from scratch rather than restoring from a persistent cache.
 
 ## What's not production-ready yet
 
-- **Identity.** No real staff identity propagates through this UI. Every
-  request in development goes through the dev-only proxy's shared admin
-  credential; there is no per-user session yet.
+- **Identity.** No real staff identity propagates through this UI yet. The
+  production route (`app.$BASE_DOMAIN`) is real infrastructure, but nothing
+  can authenticate through it end-to-end until `SSO_ENABLED=true` and
+  BLOCKER-5's role mapping are both resolved — neither of which any UI
+  ticket may do unilaterally. In development, every request still goes
+  through the dev-only proxy's shared admin credential.
 - **Writes.** Nothing in this ticket performs a clinical mutation. "Nouveau
   patient" is visible but disabled, not wired to the runtime-verified
   registration endpoint from UI-001A — enabling it is a deliberate future
   decision once the identity path above is resolved.
-- **Routing / domain integration.** This app is not wired into Caddy or any
-  subdomain yet. It runs standalone (`npm run dev` or its own container) by
-  design. **Next integration step, per ADR-027:** add an `app.$BASE_DOMAIN`
-  block to `caddy/Caddyfile` that serves this container's static build *and*
-  reverse-proxies `/openmrs/*` → `openmrs-gateway:80` and
-  `/OpenELIS-Global/*` → `openelis-webapp:8443` (the same API prefixes the
-  native session cookies are scoped to — not the native SPAs at `emr.`/`lab.`,
-  which stay untouched); add `https://app.$BASE_DOMAIN/*` to the `openmrs`
-  Keycloak client's `redirectUris`/`webOrigins` in `reconcile-sso.sh` (verify
-  the same is safe for `openelis` first — its SAML ACS derivation is
-  unverified, see ADR-027); then delete this dev-only proxy entirely rather
-  than adapt it, since the browser making same-origin calls with its own
-  session cookie needs no server-side credential at all.
+- **Routing / domain integration.** `app.$BASE_DOMAIN` now exists (UI-004,
+  see "Production routing" above) for the OpenMRS leg only. OpenELIS is not
+  under it — its SAML ACS derivation is unresolved, so it stays native at
+  `lab.$BASE_DOMAIN` per ADR-027's fallback until that's proven safe.
 - **Pagination.** UI-001A did not exercise OpenMRS's pagination envelope
   against a result set large enough to observe it (§13a.1) — this UI assumes
   a single unpaginated result page, which is honest for this environment's
