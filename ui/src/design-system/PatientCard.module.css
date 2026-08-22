@@ -1,0 +1,13 @@
+.name {
+  margin: 0 0 var(--space-1) 0;
+  font-size: 1.05rem;
+}
+
+.detail {
+  margin: 0 0 var(--space-1) 0;
+  color: var(--color-text-muted);
+}
+
+.actions {
+  margin-top: var(--space-3);
+}

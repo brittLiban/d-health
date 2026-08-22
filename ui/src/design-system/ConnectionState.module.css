@@ -1,0 +1,28 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+}
+
+.saving {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}
+
+.saved {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.saveFailed {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.connectionLost {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}

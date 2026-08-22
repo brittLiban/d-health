@@ -1,0 +1,39 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* Below tablet width, stack navigation above the workspace instead of beside
+   it (§18) — a dense sidebar shrunk to nothing is worse than a top row. */
+@media (max-width: 768px) {
+  .body {
+    flex-direction: column;
+  }
+}

@@ -195,6 +195,7 @@ present with **0 members** exactly as intended.
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 | ✅ Done (architecture/product) | **UI-001** (unified clinical UX + data-contract map — no frontend built; see `docs/UI-001-CLINICAL-UX.md`) |
 | ✅ Done (verification spike) | **UI-001A** (turned UI-001's UNVERIFIED backend assumptions into runtime-measured facts against the synthetic stack — patient search/registration, bed assignment, admission shape, and audit identity now RUNTIME VERIFIED; order-write PARTIALLY VERIFIED, stopped at the clinical-concept boundary by instruction; BFF/SSO identity remains UNRESOLVED pending SSO activation) |
+| ✅ Done (first frontend) | **UI-002** (`ui/` — Vite + React + TypeScript app shell, small design system, functional read-only patient search against the pinned stack via a dev-only proxy that never exposes the OpenMRS credential to the browser; no clinical write; no SSO; 21 tests passing, real container build verified) |
 
 ## ▶ START HERE (next session)
 
@@ -207,7 +208,7 @@ Two systems now live in this repo:
 1. **The clinical stack** (`docker-compose.yml`) — 11 services running locally, verified. Golden
    flow is **1 of 8 steps**. The order/result transport (DH-011/012) is **not built**.
 2. **The provisioning control plane** (`provisioning/`) — API, portal, host agent, durable state.
-   360 tests. Works end to end **against a stand-in compose file**.
+   549 tests. Works end to end **against a stand-in compose file**.
 
 ⚠️ **The 1 Sept pilot target is at risk by a recorded decision, not an oversight.** Liban chose on
 2026-08-15 to build provisioning before DH-011's transport chain, so the golden end-to-end flow will
@@ -2490,6 +2491,100 @@ bed-assignment encounter requirement, the idgen identifier step, and the two-cal
 as known contracts rather than open questions — **only if** still the best unblocked path when
 picked up; re-audit first, since DH-011/DH-014/DH-017's external blockers clearing would still take
 priority per the brief's own stated preference order.
+
+---
+
+### UI-002 · Design system + read-only patient search (first real Daher frontend) · ✅ DONE 2026-08-22
+
+**Why now.** UI-001/UI-001A specified and runtime-verified the clinical UI contract but wrote no
+frontend code. Re-audited first: DH-011's numeric OpenELIS site code and DH-017/DH-027J's fresh VM
+had both still not cleared, so this remained the right ticket. Deliberately narrow, per instruction:
+app shell, French-first navigation, a small design system, and a functional **read-only** patient
+search — no registration, admission, bed, order, or result writes; no SSO activation; no BFF built.
+
+**Stack:** Vite + React + TypeScript in a new `ui/` directory, sibling to `adapter/` and
+`provisioning/` — no existing frontend tooling was found anywhere in the repo, so nothing competes
+with it. Vitest + React Testing Library + `jest-axe` for tests (21 tests, all passing); `oxlint` for
+lint; `npm ci` + a committed lockfile for reproducible installs. No CDN runtime script, no external
+font service, no analytics SDK.
+
+**The identity problem, solved honestly rather than worked around.** UI-001A left the BFF/SSO
+identity path `UNRESOLVED`, and this ticket was explicitly told not to solve production write auth
+with a shared service account. `SSO_ENABLED=false` is this deployment's real current state
+(`docs/ARCHITECTURE.md` §5) — OpenMRS only accepts Basic Auth with the local admin credential today.
+The dev-only answer: `ui/vite.devOpenmrsProxy.ts`, a Vite plugin that runs only in the dev server's
+own Node process, reads `OMRS_ADMIN_PASSWORD` from the repository's existing root `.env` (via
+`envDir`, not a second `.env` under `ui/`), and attaches Basic Auth itself when forwarding exactly
+one whitelisted, GET-only path to OpenMRS through Caddy's already-published HTTPS port
+(`emr.localhost:8443`, ADR-008/ADR-010's existing routing — no new port opened). The browser never
+sees the credential. This is explicitly documented as a development convenience, not the production
+path, in both `ui/README.md` and code comments. The production container (`ui/Dockerfile`) ships
+static files only — the proxy and the credential it reads do not exist in that image at all.
+
+**The stack-trace finding from UI-001A, implemented in code, not just documented.** §13a.1 found
+that a raw OpenMRS error response can carry a full Java stack trace in `detail`/`rawMessage`. The
+dev proxy now actually strips every non-2xx response down to the fixed `{code, message}` vocabulary
+(§20) before it ever reaches the browser — demonstrated live: a real search against the pinned
+stack for the existing `10001MJ` fixture returned `HTTP 200` with one result; an unsupported method
+returned a clean `{"error":{"code":"VALIDATION_ERROR",...}}` rather than a raw exception.
+
+**Read-only, verified in the code itself, not just claimed.** A dedicated test spies on
+`Storage.prototype.setItem` and `IndexedDB.open` through a full search-and-open flow and asserts
+neither was ever called — UI-001A's PHI-storage correction (§17a: memory-only, no
+`localStorage`/`sessionStorage`/IndexedDB for clinical data) is now a running assertion, not just a
+paragraph. A second script (`ui/scripts/check-no-secrets-in-bundle.mjs`) runs as an npm `postbuild`
+hook and fails the build if the admin credential's actual value, or its variable name, appears
+anywhere in the shipped static bundle — verified to catch a real secret by testing it against the
+literal `OMRS_ADMIN_PASSWORD` value before wiring it in.
+
+**Honest about what's not built, in the UI itself, not just in docs.** Six of seven nav items
+(`Tableau de bord`, `Maternité`, `Travail`, `Lits`, `Laboratoire`, `Résultats`) are visible but
+navigate to an explicit "not yet available" screen rather than a broken or fake one — hiding
+navigation is a UX convenience, never a security boundary (§1, §24a), and the same principle now
+applies to feature availability. "Nouveau patient" is visible but disabled with an explanatory
+label, per instruction, rather than wired to the runtime-verified (but intentionally unused here)
+registration endpoint. Only the Résumé tab of the patient workspace renders real data — the exact
+fields UI-001A confirmed the search response carries; Grossesse/Travail/Ordonnances/Documents show
+an honest empty state rather than invented pregnancy, labour, or lab content.
+
+**A real defect caught before it shipped:** the scaffolded `tsconfig.app.json`/`tsconfig.node.json`
+carried `/* ... */` block comments, which are valid TypeScript JSONC but not valid JSON — the
+repo-wide CI step that strictly `json.load()`s every tracked `*.json` file has no tsconfig
+exclusion and would have failed on push. Caught by running that exact check locally before
+committing (per `AGENTS.md`'s evidence discipline) and fixed by removing the comments; also
+fabricated-then-corrected: an initial Dockerfile draft used placeholder-looking digests for
+`node:22-slim`/`nginx:1.27-alpine` before the actual images were pulled and their real digests
+substituted — caught in the same pre-commit review, not left in.
+
+**Verified, not invented:** every claim about the current OpenMRS/SSO/routing state was checked
+against `docs/ARCHITECTURE.md` and `docs/UI-001-CLINICAL-UX.md`'s §13a runtime evidence rather than
+assumed. Test counts (adapter 94, provisioning 549, seed 16, form-safety 19 = 678) were re-measured
+against `python:3.13-slim-bookworm` (matching CI's pin) rather than copied from a doc — this also
+caught and fixed a stale "360 tests" current-state claim in this file's own "Where things actually
+are" section (§14 of this ticket's brief), left over from before DH-027M.
+
+**Tests/static checks:** `npm run typecheck`, `npm run lint`, `npm run test` (21/21), `npm run
+build` (which runs the secrets-in-bundle check as its own `postbuild` step), and a real `docker
+build` of `ui/Dockerfile` all pass locally. The repo-wide checks that would otherwise only run in
+CI were also run locally first: tracked-secret scan, image-pinning/digest check, JSON/XML/CSV
+parse, and the relative-documentation-link check — all clean against the staged changes.
+
+**Not done, by instruction:** no clinical write of any kind; no BFF; no SSO activation; no
+reception-facing production workflow; no HIE; no ANC/partograph forms; no routing/domain wiring
+into Caddy (the app runs standalone; `ui/README.md` documents the next integration step once the
+identity design in §15a is resolved).
+
+**Known limitation carried forward, not solved here:** a local Docker permission restriction in
+this environment prevented cleanly stopping a test container started to verify the production
+image serves correctly (`docker stop`/`docker kill` both refused with "permission denied"); it was
+confirmed serving correctly on a test-only port before being left running rather than fought
+further — flagged to Liban rather than worked around with a broader permission change.
+
+**Recommended next ticket:** re-audit before picking anything — DH-011/DH-014/DH-017's external
+blockers are still the highest-leverage unblocks if any of them clear. If none have, the next
+UI ticket is the BFF/identity design that §15a left `UNRESOLVED`, since every write-enabled screen
+after this one depends on it; building more read-only screens without it would just repeat this
+ticket's shape without closing the actual gap.
 
 ---
 
