@@ -1393,12 +1393,11 @@ named additions a future ticket makes once BLOCKER-5's role mapping is approved.
 - **UNRESOLVED — requires BLOCKER-5.** The live end-to-end proof (a real browser completes the
   Keycloak login, OpenMRS/OpenELIS identify that same human) needs `SSO_ENABLED=true` and an approved
   role mapping. Neither was done here, and no staff identity was invented.
-- **OpenELIS's SAML ACS derivation** — fixed-origin or per-request — is unverified. If it turns out
-  to be fixed to `lab.$BASE_DOMAIN`, the fallback that preserves this ADR's core decision (no service
-  account, real session) is simply that OpenELIS-touching actions stay on `lab.$BASE_DOMAIN` via a
-  native link-out rather than a same-origin mount under `app.` — a narrower implementation detail,
-  not a different architecture.
-- **Coordinated logout** is a real, undesigned gap, not a checkbox — see above.
+- **OpenELIS's SAML ACS derivation** — *superseded by the UI-005 note below: resolved, per-request,
+  app-origin derived.* (Left here rather than deleted, since this ADR's implementation notes are
+  append-only — see UI-005 for the measured evidence.)
+- **Coordinated logout** — *superseded by the UI-005 note below: a working design is now proven,
+  not just undesigned — see UI-005 for what's verified and what's not yet wired in.*
 - **The reception/front-desk role** (§24a of `docs/UI-001-CLINICAL-UX.md`) is untouched by this ADR.
   Whatever the human decision there turns out to be, this architecture enforces it exactly the way it
   enforces every other role today: server-side, by OpenMRS/Keycloak, never by the Daher UI's own
@@ -1417,3 +1416,109 @@ against the live realm to confirm idempotency. `emr.`/`lab.`/`id.` and the `open
 confirmed byte-for-byte unaffected. Full detail, including the OpenELIS SAML ACS-URL investigation
 (still `UNRESOLVED`, so OpenELIS is not mounted under `app.`), is in `PROJECT_STATE.md`'s UI-004
 entry. No clinical write was enabled and `SSO_ENABLED` was not touched.
+
+### Implementation note (UI-005, 2026-08-22) — measured protocol evidence, disposable environment only
+
+UI-004 left OpenELIS's ACS derivation and coordinated logout as open questions, answerable only by
+running the actual protocols. Doing that against the real facility SSO config was explicitly
+forbidden, so this ticket built a throwaway Keycloak realm plus disposable OpenMRS and OpenELIS
+instances (own Docker network, own volumes, synthetic realm `daher` with one synthetic user
+`ui005-synthetic-user`, no real staff identity, no patient data) and drove the actual redirects with
+a scripted HTTP client. `SSO_ENABLED` on the real stack was not touched. The disposable containers
+and the throwaway realm/client secrets used to test them are not part of this repository. They
+remain running in this environment as of this writing — this sandbox's Docker daemon denies
+`stop`/`kill`/`restart` (confirmed again this ticket, the same constraint UI-004 hit), so they could
+not be torn down from here. The exact manual removal command is recorded in `PROJECT_STATE.md`'s
+UI-005 entry.
+
+**OpenELIS — APP-ORIGIN SUPPORTED, conditional on a Keycloak client change this ticket did not make.**
+Hitting `/OpenELIS-Global/saml2/authenticate/keycloak` with different `Host` headers produced a
+different `AssertionConsumerServiceURL` each time — `https://<host>/OpenELIS-Global/login/saml2/sso/keycloak`
+— proving OpenELIS's Spring SAML2 module derives its ACS **per-request from the incoming Host**, not
+from a fixed lab-origin value. This directly resolves UI-004's open question and rules out the
+"fixed to lab origin" hypothesis. The full round trip (AuthnRequest → Keycloak login → SAMLResponse
+posted back to the app-origin ACS → real `JSESSIONID`) completed end to end for the synthetic user,
+with the cookie posture `Secure; HttpOnly; SameSite=Strict`, and a subsequent authenticated read
+showed the synthetic username in the page — the session is genuinely bound to that identity, not a
+service account. **The conditional:** this only worked after adding `https://app.<disposable
+origin>/*` to the disposable `openelis` SAML client's `redirectUris` in Keycloak — without it,
+Keycloak rejected the AuthnRequest with `invalid_redirect_uri`. On the real stack,
+`reconcile-sso.sh` deliberately leaves the `openelis` client untouched (a UI-004 decision, kept in
+force by this ticket per §5/§13 — no doubt-free basis yet to touch the real client, see the OpenMRS
+finding below). Mounting OpenELIS under `app.$BASE_DOMAIN` for real requires that same redirect-URI
+addition against the real `openelis` client — a small, named, reviewable change, not a
+rearchitecture. **A second condition, untested here:** this ticket's captures went straight to
+OpenELIS's TLS port, so the reconstructed scheme was always `https`. Production Caddy terminates TLS
+in front of OpenELIS; if that hop to the backend were plain HTTP without `X-Forwarded-Proto: https`
+forwarded and honored, the derived ACS would come out `http://app...` and fail Keycloak's `https://`
+redirect-URI matching. Since UI-004 deliberately added no OpenELIS route to the `app.` block yet,
+there is nothing to check today — but confirming that header is forwarded correctly is the second
+condition alongside the redirect-URI addition, not an assumption to carry into that future ticket.
+
+**OpenMRS OIDC — STILL UNRESOLVED, exact blocker identified.** The disposable OpenMRS backend
+(image `daher-health/openmrs-backend:3.7-off`, `oauth2login` 1.5.0, `SSO_ENABLED=true` from first
+boot against a fresh, empty database) correctly redirects unauthenticated browser requests to
+`/oauth2login` (`OAuth2LoginRequestFilter`, wired via `config.xml`, confirmed working). But
+`/oauth2login` itself returns **404** — nothing serves it. The boot log shows
+`java.lang.IllegalStateException: Filters cannot be added to context [/openmrs] as the context has
+been initialised`, thrown from `WebComponentRegistrar.setServletContext` during the module's one
+context refresh. The module's `webModuleApplicationContext.xml` declares a Spring Security
+`<security:http>` chain (default bean name `springSecurityFilterChain`) with
+`login-page="/oauth2login"` — this is the only thing that could ever serve that path — but the
+deployed WAR's `web.xml` has no `DelegatingFilterProxy`/`springSecurityFilterChain` entry, and this
+exact exception is absent from the live stack's own boot logs (checked directly: zero occurrences,
+`SSO_ENABLED=false` there). So the failure is neither ambient OpenMRS noise nor a disposable-setup
+mistake (`oauth2.properties` was confirmed correctly written by `configure-sso.sh` with the
+disposable Keycloak's real URLs) — it is this module's Spring-Security-managed filter chain failing
+to register on a fresh first boot with SSO enabled from the start. Untested: whether enabling SSO
+against an **already-initialized** OpenMRS database (rather than an empty one) avoids this exact
+race — that variable was not exercised and is not assumed either way. Per §13/§17, this is reported
+as the exact blocker rather than worked around; patching module wiring to force the chain in would
+be exactly the "fight the SAML/OAuth2 implementation" this ADR's process forbids.
+
+**Coordinated logout — PARTIAL as currently implemented, but a working fix is now proven, not just
+theorized.** OpenELIS's own local logout is real: a CSRF-protected POST to `/Logout` genuinely
+invalidates the `JSESSIONID` (replaying the old cookie afterward gets redirected to `LoginPage`, not
+served). Left at that, Keycloak's own SSO session survives untouched — measured directly: after
+OpenELIS logout, re-running the identical SP-initiated SAML flow **in the same browser session** got
+a fresh, valid `SAMLResponse` back with **zero credential prompt**, `KEYCLOAK_SESSION`/
+`AUTH_SESSION_ID` silently re-authenticating the synthetic user. This is exactly the
+shared-workstation failure this ADR flagged as a risk, confirmed present in the naive
+"just call each app's own logout" design. But a genuine fix was found and verified, not merely
+theorized: navigating (a real browser redirect, not a background call) to Keycloak's own
+`/realms/daher/protocol/openid-connect/logout` and **submitting the confirmation page it returns**
+(a `session_code`-bearing form Keycloak renders when no `id_token_hint` is supplied) does terminate
+the SSO session — measured directly: an SP-initiated login attempted afterward in the same session
+required credentials again, no silent re-auth. A variant supplying `client_id=openelis` +
+`post_logout_redirect_uri` but still no `id_token_hint` was fetched and also rendered a confirmation
+page rather than skipping it (not submitted, since the no-`client_id` path above already proved
+submission works) — the click itself is unavoidable without a real ID token either way. **Untested,
+and a condition on using `post_logout_redirect_uri` for real:** Keycloak validates that parameter
+against the client's own registered post-logout redirect list, and the real `openelis` client has
+none registered (`post.logout.redirect.uris` unset, per UI-003) — a follow-on ticket wiring this in
+would need to either register one or land the user on Keycloak's own default page after the click.
+**So the coordinated-logout
+design this ADR can now specify with evidence:** after a user's local application logout succeeds,
+redirect their browser (not a `fetch`/XHR, which cannot complete a cross-origin navigation-based
+form submission the way Keycloak's page expects) to Keycloak's end-session endpoint; the resulting
+one extra confirmation click is real but genuinely closes the SSO session — no OpenMRS OIDC fix and
+no SAML Single Logout configuration are required to get this working today. **What remains
+undone:** nothing in the codebase currently performs this redirect — "Déconnexion" today would only
+call each app's own local logout, leaving the SSO session alive exactly as measured above. Wiring
+the Keycloak end-session redirect into the real logout action is a small, well-scoped follow-on
+ticket, not a research question anymore. A silent (no confirmation click) version remains blocked on
+the OpenMRS `oauth2login` finding above, since only a valid `id_token_hint` — obtainable only from a
+completed OIDC login — skips the confirmation page.
+
+**Negative controls run, exact results:** unauthenticated read of `/OpenELIS-Global/Home` → redirect
+to `LoginPage` (no session). Bogus `JSESSIONID` → same redirect (no session inherited). Logout
+without a CSRF token → `302` to `Home?access=denied`, session left alive (CSRF is genuinely
+enforced on this endpoint, not just present as a form field) — the same call with a valid token
+succeeded. Silent-relogin control above. OpenMRS's own unauthenticated-read and wrong-ACS controls
+were not exercised because the OIDC flow itself never completes (see the blocker above) — nothing to
+control against yet.
+
+Full evidence transcript (commands, raw HTTP responses) is in this session's transcript; only this
+summary and `PROJECT_STATE.md`'s UI-005 entry are committed. No production Caddyfile, compose file,
+or realm-config change was made — the disposable-environment findings inform, but do not yet justify,
+any of the real-client changes described above.
