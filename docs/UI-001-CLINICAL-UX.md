@@ -1,13 +1,17 @@
 # UI-001 — Unified Clinical UX + Data Contract Map
 
-**Status:** Architecture/product specification. No frontend code exists yet. Nothing here is
-implemented; UI-002 implements it.
+**Status:** Architecture/product specification. UI-002 built the first real frontend (app shell,
+design system, read-only patient search) against this spec; registration/admission/bed/order/result
+writes, the BFF question, and SSO activation remained open going into UI-003.
 **Date:** 2026-08-21 · **Audited against master `66536dd`** (`feat(DH-027H)`).
 **Updated 2026-08-22 (UI-001A):** several `UNVERIFIED` contracts below are now `RUNTIME VERIFIED`
 against the real, running pinned stack — see §13a for the full evidence (request/response shape,
 auth, negative controls, limitations) behind every claim in the summary matrix. §17's browser-PHI
 guidance and the ambiguous-write wording throughout were also corrected — see §17a and the network
 table.
+**Updated 2026-08-22 (UI-003):** the production identity question §15/§15a left `UNRESOLVED` is now
+**decided** — no BFF in V1, the browser holds the real upstream sessions directly — see new §15b and
+`DECISIONS.md`'s ADR-027. §14's BFF boundary is marked decided-against, not merely candidate.
 
 > **What this document is not.** It is not clinical content, and it invents none. Lab panel
 > contents, ANC/partograph fields, danger thresholds, and staff-role assignments remain reserved
@@ -663,8 +667,15 @@ the browser — **will record every write as that one service account**, exactly
 
 ## 14. The Daher UI API / BFF — candidate boundary, not implemented
 
-**Purpose:** compose screen-oriented reads, reduce browser chatter, centralize
-authorization-aware aggregation, normalize frontend error semantics, propagate staff identity.
+**Decided against for V1 (UI-003, ADR-027): no BFF is built.** This section is kept as the record of
+what was considered and why it was rejected, not as a pending build. The browser holds the real
+OpenMRS/OpenELIS sessions directly instead — see §15b. If a genuine future need for server-side
+composition arises, it must be a strict pass-through of the user's own upstream session, never a
+service account minting its own identity, per ADR-027's acceptance criterion.
+
+**Purpose (as originally scoped, for the record):** compose screen-oriented reads, reduce browser
+chatter, centralize authorization-aware aggregation, normalize frontend error semantics, propagate
+staff identity.
 
 **It must not, ever (repeating the brief's own constraint because it is load-bearing):**
 - store independent clinical truth
@@ -749,6 +760,34 @@ default (reverse-proxy/cookie-forwarding over token-minting) for UI-002 to build
 concrete mechanism (`auditInfo.creator` = the HTTP call's own authenticated principal) that makes the
 question matter. Proving it end-to-end still needs a real Keycloak login through `oauth2login`,
 which needs the BLOCKER-5 roster this ticket is explicitly not allowed to invent.
+
+### 15b. Architecture decided (UI-003, 2026-08-22) — see ADR-027
+
+§15a's "reverse-proxy/cookie-forwarding over token-minting" default is now a recorded decision, not
+just a leaning: **ADR-027 (`DECISIONS.md`) — no BFF in V1, the browser holds the real OpenMRS and
+OpenELIS sessions directly, same-origin under a new `app.$BASE_DOMAIN`** that proxies each backend's
+own API prefix (`/openmrs/*`, `/OpenELIS-Global/*`), not its SPA. `emr.`/`lab.` are untouched.
+
+What changed since §15a to justify moving from "unresolved leaning" to "decided": UI-003 measured,
+rather than inferred, that (1) neither backend has any bearer-token/token-exchange path at all — a
+live `Authorization: Bearer` probe against OpenMRS was ignored outright; (2) `openmrs-gateway` and
+`openelis-webapp` both route by path, not Host header, so one backend instance can answer for two
+origins, which is what makes same-origin mounting under `app.` viable without touching `emr.`/`lab.`;
+(3) a **read-only** service-account BFF — floated as a softer middle ground during this ticket's own
+analysis — was rejected, not merely deferred: it would replace each user's own OpenMRS read
+authorization with the service account's, which is a bigger hole than the audit-identity problem it
+would dodge, and is exactly the "identity silently falls back to a service identity" failure this
+document's own acceptance criteria rule out (§3 of the UI-003 brief).
+
+**Still exactly as unresolved as §15a said:** the live end-to-end demonstration needs
+`SSO_ENABLED=true` and BLOCKER-5's approved role mapping — neither was done, and none will be invented
+here. Coordinated logout across the Keycloak SSO session, OpenMRS, and OpenELIS is a new, separate,
+real gap ADR-027 identifies and does not solve (see its own text for why). OpenELIS's SAML ACS
+derivation (fixed-origin vs. per-request, unlike OpenMRS's confirmed per-request behavior) is also
+unverified — ADR-027 states the fallback if it turns out to be fixed.
+
+**§14 is updated accordingly:** the "candidate BFF" it describes is not being built in V1 per this
+decision; see the note at the top of that section.
 
 ---
 
@@ -971,6 +1010,7 @@ default nobody chose.
 
 A UI-002 engineer reading this document can answer, per screen in §13: who uses it, what their
 goal is, what data is shown and where it originates, where writes go, what permission is required
-(§1–§3), how the human actor is preserved (§15/§15a), what happens during loading/network failure
-(§16–§17a), what is not yet proven (§13's Known/Unverified column, §13a, §24), and which pieces
-depend on a clinical or product decision outside this ticket's authority (§7, §9, §12, §24, §24a).
+(§1–§3), how the human actor is preserved (§15/§15a/§15b, ADR-027), what happens during loading/
+network failure (§16–§17a), what is not yet proven (§13's Known/Unverified column, §13a, §24), and
+which pieces depend on a clinical or product decision outside this ticket's authority (§7, §9, §12,
+§24, §24a).

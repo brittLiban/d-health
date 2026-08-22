@@ -51,11 +51,12 @@ trace (§13a.1), and that must never reach a clinical user or even a browser
 network tab.
 
 **This is a development convenience, not the production identity path.**
-UI-001A left that path `UNRESOLVED` (§15a) — both OpenMRS OIDC and OpenELIS
-SAML are browser-redirect flows, not bearer-token APIs, which is a real
-obstacle to a BFF holding a staff token directly. Solving that is its own
-ticket, not something this one quietly works around with a shared service
-account in production.
+UI-001A left that path `UNRESOLVED` (§15a); UI-003 has since decided it
+(`DECISIONS.md` ADR-027, `docs/UI-001-CLINICAL-UX.md` §15b): no BFF, ever,
+authenticating as a shared account — the browser holds the real OpenMRS and
+OpenELIS sessions directly, same-origin under a future `app.$BASE_DOMAIN`
+that proxies each backend's own API prefix, not this dev-only proxy's shared
+credential. See "Next integration step" below for exactly what that requires.
 
 The production build (`npm run build` / the `Dockerfile`) does **not**
 include this proxy at all — it is dev-only code, and the shipped container is
@@ -79,12 +80,17 @@ re-fetches from scratch rather than restoring from a persistent cache.
   decision once the identity path above is resolved.
 - **Routing / domain integration.** This app is not wired into Caddy or any
   subdomain yet. It runs standalone (`npm run dev` or its own container) by
-  design (per the UI-002 ticket's own instruction not to touch clinical-stack
-  routing without a clear, safe reason). **Next integration step:** once a
-  BFF or reverse-proxy design resolves the identity question in §15a, give
-  this app its own subdomain in `caddy/Caddyfile` (following the `emr.`/`lab.`
-  pattern in ADR-008) proxying to this container, and replace the dev-only
-  proxy's Basic Auth with whatever that design specifies.
+  design. **Next integration step, per ADR-027:** add an `app.$BASE_DOMAIN`
+  block to `caddy/Caddyfile` that serves this container's static build *and*
+  reverse-proxies `/openmrs/*` → `openmrs-gateway:80` and
+  `/OpenELIS-Global/*` → `openelis-webapp:8443` (the same API prefixes the
+  native session cookies are scoped to — not the native SPAs at `emr.`/`lab.`,
+  which stay untouched); add `https://app.$BASE_DOMAIN/*` to the `openmrs`
+  Keycloak client's `redirectUris`/`webOrigins` in `reconcile-sso.sh` (verify
+  the same is safe for `openelis` first — its SAML ACS derivation is
+  unverified, see ADR-027); then delete this dev-only proxy entirely rather
+  than adapt it, since the browser making same-origin calls with its own
+  session cookie needs no server-side credential at all.
 - **Pagination.** UI-001A did not exercise OpenMRS's pagination envelope
   against a result set large enough to observe it (§13a.1) — this UI assumes
   a single unpaginated result page, which is honest for this environment's

@@ -1265,3 +1265,141 @@ should not be built until it is known whether it is needed for the resource that
 **BLOCKER-6 remains OPEN and no option is selected.** This correction makes Option F look *better*,
 not worse, which is precisely why it needed correcting rather than leaving a pessimistic record in
 place.
+
+---
+
+## ADR-027 — Daher UI production identity: the browser holds the real upstream sessions; no BFF in V1
+
+**Date:** 2026-08-22 · **Status:** ACCEPTED (architecture pattern) — **activation blocked on BLOCKER-5**
+**Ticket:** UI-003. **Does not supersede** ADR-013 (session lifetimes), ADR-014 (one realm, OpenMRS
+OIDC / OpenELIS SAML), or ADR-017 (the 3-role authorization matrix) — it decides how a browser-based
+Daher UI reaches those already-decided protocols without inventing a fourth identity.
+
+### Context
+
+UI-002 shipped a real frontend with a dev-only proxy that holds the shared OpenMRS admin credential
+in the Vite server's own Node process — explicitly not a production answer. UI-001A already found
+the production path `UNRESOLVED`. This ADR is the result of inspecting the actual running
+configuration (Keycloak realm export, `configure-sso.sh`, `reconcile-sso.sh`, the Caddyfile, and the
+live containers) rather than reasoning from the generic OIDC/SAML brief.
+
+**Measured, not assumed:**
+
+- The Keycloak `daher` realm has exactly three clients: `openmrs` (confidential OIDC, standard flow
+  only, no direct grants, no service account), `openelis` (confidential SAML, same shape), and
+  `adapter` (service-account only, `client_credentials`, no browser flow at all). **No client for a
+  browser-based Daher UI or a BFF exists today**, and no token-exchange capability is configured on
+  any client.
+- `openmrs-module-oauth2login` and `org.itech.login.saml` are both server-side confidential clients
+  that complete the browser-redirect handshake themselves and establish their own Tomcat session
+  (`JSESSIONID`) — neither is a bearer-token resource server. **Demonstrated, not inferred:** sending
+  `Authorization: Bearer <token>` to `/ws/rest/v1/patient` gets `WWW-Authenticate: Basic` and the
+  same anonymous "Privileges required" rejection UI-001A already characterized — the header is
+  silently ignored.
+- `configure-sso.sh` never gives OpenMRS its own public URL; `OPENMRS_PUBLIC_URL`/
+  `OPENELIS_PUBLIC_URL` are consumed **only** by `reconcile-sso.sh`, to set the *Keycloak client's*
+  `rootUrl`/`redirectUris`/`webOrigins` — never passed into either backend container. This means
+  OpenMRS's own redirect_uri is derived from the incoming request, not fixed to one origin.
+  **Demonstrated:** `openmrs-gateway` and `openelis-webapp` both route purely by path — an arbitrary,
+  unconfigured `Host` header still reaches the real backend on both. One OpenMRS instance can
+  therefore legitimately answer for two origins. The equivalent claim for OpenELIS's SAML ACS URL
+  derivation is **not verified** — its SP integration ships compiled, with no source in this repo —
+  and is called out below as the one open implementation risk, not assumed favorable.
+- Session cookie posture, measured directly and again through Caddy: OpenMRS's `JSESSIONID` carries
+  only `HttpOnly` — no `Secure`, no `SameSite`, in both places. A cookie-only `POST` to
+  `/ws/rest/v1/patient` (no `Authorization` header, no CSRF token) reached real validation logic
+  despite an `org.owasp.csrfguard.CsrfGuardFilter` in the filter chain — that filter does not cover
+  this path. OpenELIS's `JSESSIONID` carries `Secure; HttpOnly; SameSite=Strict` in both places, and
+  its login page embeds a real Spring Security `_csrf` token; per-endpoint CSRF enforcement on
+  authenticated **business** writes (as opposed to the login form) was not exercised and is not
+  assumed either way.
+- `DELETE /ws/rest/v1/session` genuinely invalidates OpenMRS's own session (confirmed: the same
+  cookie gets `401 Session timed out` immediately after). No SAML Single Logout is configured for the
+  `openelis` Keycloak client, and neither client has `frontchannelLogout` configured — there is no
+  coordinated logout across OpenMRS, OpenELIS, and the Keycloak SSO session today. An OpenELIS logout
+  endpoint was not identified or verified.
+- Caddy already has three origins: `emr.$BASE_DOMAIN` (OpenMRS gateway, full SPA+API), `lab.
+  $BASE_DOMAIN` (OpenELIS, path-split between the webapp and its static frontend), and `id.
+  $BASE_DOMAIN` (Keycloak) — the last one's own comment already ties its existence to SSO
+  activation. No `app.$BASE_DOMAIN` exists yet.
+
+### Decision
+
+**No service account, anywhere, ever stands in for a staff user for a write.** A read-only BFF using
+its own account was considered and rejected — it would replace each user's own OpenMRS read
+authorization with "whatever the BFF's account can see," which is a bigger authorization hole than
+the audit-identity problem it would avoid, and it is exactly the "identity silently falls back to a
+service identity" failure this ticket's own acceptance criteria (§3, §12) rule out. **There is no
+BFF in V1.**
+
+Instead: **the browser authenticates directly with OpenMRS (OIDC) and OpenELIS (SAML) through their
+own already-built browser-redirect flows**, each establishing its own native session cookie. The
+Daher UI never intermediates that handshake and never sees a password, a client secret, or a token
+it could replay as someone else.
+
+**Same-origin, achieved by proxying each backend's own API prefix, not its SPA.** The Daher UI gets
+its own origin, `app.$BASE_DOMAIN`, served by Caddy. Under that same origin, Caddy also
+reverse-proxies exactly the prefixes the Daher UI's own calls need — `/openmrs/*` to
+`openmrs-gateway:80`, `/OpenELIS-Global/*` to `openelis-webapp:8443` — the same prefixes the native
+session cookies are scoped to (`Path=/openmrs`, `Path=/OpenELIS-Global`). `emr.$BASE_DOMAIN` and
+`lab.$BASE_DOMAIN` are untouched and keep serving the native SPAs at their own origins for anyone who
+uses them directly; nothing about ADR-008's "subdomains, not path prefixes" rule for the *SPAs*
+is violated, because the Daher UI never tries to own or rewrite the SPA's own root — only the API
+prefix behind it, which is already a distinct, path-scoped surface today. This makes the login
+redirect land the session cookie on the same origin the Daher UI's own `fetch()` calls use, with no
+CORS, no `SameSite=None`, and no relaxation of OpenELIS's already-good `SameSite=Strict` posture —
+same-origin is not merely nicer here, `SameSite=Strict` makes it close to mandatory.
+
+**Composed reads, if ever needed, stay user-scoped.** If a screen genuinely needs data from both
+systems at once, that composition happens in the browser (two same-origin calls, one per backend),
+or, if a server-side composer is later justified, it must be a strict pass-through that forwards the
+user's own upstream session rather than substituting a credential of its own. That is a narrower
+question than this ADR needs to answer for V1, since UI-002 built exactly one read-only screen and
+UI-003 builds none.
+
+**Audit identity, satisfied by construction.** Every request OpenMRS or OpenELIS receives carries
+the real user's own session — `auditInfo.creator` (UI-001A, §13a.6) and `currentProvider` (measured
+in this ticket: `/ws/rest/v1/session` already distinguishes `user` from `currentProvider`) are
+populated from that real identity, never a service account's.
+
+### What must change to build this — mechanical, not clinical, none of it done here
+
+- Add an `app.$BASE_DOMAIN` block to `caddy/Caddyfile`, handling `/openmrs/*` → `openmrs-gateway:80`
+  and `/OpenELIS-Global/*` → `openelis-webapp:8443` (mirroring `lab.`'s existing TLS/trust-anchor
+  handling for the latter), plus whatever serves the Daher UI's own static assets at that origin.
+- Add `https://app.$BASE_DOMAIN/*` to the `openmrs` client's `redirectUris`/`webOrigins` in
+  `reconcile-sso.sh` (a list append — the client already carries three entries). Do the same for the
+  `openelis` client **only after** its SAML ACS derivation is verified to be per-request rather than
+  fixed — see the open risk below.
+- Give OpenMRS's session cookie explicit `Secure`/`SameSite` attributes (Tomcat `context.xml` or a
+  Caddy `header_down` rewrite on the `app.`/`emr.` routes) before any Daher-built write relies on
+  that cookie, and require a custom header (e.g. `X-Requested-With`) on Daher-originated
+  state-changing calls to OpenMRS — a plain cross-site HTML form cannot set one, which closes the gap
+  the measured CSRF finding above identified without waiting on Tomcat/CSRFGuard configuration this
+  ADR does not control.
+- For any Daher-built write against OpenELIS, fetch and echo its `_csrf` token like its own UI does,
+  rather than assuming the cookie's `SameSite=Strict` alone is sufficient.
+- Design real coordinated logout (Keycloak front-channel/back-channel logout wired to both clients,
+  or an explicit "you are not fully logged out" UI state) before any write ships — today, ending a
+  Daher session does not prove either backend's session or the Keycloak SSO session ended, which is
+  exactly the shared-workstation risk (§9) this ADR is required to flag, not solve.
+
+**None of the above is "activating production SSO."** `SSO_ENABLED` stays `false`, and
+`keycloak/realm-config/daher-realm.json` is not edited by this ADR — these are the exact,
+named additions a future ticket makes once BLOCKER-5's role mapping is approved.
+
+### What remains genuinely open
+
+- **UNRESOLVED — requires BLOCKER-5.** The live end-to-end proof (a real browser completes the
+  Keycloak login, OpenMRS/OpenELIS identify that same human) needs `SSO_ENABLED=true` and an approved
+  role mapping. Neither was done here, and no staff identity was invented.
+- **OpenELIS's SAML ACS derivation** — fixed-origin or per-request — is unverified. If it turns out
+  to be fixed to `lab.$BASE_DOMAIN`, the fallback that preserves this ADR's core decision (no service
+  account, real session) is simply that OpenELIS-touching actions stay on `lab.$BASE_DOMAIN` via a
+  native link-out rather than a same-origin mount under `app.` — a narrower implementation detail,
+  not a different architecture.
+- **Coordinated logout** is a real, undesigned gap, not a checkbox — see above.
+- **The reception/front-desk role** (§24a of `docs/UI-001-CLINICAL-UX.md`) is untouched by this ADR.
+  Whatever the human decision there turns out to be, this architecture enforces it exactly the way it
+  enforces every other role today: server-side, by OpenMRS/Keycloak, never by the Daher UI's own
+  navigation.

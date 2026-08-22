@@ -196,6 +196,7 @@ present with **0 members** exactly as intended.
 | ✅ Done (architecture/product) | **UI-001** (unified clinical UX + data-contract map — no frontend built; see `docs/UI-001-CLINICAL-UX.md`) |
 | ✅ Done (verification spike) | **UI-001A** (turned UI-001's UNVERIFIED backend assumptions into runtime-measured facts against the synthetic stack — patient search/registration, bed assignment, admission shape, and audit identity now RUNTIME VERIFIED; order-write PARTIALLY VERIFIED, stopped at the clinical-concept boundary by instruction; BFF/SSO identity remains UNRESOLVED pending SSO activation) |
 | ✅ Done (first frontend) | **UI-002** (`ui/` — Vite + React + TypeScript app shell, small design system, functional read-only patient search against the pinned stack via a dev-only proxy that never exposes the OpenMRS credential to the browser; no clinical write; no SSO; 21 tests passing, real container build verified) |
+| ✅ Done (architecture decided) | **UI-003** (production identity — ADR-027: no BFF in V1, browser holds real OpenMRS/OpenELIS sessions directly, same-origin under a future `app.$BASE_DOMAIN` proxying each backend's API prefix; a read-only service-account BFF was considered and explicitly rejected; coordinated logout across Keycloak/OpenMRS/OpenELIS recorded as an open gap; live end-to-end proof stays UNRESOLVED pending BLOCKER-5) |
 
 ## ▶ START HERE (next session)
 
@@ -2594,6 +2595,96 @@ blockers are still the highest-leverage unblocks if any of them clear. If none h
 UI ticket is the BFF/identity design that §15a left `UNRESOLVED`, since every write-enabled screen
 after this one depends on it; building more read-only screens without it would just repeat this
 ticket's shape without closing the actual gap.
+
+---
+
+### UI-003 · Production identity path for the clinical UI · ✅ DONE 2026-08-22 (architecture decided; activation blocked)
+
+**Why now.** UI-002 shipped with a deliberately dev-only proxy holding a shared admin credential;
+UI-001A had already flagged the production identity path as `UNRESOLVED`. This ticket exists to
+answer exactly one question — how the production Daher UI reaches OpenMRS/OpenELIS while preserving
+real staff identity — by inspecting the actual running configuration, not the generic OIDC/SAML
+brief. Re-audited first: neither DH-011's numeric site code nor DH-017/DH-027J's fresh VM had
+cleared. No code was written; no clinical screen was added; `SSO_ENABLED` was never touched.
+
+**The decision: ADR-027 (`DECISIONS.md`).** No BFF in V1, not even read-only. The browser
+authenticates directly with OpenMRS (OIDC) and OpenELIS (SAML) through their own already-built
+browser-redirect flows, each keeping its own native session; the Daher UI gets a new origin
+(`app.$BASE_DOMAIN`) that also proxies each backend's own API prefix — not its SPA — so the same
+session cookie set by that same-origin login is valid for the Daher UI's own calls. `emr.`/`lab.`
+keep serving the native SPAs untouched. Full reasoning, the rejected alternatives, and the exact
+(mechanical, non-clinical) changes a future ticket would make are in the ADR itself.
+
+**The finding that closed the question, measured rather than assumed:** a live
+`Authorization: Bearer <token>` probe against `/ws/rest/v1/patient` got `WWW-Authenticate: Basic` and
+fell straight through to the same anonymous rejection UI-001A already characterized — OpenMRS has no
+bearer-token path at all, full stop. Combined with `openmrs-gateway` and `openelis-webapp` both
+demonstrably routing by path rather than Host header (an arbitrary Host still reached the real
+backend on both), this is what makes "one backend instance, two origins, no rewritten upstream"
+architecturally sound rather than a hope.
+
+**The read-only BFF was considered and explicitly rejected, not merely deferred.** A service-account
+BFF that only reads was floated as a softer middle ground during this ticket's own analysis and
+rejected on review: it would replace every Daher user's own OpenMRS read authorization with the
+service account's, which is a bigger authorization hole than the audit-identity problem it would
+dodge — precisely the "identity silently falls back to a service identity" failure this ticket's own
+acceptance criteria rule out. A second-look catch worth recording: it is easy to reason your way past
+your own stated constraint by scoping it ("read-only doesn't count") when the constraint said no such
+thing.
+
+**Cookie/CSRF findings, measured directly and through Caddy, stated precisely:**
+- OpenMRS's `JSESSIONID`: `HttpOnly` only — no `Secure`, no `SameSite`, in both places. A cookie-only
+  `POST` with no CSRF token reached real validation logic despite an `org.owasp.csrfguard.CsrfGuardFilter`
+  in the chain — that filter does not cover this path. **Undefined by configuration**, not "probably
+  fine because of SameSite defaults" — the ticket's own explicit warning against that assumption.
+- OpenELIS's `JSESSIONID`: `Secure; HttpOnly; SameSite=Strict`, both directly and through Caddy. Its
+  login page carries a real Spring Security `_csrf` token; local login was exercised successfully.
+  Per-endpoint CSRF enforcement on authenticated **business** writes (as opposed to the login form,
+  which is commonly CSRF-exempt and is not a valid proxy for this) was **not** exercised — recorded
+  as unverified, not assumed protected.
+
+**Logout, stated as a real gap, not a checkbox.** `DELETE /ws/rest/v1/session` genuinely invalidates
+OpenMRS's own session (verified: the same cookie gets `401 Session timed out` immediately after). No
+SAML Single Logout is configured for the `openelis` Keycloak client, and neither client has
+`frontchannelLogout` configured. **Coordinated logout across the Keycloak SSO session, OpenMRS, and
+OpenELIS cannot currently be proven** — ending a Daher session today would not provably end either
+backend's session or the SSO session itself, which is exactly the shared-workstation risk (silent
+re-authentication as the previous user) this ticket was asked to surface, not solve. An OpenELIS
+logout endpoint was not identified or tested.
+
+**Negative controls exercised:** unauthenticated/garbage-bearer requests against OpenMRS's protected
+API (rejected, anonymous); a cookie-only write with no CSRF token reaching OpenMRS's validation layer
+(the actual finding above, not something "passing" — recorded as the gap it is); confirmed no
+Keycloak client, redirect URI, or realm config was modified.
+
+**Documentation updated, no code touched:** `DECISIONS.md` (new ADR-027), `docs/UI-001-CLINICAL-UX.md`
+(new §15b, §14 marked decided-against, header notes, §25 cross-reference), `ui/README.md`'s "Next
+integration step" made concrete instead of pointing at an open question. `keycloak/realm-config/
+daher-realm.json`, `caddy/Caddyfile`, and `docker-compose.yml` were read and reasoned about — not
+edited — per instruction.
+
+**Tests/CI:** no new code — nothing to test. All investigation ran as ephemeral `docker exec`/`curl`
+probes against the already-running synthetic stack, the same methodology UI-001A established; no
+persistent state changed. Test counts re-measured, unchanged from UI-002 (699 across five suites);
+existing CI unaffected since no tracked source changed beyond documentation.
+
+**Still unverified, and why:** the live end-to-end proof (real browser, real Keycloak login, OpenMRS/
+OpenELIS identifying that same human) needs `SSO_ENABLED=true` and BLOCKER-5's approved role mapping
+— both explicitly out of bounds for this ticket. OpenELIS's SAML ACS derivation (fixed vs. per-request
+origin) is unverified — its SP integration ships compiled, with no source in this repo. Whether
+OpenELIS enforces CSRF on authenticated business writes (not just the login form) is unverified.
+
+**Human decisions required:** none new. BLOCKER-5 (role mapping) remains the human decision gating
+real activation, exactly as before this ticket. The reception/front-desk role decision (§24a) is
+untouched — this architecture would enforce whatever that decision turns out to be exactly the way
+it enforces every other role today: server-side, never by the Daher UI's navigation.
+
+**Recommended next ticket:** re-audit before picking anything — DH-011/DH-014/DH-017's external
+blockers still take priority if any clear. If none have, the mechanical Caddy/Keycloak-client changes
+ADR-027 specifies are buildable now (they are config, not clinical content, and don't require
+`SSO_ENABLED=true`) and would let a future ticket demonstrate the same-origin OpenMRS leg for real;
+the OpenELIS leg's ACS-derivation question should be verified before committing engineering time to
+its side of the same design.
 
 ---
 
