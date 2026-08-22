@@ -193,6 +193,7 @@ present with **0 members** exactly as intended.
 | ✅ Done (infrastructure) | **DH-027M** (CI — 678 tests now gated, every check control-tested), **DH-027B** (compensated facility creation — not a single ACID transaction; see its entry), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring), **DH-027H** (nightly-scheduler backup evidence reaches the control plane) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
+| ✅ Done (architecture/product) | **UI-001** (unified clinical UX + data-contract map — no frontend built; see `docs/UI-001-CLINICAL-UX.md`) |
 
 ## ▶ START HERE (next session)
 
@@ -2312,6 +2313,68 @@ proves interpolation and syntax, **not** that the stack boots.
 P1: monitoring, digest-pinning automation, `docs/RUNBOOK.md` depth. (`docs/CLINICAL-SIGNOFF.md`
 now exists — created at DH-006.) P2: graphical partogram plotting recorded values only (still needs the ADR-006
 conversation), RapidPro, Orthanc/PACS, multi-facility.
+
+---
+
+### UI-001 · Unified clinical UX + data-contract map · ✅ DONE 2026-08-21
+
+**Why now.** DH-011 (numeric OpenELIS site code), DH-017/DH-027J (fresh VM), and DH-014's off-site
+leg (approved external storage) all remain blocked on external input; none cleared as of this
+ticket's audit. Rather than adding another optional provisioning feature, this ticket defines the
+unified Daher clinical application precisely enough that a future frontend agent can implement it
+without inventing architecture — an architecture/product deliverable, not code.
+
+**What it is not:** no frontend code, no new backend endpoint, no clinical content. Lab panel
+contents, ANC/partograph fields, and staff role assignments remain exactly as unresolved as before
+this ticket — reserved to the clinical lead and Liban, per `AGENTS.md`.
+
+**The one finding worth flagging on its own:** ADR-017 already decided the authorization model —
+exactly three Keycloak realm roles (`clinician`, `lab-tech`, `sys-admin`), with midwives and
+doctors deliberately folded into one `clinician` role and **no separate reception/front-desk
+role**. The document's persona map (Réception, Sage-femme, Médecin, Lab tech, Admin) had to be
+built as a **UX layer over that existing model**, not a new one — three of the five personas share
+one auth role, and reception's restricted view is explicitly documented as a navigation
+convenience with **no server-side enforcement**, not a security boundary. Inventing a fourth realm
+role to make reception "real" would have been exactly the kind of clinical/access decision
+`AGENTS.md` reserves for a human — flagged as a backend gap instead (§1, §24 of the document).
+
+**Second load-bearing finding:** the adapter's own code comment
+(`adapter/src/daher_adapter/openmrs.py`) states FHIR `ServiceRequest` is search/read-only on this
+OpenMRS server — so a lab order placed through the Daher UI cannot be written via FHIR at all; it
+must go through OpenMRS's native REST order resource, unverified against this exact pinned build.
+Recorded in the data-contract matrix rather than assumed compatible with the adapter's read path.
+
+**Deliverable:** `docs/UI-001-CLINICAL-UX.md` — role map, role-aware navigation, French
+terminology glossary, the full patient-arrival-to-discharge journey with per-step system/API/
+permission/failure-mode, patient/maternity/lab/result information architecture, a central
+data-contract matrix (source system, read/write API, permission, audit actor, known-vs-unverified,
+per UI element), the candidate Daher UI API/BFF boundary (explicitly not the adapter, and not
+implemented), auth/identity propagation design (one real unresolved seam: OIDC+SAML dual-protocol
+propagation through one BFF), network-loss/write-ambiguity behavior, accessibility requirements,
+and nine backend gaps found and recorded rather than built around.
+
+**Verified, not invented:** every OpenMRS/OpenELIS capability claim was checked against source
+(`docs/ARCHITECTURE.md`, the adapter's own code, DH-011B's spike, ADR-017/018) or explicitly
+marked `UNVERIFIED` — patient search/registration, bed-status vocabulary beyond create/list, the
+order-write path, and the admission-aggregate queries needed for two dashboard cards are all
+marked unverified rather than assumed. Two dashboard metrics ("En travail", "Ordonnances en
+attente") are marked `UNAVAILABLE` by design rather than backed by an invented query, per
+instruction.
+
+**Tests/static checks:** documentation only — relative-link check re-run and passing (16
+documents); no code changed, so the provisioning/adapter/seed/form-safety suites are unaffected
+and were not re-run for this ticket.
+
+**Documentation updated:** `docs/UI-001-CLINICAL-UX.md` (new), this entry, the ticket-status table
+above. No drift found beyond what DH-027H already corrected.
+
+**Not done, by instruction:** no frontend implementation (UI-002), no HIE, no new provisioning
+ticket, no clinical configuration touched.
+
+**Recommended next ticket:** UI-002 (design-system + first screen implementation) **only if**
+still the best unblocked path when picked up — re-audit first, since any of DH-011/DH-014/DH-017's
+external blockers clearing would make the clinical golden flow or real provisioning the higher
+priority again, per the brief's own stated preference order.
 
 ---
 
