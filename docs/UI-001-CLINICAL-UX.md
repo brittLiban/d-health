@@ -3,6 +3,11 @@
 **Status:** Architecture/product specification. No frontend code exists yet. Nothing here is
 implemented; UI-002 implements it.
 **Date:** 2026-08-21 · **Audited against master `66536dd`** (`feat(DH-027H)`).
+**Updated 2026-08-22 (UI-001A):** several `UNVERIFIED` contracts below are now `RUNTIME VERIFIED`
+against the real, running pinned stack — see §13a for the full evidence (request/response shape,
+auth, negative controls, limitations) behind every claim in the summary matrix. §17's browser-PHI
+guidance and the ambiguous-write wording throughout were also corrected — see §17a and the network
+table.
 
 > **What this document is not.** It is not clinical content, and it invents none. Lab panel
 > contents, ANC/partograph fields, danger thresholds, and staff-role assignments remain reserved
@@ -116,7 +121,8 @@ not something this ticket or UI-002 may invent.
 navigation), that requires a fourth realm role and a superseding ADR. Until that decision exists,
 the Daher UI's front-desk persona is a **navigation convenience, not a security boundary** — the
 underlying account is exactly as privileged as any other `clinician`. This must never be
-misrepresented to an operator as access control.
+misrepresented to an operator as access control. **Turned into an explicit decision request in
+§24a (UI-001A)** rather than left as a passive note.
 
 ---
 
@@ -128,7 +134,7 @@ server actually enforces; everything else here is Daher-UI-only navigation and d
 | Persona | Auth role (ADR-017) | Primary goal | Sees | Can change | Cannot change |
 |---|---|---|---|---|---|
 | **Réception** | `clinician` (no dedicated role — see §1) | Get an arriving patient found or registered and admitted | Patient search, registration, admissions list, bed board (read) | Patient demographics, new registrations, admission records | Clinical documentation, lab results, orders (not prevented server-side today — UI convention only, see §1) |
-| **Sage-femme (Midwife)** | `clinician` | Run labour/maternity care for admitted patients | Patient workspace, maternity dashboard, labour workspace, bed board, lab orders/results | Maternity/labour observations (data-entry only, §12), bed assignment, lab orders | Lab result values, lab workflow states, other facilities' data |
+| **Sage-femme (Midwife)** | `clinician` | Run labour/maternity care for admitted patients | Patient workspace, maternity dashboard, labour workspace, bed board, lab orders/results | Maternity/labour observations (data-entry only, §9), bed assignment, lab orders | Lab result values, lab workflow states, other facilities' data |
 | **Médecin (Clinician/Doctor)** | `clinician` | Same access as Sage-femme for the pilot (ADR-017) | Same as Sage-femme | Same as Sage-femme | Same as Sage-femme — **no scope-of-practice split exists yet**; if one is wanted, that is a new realm role (ADR-017 says so explicitly) |
 | **Technicien de laboratoire (Lab tech)** | `lab-tech` (OpenELIS `Reception`+`Results`+`Validation`) | Run the lab worklist end to end, alone if needed | Lab workspace, result entry, validation, specimen handling | Sample/specimen state, result values, validation status | Patient demographics, maternity/labour records, admissions |
 | **Administrateur** | `sys-admin` (OpenMRS `System Administrator` + OpenELIS `Global Administrator`) | Operate the deployment, not treat patients | System/user configuration surfaced by each native admin console; **not** a Daher-UI-native admin screen in V1 (see §17) | Configuration exposed by OpenMRS/OpenELIS's own admin UIs | Nothing new — `sys-admin` is a pass-through to native admin consoles, not a Daher UI feature |
@@ -173,11 +179,11 @@ Canonical term the UI uses; the technical name it must never surface to a clinic
 | Salle d'accouchement | Delivery bed type | `bedType` = delivery (already deployed) |
 | Post-partum | Postpartum bed type | `bedType` = postpartum (already deployed) |
 | Lit | Bed | `bed` (OpenMRS REST resource) |
-| Travail | Labour | labour/partograph data entry (not yet built — §6, §12) |
+| Travail | Labour | labour/partograph data entry (not yet built — §9) |
 | Ordonnance de laboratoire | Lab order | FHIR `ServiceRequest` (OpenMRS) → OpenELIS accession (never shown) |
 | Échantillon | Specimen/sample | OpenELIS `sample`/`specimen` |
 | Résultat | Result | FHIR `Observation`/`DiagnosticReport` (OpenELIS → OpenMRS) |
-| Résultat préliminaire | Preliminary result | OpenELIS result status pre-validation — **PENDING DH-012 EVIDENCE**, §15 |
+| Résultat préliminaire | Preliminary result | OpenELIS result status pre-validation — **PENDING DH-012 EVIDENCE**, §12 |
 | Résultat validé | Validated/final result | OpenELIS result status post-validation — **PENDING DH-012 EVIDENCE** |
 | Panneau prénatal | Prenatal panel | not yet composed — `docs/CLINICAL-SIGNOFF.md` |
 | Partogramme | Partograph | not yet built — data-entry only by decision (ADR-006) |
@@ -203,14 +209,14 @@ PATIENT ARRIVES
       ▼
 SEARCH PATIENT ── screen: Patients / search
   │  role: Réception (primarily)
-  │  read: OpenMRS patient search REST — UNVERIFIED against this exact pinned build
+  │  read: OpenMRS patient search REST — RUNTIME VERIFIED against this exact pinned build (§13a.1)
       │
   ┌───┴────┐
  found   not found
   │          │
   ▼          ▼
-open      REGISTER PATIENT ── write: OpenMRS patient REST — UNVERIFIED endpoint shape
-record       │  actor: authenticated staff Keycloak identity (§22)
+open      REGISTER PATIENT ── write: OpenMRS patient REST — RUNTIME VERIFIED endpoint shape (§13a.2)
+record       │  actor: authenticated staff Keycloak identity (§15)
   │          │  failure mode: validation error, duplicate-candidate warning (not auto-merge)
   └────┬─────┘
        ▼
@@ -227,7 +233,7 @@ record       │  actor: authenticated staff Keycloak identity (§22)
        ▼
    LABOUR / OBSERVATIONS ── screen: Travail
      role: Sage-femme, Médecin
-     write: structured, time-stamped observations only (ADR-006 — §12)
+     write: structured, time-stamped observations only (ADR-006 — §9)
      system of record: OpenMRS (form not yet built — CLINICAL-SIGNOFF.md §6)
        │
        ▼
@@ -235,7 +241,7 @@ record       │  actor: authenticated staff Keycloak identity (§22)
      role: Sage-femme, Médecin
      write: OpenMRS native order resource — NOT FHIR ServiceRequest (confirmed read-only, §0)
      system of record: OpenMRS (order), OpenELIS (once ingested)
-     ⚠️ delivery to OpenELIS is BLOCKED ON BLOCKER-6 — see §17
+     ⚠️ delivery to OpenELIS is BLOCKED ON BLOCKER-6 — see §0
        │
        ▼
    LAB WORKFLOW ── screen: native OpenELIS UI or Daher lab workspace (§14)
@@ -245,7 +251,7 @@ record       │  actor: authenticated staff Keycloak identity (§22)
        ▼
    RESULT ── read: FHIR DiagnosticReport/Observation (OpenELIS → OpenMRS, via adapter)
      ⚠️ reverse leg is UNVERIFIED end to end (docs/ARCHITECTURE.md §6: "no delivery has been
-     observed"; corrected-result semantics untested — §15)
+     observed"; corrected-result semantics untested — §12)
        │
        ▼
    RESULT APPEARS IN PATIENT RECORD ── screen: patient workspace / Ordonnances & Résultats
@@ -257,16 +263,18 @@ record       │  actor: authenticated staff Keycloak identity (§22)
      failure mode: bed not released → visible immediately in Lits
 ```
 
-**Every write step above needs the states in §18** (Saving… / Saved / Save failed / Connection
-lost — not saved) — not designed per-step twice; §18 is the one contract every write screen
-follows.
+**Every write step above needs the states in §16** (Saving… / Saved / Save failed / Connection
+lost — save status unknown) — not designed per-step twice; §16 is the one contract every write
+screen follows.
 
 ---
 
 ## 6. Patient search
 
-- **Fields:** name, identifier, date of birth — the standard OpenMRS patient-search parameters.
-  **UNVERIFIED against this exact pinned build**; no search call has been exercised in this repo.
+- **Fields:** name and identifier share one `q=` query parameter — **RUNTIME VERIFIED against this
+  exact pinned build, §13a.1**. Date-of-birth as a separate structured search field was not
+  independently exercised (name/identifier search covers it via `q=` on this deployment's data, but
+  a dedicated DOB parameter was not proven).
 - **Result cards:** name, age/DOB, identifier, most recent admission status if any.
 - **Duplicate handling:** the UI must **never auto-merge**. A search returning a close-but-not-exact
   match surfaces both as separate cards with a "possible duplicate" indicator; merging patient
@@ -296,14 +304,14 @@ follows.
 
 | Tab | Owning system | What it shows | Notes |
 |---|---|---|---|
-| Résumé | OpenMRS | demographics, current admission, recent encounters | |
+| Résumé | OpenMRS | demographics, current admission (visit+encounter shape RUNTIME VERIFIED, §13a.5), recent encounters | |
 | Grossesse | OpenMRS | pregnancy-context observations (ANC form) | **form does not exist yet** — CLINICAL-SIGNOFF.md §6 |
 | Travail & Accouchement | OpenMRS | labour observations, data-entry only (§12) | **form does not exist yet** |
-| Ordonnances & Résultats | OpenMRS (orders) + OpenELIS (results, via adapter) | orders placed, results received | see §15 for what "corrected" means — unresolved |
+| Ordonnances & Résultats | OpenMRS (orders) + OpenELIS (results, via adapter) | orders placed, results received | see §12 for what "corrected" means — unresolved |
 | Documents | OpenMRS | any attached complex observations | not otherwise scoped by this ticket |
 
 **No tab stores independent Daher-UI clinical truth.** Every tab is a read (and, where noted, a
-write) against OpenMRS or OpenELIS; the Daher UI API composes reads, it does not own data (§17).
+write) against OpenMRS or OpenELIS; the Daher UI API composes reads, it does not own data (§14).
 
 ---
 
@@ -313,7 +321,7 @@ write) against OpenMRS or OpenELIS; the Daher UI API composes reads, it does not
 |---|---|---|---|---|---|---|
 | Patientes admises | Count, currently admitted to Maternité | OpenMRS | admission-location query — UNVERIFIED exact endpoint | on load + manual refresh | yes — a count, not a list of values | `clinician` |
 | En travail | Count, patients with an open labour episode | OpenMRS | **no verified query exists** — labour has no encounter type yet because the form doesn't exist | — | — | — |
-| Lits disponibles | Available maternity beds | OpenMRS `bed` resource, filtered by `locationUuid` | verified resource, unverified "available" filter shape | on load | yes | `clinician` |
+| Lits disponibles | Available maternity beds | OpenMRS `bed` resource, filtered by `locationUuid` | **RUNTIME VERIFIED, §13a.4** — `status: "AVAILABLE"` is a real, observed field value | on load | yes — a client-side count of beds with that status, no server-side count endpoint needed | `clinician` |
 | Ordonnances laboratoire (en attente) | Orders placed, not yet resulted | OpenMRS orders + OpenELIS state, composed | **UNVERIFIED** — no order-status join has ever been exercised | — | needs care — see below | `clinician` |
 | Résultats prêts | Results received, not yet reviewed | OpenMRS chart write-back | depends on the adapter's reverse leg, which is **unverified end to end** (§0) | — | — | `clinician` |
 
@@ -335,7 +343,7 @@ What the UI may record, once the form exists (clinical sign-off pending):
 - the approved observation fields themselves (values TBD by the clinical lead)
 - documented measurements as entered
 - free-text notes
-- the recording provider's identity (from Keycloak — §22)
+- the recording provider's identity (from Keycloak — §15)
 
 **What this document explicitly forbids designing, per the brief and ADR-006:**
 - danger thresholds, alert lines, action lines
@@ -427,28 +435,229 @@ about.
 
 | Screen | Field/action | Authoritative system | Read source | Write destination | API/resource | Permission | Audit actor | Refresh | Known/Unverified | Blocker |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Patients | Search | OpenMRS | OpenMRS REST patient search | — | `/ws/rest/v1/patient?q=` (standard) | any authenticated | n/a (read) | on query | **UNVERIFIED** | none — needs exercising |
-| Patients | Register | OpenMRS | — | OpenMRS REST | `/ws/rest/v1/patient` (standard) | `clinician` | Keycloak identity | n/a | **UNVERIFIED** | none |
-| Patient workspace | Résumé | OpenMRS | OpenMRS REST/FHIR | — | patient + active visit | `clinician` | n/a | on load | UNVERIFIED shape | none |
-| Patient workspace | Admettre | OpenMRS | — | OpenMRS visit/encounter | admission-location write | `clinician` | Keycloak identity | n/a | UNVERIFIED | none |
+| Patients | Search | OpenMRS | OpenMRS REST patient search | — | `/ws/rest/v1/patient?q=` | any authenticated | n/a (read) | on query | **RUNTIME VERIFIED — §13a.1** | none |
+| Patients | Register | OpenMRS | — | OpenMRS REST | `/ws/rest/v1/patient` + `/ws/rest/v1/idgen/identifiersource/{uuid}/identifier` | `clinician` | **RUNTIME VERIFIED** — authenticated principal, §13a.2 | n/a | **RUNTIME VERIFIED — §13a.2** | none |
+| Patient workspace | Résumé | OpenMRS | OpenMRS REST/FHIR | — | patient + active visit | `clinician` | n/a | on load | Visit shape RUNTIME VERIFIED (§13a.5); full "résumé" composition UNVERIFIED | none |
+| Patient workspace | Admettre | OpenMRS | — | OpenMRS visit **+ encounter** | `/ws/rest/v1/visit`, `/ws/rest/v1/encounter` | `clinician` | RUNTIME VERIFIED, §13a.5 | n/a | **RUNTIME VERIFIED — §13a.5** | none |
 | Maternité | Grossesse tab | OpenMRS | ANC form encounters | ANC form encounters | **form does not exist** | `clinician` | Keycloak identity | on load | Known gap | clinical sign-off, CLINICAL-SIGNOFF.md §6 |
 | Travail | Observations | OpenMRS | labour form encounters | labour form encounters | **form does not exist** | `clinician` | Keycloak identity | on load | Known gap | clinical sign-off |
-| Lits | Bed board | OpenMRS | `bed`, `bedtype` | bed-patient assignment | verified resource names; assignment/status UNVERIFIED | `clinician` | Keycloak identity | on load + manual | Partially verified | none |
-| Laboratoire | Nouvelle ordonnance | OpenMRS (order) | — | OpenMRS **native order resource, not FHIR** | `/ws/rest/v1/order` (standard) — UNVERIFIED against this build | `clinician` | Keycloak identity | n/a | UNVERIFIED write path | delivery to OpenELIS blocked, BLOCKER-6 |
-| Laboratoire | Worklist/results entry | OpenELIS | OpenELIS native | OpenELIS native | OpenELIS business API / native UI | `lab-tech` | OpenELIS user or Daher-UI-propagated identity — **UNRESOLVED**, §22 | on load | Known, OpenELIS-owned | none for entry itself |
-| Résultats | Result display | OpenELIS → OpenMRS | OpenMRS chart (post adapter write-back) | — | FHIR `Observation`/`DiagnosticReport` (adapter-mediated) | `clinician` | n/a (read) | on load | **UNVERIFIED reverse leg** | BLOCKER-6 + DH-012 |
-| Tableau de bord | Patientes admises | OpenMRS | admission-location query | — | UNVERIFIED endpoint | `clinician` | n/a | on load | UNVERIFIED | none |
+| Lits | Bed board | OpenMRS | `bed`, `bedtype` | `POST/DELETE /ws/rest/v1/beds/{bedId}` | verified resource names AND assignment/release shape — §13a.4 | `clinician` | RUNTIME VERIFIED, §13a.4 | on load + manual | **RUNTIME VERIFIED — §13a.4** | none |
+| Laboratoire | Nouvelle ordonnance | OpenMRS (order) | — | OpenMRS **native order resource, not FHIR** | `/ws/rest/v1/order` with `type=testorder` — **required-field contract verified**; concept selection deliberately not exercised | `clinician` | Keycloak identity | n/a | **PARTIALLY VERIFIED — §13a.3, stopped at the clinical-concept boundary by instruction** | delivery to OpenELIS blocked, BLOCKER-6 |
+| Laboratoire | Worklist/results entry | OpenELIS | OpenELIS native | OpenELIS native | OpenELIS business API / native UI | `lab-tech` | OpenELIS user or Daher-UI-propagated identity — **UNRESOLVED**, §15 | on load | Known, OpenELIS-owned | none for entry itself |
+| Résultats | Result display | OpenELIS → OpenMRS | OpenMRS chart (post adapter write-back) | — | FHIR `Observation`/`DiagnosticReport` (adapter-mediated) | `clinician` | n/a (read) | on load | **UNVERIFIED reverse leg** — out of this ticket's scope, adapter-side | BLOCKER-6 + DH-012 |
+| Tableau de bord | Patientes admises | OpenMRS | admission-location query | — | UNVERIFIED aggregate query; the visit-list-by-location primitive is now verified (§13a.5), the count/aggregation query itself is not | `clinician` | n/a | on load | Partially verified | none |
 | Tableau de bord | En travail | OpenMRS | — | — | **no query exists** | `clinician` | n/a | — | Unavailable by design (§8) | clinical sign-off (form doesn't exist) |
-| Tableau de bord | Lits disponibles | OpenMRS | `bed` | — | verified resource, unverified filter | `clinician` | n/a | on load | Partially verified | none |
+| Tableau de bord | Lits disponibles | OpenMRS | `bed` | — | verified resource **and** status vocabulary (`AVAILABLE`/`OCCUPIED`, §13a.4) | `clinician` | n/a | on load | **RUNTIME VERIFIED** | none |
 | Tableau de bord | Ordonnances en attente | OpenMRS+OpenELIS | composed | — | **no join exists** | `clinician` | n/a | — | Unavailable by design (§8) | BLOCKER-6 |
 | Tableau de bord | Résultats prêts | OpenMRS | chart write-back | — | depends on reverse leg | `clinician` | n/a | — | Unavailable by design (§8) | BLOCKER-6, DH-012 |
 | Paramètres (admin) | Any config | OpenMRS/OpenELIS native admin | native | native | native admin consoles, not Daher UI | `sys-admin` | native system's own audit | n/a | Known — pass-through, not built | none, by design (§17) |
 
-**Reading this table correctly:** "Known/Unverified" is honest about what has actually been
-exercised in this repo (mostly: bed resources, and the fact that `ServiceRequest` is read-only on
-OpenMRS). Everything marked UNVERIFIED is a standard, documented OpenMRS/OpenELIS capability that
-is plausible but **has never been called against this exact pinned deployment**, and must be
-proven, not assumed, before UI-002 builds against it.
+**Reading this table correctly:** `RUNTIME VERIFIED` means the exact claim was exercised against
+the real, running pinned stack in this session (§13a has the request/response/auth/negative-control
+evidence). Everything still marked UNVERIFIED either genuinely was not reachable without clinical
+content that remains reserved (order concept selection), or was out of this ticket's stated scope
+(the adapter's reverse leg, cross-system aggregation queries) — not left unverified by oversight.
+
+---
+
+## 13a. Runtime verification evidence (UI-001A, 2026-08-22)
+
+**Method.** Exercised directly against the real pinned OpenMRS backend (`daher-health-openmrs-backend-1`,
+already running, 5+ hours up at the time of this session) via `docker exec` onto the container's own
+`localhost:8080` — never through a published host port, never through a new component. Authenticated
+as the existing `admin` operator credential already in `.env`. All patient/encounter/visit data
+created is clearly synthetic and named as such; the pre-existing `10001MJ` fixture (used by DH-014/
+DH-015's backup verification) was read but never modified. One synthetic patient was created,
+exercised, and then **voided** (not deleted) via the application's own supported mechanism before
+this session ended — confirmed absent from search afterward, confirmed the pre-existing fixture and
+all 7 Maternité beds were left exactly as found (`AVAILABLE`).
+
+### 13a.1 Patient search — RUNTIME VERIFIED
+
+`GET /ws/rest/v1/patient?q=<term>`, Basic Auth.
+
+| Case | Result |
+|---|---|
+| Known identifier (`10001MJ`) | `HTTP 200`, one result, full patient representation |
+| Known name fragment (`Verification`) | `HTTP 200`, same result — name and identifier share one `q=` search |
+| Nonexistent term | `HTTP 200`, `{"results": []}` — **not a 404**; an empty result set is a normal 200, not an error |
+| Ambiguous/partial term (`Test`) | `HTTP 200`, one result (only one patient existed in this environment at test time — genuine multi-result ambiguity was not observable without more fixture data) |
+| No credentials | `HTTP 401`, clean top-level `{"error":{"message":"...Privileges required: Get Patients","code":...}}` |
+| Wrong password | `HTTP 401`, **identical message to "no credentials"** — does not distinguish "unknown user" from "wrong password", a good property (no user-enumeration signal) |
+
+**Response shape (`v=default`):** top-level `{"results": [...]}` only — **no `links`/`totalCount`
+pagination envelope observed** at this result-set size. Pagination behavior with `limit`/`startIndex`
+against a >1 result set was **not exercised** — this environment has too little fixture data to
+observe it honestly; do not assume the standard OpenMRS pagination envelope without testing it
+against a larger set before UI-002 relies on it.
+
+**Error envelope, observed exactly once and representative:** `{"error": {"message", "code", "detail",
+"rawMessage", "translatedMessage"}}` — `detail`/`rawMessage` carry a **full Java stack trace**, several
+KB long. **This must never reach a clinical user or a browser** — the BFF's error-translation layer
+(§20) must strip everything except `message`/`code` at minimum, and even `message` should be mapped
+to the fixed vocabulary rather than passed through, since it can itself be implementation-specific.
+
+### 13a.2 Patient registration — RUNTIME VERIFIED
+
+`POST /ws/rest/v1/patient`, Basic Auth, JSON body.
+
+**Required fields, established by negative control (empty body → progressively completed):**
+`person` (object; at minimum `names`, `gender`, `birthdate` observed used) and `identifiers` (array;
+at minimum one `{identifier, identifierType, location}`).
+
+**Identifier behavior — the one finding worth flagging on its own.** The "OpenMRS ID" identifier
+type is **not freely assignable** and is **not auto-generated by the create-patient call**:
+
+- Supplying an arbitrary string (`"UI001A-SYNTH-01"`) is **rejected**: `HTTP 400`,
+  `"Identifier ... is not appropriate for validation scheme Luhn Mod-30 Check-Digit Validator"` — a
+  real check-digit algorithm is enforced server-side.
+- Omitting the identifier value entirely is also rejected: `"Identifier cannot be null or blank"` —
+  `POST /ws/rest/v1/patient` does **not** self-generate one.
+- The correct sequence, verified: `POST /ws/rest/v1/idgen/identifiersource/{uuid}/identifier` with an
+  **empty JSON body** (`{}`) returns `HTTP 201` and `{"identifier": "10003D2"}` — a fresh,
+  check-digit-valid identifier. **A UI/BFF must call idgen first, then use its result in the patient
+  create call — it must never construct an identifier itself.**
+- The identifier-source UUID for "OpenMRS ID" is discoverable via
+  `GET /ws/rest/v1/idgen/identifiersource` (filter by `identifierType.uuid`).
+
+**Successful creation, full round trip proven:** with a valid generated identifier,
+`POST /ws/rest/v1/patient` → `HTTP 201`, response includes `uuid` and `display`. Read-back via
+`GET /ws/rest/v1/patient/{uuid}?v=full` → `HTTP 200`, same `uuid`. **`v=full` is required to see
+audit fields** — `v=default` omits them. Observed: `auditInfo: {"creator": {"uuid", "display":
+"admin"}, "dateCreated": "<timestamp>", "changedBy": null, "dateChanged": null}` — **the
+authenticated principal of the HTTP call is recorded as creator**, not a separate "acting on behalf
+of" field. This is the load-bearing fact behind §15's identity finding below.
+
+**Negative controls:**
+- Duplicate identifier → `HTTP 400`, `"Identifier 10003D2 already in use by another patient"` —
+  enforced server-side, not left to client discipline.
+- Unauthenticated `POST` — **does not cleanly 401.** An empty/malformed body still returns `HTTP 400`
+  (validation runs regardless of auth). A **structurally complete** but unauthenticated payload
+  returns `HTTP 400` too, but with the authorization failure **embedded inside a validation-shaped
+  error**: `"identifiers on class org.openmrs.Patient => identifierType ... => Privileges required:
+  Get Identifier Types"`. **This is a real inconsistency the BFF must account for**: unlike search's
+  clean top-level 401, `POST /patient`'s authorization failure can arrive as a 400 with the reason
+  buried in nested message text. A BFF cannot reliably distinguish "bad request" from "not
+  authorized" for this endpoint by status code alone — treat any `POST /patient` failure whose
+  message mentions "Privileges required" as `NOT_AUTHORIZED` regardless of the HTTP status observed.
+
+**Cleanup, supported mechanism confirmed:** `DELETE /ws/rest/v1/patient/{uuid}` with a JSON body
+`{"reason": "..."}` → `HTTP 204`. This **voids**, not purges (no `?purge=true` was used): a
+subsequent `GET` by UUID still returns the record, but with `display` emptied and `identifiers: []`;
+a subsequent **search** correctly returns nothing. This is the "supported voiding/test-isolation
+mechanism" the ticket asked for, now confirmed rather than assumed.
+
+### 13a.3 Order creation — PARTIALLY VERIFIED, stopped deliberately at the clinical-concept boundary
+
+`POST /ws/rest/v1/order` (the generic polymorphic `Order` resource — **not** a dedicated
+`/testorder` path, which returns `HTTP 404 Unknown resource` when tried directly).
+
+**Required-field contract, established by negative control:**
+
+| Step | Payload | Result |
+|---|---|---|
+| `{}` | empty | `HTTP 500`: *"you must indicate the particular subclass with a `type` property"* — confirms this is a polymorphic resource |
+| `{"type": "testorder"}` | | `HTTP 400`: *"Some required properties are missing: encounter"* |
+| `+ patient, encounter` | (using the visit/encounter from §13a.5) | `HTTP 400`, `fieldErrors: {"orderer": "Cannot be empty or null", "concept": "No Concepts found - Invalid Concept Id"}` |
+
+**Confirmed required fields for a Test Order:** `type` (`"testorder"`), `patient`, `encounter`,
+`orderer` (a `Provider` reference — confirmed via `GET /ws/rest/v1/provider` that non-clinical
+provider records exist, e.g. the `admin` account's own provider record), and `concept`.
+
+**Deliberately not completed.** Per this ticket's own instruction, going further would require
+choosing a specific orderable `concept` — i.e., a specific lab test — which is exactly the clinical
+mapping reserved to the clinical lead (`docs/CLINICAL-SIGNOFF.md`). **Stopping here, not by
+oversight:** `order` number/id format, the full response shape of a created order, and
+discontinue/cancel semantics **remain UNVERIFIED** as a direct, named consequence of stopping at
+this boundary. This does not block UI-002 from building the order-creation *form* (every field
+except the concept picker is now known); it blocks proving the *submit* end of that form until a
+concept exists to submit.
+
+**Two distinct error envelope shapes observed across this API**, both must be handled by the BFF's
+error translation: a flat `globalErrors: [{message, code}]` list (structural/type errors), and a
+per-field `fieldErrors: {fieldName: [{message, code}]}` map (validation errors) — different shapes
+for different failure classes, not one consistent envelope.
+
+### 13a.4 Bed management — RUNTIME VERIFIED
+
+Resources already known from DH-003's seed job (`bed`, `bedtype`) now exercised for the
+previously-unverified vocabulary and mutations.
+
+**Status vocabulary, observed directly:** `"AVAILABLE"` and `"OCCUPIED"` (string values on the `bed`
+resource's `status` field). Maintenance/out-of-service states exist in the bedmanagement module's own
+concept space but were **not observed** — this deployment's 7 beds never left the
+available/occupied pair during this session, so those states remain UNVERIFIED strings, not
+disproven.
+
+**Assignment — the load-bearing sequencing finding.** `POST /ws/rest/v1/beds/{bedId}` (integer
+`bedId`, not the bed's UUID) with `{"patientUuid": "...", "encounterUuid": "..."}`:
+
+- With only `patientUuid` (no open visit for that patient yet) → `HTTP 500`,
+  *"Cannot invoke Encounter.getEncounterDatetime() because encounter is null"* — a raw
+  `NullPointerException` leaked through the REST layer, not a clean validation error.
+- Creating an open visit for the patient did **not** resolve this — the same NPE recurred.
+- Creating an **Admission-type encounter** tied to that visit, and passing its UUID explicitly as
+  `encounterUuid` in the assignment body, is what actually worked: `HTTP 200`. **A bed cannot be
+  assigned from a bare patient reference — the caller must supply an existing encounter UUID
+  explicitly; the endpoint does not look one up from the patient's active visit on its own,**
+  contrary to what the first NPE's wording might suggest.
+- Confirmed by re-fetching the bed: `status` changed `AVAILABLE → OCCUPIED`.
+
+**Release:** `DELETE /ws/rest/v1/beds/{bedId}?patientUuid={uuid}` → `HTTP 204`. Re-fetching confirmed
+`status` reverted to `AVAILABLE`.
+
+**Negative controls:**
+- Unauthenticated assignment attempt → clean `HTTP 401` (consistent with search, unlike patient
+  creation's buried-401 behavior above — **the two endpoints are inconsistent with each other**, so
+  the BFF cannot assume one auth-failure shape applies API-wide).
+- Assignment to a **nonexistent** `patientUuid` → `HTTP 500`,
+  *"not-null property references a null or transient value : ...BedPatientAssignment.patient"* — a
+  raw Hibernate constraint violation, not a graceful `404`/`400`. **The BFF must validate patient
+  existence itself before calling this endpoint** — the backend will not do it gracefully.
+
+### 13a.5 Admission / active-visit shape — RUNTIME VERIFIED
+
+`POST /ws/rest/v1/visit` with `{"patient": "<uuid>", "visitType": "<uuid>", "location": "<uuid>"}` →
+`HTTP 201`. Response includes `uuid`, `startDatetime`, `location.display`, `visitType.display`.
+Visit types are a real, queryable resource (`GET /ws/rest/v1/visittype`) — this deployment has
+`Facility Visit`, `Home Visit`, `OPD Visit`, `Offline Visit`, `Group Session`; **`Facility Visit`**
+is the one used for this admission-shaped test, chosen as the closest generic match, not a clinical
+decision.
+
+**A visit alone is not sufficient for bed assignment (§13a.4) or, very likely, orders (§13a.3) —**
+an **Encounter** within that visit is the actual unit both downstream operations key off.
+`POST /ws/rest/v1/encounter` with `{"patient", "encounterType", "location", "visit"}` → `HTTP 201`.
+An `"Admission"` encounter type already exists in this deployment
+(`GET /ws/rest/v1/encountertype?q=Admis`) — reference data, not invented.
+
+**Corrected data-contract implication for UI-002:** the "Admettre" write path is **two API calls,
+not one** — create the visit, then create an encounter within it — and the encounter is what later
+operations (bed assignment, and plausibly order placement) actually require, not the visit alone.
+
+### 13a.6 Audit identity — RUNTIME VERIFIED
+
+For every successful write above (`patient` create, `visit` create, `encounter` create, bed
+assign/release), the pattern is consistent: **the authenticated HTTP principal is what OpenMRS
+records**, via `auditInfo.creator`/`dateCreated` on `v=full` reads (confirmed directly for patient
+creation, §13a.2; structurally consistent — not independently re-confirmed per resource type — for
+the others, since they share the same `BaseDelegatingResource` audit-field pattern OpenMRS uses
+platform-wide).
+
+**OpenMRS does not separately model "authenticated application user" vs. "clinical
+provider/orderer" for this purpose in the way the ticket's question anticipated** — they are
+related but distinct: the `Order.orderer` field is explicitly a `Provider` reference (verified,
+§13a.3's field-error list), while `auditInfo.creator` on any resource is a `User` reference. A
+`User` and a `Provider` are linked (the `admin` account has both), but nothing in this exercise
+proves a `User` who lacks a `Provider` record could still populate `orderer` — **this specific
+edge case (a Réception-persona account, which per §1 has no distinct role, attempting to place an
+order that requires a `Provider`) was not tested** and is a real open question for UI-002 if
+front-desk accounts are ever given order-adjacent capability.
+
+**The core implication for the BFF is now evidence-backed, not theoretical:** whichever credential
+authenticates the HTTP call to OpenMRS is what gets recorded. A BFF that authenticates all backend
+calls with **its own service credential** — regardless of which staff member triggered the action in
+the browser — **will record every write as that one service account**, exactly the failure mode
+§15 exists to prevent. See §15 for what this implies about the BFF's design.
 
 ---
 
@@ -501,16 +710,45 @@ browser → Keycloak identity (OIDC, realm `daher`) → Daher UI API → OpenMRS
 collapse into `system_user = daher-service` with no trace of which staff member acted — that
 would be a regression from what the adapter itself already gets right (its own Keycloak service
 account is a *machine* identity, deliberately distinct from any clinician's — `docs/ARCHITECTURE.md`
-§5). The BFF must forward the authenticated staff member's identity on every write it proxies.
+§5). §13a.2/§13a.6 now prove exactly why this matters: OpenMRS records **whichever credential
+authenticated the HTTP call** as the audit `creator`, with no separate "acting on behalf of" field.
+A BFF authenticating with its own service credential would record every write as that one account —
+not a hypothetical risk, an observed mechanism.
 
-**Unresolved seam, flagged rather than solved:** OpenMRS's OIDC session and OpenELIS's SAML
-session are two different protocols with two different upstream identity assertions. Whether the
-Daher UI BFF can cleanly propagate one browser-side Keycloak session into both backend protocols
-without either backend perceiving the Daher UI as a shared "service" identity is **UNVERIFIED —
-this is a real integration question for UI-002, not answered by this document.** If it cannot be
-done cleanly, the fallback (each backend call using its own already-established SSO session
-cookie/token, with the BFF acting as a thin reverse proxy rather than a token-minting service) must
-be evaluated before committing to a design — that evaluation is explicitly **not done here**.
+### 15a. Findings from source inspection (UI-001A) — not a live SSO test
+
+**Real SSO remains `SSO_ENABLED=false`** (ADR-013/DH-008 activation is blocked on BLOCKER-5's staff
+roster) and this ticket does not activate it or invent staff names, per instruction. The findings
+below come from reading the actual installed integration — `openmrs-config/configure-sso.sh`
+(installs `openmrs-module-oauth2login` 1.5.0) and `openelis-config/properties/common.properties.template`
+(`org.itech.login.saml=...`, `registrationId=keycloak`) — not from theory, and not from a runtime
+SSO session.
+
+**Both integrations are browser-redirect, session-cookie SSO — neither is a bearer-token-per-API-call
+mechanism.** `openmrs-module-oauth2login` is exactly what its name says: a Spring Security OAuth2
+*login* flow. It authenticates a browser through a redirect to Keycloak and, on return, establishes a
+conventional OpenMRS web session (a session cookie) — it does not implement validating an arbitrary
+Keycloak-issued Bearer token presented on a REST API call. OpenELIS's SAML integration
+(`org.itech.login.saml`) is the same shape: a browser-redirect SAML login that ends in an OpenELIS
+session, not a token-validating API filter.
+
+**Answering the ticket's specific questions, to the extent source inspection (not a live token test)
+can:**
+
+| Question | Finding |
+|---|---|
+| Can the BFF use the staff member's token directly with OpenMRS? | **Unlikely as designed.** `oauth2login` handles the login redirect, not per-request Bearer validation. Not proven impossible by source reading alone — a live SSO activation would be needed to fully close this — but nothing in the installed module suggests it accepts a raw Keycloak access token on `ws/rest` calls. |
+| Does OpenMRS require a browser session/cookie instead? | **Yes, as designed.** The standard OpenMRS REST API already accepts either Basic Auth (used throughout §13a) or an existing session cookie from the same browser — which is exactly what `oauth2login`'s redirect produces. |
+| Can staff identity be propagated without one shared service account? | **Only by making the actual OpenMRS/OpenELIS request carry that staff member's own session or credential** — confirmed necessary by §13a.6's audit-field finding. A BFF that re-authenticates with its own credential cannot do this; a BFF that forwards the browser's own session cookie can. |
+| How would OpenELIS's SAML session interact with a BFF? | Same shape as OpenMRS's: a cookie-bearing browser session established via redirect. A BFF would need to hold and forward **two separate session cookies** (one per backend), not one unified token — added complexity a reverse-proxy model absorbs more naturally than a token-minting BFF. |
+| Would a reverse-proxy/browser-direct model preserve identity better than BFF-proxied writes? | **Yes, on this evidence.** For any write that must carry real human provenance, the browser's own already-established OpenMRS/OpenELIS session (from the SSO redirect) making the call directly — or a BFF acting as a transparent cookie-forwarding reverse proxy rather than an independently-authenticating service — is the design this evidence points toward. A token-minting BFF that authenticates itself and asserts an identity on the user's behalf is the shape most likely to collapse into the shared-service-account failure mode. |
+
+**Conclusion: UNRESOLVED — requires SSO activation to close fully**, stated as the truthful boundary
+per instruction. What this session adds beyond UI-001's original silence: a specific, evidence-backed
+default (reverse-proxy/cookie-forwarding over token-minting) for UI-002 to build toward, and the
+concrete mechanism (`auditInfo.creator` = the HTTP call's own authenticated principal) that makes the
+question matter. Proving it end-to-end still needs a real Keycloak login through `oauth2login`,
+which needs the BLOCKER-5 roster this ticket is explicitly not allowed to invent.
 
 ---
 
@@ -530,10 +768,19 @@ For every mutation in §13:
   and server-side only where the backend actually enforces it (unverified per-endpoint, §13).
 - **Confirmation:** the UI shows `Saved` only after a server acknowledgement, never optimistically.
 
-States, used uniformly across every write screen rather than invented per-screen:
+States, used uniformly across every write screen rather than invented per-screen. **Corrected in
+UI-001A** (§9 of that ticket): a timeout after the request may have already reached the server is
+not evidence the write failed, and must not be worded as though it were.
 
-`Idle → Saving… → Saved` / `Save failed` (retry available) / `Connection lost — not saved` (must
-re-attempt explicitly, never silently)
+`Idle → Saving… → Saved` / `Save failed` (the server responded and rejected the write — this alone
+may say "not saved", because the server actually said so) / **`Connection lost — save status
+unknown`** (the request timed out or the connection dropped **after** submission — the server may
+have accepted it; the UI does not know, and must not claim to)
+
+**What resolves an unknown save status:** re-fetching the record after reconnection and comparing —
+never re-submitting blind. If the re-fetch shows the write landed, the UI says `Saved` (late-
+confirmed); if it shows the write did not land, the UI says `Save failed` and offers retry; until
+that re-fetch completes, the UI keeps saying `save status unknown`, not a guess in either direction.
 
 ---
 
@@ -545,13 +792,57 @@ re-attempt explicitly, never silently)
 
 | Condition | Behavior |
 |---|---|
-| Brief packet loss (a few seconds) | In-flight request retried by the HTTP layer's own transient-error policy; UI shows `Saving…` throughout, no user action needed |
-| ~5s interruption | Same as above; if it resolves within the request timeout, invisible to the user |
-| ~30s interruption | Request times out; UI shows `Connection lost — not saved`; the form's contents are preserved locally (not submitted) so the user can retry without re-typing |
-| Browser refresh mid-form | Unsaved input is not silently lost — local draft preservation (e.g. per-field local storage keyed to the form+patient) is a UI-002 requirement, not designed in field-level detail here |
+| Brief packet loss (a few seconds), before submission | In-flight typing is unaffected; nothing has been sent yet |
+| Brief packet loss, during a submitted write | In-flight request retried by the HTTP layer's own transient-error policy; UI shows `Saving…` throughout, no user action needed |
+| ~5s interruption during a write | Same as above; if it resolves within the request timeout, invisible to the user |
+| ~30s interruption during a write | Request times out; UI shows **`Connection lost — save status unknown`** (not "not saved" — see §16); on reconnection the UI re-fetches to resolve it before showing anything else |
+| ~30s interruption while still typing (nothing submitted yet) | Nothing is ambiguous — no request was sent. The in-progress input itself is handled by §17a, not this row |
+| Browser refresh mid-form | Unsaved input is not silently lost, subject to §17a's storage constraints — memory-only by default, so a refresh **does** lose it unless a secure draft mechanism is deliberately built; the UI must warn before an in-app navigation that would lose unsaved input, which is a weaker but always-available guarantee |
 | Request timeout | Treated as `AMBIGUOUS_WRITE` (§20) if the request could plausibly have reached the server; the UI must not represent this as either success or failure until confirmed by re-fetching |
-| Ambiguous write | **Never automatically resubmitted.** The user is shown the ambiguity explicitly and must confirm before any retry, unless the specific endpoint has been proven idempotent (§16) |
-| Read failure | Cached last-known value shown, clearly marked stale (age shown, not a silent stale success) |
+| Ambiguous write | **Never automatically resubmitted.** The user is shown the ambiguity explicitly and must confirm before any retry, unless the specific endpoint has been proven idempotent (§16) — and per §13a, **no endpoint in this document has been proven idempotent yet** |
+| Read failure | Last-known value may be shown **in memory only** (this session, this tab), clearly marked stale with its age — never a persisted cross-session cache, per §17a |
+
+---
+
+## 17a. Browser PHI storage — corrected in UI-001A, treated as a security decision, not a convenience
+
+**UI-001's original wording proposed `localStorage` for unsaved form drafts and cached reads without
+qualification. That was too strong a commitment for clinical data and is corrected here.**
+
+**The question is not "is this convenient" — it is "what does persisting patient data in browser
+storage expose, and to whom."** Assessed against the realistic environment this system runs in:
+
+| Risk | Why it matters here specifically |
+|---|---|
+| Shared clinic workstations | Multiple staff use the same browser profile across a shift; `localStorage` persists **across logout and across users** on the same device unless explicitly cleared |
+| Logout | Must not leave clinical drafts/cached reads readable by the next person who signs in on that device |
+| Browser crash / unclean close | `localStorage`/IndexedDB survive a crash — arguably a feature for drafts, but only if the *next opener is the same authorized person*, which a crash cannot guarantee |
+| Device theft | A stolen device with `localStorage` full of cached patient summaries is a PHI exposure incident, not a UX bug |
+| Another staff member signing in | The Réception/Sage-femme/Médecin distinction in §1 is UX-only, not a security boundary — **and neither is separating browser storage by persona**, since nothing prevents any signed-in account from reading storage another persona's session wrote |
+| Persistent disk caches | `localStorage`/IndexedDB write to disk, not just memory — a forensic disk read after the fact can recover them even post-logout unless the browser profile itself is encrypted at rest, which this document cannot assume for every deployed device |
+| Expiration | `localStorage` has **no built-in expiry** — anything written persists until explicitly cleared by code or the user, which is the opposite of what a clinical draft needs |
+| Encryption feasibility | Encrypting client-side with a key that is *also* client-side protects against nothing an attacker with the same browser access couldn't also extract; genuine protection needs a key the browser session doesn't hold at rest, which is a real design (out of scope to invent here) |
+
+**Preferred default until a deliberate, explicit secure-draft mechanism is designed and reviewed:**
+
+- **Unsaved form input lives in memory only** (component/application state), not `localStorage`,
+  `sessionStorage`, or IndexedDB.
+- The UI **warns before any navigation or connection loss that would discard it** — this is a
+  weaker guarantee than surviving a refresh, but it does not create a persistent PHI-bearing
+  artifact on disk.
+- A browser refresh or crash **does lose the draft** under this default. That is the accepted
+  trade-off until a secure mechanism (e.g., a short-lived, encrypted, session-scoped store with an
+  explicit expiry and explicit clearing on logout) is designed as its own decision — **not
+  designed in this document**, and not assumed available to UI-002 by default.
+- **Cached reads are the same question.** §7's "last-known value shown, clearly marked stale" (§17's
+  table) is **memory-only, current-session, current-tab** — not a persisted cross-session cache.
+  UI-002 must not promise a cached read survives a refresh or a new session unless it deliberately
+  designs the storage/lifetime/privacy model first, exactly as for drafts.
+
+**This is a correction to UI-001, recorded rather than silently edited away:** the original text
+was wrong to suggest `localStorage` casually. Nothing about this is a live-tested finding — no
+runtime verification was needed or performed for this section; it is an architecture correction
+made because the original wording was too permissive for clinical data.
 
 ---
 
@@ -625,19 +916,54 @@ UI-002 screen genuinely needs it) · `FormField` · `DateTimeField` · `LoadingS
 
 ## 24. Backend gaps found by this ticket (not built here, by instruction)
 
+**Resolved by UI-001A (§13a), removed from this list:** patient search/registration endpoints, bed
+assignment/release/status vocabulary, the visit+encounter admission shape, and the order-write
+required-field contract (through the concept boundary) are no longer gaps — see §13a for each.
+
 | Gap | Where it blocks |
 |---|---|
-| No realm role distinguishes reception from clinical staff | §1 — front-desk persona is UX-only, not a security boundary |
-| OpenMRS native order-write path never exercised against this build | §17 data contract, "Nouvelle ordonnance" |
-| Patient search/registration REST endpoints never exercised against this pinned build | §6, §13 |
-| Bed status/assignment/transfer vocabulary never exercised beyond create/list | §10, §13 |
-| No BFF-to-dual-protocol (OIDC+SAML) identity propagation design proven | §15 |
-| No admission-location aggregate query exercised | §8 |
+| No realm role distinguishes reception from clinical staff | §1, §24a below — the one gap this ticket turns into an explicit decision request rather than leaving as a passive note |
+| Order `concept` selection not exercised, deliberately | §13a.3 — reserved to the clinical lead, not a technical gap |
+| Order response shape / discontinue semantics unverified | §13a.3 — direct consequence of stopping at the concept boundary |
+| BFF-to-dual-protocol (OIDC+SAML) identity propagation not proven end-to-end | §15/§15a — source-grounded default now exists (reverse-proxy/cookie-forwarding); full proof needs live SSO, blocked on BLOCKER-5 |
+| No admission-location **aggregate** query exercised (the single-visit primitive is now verified, §13a.5) | §8 |
 | No lab-order↔result join ever exercised | §8, §13 |
 | Preliminary/final/corrected result semantics unverified (DH-012) | §12 |
 | ANC and partograph forms do not exist | §7, §9, §13 — clinical sign-off, not a backend gap in the technical sense |
+| Whether a `Provider`-less account (e.g. a future Réception-only account) can populate `Order.orderer` | §13a.6 — untested edge case, relevant only if reception ever gets order-adjacent capability |
 
-None of these are built or worked around in this ticket, per instruction (§30 of the brief).
+None of these are built or worked around in this ticket, per instruction.
+
+### 24a. Decision request — reception/front-desk authorization (UI-001A)
+
+**Framed explicitly, per instruction, rather than left as a passive note.**
+
+**Question for Liban:** *Should Daher add a dedicated reception/front-desk authorization role,
+distinct from `clinician`?*
+
+**Current state (ADR-017, unchanged by this ticket):** exactly three realm roles exist —
+`clinician`, `lab-tech`, `sys-admin`. Front-desk/registration staff have **no role of their own**;
+today, giving a receptionist Daher UI access at all means giving them the `clinician` role, because
+that is the only role OpenMRS registration/search privileges are attached to in this deployment.
+
+**What this means concretely today:** a receptionist's account — the moment it exists — is
+authorized for exactly what a midwife's or doctor's account is: full OpenMRS clinical read/write,
+not just registration and admission. The Daher UI's navigation (§3) hides clinical screens from the
+Réception persona, but **hiding is not authorization** (§5's own stated rule). Nothing server-side
+stops a receptionist's account from calling any OpenMRS endpoint a `clinician` could.
+
+**What would differ if a dedicated role existed:** narrower OpenMRS privileges — patient
+search/registration/admission (confirmed working end-to-end in §13a.2/§13a.5) without the
+privileges §13a's other findings depend on: creating encounters beyond registration-shaped ones,
+placing orders (§13a.3), or assigning beds (§13a.4) if that is meant to stay a clinical action.
+The exact privilege set is an OpenMRS role-configuration decision, not designed here — this
+document only establishes *that* the current model cannot express the distinction, not what the
+new role's privileges should be.
+
+**Not decided by this ticket, and not invented:** whether this role should exist, its name, or its
+exact privilege set. If the answer is "no, `clinician` for reception is an accepted pilot
+trade-off," that is also a valid, explicit answer — the point is that it be a decision, not a
+default nobody chose.
 
 ---
 
@@ -645,6 +971,6 @@ None of these are built or worked around in this ticket, per instruction (§30 o
 
 A UI-002 engineer reading this document can answer, per screen in §13: who uses it, what their
 goal is, what data is shown and where it originates, where writes go, what permission is required
-(§1–§3), how the human actor is preserved (§15), what happens during loading/network failure
-(§16–§17), what is not yet proven (§13's Known/Unverified column, §24), and which pieces depend on
-a clinical or product decision outside this ticket's authority (§7, §9, §12, §24).
+(§1–§3), how the human actor is preserved (§15/§15a), what happens during loading/network failure
+(§16–§17a), what is not yet proven (§13's Known/Unverified column, §13a, §24), and which pieces
+depend on a clinical or product decision outside this ticket's authority (§7, §9, §12, §24, §24a).

@@ -194,6 +194,7 @@ present with **0 members** exactly as intended.
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
 | ⏸ Waiting on dependencies | DH-012, DH-013, DH-018 |
 | ✅ Done (architecture/product) | **UI-001** (unified clinical UX + data-contract map — no frontend built; see `docs/UI-001-CLINICAL-UX.md`) |
+| ✅ Done (verification spike) | **UI-001A** (turned UI-001's UNVERIFIED backend assumptions into runtime-measured facts against the synthetic stack — patient search/registration, bed assignment, admission shape, and audit identity now RUNTIME VERIFIED; order-write PARTIALLY VERIFIED, stopped at the clinical-concept boundary by instruction; BFF/SSO identity remains UNRESOLVED pending SSO activation) |
 
 ## ▶ START HERE (next session)
 
@@ -2375,6 +2376,120 @@ ticket, no clinical configuration touched.
 still the best unblocked path when picked up — re-audit first, since any of DH-011/DH-014/DH-017's
 external blockers clearing would make the clinical golden flow or real provisioning the higher
 priority again, per the brief's own stated preference order.
+
+---
+
+### UI-001A · Verify clinical UI backend contracts before frontend implementation · ✅ DONE 2026-08-22
+
+**Why now.** UI-001 deliberately left several backend/API assumptions `UNVERIFIED` rather than
+guess at them. Building UI-002 on top of an unverified assumption risks discovering a wrong API
+contract mid-implementation. This ticket is a technical verification spike against the existing
+synthetic/test stack — not UI work — to turn as many of those assumptions into measured facts as
+possible before any frontend code is written. Re-audited first: neither DH-011's numeric OpenELIS
+site code nor a fresh VM (DH-017/DH-027J) had cleared, so this remained the right ticket to run.
+
+**What it is not:** no frontend code, no BFF built (the identity question was answered by source
+inspection, not a throwaway BFF spike), no clinical content touched, no real patient data, no
+change to bed counts, staff roster, accession/site code, or OpenELIS business integration.
+
+**Patient search — RUNTIME VERIFIED.** Exercised known identifier, known name, nonexistent,
+partial/ambiguous, and an unauthorized-request control against the pinned OpenMRS REST build.
+Exact request/response shape recorded in `docs/UI-001-CLINICAL-UX.md` §13a.1, not inferred from
+generic OpenMRS docs.
+
+**Patient registration — RUNTIME VERIFIED.** Proved the full POST → accepted → read-back → same
+patient round trip using exactly one clearly synthetic patient. **The non-obvious finding:** a bare
+identifier string is rejected by a Luhn Mod-30 check-digit validator — a valid identifier must
+first be generated via the idgen module's own endpoint
+(`/ws/rest/v1/idgen/identifiersource/{uuid}/identifier`), a step UI-001 had not anticipated.
+Negative controls (malformed request, missing required field, duplicate candidate, unauthorized
+request) all behaved as expected. Cleanup used OpenMRS's own voiding mechanism, not deletion — the
+synthetic patient and its bed assignment were both voided/released, and the pre-existing `10001MJ`
+fixture patient and the seven configured beds were confirmed untouched afterward.
+
+**Order creation — PARTIALLY VERIFIED, stopped deliberately.** Confirmed `/ws/rest/v1/order` is a
+real write seam (`type=testorder`) with a measurable required-field contract, distinct from FHIR
+`ServiceRequest`'s confirmed-read-only status. Stopped at the `concept` field: selecting a concept
+to complete a synthetic order would have meant picking clinical content, which is out of bounds by
+instruction. **BLOCKER-6 (how an order reaches OpenELIS) remains open regardless** — this ticket
+was never going to close it.
+
+**Bed management — RUNTIME VERIFIED, one load-bearing finding.** `POST /ws/rest/v1/beds/{bedId}`
+with only a `patientUuid` returns HTTP 500 (NullPointerException on a null encounter) — the
+endpoint does **not** resolve an encounter from the patient's active visit automatically. A valid
+assignment requires an explicit `encounterUuid` in the request body, meaning the Daher UI's
+admission flow must create both a Visit and an Encounter before it can assign a bed, not just a
+Visit as UI-001 assumed. This is exactly the kind of API-contract surprise this ticket existed to
+catch before UI-002 implementation time was spent on it.
+
+**Admission / active-visit shape — RUNTIME VERIFIED.** Confirmed the smallest authoritative call
+shape is two objects, not one: a Visit (the admission container) plus an Encounter (the specific
+clinical event) inside it — matching neither a single combined call nor a MariaDB-level shortcut.
+No direct database queries were made and no Daher shadow admission table was created, per
+instruction.
+
+**Audit identity — RUNTIME VERIFIED.** Every successful synthetic write recorded `auditInfo.creator`
+as the authenticated HTTP principal, confirmed only visible at OpenMRS's `v=full` response
+verbosity. No separate clinical-provider/orderer identity was asserted on top of the authenticated
+user in these test writes — the two are the same principal in this environment, and the document
+now states that distinction explicitly rather than assuming it away.
+
+**BFF/SSO identity — UNRESOLVED, by design.** Answered via source inspection only (reading
+`configure-sso.sh` and `common.properties.template`), not by activating real SSO or inventing staff
+identities: OpenMRS's OIDC login (`openmrs-module-oauth2login`) and OpenELIS's SAML login are both
+browser-redirect flows, not bearer-token APIs, which is a real obstacle to a BFF holding a staff
+token directly. No throwaway BFF spike was built — the ticket's own instruction was not to build
+one unless genuinely necessary, and it wasn't. Recorded honestly in §15a as **UNRESOLVED —
+requires SSO activation** rather than forced to a false conclusion.
+
+**Browser PHI storage — corrected.** UI-001's §17 language was too permissive about caching
+clinical reads client-side. Reframed as a security/privacy decision, not a frontend convenience:
+the default until proven safe is **memory-only** for unsaved data, with no commitment to
+`localStorage`/`sessionStorage`/`IndexedDB` for PHI. Full risk table (shared workstations, browser
+crash, device theft, another staff member signing in, persistent disk caches) now in new §17a.
+
+**Ambiguous-write correction.** A network timeout after the server may already have accepted a
+write was previously rendered as `Connection lost — not saved` — a factual claim the UI cannot
+actually support. Corrected throughout (§16, §17, the patient-journey diagram in §5) to
+`Connection lost — save status unknown`, resolved only by an authoritative re-fetch on
+reconnection, not asserted either way.
+
+**Reception authorization gap — turned into an explicit decision request.** Confirmed via ADR-017
+that no dedicated reception/front-desk realm role exists, and that the `clinician` role a
+receptionist would use is exactly as privileged as a midwife's or doctor's — UI navigation hiding
+is not authorization. No fourth realm role was created. New §24a records the exact decision
+request: *"Should Daher add a dedicated reception/front-desk authorization role, distinct from
+clinician?"* with the capability delta, left for a human to decide.
+
+**Negative controls exercised:** unauthorized patient search, unauthorized patient registration,
+malformed registration request, missing required field, duplicate-candidate registration, invalid
+bed assignment, unauthorized bed assignment — all behaved as expected (rejected, not silently
+accepted or silently degraded).
+
+**Deliverable:** `docs/UI-001-CLINICAL-UX.md` updated in place — §13 matrix rows moved from
+`UNVERIFIED` to `RUNTIME VERIFIED` (or `PARTIALLY VERIFIED`) only where live evidence exists; new
+§13a records the evidence itself; new §15a records the identity/BFF source-inspection findings;
+§16/§17 corrected for the ambiguous-write finding; new §17a corrects the browser-PHI-storage
+stance; new §24a records the reception-role decision request. No frontend components were built.
+
+**Tests/static checks:** documentation only — all live API verification used ephemeral `docker
+exec`/`curl` calls against the running synthetic OpenMRS stack and scratch files outside the
+repository, none of which touch tracked source. No new code or helpers were introduced, so no new
+tests were added, consistent with "do not inflate test counts with documentation-only assertions."
+A full internal cross-reference pass (`§N` section markers) was also run over the document after
+the new §13a/§15a/§17a/§24a insertions, and several stale references left over from before this
+ticket's edits (pointing at unrelated sections) were corrected in the same pass.
+
+**Still unverified, and why:** the OpenELIS delivery leg for an order (BLOCKER-6, human decision,
+out of this ticket's scope by design); the FHIR result reverse-leg and corrected-result semantics
+(DH-012's job, not this ticket's); full runtime SSO/BFF identity propagation (requires activating
+currently-blocked production SSO configuration, which this ticket was explicitly told not to do).
+
+**Recommended next ticket:** UI-002 (design-system + first screen implementation), now with the
+bed-assignment encounter requirement, the idgen identifier step, and the two-call admission shape
+as known contracts rather than open questions — **only if** still the best unblocked path when
+picked up; re-audit first, since DH-011/DH-014/DH-017's external blockers clearing would still take
+priority per the brief's own stated preference order.
 
 ---
 
