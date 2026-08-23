@@ -3,9 +3,25 @@ FROM maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14f
 # OpenMRS's official OAuth2 Login module is not included in the O3 3.7.x
 # backend. Build its released 1.5.0 tag from the exact commit rather than
 # downloading an unversioned OMOD or relying on a moving Maven repository.
+#
+# UI-008/DH-008C applies the Daher bridge patch (proven end-to-end in UI-007)
+# on top of that pinned source before building, rather than downloading an
+# opaque prebuilt patched .omod: the new filter class and the config.xml
+# addition (the /oauth2login bridge -- see
+# patches/oauth2login-bridge/PROVENANCE.md) are applied here, from the files
+# already reviewed and committed in this repo. The Maven build itself is not
+# byte-for-byte reproducible (jar entry timestamps), so reproducibility is
+# verified at the source/patch/toolchain level -- this exact clone command,
+# this exact patch, this exact base image digest -- not by asserting a fixed
+# artifact hash.
+COPY patches/oauth2login-bridge/OAuth2LoginBridgeFilter.java /patch/OAuth2LoginBridgeFilter.java
+COPY patches/oauth2login-bridge/config.xml.patch /patch/config.xml.patch
 RUN git clone --branch 1.5.0 --depth 1 \
       https://github.com/openmrs/openmrs-module-oauth2login.git /src \
     && test "$(git -C /src rev-parse HEAD)" = 2770233627343a53719ec981e997d94b1d90b7ad \
+    && cp /patch/OAuth2LoginBridgeFilter.java \
+        /src/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java \
+    && git -C /src apply /patch/config.xml.patch \
     && mvn -B -f /src/pom.xml -Dmaven.test.skip=true package \
     && test -s /src/omod/target/oauth2login-1.5.0.omod
 
@@ -15,6 +31,45 @@ COPY --from=oauth2login-build --chown=1001:1001 \
   /src/omod/target/oauth2login-1.5.0.omod \
   /openmrs/distribution/openmrs_modules/oauth2login-1.5.0.omod
 COPY --chmod=0755 configure-sso.sh /openmrs/configure-sso.sh
+COPY --chmod=0644 exclude-authentication-when-sso.sh /openmrs/exclude-authentication-when-sso.sh
+COPY --chmod=0644 activate-oauth2login-if-needed.sh /openmrs/activate-oauth2login-if-needed.sh
+
+# UI-008/DH-008C: oauth2login's own AuthenticationScheme bean and the bundled
+# "authentication" module's DelegatingAuthenticationScheme bean collide in
+# OpenMRS's by-type Spring lookup (see PROJECT_STATE.md's UI-007/UI-008
+# entries for the full measured chain; no config.xml/global-property fixes
+# that ambiguity directly). Excluding the module's omod when SSO is enabled
+# is config-only: startup-init.sh unconditionally repopulates
+# $OMRS_MODULES_DIR from the read-only distribution/ directory on every boot,
+# before this line's inserted call runs, so the exclusion is re-evaluated
+# fresh every boot rather than being a one-time deletion, and the module
+# reappears the instant SSO is turned back off. This is the one stable anchor
+# line in the vendor's own startup.sh (immediately after it sources
+# startup-init.sh, which is what performs that repopulation).
+#
+# The second insertion solves the oauth2login.started=false persistence
+# gotcha (UI-006/UI-007): a database that had SSO disabled once, and is later
+# turned on, does not restart the module by itself (confirmed directly from
+# ModuleFactory.getModulesThatShouldStart()'s source). Anchored on the
+# vendor's own "Trigger first filter to start data import" comment, the one
+# point in startup.sh after Tomcat is up but before it waits on the
+# foreground process -- see activate-oauth2login-if-needed.sh for exactly why
+# this does NOT try to hot-start the module in place (measured this ticket to
+# update the database but never restore live HTTP dispatch within the same
+# container lifecycle) and instead marks it eligible to start on the next
+# boot via the supported systemsetting REST resource, then exits non-zero so
+# openmrs-backend's own `restart: unless-stopped` policy provides that boot.
+USER root
+RUN startup_script=/openmrs/startup.sh \
+    && sed -i '/^source \/openmrs\/startup-init\.sh$/a source /openmrs/exclude-authentication-when-sso.sh' \
+       "$startup_script" \
+    && grep -q '^source /openmrs/exclude-authentication-when-sso\.sh$' "$startup_script" \
+    && test "$(grep -c '^source /openmrs/exclude-authentication-when-sso\.sh$' "$startup_script")" = 1 \
+    && sed -i '/^# Trigger first filter to start data import$/a source /openmrs/activate-oauth2login-if-needed.sh' \
+       "$startup_script" \
+    && grep -q '^source /openmrs/activate-oauth2login-if-needed\.sh$' "$startup_script" \
+    && test "$(grep -c '^source /openmrs/activate-oauth2login-if-needed\.sh$' "$startup_script")" = 1
+USER 1001
 
 # Upstream's referenceapplication-demo global-properties file also sets the
 # demo-patient trigger to 50. Our runtime-mounted patients.on/off.xml must be

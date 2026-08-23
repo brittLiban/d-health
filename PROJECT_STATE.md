@@ -201,6 +201,7 @@ present with **0 members** exactly as intended.
 | ✅ Done (evidence gathered) | **UI-005** (disposable Keycloak+OpenMRS+OpenELIS stack, no real facility SSO touched — OpenELIS ACS resolved: **APP-ORIGIN SUPPORTED**, full synthetic SAML round trip proven, conditional on a redirect-URI addition not made to the real client; OpenMRS OIDC found **STILL UNRESOLVED** — `/oauth2login` 404s (initial attribution to an `IllegalStateException` corrected by UI-006, see below); coordinated logout found **PARTIAL as implemented, but a working fix proven** — Keycloak's SSO session silently survives app-level logout alone (confirmed live), yet redirecting the browser to Keycloak's own end-session endpoint and completing its confirmation click genuinely closes it (also confirmed live) — not yet wired into the real logout action; no clinical write; `SSO_ENABLED` untouched) |
 | ✅ Done (precisely blocked) | **UI-006 / DH-008A** (root-caused OpenMRS OIDC's `/oauth2login` 404 to the actual mechanism — no servlet mapping covers the bare path, `OAuth2LoginRequestFilter`'s exclusion list creates a dead end, and `UserRedirectRequiredException` is never caught because `oauth2ClientContextFilter` is never wired into the request pipeline; corrected UI-005's `IllegalStateException` misattribution — that exception belongs to `legacyui`, is non-deterministic, and is unrelated; proved fresh-DB and initialized-DB configurations fail identically, ruling out a first-boot race; found a separate real gotcha where a module stopped once stays `started=false` in `global_property` across a later SSO-enable reboot; no upstream fix exists; a precise microscopic-patch design recorded for a follow-on ticket; no patch attempted, no clinical write, `SSO_ENABLED` untouched) |
 | ✅ Done (bridge proven; activation blocked) | **UI-007 / DH-008B** (built and proved UI-006's bridge filter: patched `oauth2login`, unmodified baseline vs. patched control, full synthetic OIDC round trip — `authenticated:true`, real `user`/`currentProvider`, no Basic Auth/admin/service-account fallback — restart and Keycloak-outage-fail-closed both proven; patch source + provenance committed under `openmrs-config/patches/oauth2login-bridge/`, **not** wired into the Dockerfile; found three new, separate blockers on real activation, each **Human Decision Required: Yes**: an `oauth2login`/`authentication`-module `AuthenticationScheme` bean collision with no config-level fix, break-glass local login lost entirely while `oauth2login` is active (the module's own designed behavior), and `oauth2login.started=false` does not self-heal when SSO is later re-enabled; one §14 negative control did not reproduce the expected failure and is recorded as unexplained rather than forced; no clinical write, `SSO_ENABLED` untouched, no production file modified) |
+| ✅ Done (SSO-off/on proven; §7/§8 deferred; §6 script's guards untested live) | **UI-008 / DH-008C** (wired the proven bridge patch into `openmrs-config/Dockerfile` reproducibly; resolved the `authentication`/`oauth2login` collision per this ticket's own decision — `authentication-2.3.0.omod` excluded when SSO is on, config-only, re-evaluated every boot; both SSO-off and SSO-on proven live on a real booted database — single `AuthenticationScheme` bean, no collision, break-glass correctly unavailable while `oauth2login` is active; solved `oauth2login.started=false` without SQL after a disproven first design — REST module-start updates the database but never restores live HTTP dispatch in place (measured 3×) — via `oauth2login.mandatory=true` (self-cleaning global property) plus the existing `restart: unless-stopped` policy, **mechanism proven live twice**, but verifying it against a fresh database surfaced two real defects in the script's checks (a status-code-only predicate that can't tell a genuine redirect from OpenMRS's own wizard-incomplete one, and activation attempted before first-time setup finishes — produced a real crash loop, `RestartCount` past 20) — both fixed with source-level reasoning and a clean build, **not re-verified live**; found and exonerated a genuine base-image/host first-boot install-duration issue (~50min+, reproduced identically on the pristine pre-ticket image); §7 break-glass mechanism and §8 full OIDC re-proof **not done this ticket** — scope cut, recorded as not-started, not as a finding; 700 tests unchanged) |
 
 ## ▶ START HERE (next session)
 
@@ -3294,6 +3295,221 @@ each other):**
 question 1 (the collision), a short follow-on ticket can wire the (already-proven) bridge patch into
 `openmrs-config/Dockerfile` and re-run this ticket's full proof against that decision. Questions 2
 and 3 can be decided independently and in either order.
+
+---
+
+### UI-008 / DH-008C · Wire the oauth2login patch into the image build + resolve the AuthenticationScheme collision · ✅ SSO-off and SSO-on proven; §7/§8 and the full restart/negative-control matrix deferred by ticket-permitted scope cut
+
+**Gate check.** Confirmed `8461d95` was not yet on `origin/master`, pushed it, watched CI run
+`32625830380` go green on all 6 jobs before starting any work, per this ticket's explicit
+precondition.
+
+**§1–§2 (collision audit, re-confirmed).** Re-verified UI-007's finding by reading every bundled
+omod's `config.xml` in the pinned O3 3.7.x backend (30 modules): `authentication-2.3.0` is the only
+other module (besides `fhir2`'s unrelated servlet filter) touching `AuthenticationScheme`. This
+ticket's own "human decisions already made" section had already settled question 1 from UI-007's
+handoff (exclude `authentication` when SSO is on, don't fork a second module) — implemented as
+`exclude-authentication-when-sso.sh`, sourced from `startup.sh` immediately after
+`startup-init.sh`'s unconditional `$OMRS_MODULES_DIR` repopulation (confirmed from that script's own
+source: it rewrites the modules directory from the read-only `distribution/` copy on **every** boot,
+so the exclusion has to re-run every boot too, not once at build time).
+
+**§3 (patch wired into the image, reproducibly).** `openmrs-config/Dockerfile` now clones
+`openmrs-module-oauth2login` at the exact pinned commit
+`2770233627343a53719ec981e997d94b1d90b7ad`, applies the Daher bridge patch via `git apply` (the
+`maven:3.9.11-eclipse-temurin-17` build image has no `patch` binary — confirmed, switched to `git
+apply` which is already needed for the clone step), and builds the module in a dedicated build
+stage before copying the artifact into `distribution/openmrs_modules/`. `config.xml.patch` is
+**byte-identical to UI-007's committed version** (bridge filter only; no `<mandatory>` element) —
+see the dead end below for why. Both `on` and `off` build targets build clean; `docker compose
+config -q` (default and `backup` profiles) and the demo compose file all parse clean with the
+changed Dockerfile.
+
+**Dead end, recorded so it is not retried: config.xml `<mandatory>true</mandatory>`.** Tried first,
+paired with bumping `configVersion` to `1.3` (below `1.3`, `ModuleFileParser.extractMandatory()`
+silently ignores the element regardless of content — confirmed from source). Built and deployed
+correctly once an XML-comment-legality bug in the same edit was fixed (a literal `--` inside a
+`<!-- -->` comment, the same class of bug UI-007 hit), but then threw
+`org.openmrs.module.ModuleException`'s sibling, `MandatoryModuleException: The oauth2login module is
+marked as 'mandatory' and so cannot be stopped or unloaded`, on every `SSO_ENABLED=false` boot.
+Cause: `ModuleFactory.stopModule()` refuses to stop/unload a module whose `Module.isMandatory()` is
+true (set from config.xml's `<mandatory>` element only) — and `OAuth2LoginActivator.willStart()`'s
+own designed behavior is to call exactly `stopModule()`+`unloadModule()` on itself whenever
+`oauth2.enabled=false`. Config.xml `<mandatory>` is therefore structurally incompatible with
+`oauth2login`'s self-disabling design; reverted to the UI-007 patch content byte-for-byte
+(`git show 8461d95:openmrs-config/patches/oauth2login-bridge/config.xml.patch`).
+
+**§5 (collision resolution) — both modes proven live, not just designed.** Built a disposable stack
+(`daher-ui008_internal` network, `mariadb-ui008`, `openmrs-ui008`) and, after the environmental
+finding below, reached a genuinely booted, fully-initialized database. On that database:
+- **SSO off:** `authentication-2.3.0.omod` present, `oauth2login` self-unloaded (its own activator's
+  designed behavior), exactly one `AuthenticationScheme` bean (`Context.setAuthenticationScheme`
+  logged the single-override line, never the "Multiple authentication schemes" error), admin Basic
+  Auth to `/ws/rest/v1/session` succeeded (`authenticated:true`, real admin user/roles).
+- **SSO on:** `authentication-2.3.0.omod` absent from `/openmrs/data/modules/` (confirmed by
+  directory listing, not inferred), `oauth2login-1.5.0.omod` present and started, `/oauth2login`
+  returned a `302` whose target host (`kc-ui008`) was never stood up this ticket — this evidences the
+  module active and the bridge filter genuinely wired into the dispatch chain, **not** a reachable
+  identity provider or a completed round trip; that proof is UI-007's, against this same patch
+  content — exactly one `AuthenticationScheme` bean (same single-override log line, no collision),
+  and admin Basic Auth to `/ws/rest/v1/session` returned HTTP 200 with `authenticated:false` in the
+  body — break-glass correctly unavailable while `oauth2login` is active, matching UI-007's finding
+  exactly (not a new regression, the module's own designed intent).
+
+**§6 (`oauth2login.started=false` fix) — working mechanism found after one design that measurably
+does not work.**
+- **First design, disproven 3-for-3:** call the supported `ModuleActionResource1_8` REST resource
+  (`POST /ws/rest/v1/moduleaction`, `action=START` — the same code path the admin UI's module
+  "Start" button uses) to start `oauth2login` in place. This reliably flips `oauth2login.started` to
+  `true` in the database every time it was tried (verified directly via `global_property` after each
+  attempt), but **never** made `/oauth2login` reachable within the same container lifecycle — tried
+  with a 5-minute wait after the call, then a 20-minute wait; both times the module's own triggered
+  Spring context refresh (`Refreshing Context`/`Done refreshing Context` in the log) completed in
+  single-digit seconds, and `/oauth2login` still 404'd for the entire remaining wait. This is not a
+  patience problem — a natural boot that starts with `oauth2login.started` already `true` reaches a
+  reachable `/oauth2login` in under 30 seconds, every time that was measured. Whatever the
+  REST-triggered, already-initialized-context module start does internally, it does not reach the
+  same end state as Tomcat's own boot-time module start. (An initial theory blaming a logged
+  `IllegalStateException: Filters cannot be added to context [/openmrs] as the context has been
+  initialised` was checked and **ruled out**: the same exception, from the same
+  `WebComponentRegistrar`/`refreshWAC` stack, also fires on boots that fully succeed — it is
+  unrelated to this failure and should not be cited as the cause.)
+  A real defect found in the process: `activate-oauth2login-if-needed.sh`'s original design killed
+  the container (via its own `exit 1` fail-loud path) three separate times **after** the database
+  update had already succeeded, because it was checking a condition (`/oauth2login` reachability)
+  that this REST-triggered start path can never satisfy — not because it wasn't patient enough;
+  extending the wait window from 5 to 20 minutes did not change the outcome. Any future automation
+  must not fail loudly on a check that can never pass by construction.
+- **Working design:** `ModuleFactory.getModulesThatShouldStart()` (confirmed from source) starts a
+  module if global property `<id>.started` is null/true, **or** if global property `<id>.mandatory`
+  is `"true"` — two independent conditions — while `ModuleFactory.stopModule()`'s
+  `MandatoryModuleException` guard checks only `Module.isMandatory()` (the config.xml-derived field,
+  untouched by the global property). Setting `oauth2login.mandatory=true` via the standard
+  `SystemSettingResource1_9` REST resource (`POST /ws/rest/v1/systemsetting` — the same
+  `GlobalProperty` write path the admin settings UI uses, no SQL) therefore makes the module always
+  attempt to start on the *next* boot without arming the guard that made the config.xml `<mandatory>`
+  approach dead. `activate-oauth2login-if-needed.sh` now sets this property when it detects
+  `oauth2login.started=false` with SSO on, then deliberately exits non-zero so
+  `openmrs-backend`'s already-existing `restart: unless-stopped` policy provides the next boot —
+  no new self-restart automation was added; the existing policy is reused for exactly the case it
+  exists for. **Proven live, twice**, forcing `oauth2login.started=false` as the test precondition
+  (a legitimate test setup per this ticket's own instructions — the SQL prohibition is on the fix,
+  not on constructing the failure state to test against): first boot detected the flag, set
+  `mandatory=true`, exited 1; Docker's restart policy relaunched the container exactly once
+  (`RestartCount: 1`); the second boot started `oauth2login` normally and `/oauth2login` was
+  reachable within ~40 seconds. The `mandatory` global property is **self-cleaning** — confirmed:
+  once the module successfully starts, `ModuleFactory.startModule()` itself overwrites
+  `<id>.mandatory` back to `Module.isMandatory()`'s real value (`false`, since config.xml carries no
+  `<mandatory>` element), so nothing lingers between SSO toggles.
+  **Precision on what's proven versus what's reasoned:** both live successes above ran against the
+  *pre-fix* script text — a status-code-only `302` check for "already active." Verifying the fix
+  against a fresh database (never having run `oauth2login` before) surfaced that the 302-only check
+  cannot distinguish oauth2login's real redirect from OpenMRS's own wizard-incomplete
+  `/initialsetup` redirect, which answers the identical path with the identical status code — and
+  that attempting activation before OpenMRS's own first-time install finishes fails the REST call
+  outright (the API isn't functional yet) and produced a genuine crash loop, `RestartCount` past 20
+  within a minute, before this was caught. Fixed with two guards: check the actual redirect target,
+  not just the status code, and gate the whole function on `/openmrs/data/openmrs-runtime.properties`
+  existing (its absence is the exact condition OpenMRS itself logs as "Initial setup is needed" — on
+  a database that has never started the module, there is no `started=false` to heal, so doing nothing
+  is correct, not just safe). A third guard was added defensively, not because it was triggered: if
+  `oauth2login.mandatory` is already `true` and the module still isn't active, stop restarting and
+  leave the container running degraded rather than loop unboundedly. **The mechanism (mandatory
+  property + one restart) is proven live, twice. The current script text, with these three guards, is
+  not** — committed on source-level reasoning plus a clean build/syntax check, not a fresh live boot,
+  given the time already spent this ticket on this one path. Recommended as the very first thing the
+  next session verifies.
+
+**§9 (restart matrix) — 2 of 8 cells proven, not the full matrix.** "Initialized DB, SSO off → SSO
+on" and "SSO on → clean restart → still works" were both exercised live as part of the §6 proof above
+(clean restart: `docker start` after a graceful in-container `kill -TERM 1`, `/oauth2login` reachable
+again within ~20 seconds, no re-activation needed). Fresh-DB-with-SSO-on-from-first-boot, the
+Keycloak-outage/recovery pair, and the break-glass transition cells were **not** run this ticket —
+see the scope cut below.
+
+**Environmental finding, not a regression: first boot is genuinely slow on this host, independent of
+any patch.** The first attempt to reach a working session took over 50 minutes on a fresh database
+before this ticket suspected an environmental cause rather than a bug. Diagnosed with `jstack`:
+Hibernate Search's Lucene backend runs 15-20 parallel worker threads committing the full-text index
+(`IndexWriter.commit()` → native `fsync()`), each accumulating only ~12s of real CPU time against
+20-30+ minutes of wall-clock elapsed — I/O-bound, not looping. **Isolated with a genuine control**:
+booted `daher-health/openmrs-backend:3.7-on` (the pristine, pre-UI-008 image, no oauth2login build
+stage, no Dockerfile changes from this ticket) on its own fresh database with identical env vars —
+it hit the **identical** stall, same thread pattern, same `IllegalStateException` log line, still not
+ready after 30 minutes, block I/O climbing steadily (not flat/wedged) the whole time. This exonerates
+every UI-006/007/008 change: the first-boot cost is a base-image/host characteristic on this
+disposable, shared, resource-contended host, not something introduced by the oauth2login work. A
+warm/pre-initialized database fixture would make future disposable-environment testing on this stack
+dramatically faster and is worth its own ticket if this kind of testing continues.
+
+**§4, §7, §8, §10, §11 — scope cut this ticket, not silently dropped:**
+- §4's specific "rebuild without the patch, reproduce the original failure" baseline was not re-run
+  standalone this ticket (UI-007 already proved it against this exact patch content); the pristine-
+  image control above serves the same isolating purpose for the install-duration finding instead.
+- §7 (break-glass operator procedure) was **not designed or implemented**. The ticket's own
+  "human decisions already made" section already settled the *semantics* (normal=SSO-only,
+  Keycloak-outage=fail-closed, break-glass=explicit operator action only, never automatic); what
+  remains is the concrete mechanism, which is genuine scope on its own and was cut in favor of
+  finishing §5/§6 with real evidence rather than leaving everything half-proven. Recorded as
+  **not started**, not as a finding.
+- §8 (full synthetic OIDC round trip against this integrated image) was **not re-run** — no
+  disposable Keycloak container was stood up this ticket. UI-007 already proved this exact patch
+  content end-to-end (synthetic user, correct provider, no Basic Auth/service-account fallback); §5's
+  proof above establishes the collision-resolved image reaches a genuine `302` toward the identity
+  provider, which is as far as this ticket verified without Keycloak running.
+- §10 honored: no real facility SSO activated, no staff added, no clinical write, no OpenELIS wiring,
+  no Daher logout UI, no clinical form touched.
+- §11 negative controls run implicitly by the work above (unauthenticated/wrong-credential REST
+  denied, collision-restored-equivalent already covered by the SSO-off mode proof, activation
+  intentionally left `started=false` and confirmed to correctly fail the reachability check before
+  the fix) but the explicit wrong-Keycloak-secret and Keycloak-unavailable-after-being-up controls
+  were **not** run (no Keycloak container this ticket).
+
+**Disposable environment.** `daher-ui008_internal` network, `mariadb-ui008`, `openmrs-ui008`, plus a
+short-lived `openmrs-ui008-control`/`mariadb-ui008-control` pair for the pristine-image isolation
+test. All containers, volumes, and the network were removed by the end of this ticket using the
+established `docker exec <name> bash -c "kill -TERM 1"` → wait-for-exited → `docker rm` technique
+(one container needed `docker update --restart=no` first — it had been started with `--restart
+unless-stopped` for the §6 proof and kept auto-relaunching faster than the teardown loop's poll
+interval could observe an "exited" state). Confirmed clean: no `ui008`-named containers, volumes, or
+networks remain; the live `daher-health-*` stack (twelve containers) was not touched. Two pre-existing,
+unrelated issues observed and left alone per "one ticket at a time": `daher-health-adapter-1` is
+crash-looping (`Restarting (255)`), and two unexplained, unkillable auto-named containers
+(`wizardly_lichterman`, `sad_pasteur`) remain on the host from outside this session's own work —
+daemon-level `docker kill`/`rm -f` is blocked in this sandbox for them, the same restriction pattern
+noted in UI-006/UI-007.
+
+**Full local suite run** (Python 3.13 containers, matching UI-007's approach since the host's Python
+3.14 has no `pydantic-core` wheel): adapter 94, provisioning 549, seed 16, form-safety 19, ui 22 =
+**700 total, unchanged from UI-007** — no application code was touched this ticket, only
+`openmrs-config/Dockerfile` and two new shell scripts. `ruff`/`oxlint`/`tsc`/`vitest`/`npm run build`
+all clean. `docker compose config -q` (default + `backup` profiles) and the demo compose file all
+parse clean.
+
+**Committed this ticket:** `openmrs-config/Dockerfile` (oauth2login build stage, both `sed`
+insertions into `startup.sh`), `openmrs-config/exclude-authentication-when-sso.sh` (new),
+`openmrs-config/activate-oauth2login-if-needed.sh` (new). This entry and the matching `DECISIONS.md`
+update if warranted. `config.xml.patch` unchanged from UI-007 (byte-identical, confirmed). No
+production Caddyfile, compose file, realm config, or `configure-sso.sh` was modified. `SSO_ENABLED`
+untouched on the live stack; no real facility SSO activated; no clinical write.
+
+**Human decisions still required:**
+1. Break-glass operator procedure (§7) — semantics already decided by this ticket's own instructions,
+   concrete mechanism not yet designed.
+2. Whether/when to actually flip `SSO_ENABLED=true` on the live stack — this ticket proves the
+   mechanism works in a disposable environment; activation on the real facility stack remains a
+   separate decision gated on staff-name mapping (BLOCKER-5) per DH-008's existing entry.
+
+**Recommended next ticket:** first, one fresh-DB `SSO_ENABLED=true` boot from a genuinely empty
+database against the current `activate-oauth2login-if-needed.sh` (three guards, never live-tested
+together) to close that gap before anything else — this is cheap relative to everything else queued
+and the current script text has not earned the same confidence as the mechanism it implements. Then
+stand up a disposable Keycloak container and re-run §8's full round trip plus the remaining §9
+restart-matrix cells (Keycloak outage/recovery, break-glass transition) against this now-integrated
+image, then design §7's break-glass mechanism as its own scoped piece of work. Also worth its own
+ticket, lower priority: a warm/pre-initialized database fixture for this stack's disposable-environment
+tests, given the ~50-minute-plus first-boot cost measured (and exonerated as environmental, not a
+regression) this ticket.
 
 ---
 
