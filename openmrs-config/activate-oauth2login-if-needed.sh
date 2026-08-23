@@ -32,20 +32,43 @@
 # ModuleFactory.getModulesThatShouldStart() (openmrs-core 2.8.7) starts a
 # module if global property "<id>.started" is null/true, OR global property
 # "<id>.mandatory" is "true", OR Module.isMandatory() is true -- three
-# independent conditions. Module.isMandatory() (set only from config.xml,
-# unset in this repo's patch) is the one that arms
-# ModuleFactory.stopModule()'s MandatoryModuleException guard (measured
-# directly in this ticket: setting config.xml's <mandatory> element made
-# OAuth2LoginActivator.willStart()'s own self-unload-when-SSO-off throw that
-# exception at boot -- reverted, recorded in PROJECT_STATE.md). The
-# "<id>.mandatory" *global property* is a separate, independent input to the
-# same OR and does not touch Module.isMandatory() or that guard at all -- so
-# setting it via the standard SystemSettingResource1_9 REST resource
-# (POST /ws/rest/v1/systemsetting, the same GlobalProperty write the admin
-# settings UI performs) makes oauth2login always attempt to start on every
-# future boot, while leaving OAuth2LoginActivator.willStart()'s own
-# oauth2.enabled check free to immediately self-stop+unload it when SSO is
-# off, exactly as before.
+# independent conditions.
+#
+# UI-009 (DH-008D) found, the hard way, that the "<id>.mandatory" global
+# property is NOT the safe choice among those three: it is read again, fresh,
+# by a *separate* enforcement point than the one UI-008 checked.
+# ModuleFactory.stopModule()'s guard (the one UI-008 measured, tied to
+# Module.isMandatory() from config.xml) is not the only consumer --
+# ModuleUtil.checkMandatoryModulesStarted() (openmrs-core 2.8.7,
+# ModuleUtil.java:965), called from Context.startup() during every single
+# boot regardless of how a module got marked, rereads *every*
+# "<id>.mandatory" global property and throws a fatal
+# MandatoryModuleException -- aborting the entire OpenMRS webapp, not just the
+# one module -- if any module named there is not in the started-modules map
+# by that point in boot. Measured directly this ticket: setting
+# oauth2login.mandatory=true correctly triggered oauth2login to attempt to
+# start on the next boot (ModuleFactory.java:707 resets it back to
+# module.isMandatory()=false once that module actually starts) -- but if that
+# property is still "true" going into a boot where SSO is off (so
+# OAuth2LoginActivator.willStart() deliberately self-unloads, exactly as
+# designed), checkMandatoryModulesStarted() sees "marked mandatory, not
+# started" and fatally aborts. This is worse than a restart loop: Tomcat's own
+# process stays up (so `restart: unless-stopped` never even fires) while the
+# openmrs.war webapp itself is permanently dead, and my own activation script
+# never gets a chance to run because the vendor's own pre-activation
+# readiness wait blocks on a webapp that will never come up. Confirmed live
+# against the real (uncorrupted) oauth2login module on an SSO-off boot of an
+# otherwise-healthy database.
+#
+# The "<id>.started" global property drives the exact same
+# getModulesThatShouldStart() OR-condition and is read by NEITHER
+# ModuleFactory.stopModule()'s guard NOR checkMandatoryModulesStarted() (both
+# key strictly on ".mandatory" / Module.isMandatory(), never on ".started") --
+# so setting oauth2login.started=true instead gets the identical
+# next-boot-eligibility effect this script needs, without ever arming either
+# fatal check. This is the same standard SystemSettingResource1_9 REST
+# resource (POST /ws/rest/v1/systemsetting, the same GlobalProperty write the
+# admin settings UI performs), just a different property name.
 #
 # Once set, this property is durable: the next boot's
 # getModulesThatShouldStart() includes oauth2login unconditionally, so this
@@ -72,12 +95,25 @@
 #    added. Gate on the runtime-properties file existing -- its absence is
 #    the exact condition OpenMRS itself logs as "Initial setup is needed."
 #
-# 2. If oauth2login.mandatory is already "true" when this script runs, a
+# 2. If oauth2login.started is already "true" when this script runs, a
 #    previous boot already did its job and something else is preventing
 #    activation -- exiting 1 again would restart-loop forever rather than
 #    the intended single corrective restart. Detect that and fail loud
 #    without exiting, leaving a running-but-degraded container instead of an
 #    unbounded loop.
+#
+# 3. "/oauth2login answers with something other than 000" is not the same
+#    condition as "OpenMRS's REST API is ready to serve authenticated
+#    systemsetting calls." A module that can never load at all (measured this
+#    ticket with a deliberately corrupted omod, as a negative control for
+#    guard 2 above) answers /oauth2login with a real 404 almost immediately
+#    after Tomcat deploys the WAR -- long before the Spring context and REST
+#    layer finish initializing -- so the systemsetting GET/POST below fired
+#    against an API that wasn't serving yet and got empty responses,
+#    triggering the same fail-loud exit this whole file exists to avoid.
+#    Gate on /ws/rest/v1/session returning 200 -- the same readiness signal
+#    used everywhere else this ticket and by the compose healthcheck -- before
+#    ever calling systemsetting.
 
 daher_activate_oauth2login() {
     if [ "${SSO_ENABLED:-false}" != "true" ]; then
@@ -123,26 +159,41 @@ daher_activate_oauth2login() {
         return 0
     fi
 
-    daher_current_mandatory=$(curl -s -u "admin:${OMRS_ADMIN_USER_PASSWORD}" \
-        "http://localhost:8080/${OMRS_WEBAPP_NAME}/ws/rest/v1/systemsetting/oauth2login.mandatory" 2>/dev/null) || true
-    if echo "$daher_current_mandatory" | grep -q '"value":"true"'; then
-        echo "FATAL: oauth2login.mandatory is already true from a previous boot and oauth2login is still not active -- restarting again would loop without fixing anything. Leaving this container running in a degraded state (SSO enabled, oauth2login not reachable) rather than crash-looping. This needs investigation, not another restart." >&2
+    daher_session_status() {
+        curl -s -m 10 -o /dev/null -w '%{http_code}' "http://localhost:8080/${OMRS_WEBAPP_NAME}/ws/rest/v1/session" || true
+    }
+
+    echo "oauth2login is not active; waiting for the REST API itself to be ready before touching systemsetting..."
+    daher_attempt=0
+    while [ "$(daher_session_status)" != "200" ]; do
+        daher_attempt=$((daher_attempt + 1))
+        if [ "$daher_attempt" -ge 120 ]; then
+            echo "FATAL: /ws/rest/v1/session never returned 200; cannot safely attempt activation" >&2
+            exit 1
+        fi
+        sleep 5
+    done
+
+    daher_current_started=$(curl -s -u "admin:${OMRS_ADMIN_USER_PASSWORD}" \
+        "http://localhost:8080/${OMRS_WEBAPP_NAME}/ws/rest/v1/systemsetting/oauth2login.started" 2>/dev/null) || true
+    if echo "$daher_current_started" | grep -q '"value":"true"'; then
+        echo "FATAL: oauth2login.started is already true from a previous boot and oauth2login is still not active -- restarting again would loop without fixing anything. Leaving this container running in a degraded state (SSO enabled, oauth2login not reachable) rather than crash-looping. This needs investigation, not another restart." >&2
         return 0
     fi
 
     echo "oauth2login did not self-activate (see PROJECT_STATE.md's UI-006/UI-008 oauth2login.started=false finding). Marking it always-eligible-to-start via the supported systemsetting REST resource, then failing loudly so the platform's restart policy gives it a fresh boot -- in-place REST module-start was measured this ticket to update the database but never restore actual HTTP dispatch within the same container lifecycle."
-    daher_mandatory_response=$(curl -s -u "admin:${OMRS_ADMIN_USER_PASSWORD}" \
+    daher_started_response=$(curl -s -u "admin:${OMRS_ADMIN_USER_PASSWORD}" \
         -H "Content-Type: application/json" \
         -X POST \
-        -d '{"property":"oauth2login.mandatory","value":"true"}' \
+        -d '{"property":"oauth2login.started","value":"true"}' \
         "http://localhost:8080/${OMRS_WEBAPP_NAME}/ws/rest/v1/systemsetting") || true
 
-    if ! echo "$daher_mandatory_response" | grep -q '"value":"true"'; then
-        echo "FATAL: could not set oauth2login.mandatory=true via the supported systemsetting REST operation. Response was: ${daher_mandatory_response}" >&2
+    if ! echo "$daher_started_response" | grep -q '"value":"true"'; then
+        echo "FATAL: could not set oauth2login.started=true via the supported systemsetting REST operation. Response was: ${daher_started_response}" >&2
         exit 1
     fi
 
-    echo "FATAL: oauth2login.started was false this boot; it is now marked mandatory for the next boot and this container must restart for it to take effect. Exiting non-zero so the platform's restart policy (openmrs-backend: restart: unless-stopped) provides that boot." >&2
+    echo "FATAL: oauth2login.started was false this boot; it is now marked started for the next boot and this container must restart for it to take effect. Exiting non-zero so the platform's restart policy (openmrs-backend: restart: unless-stopped) provides that boot." >&2
     exit 1
 }
 

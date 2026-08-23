@@ -194,10 +194,30 @@ services:
     # tolerates ~60 minutes before the container is called unhealthy. Deliberately generous:
     # nothing restarts on unhealthy, so the cost of being too tight is a misleading red
     # status that invites someone to "fix" a working system mid-import.
+    # UI-009/DH-008D: the REST session endpoint above returns 200 whether or not anyone can
+    # actually log in -- {"authenticated":false} is itself a 200. Measured directly this
+    # ticket: a database where oauth2login never activates (SSO_ENABLED=true but the module
+    # can't start) still answers /ws/rest/v1/session with 200, so the healthcheck above alone
+    # goes green in a state where staff cannot authenticate at all -- a false-green facility
+    # status. Gated strictly on SSO_ENABLED so this is a no-op in the live stack's current
+    # SSO-off mode: when SSO is on, also require /oauth2login to redirect toward the
+    # configured identity provider rather than OpenMRS's own setup wizard (the same
+    # redirect-target check activate-oauth2login-if-needed.sh uses). This is local
+    # configured-auth-path readiness, not Keycloak reachability -- constructing that redirect
+    # never contacts the identity provider (measured this ticket with the identity provider
+    # host absent entirely), so this does not turn container health into a dependency on an
+    # external service staying continuously online.
     healthcheck:
       test:
         - CMD-SHELL
-        - test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/openmrs/ws/rest/v1/session)" = "200"
+        - |
+          test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/openmrs/ws/rest/v1/session)" = "200" || exit 1
+          if [ "$$SSO_ENABLED" = "true" ]; then
+            loc=$$(curl -s -o /dev/null -w '%{redirect_url}' http://localhost:8080/openmrs/oauth2login)
+            case "$$loc" in
+              *initialsetup*|"") exit 1 ;;
+            esac
+          fi
       interval: 30s
       timeout: 10s
       retries: 60
