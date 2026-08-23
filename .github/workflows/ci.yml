@@ -45,6 +45,20 @@ jobs:
   adapter:
     name: adapter — ruff + pytest
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: adapter
+          POSTGRES_PASSWORD: adapter
+          POSTGRES_DB: adapter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U adapter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -65,6 +79,43 @@ jobs:
         # PYTHONPATH mirrors the image's ENV PYTHONPATH=/app/src.
         run: PYTHONPATH=src python -m pytest -q
         working-directory: adapter
+      - name: Migration history reaches head on a fresh database
+        # DAHER (adapter live-recovery ticket): a stale runtime image bound to an
+        # older container silently regressed to a database revision Alembic's own
+        # history no longer recognised ("Can't locate revision identified by
+        # '0002_watermarks'") -- reproduced live in production. Filename-scanning
+        # alone would not have caught it (the file was always present in source);
+        # what actually failed was applying the real migration chain against a
+        # real database from a real build.
+        #
+        # Comparing `alembic current` against `alembic heads` alone is NOT
+        # sufficient and was control-tested to prove that: with 0002_watermarks.py
+        # deleted, a fresh database upgrades cleanly to 0001_safety_ledger, and
+        # "heads" -- computed from that same reduced file set -- also reports
+        # 0001_safety_ledger, so current == heads holds despite the migration
+        # being silently lost. EXPECTED_HEAD is therefore a literal, hand-updated
+        # constant naming the specific revision this repository's history is
+        # currently known to require -- bump it deliberately whenever a new
+        # migration is added, the same way the seed/form-safety count floors
+        # elsewhere in this file are maintained by hand.
+        env:
+          ADAPTER_DB_HOST: localhost
+          ADAPTER_DB_PORT: 5432
+          ADAPTER_DB_USER: adapter
+          ADAPTER_DB_PASSWORD: adapter
+          ADAPTER_DB_NAME: adapter
+          EXPECTED_HEAD: 0002_watermarks
+        working-directory: adapter
+        run: |
+          alembic upgrade head
+          current=$(alembic current | awk '{print $1}')
+          heads=$(alembic heads | awk '{print $1}')
+          echo "alembic current: ${current}"
+          echo "alembic heads:   ${heads}"
+          echo "expected head:   ${EXPECTED_HEAD}"
+          test -n "$current" || { echo "::error::alembic current produced no revision"; exit 1; }
+          test "$current" = "$heads" || { echo "::error::current ($current) does not match heads ($heads)"; exit 1; }
+          test "$current" = "$EXPECTED_HEAD" || { echo "::error::migration history reached ${current}, not the expected ${EXPECTED_HEAD} -- a migration file is likely missing from this build"; exit 1; }
 
   provisioning:
     name: provisioning — ruff + pytest
