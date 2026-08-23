@@ -198,7 +198,8 @@ present with **0 members** exactly as intended.
 | ✅ Done (first frontend) | **UI-002** (`ui/` — Vite + React + TypeScript app shell, small design system, functional read-only patient search against the pinned stack via a dev-only proxy that never exposes the OpenMRS credential to the browser; no clinical write; no SSO; 21 tests passing, real container build verified) |
 | ✅ Done (architecture decided) | **UI-003** (production identity — ADR-027: no BFF in V1, browser holds real OpenMRS/OpenELIS sessions directly, same-origin under a future `app.$BASE_DOMAIN` proxying each backend's API prefix; a read-only service-account BFF was considered and explicitly rejected; coordinated logout across Keycloak/OpenMRS/OpenELIS recorded as an open gap; live end-to-end proof stays UNRESOLVED pending BLOCKER-5) |
 | ✅ Done (foundation built) | **UI-004** (`app.$BASE_DOMAIN` real and verified live — `/openmrs/*` same-origin, OpenMRS session cookie hardened `Secure`+`SameSite=Lax` on that route only, a real Caddy-level CSRF guard control-tested with 5 deliberate breaks, `openmrs` Keycloak client reconciliation extended idempotently; OpenELIS's SAML ACS derivation stays `UNRESOLVED` so it is not mounted; no clinical write; `SSO_ENABLED` untouched) |
-| ✅ Done (evidence gathered) | **UI-005** (disposable Keycloak+OpenMRS+OpenELIS stack, no real facility SSO touched — OpenELIS ACS resolved: **APP-ORIGIN SUPPORTED**, full synthetic SAML round trip proven, conditional on a redirect-URI addition not made to the real client; OpenMRS OIDC found **STILL UNRESOLVED** — `/oauth2login` 404s, exact `IllegalStateException` blocker identified in the module's filter registration; coordinated logout found **PARTIAL as implemented, but a working fix proven** — Keycloak's SSO session silently survives app-level logout alone (confirmed live), yet redirecting the browser to Keycloak's own end-session endpoint and completing its confirmation click genuinely closes it (also confirmed live) — not yet wired into the real logout action; no clinical write; `SSO_ENABLED` untouched) |
+| ✅ Done (evidence gathered) | **UI-005** (disposable Keycloak+OpenMRS+OpenELIS stack, no real facility SSO touched — OpenELIS ACS resolved: **APP-ORIGIN SUPPORTED**, full synthetic SAML round trip proven, conditional on a redirect-URI addition not made to the real client; OpenMRS OIDC found **STILL UNRESOLVED** — `/oauth2login` 404s (initial attribution to an `IllegalStateException` corrected by UI-006, see below); coordinated logout found **PARTIAL as implemented, but a working fix proven** — Keycloak's SSO session silently survives app-level logout alone (confirmed live), yet redirecting the browser to Keycloak's own end-session endpoint and completing its confirmation click genuinely closes it (also confirmed live) — not yet wired into the real logout action; no clinical write; `SSO_ENABLED` untouched) |
+| ✅ Done (precisely blocked) | **UI-006 / DH-008A** (root-caused OpenMRS OIDC's `/oauth2login` 404 to the actual mechanism — no servlet mapping covers the bare path, `OAuth2LoginRequestFilter`'s exclusion list creates a dead end, and `UserRedirectRequiredException` is never caught because `oauth2ClientContextFilter` is never wired into the request pipeline; corrected UI-005's `IllegalStateException` misattribution — that exception belongs to `legacyui`, is non-deterministic, and is unrelated; proved fresh-DB and initialized-DB configurations fail identically, ruling out a first-boot race; found a separate real gotcha where a module stopped once stays `started=false` in `global_property` across a later SSO-enable reboot; no upstream fix exists; a precise microscopic-patch design recorded for a follow-on ticket; no patch attempted, no clinical write, `SSO_ENABLED` untouched) |
 
 ## ▶ START HERE (next session)
 
@@ -2928,6 +2929,159 @@ on the OpenMRS `oauth2login` filter-registration failure — whether enabling SS
 already-initialized database (rather than a fresh one) avoids the registration race — which would
 unblock OpenMRS OIDC directly and let coordinated logout become silent (no click) via a real
 `id_token_hint`. (a) is smaller and delivers real security value without waiting on (b).
+
+### UI-006 / DH-008A · Resolve the OpenMRS OIDC activation blocker · ✅ DONE 2026-08-23 (precisely blocked; root cause fully diagnosed; no patch attempted this ticket)
+
+**Why now.** UI-005 named `/oauth2login` returning 404 as OpenMRS OIDC's blocker, but only ran one
+configuration (fresh DB, SSO on from first boot) and attributed the cause to an exception that this
+ticket shows was a red herring. Re-audited first: neither DH-011's site code nor DH-017/DH-027J's
+fresh VM had cleared. Test counts re-measured, not copied: adapter 94, provisioning 549, seed 16,
+form-safety 19, ui 22 = **700 total**, unchanged (no code committed this ticket).
+
+**Versions, measured directly on the disposable stack:** OpenMRS platform `2.8.7`
+(`openmrs-api-2.8.7.jar`/`openmrs-web-2.8.7.jar`), Tomcat `9.0.120`, `oauth2login` `1.5.0`. Core web
+app runs Spring `5.3.30`; `oauth2login`'s own bundled libs (`.openmrs-lib-cache/oauth2login/lib/`)
+carry Spring Security `3.2.10.RELEASE` and `spring-security-oauth2 2.3.5.RELEASE` — a 2014-era
+generation, unrelated to and much older than OpenMRS core's own Spring version. Confirmed via GitHub:
+`1.5.0` is the latest tag; `master` is only 3 commits ahead of it and all three are CI/release
+tooling, not a fix.
+
+**FRESH-DB RESULT (Case A, reusing UI-005's still-running `openmrs-disposable`):**
+`OAuth2LoginRequestFilter` correctly redirects unauthenticated browser requests to `/oauth2login`.
+`/oauth2login` itself: `404`, Tomcat's own generic page — the request never reaches Spring.
+
+**INITIALIZED-DB RESULT (Case B, new disposable instance, own volumes
+`daher-ui006_openmrs-db-data`/`daher-ui006_openmrs-data`):** initialized OpenMRS completely with
+`SSO_ENABLED=false` (`openmrs-ui006-a`), shut it down cleanly via an in-container `bash -c "kill -TERM
+1"` (the daemon-level `docker stop`/`kill`/`restart` block UI-004/UI-005 documented is a daemon-API
+restriction — a signal sent by a process inside the container's own PID namespace via `docker exec`
+is unaffected, confirmed by watching the container exit with code 143 and `docker rm` succeeding
+immediately afterward), then started a second container (`openmrs-ui006-b`) against the same,
+already-initialized volumes with `SSO_ENABLED=true`. Same result: `/oauth2login` → `404`. **This
+answers the ticket's load-bearing question directly: it is not a first-boot lifecycle race.** Both
+configurations fail identically.
+
+**A genuine, separate Case-B-only finding, not the main blocker but real:** `oauth2login` never even
+attempted to start on the Case B boot — absent from `.openmrs-lib-cache/`, and the admin module list
+showed **"OAuth 2.0 Login [Not Started]"**. Confirmed by direct SQL against `mariadb-ui006`:
+`global_property` holds `oauth2login.started = false`. `OAuth2LoginActivator.willStart()` (read from
+the pinned upstream source) checks `oauth2.enabled` on every boot and, when false, calls
+`ModuleFactory.unloadModule()` on itself during Stage 1's `SSO_ENABLED=false` boot — read
+`ModuleFactory.java`'s source directly to confirm which write path sets the flag rather than
+asserting it: `stopModule(Module, boolean, boolean)` is what writes `<moduleId>.started` to the
+`global_property` table (`ModuleFactory.java:1066`), and it is called both from `unloadModule` and
+from OpenMRS's own graceful-shutdown path (`Listener.contextDestroyed` → `WebModuleUtil.shutdownModules`).
+Which of those two call sites actually wrote the `false` value observed here was not traced further
+— both are plausible and either way the practical fact stands: flipping the env var back to `true`
+and rebooting does not clear a persisted `started=false`; nothing in the boot path re-evaluates it
+upward. A real activation runbook that goes "deploy with SSO off, then turn it on later" must also
+reset this flag (via the admin module UI's "Start" action, which is CSRFGuard-protected — attempted,
+blocked on token extraction from a script, not pursued further since
+Case A's evidence already answers the ticket's core question independent of this).
+
+**ROOT CAUSE — measured, not inferred, three-part chain:**
+1. **`/oauth2login` (bare, no extension) has no servlet mapping.** OpenMRS's `openmrs`
+   `DispatcherServlet` is mapped in the deployed `web.xml` only by file extension
+   (`.htm`/`.form`/`.list`/`.json`/`.field`/`.portlet`/`.page`/`.action` — added dynamically by
+   `legacyui`'s `WebComponentRegistrar`, extracted and decompiled directly from
+   `legacyui-2.1.0.omod`, confirmed to be `legacyui`'s own class, not OpenMRS core's) plus a static
+   `/ws/*` prefix. Nothing maps the exact literal path `/oauth2login`.
+2. **`OAuth2LoginRequestFilter`'s own exclusion list creates a dead end.** Its `servletPaths` init-param
+   (`/oauth2login,/oauth2logout`) matches on `HttpServletRequest.getServletPath()`, which equals that
+   literal string only when a request hits an *exact* servlet mapping — one that doesn't exist. Every
+   extension-suffixed alias that *does* reach a real mapping (measured: `.htm`, `.form`, `.list`,
+   `.json` all return `302` back to bare `/oauth2login`) gets caught by this same filter and bounced
+   right back to the one path nothing serves.
+3. **Even reaching the controller produces an uncaught exception, not a redirect.** `/ws/oauth2login`
+   uses the one real prefix mapping (`/ws/*`); Spring matches its `pathInfo` against
+   `OAuth2LoginController`'s `@RequestMapping("/oauth2login")` (confirmed by reading the controller's
+   pinned source, commit `2770233627343a53719ec981e997d94b1d90b7ad`) and the handler genuinely runs.
+   It calls `restTemplate.getForObject(userInfoUri, ...)` via a Spring Security OAuth2 1.x
+   `OAuth2RestOperations`, which — with no access token yet — throws
+   `org.springframework.security.oauth2.client.resource.UserRedirectRequiredException` **by design**,
+   expecting `oauth2ClientContextFilter` to catch it and issue the real redirect to Keycloak's
+   authorization endpoint. Measured directly (authenticated, to bypass step 2's redirect loop): a raw
+   Tomcat `500` with that exact exception name in the stack trace, not a `302`. `oauth2ClientContextFilter`
+   is declared *only* inside `webModuleApplicationContext.xml`'s Spring Security `<security:http>`
+   block — plain Spring beans, never wired into OpenMRS's real request pipeline by anything in
+   `config.xml` (the one mechanism proven, via `OAuth2LoginRequestFilter` itself, to reliably register
+   a module filter). The module's own designed OAuth2 flow fires correctly; the one piece that would
+   turn it into an actual browser redirect is simply never invoked.
+
+**Corrects UI-005:** the `IllegalStateException: Filters cannot be added...` UI-005 named as the
+cause is unrelated — it belongs to `legacyui`'s own filter registration (not `oauth2login`'s),
+reproduced here with `SSO_ENABLED=false`, and is non-deterministic even holding configuration
+constant (present on one boot, absent on an otherwise-identical restart). UI-005's claim that its
+absence from the live stack's logs proved SSO-specificity was also checked directly this ticket and
+found wrong for a different reason: the live `openmrs-backend` log was not rotated (it starts at
+`Initiating OpenMRS startup`, the genuine first line) — the exception is just genuinely, if
+inconsistently, absent there, consistent with it being an unrelated flaky race rather than tied to
+SSO at all. See `DECISIONS.md`'s UI-006 correction note, appended to (not replacing) UI-005's original
+text.
+
+**CHOSEN FIX: none attempted this ticket — Outcome B, precisely blocked, by design.** Fix hierarchy
+checked in order: (1) configuration/deployment-order, no fork — ruled out empirically (Case A and
+Case B fail identically; no boot ordering fixes a URL that no servlet mapping and no wired filter
+ever reaches). (2) verified compatible upstream release — ruled out (no newer tag exists; `master`
+has no relevant fix). (3) minimal source patch — the only remaining tier, and now precisely
+scoped rather than vague: a new `config.xml`-declared `Filter` (the one proven-working module
+extension mechanism) whose `doFilter()` matches the two literal paths `/oauth2login`/`/oauth2logout`
+by string comparison (not relying on servlet-container URL-pattern matching at all, sidestepping
+finding #1 and #2 above), and internally forwards the request to `/ws/oauth2login` — the one mapping
+already measured to correctly reach `OAuth2LoginController` — while wrapping that forward in the
+same `UserRedirectRequiredException`-to-redirect translation `oauth2ClientContextFilter` already
+implements (reusing that bean from the module's own Spring context, not reimplementing OAuth2
+redirect logic from scratch). This is intended to be a routing bridge between two pieces that
+OpenMRS's own module packaging never connected, not a rewrite of authentication — but one premise is
+untested and the follow-on ticket must confirm it first: the `/ws/oauth2login` → controller hop was
+only measured **authenticated** (as the local admin, to bypass `OAuth2LoginRequestFilter`'s
+redirect). The case this fix exists for is an *unauthenticated* user starting a login — whether the
+forward still reaches the handler correctly for that user, and whether OpenMRS's module filter chain
+re-applies on a servlet-level `FORWARD` dispatch the same way it does on the original request, is not
+yet known. Not built this ticket: it requires confirming that premise, a Maven build from the pinned
+upstream commit, a new pinned `.omod` artifact, and a full round-trip proof through Keycloak before
+it could be called done, and the ticket's own §16 is explicit that a partial attempt without that
+proof is not Outcome A. That is deliberately left for a dedicated follow-on ticket rather than rushed
+here.
+
+**Not exercised:** the module-patch build itself; the full OIDC round-trip proof (blocked on the
+patch); restart/Keycloak-unavailable-during-boot behavior (blocked on OIDC working at all);
+provider-identity mapping (blocked likewise). No clinical write was made or enabled. No production
+config changed — `caddy/Caddyfile`, `docker-compose.yml`, `keycloak/realm-config/daher-realm.json`,
+`openmrs-config/configure-sso.sh` all byte-for-byte unchanged.
+
+**Disposable environment:** reused UI-005's still-running `kc-disposable` (same synthetic realm/user)
+and `openmrs-disposable`. Added, on the same `daher-ui005_internal` network: `mariadb-ui006`,
+`openmrs-ui006-a` (Case B stage 1), `openmrs-ui006-b` (Case B stage 2) — plus dedicated volumes
+`daher-ui006_openmrs-db-data`/`daher-ui006_openmrs-data`. All three UI-006 containers and both
+volumes were cleanly stopped and removed by the end of this ticket, using the same technique
+`openmrs-ui006-a`'s own mid-ticket shutdown proved: `docker exec <name> bash -c "kill -TERM 1"`
+(an in-container signal delivered inside the container's own PID namespace, not the daemon-level
+`stop`/`kill`/`restart` API this sandbox denies), wait for `docker inspect --format
+'{{.State.Status}}'` to report `exited`, then a plain `docker rm`. This works because the
+restriction UI-004/UI-005 documented is on the Docker *daemon's* stop/kill/restart verbs
+specifically — it does not reach a signal one process sends another inside the same container.
+`docker rm -f` on a still-running container remains blocked (confirmed again in UI-005); the
+technique above is the one that actually works, and it is what future tickets should use instead of
+assuming disposable containers can never be torn down.
+
+**UI-005's leftover disposable resources, cleaned up as part of this ticket:** `kc-disposable`,
+`mariadb-disposable`, `openmrs-disposable`, `openelis-db-disposable`, `openelis-webapp-disposable`,
+the `daher-ui005_internal` network, and its two OpenELIS volumes were all removed using the same
+proven method, since UI-005 had left them running with no working teardown path documented at the
+time. Confirmed clean afterward: no `disposable`/`ui00`-named containers remain, the network is
+gone, and the live `daher-health-*` stack (12 containers) is untouched and was not queried for its
+own state beyond that count.
+
+**Human decisions required:** none new. BLOCKER-5 remains the gate on activation.
+
+**Recommended next ticket:** build and prove the microscopic bridging filter described above —
+Maven build from `openmrs-module-oauth2login` commit `2770233627343a53719ec981e997d94b1d90b7ad` with
+one new `Filter` class and one `config.xml` addition, produce a pinned `.omod`, and run the exact
+full-round-trip proof this ticket's §8 specifies against the same disposable Keycloak already
+carrying a working synthetic `openmrs` OIDC client. Independently, UI-005's coordinated-logout
+follow-on (wiring the proven Keycloak end-session redirect into the real logout action) remains
+available and does not depend on this fix landing first.
 
 ---
 

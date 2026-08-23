@@ -1476,6 +1476,54 @@ race — that variable was not exercised and is not assumed either way. Per §13
 as the exact blocker rather than worked around; patching module wiring to force the chain in would
 be exactly the "fight the SAML/OAuth2 implementation" this ADR's process forbids.
 
+**Correction (UI-006, 2026-08-23) — the attribution above is wrong; the symptom and blocked
+conclusion are not.** UI-006 ran the fresh-DB-vs-initialized-DB experiment this note flagged as
+untested, and went further into primary source. Two things in the paragraph above do not hold up:
+
+1. **The `IllegalStateException` is not SSO-specific.** UI-006 reproduced it on a disposable OpenMRS
+   instance with `SSO_ENABLED=false`. It is also non-deterministic — a second, otherwise-identical
+   restart of the same disposable stack did not show it at all. It belongs to `legacyui`'s own
+   `WebComponentRegistrar` (confirmed by extracting the class from `legacyui-2.1.0.omod`, not
+   OpenMRS core), registering `legacyui`'s own three filters
+   (`redirectAfterLoginFilter`/`forcePasswordChangeFilter`/`adminPageFilter`) — nothing to do with
+   `oauth2login`. The exception is caught and printed via `e.printStackTrace()` inside that same
+   method (confirmed by decompiling it) and does not abort module loading. The live stack's apparent
+   absence of this exception is not log rotation either — its `openmrs-backend` log was checked
+   directly and starts at `Initiating OpenMRS startup`, the genuine first line, with zero occurrences
+   in 1514 lines. It is simply a flaky, unrelated `legacyui` timing race that happened to co-occur in
+   the same log capture as the real finding below.
+2. **The real cause has nothing to do with `springSecurityFilterChain` failing to register — it
+   never needed to.** Reading `OAuth2LoginController`'s actual source (pinned commit
+   `2770233627343a53719ec981e997d94b1d90b7ad`) shows `/oauth2login`'s handler is a plain
+   `@RequestMapping`-annotated Spring MVC method, dispatched the same way every other OpenMRS
+   controller is — not through Spring Security's filter chain at all. The real, measured mechanism,
+   in three parts: **(a)** OpenMRS's `openmrs` `DispatcherServlet` is mapped only by file extension
+   (`.htm`/`.form`/`.list`/`.json`/`.field`/`.portlet`/`.page`/`.action`, added dynamically by
+   `legacyui`) plus a static `/ws/*` prefix — nothing maps the bare, extensionless `/oauth2login`
+   path, so it 404s before Spring ever sees it. **(b)** `OAuth2LoginRequestFilter`'s own exclusion
+   list (`servletPaths=/oauth2login,/oauth2logout`) matches on `HttpServletRequest.getServletPath()`,
+   which equals that literal string only for a request that hit an exact servlet mapping — so the
+   one path the filter won't redirect is the one path nothing serves, and every extension-suffixed
+   alias that *is* served gets caught by the filter and bounced back to the dead path (measured:
+   `/oauth2login.htm`, `.form`, `.list`, `.json` all `302` back to `/oauth2login`). **(c)** Hitting
+   the controller directly via the one mapping that does reach it —
+   `/ws/oauth2login`, whose `pathInfo` Spring matches against `@RequestMapping("/oauth2login")` —
+   while authenticated (to bypass (b)) reaches real controller logic and produces a measured `500`:
+   `org.springframework.security.oauth2.client.resource.UserRedirectRequiredException: A redirect is
+   required to get the users approval`. That exception is Spring Security OAuth2 1.x's designed
+   signal to redirect the browser to the identity provider — and it is supposed to be caught by
+   `oauth2ClientContextFilter`, the exact bean `webModuleApplicationContext.xml` declares inside its
+   `<security:http>` block. Nothing in `config.xml` — the only mechanism proven to reliably wire a
+   module's filter into OpenMRS's real request pipeline — ever invokes that filter. So the module's
+   own designed OAuth2 flow does trigger correctly; the one piece that would turn it into an actual
+   redirect to Keycloak is simply never wired into the path a request takes.
+
+This changes what a fix needs to do, but not the ticket-relevant conclusion: OpenMRS OIDC is still
+blocked, on both a fresh database and a database already initialized with SSO disabled and then
+enabled on restart (both tested; the 404/500 pattern above was identical in each). See UI-006's own
+entry in `PROJECT_STATE.md` for the full evidence chain, the Case-B-specific `oauth2login.started`
+global-property finding, and the precise candidate fix.
+
 **Coordinated logout — PARTIAL as currently implemented, but a working fix is now proven, not just
 theorized.** OpenELIS's own local logout is real: a CSRF-protected POST to `/Logout` genuinely
 invalidates the `JSESSIONID` (replaying the old cookie afterward gets redirected to `LoginPage`, not
