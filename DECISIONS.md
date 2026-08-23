@@ -1570,3 +1570,55 @@ Full evidence transcript (commands, raw HTTP responses) is in this session's tra
 summary and `PROJECT_STATE.md`'s UI-005 entry are committed. No production Caddyfile, compose file,
 or realm-config change was made — the disposable-environment findings inform, but do not yet justify,
 any of the real-client changes described above.
+
+**Update (UI-007, 2026-08-23) — the bridge UI-006 designed works; two independent, separate blockers
+were found behind it.** UI-007 built and proved the minimal `OAuth2LoginBridgeFilter` UI-006
+specified: registered in `config.xml` against the exact literal path `/oauth2login` only, it looks
+up the module's own unmodified `oauth2ClientContextFilter` Spring bean by name
+(`Context.getRegisteredComponent("oauth2ClientContextFilter", Filter.class)` — a by-name lookup,
+distinct from the by-type lookup implicated below) and forwards through it to `/ws/oauth2login`,
+which the core `openmrs` servlet's existing `/ws/*` mapping already routes to
+`OAuth2LoginController`. On a disposable Keycloak+OpenMRS+MariaDB stack this produced a genuine
+`302` to Keycloak's real authorization endpoint — the dispatch premise holds; the forward does not
+loop. Source, patch diff, and checksums are recorded in
+`openmrs-config/patches/oauth2login-bridge/` (not wired into `openmrs-config/Dockerfile` — see
+below for why).
+
+Driving the flow further (synthetic Keycloak user, full authorization-code exchange) reached
+`OAuth2LoginController.login()`'s `Context.authenticate(new OAuth2TokenCredentials(userInfo))`
+call and failed there with OpenMRS logging `Multiple authentication schemes overrides are being
+provided, this is currently not supported. Sticking to OpenMRS default authentication scheme.`
+Reading `Context.setAuthenticationScheme()`'s source confirms the mechanism: a by-type
+`getBean(AuthenticationScheme.class)` Spring lookup throws `NoUniqueBeanDefinitionException` when
+more than one bean implements that interface, and OpenMRS's designed fallback is to silently keep
+the default `UsernamePasswordAuthenticationScheme` — which cannot process `OAuth2TokenCredentials`.
+Decompiling every module bundled in the disposable image found the second bean:
+`org.openmrs.module.authentication`'s `DelegatingAuthenticationScheme`, a `@Component`-annotated
+class implementing the same `org.openmrs.api.context.AuthenticationScheme` interface as
+`oauth2login`'s own `OAuth2UserInfoAuthenticationScheme` (also `@Component`-annotated). Both are
+legitimate, intentional beans from their respective modules; neither is wrong on its own. No
+scheme-selection global property exists to disambiguate them (checked: `authentication`'s own
+`authentication.scheme` GP configures which scheme `DelegatingAuthenticationScheme` delegates to
+*internally*, but does not affect which bean Spring's by-type lookup returns — the ambiguity is
+resolved before that logic ever runs). Setting `authentication.started=false` on the disposable
+database (a global-property flip, not a schema or code change) removed the competing bean and the
+authentication-scheme override was accepted on the next boot
+(`Context.setAuthenticationScheme(198) | An authentication scheme override was provided.`) — this
+was done, and reverted, only in the disposable environment. **This is an upstream
+compatibility gap between `oauth2login` 1.5.0 and the `authentication` 2.3.0 module the O3 3.7.x
+reference-application backend bundles by default — not something UI-007's bridge patch caused or
+can fix, and not something to resolve by patching either module's Spring wiring.
+`Human Decision Required: Yes`** — disabling `authentication` removes `ForcePasswordChangeFilter`
+and its 2FA/secret-question/lockout surface; forcing `oauth2login`'s bean `@Primary` requires
+patching a second module, which is exactly the "second source patch, second fork" this ticket's
+minimal-bridge framing was meant to avoid. See `PROJECT_STATE.md`'s UI-007 entry for the full
+account, including the two further blockers found only after this one was worked around
+disposably: `oauth2login`'s own request filter removes any non-`/ws/rest/v1/session` unauthenticated
+path once the module is active (including admin Basic Auth and the legacy login form — break-glass
+is not preserved, contradicting this ADR's and the ticket's expectation that it would be), and the
+already-documented `oauth2login.started=false` persistence does not self-heal when `SSO_ENABLED`
+is later flipped back to `true` (confirmed by recreating the disposable container twice: OFF →
+`started=false` and the module unloaded via `OAuth2LoginActivator.willStart()`'s own
+`ModuleFactory.unloadModule()` call; ON again on the same database → the module did not return,
+`/oauth2login` `404`d again). None of these three are solvable by extending UI-007's bridge patch;
+each needs its own human decision before real facility SSO can be turned on.

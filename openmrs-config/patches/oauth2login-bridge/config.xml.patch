@@ -1,0 +1,21 @@
+--- a/omod/src/main/resources/config.xml
++++ b/omod/src/main/resources/config.xml
+@@ -43,4 +43,18 @@
+ 		<url-pattern>/*</url-pattern>
+ 	</filter-mapping>
+
++	<!-- DAHER PATCH (UI-007/DH-008B): bridges /oauth2login (unreachable by any servlet
++	     mapping) to /ws/oauth2login (reachable via the core openmrs servlet's static /ws/*
++	     mapping), wrapped in the module's own unmodified oauth2ClientContextFilter bean so its
++	     UserRedirectRequiredException becomes a real redirect to the identity provider. Scoped
++	     to this exact literal path only; see OAuth2LoginBridgeFilter's own Javadoc. -->
++	<filter>
++		<filter-name>oauth2-login-bridge-filter</filter-name>
++		<filter-class>org.openmrs.module.oauth2login.web.filter.OAuth2LoginBridgeFilter</filter-class>
++	</filter>
++	<filter-mapping>
++		<filter-name>oauth2-login-bridge-filter</filter-name>
++		<url-pattern>/oauth2login</url-pattern>
++	</filter-mapping>
++
+ </module>
