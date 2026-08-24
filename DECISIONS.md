@@ -670,6 +670,50 @@ this matrix: `clinician` now maps to a provider.
 
 ---
 
+## ADR-017B — Commit a dedicated `Daher Reception` role, registration only
+
+**Date:** 2026-08-24 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** NEEDS LIBAN #17 (ADR-017A / UI-012A) characterized, but did not choose between, two
+options for which staff role may register a patient. Liban chose **Option B**: a dedicated
+registration-only role, not an extension of `clinician`. This entry records that choice and its
+implementation, scoped to registration only — admission stays blocked on its own separate
+privilege-boundary characterization (ADR-017A's `ADMISSION_INCREMENT`, not attempted here).
+
+**A mechanism finding this ticket depended on, measured live before writing any config:** the
+Keycloak→OpenMRS role mechanism this repository actually runs on does not match `daher-realm.json`'s
+own visual structure. `clinician`/`lab-tech`/`sys-admin` are defined there as **realm-level** roles,
+but the `openmrs` client's only role-bearing protocol mapper (`oidc-usermodel-client-role-mapper`,
+scoped to `usermodel.clientRoleMapping.clientId=openmrs`) reads only **client roles** on that one
+client — realm roles never reach OpenMRS. Confirmed empirically: a fresh Keycloak user carrying only
+the realm role `clinician` authenticates but lands with zero OpenMRS privileges. Realm roles remain
+load-bearing only for `lab-tech`, via OpenELIS's separate `saml-role-list-mapper`, which (unlike the
+OIDC client-role mapper) does include them. The unmodified `oauth2login` module then assigns any
+OpenMRS role whose name matches a JWT `roles` claim value **exactly** — no translation table exists;
+confirmed both directions live (a matching name round-trips privileges, a non-matching name produces
+`authenticated:true` with zero privileges, silently, no auto-created role). Consequently the
+Keycloak-side artifact for this role is a **client role on `openmrs`, named identically to the
+OpenMRS role** — `Daher Reception` — not a fourth realm-level entry next to `clinician`/`lab-tech`/
+`sys-admin`, which would be inert for OpenMRS and would misleadingly imply OpenELIS/SAML participation
+reception never has.
+
+**Decision — the exact artifacts committed:**
+
+| Layer | Artifact | Contents |
+|---|---|---|
+| OpenMRS | Role `Daher Reception` (`openmrs-config/initializer/roles/roles-daher.csv`, Initializer-provisioned) | Exactly `Edit Patient Identifiers`, `Add Patients`, `Get Patients` — ADR-017A's proven minimum, no more |
+| Keycloak | Client role `Daher Reception` on the `openmrs` client (`keycloak/reconcile-sso.sh`'s new `reconcile_client_role`, additive, idempotent) | Name-matches the OpenMRS role above; assigned to no one by this ticket |
+
+**Explicitly not done:** no admission privilege (`ADMISSION_INCREMENT`), no `Add Encounters`, no
+`Assign Beds`, no change to `clinician`/`lab-tech`/`sys-admin`'s own mappings, no realm-level
+`reception` entry in `daher-realm.json`, no real staff assignment. **UI-013 (admission) stays
+blocked** on its own separate characterization — this ticket does not unblock it.
+
+**What still needs the meeting:** which real staff member(s) hold this role — a roster fact, not a
+design question, same as ADR-017's own remaining gap.
+
+---
+
 ## ADR-018 — Order cancellation: revoke before acceptance, manual handling after
 
 **Date:** 2026-08-14 · **Status:** ACCEPTED (interim policy, to be validated against real workflow)

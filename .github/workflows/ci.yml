@@ -470,6 +470,96 @@ jobs:
           print("ok — app. origin, OpenMRS redirect reconciliation, and native-origin regressions all check out")
           PY
 
+      - name: ADR-017B — Daher Reception is registration-only, additive, unchanged for existing roles
+        # This cannot boot the real stack (see this file's header), so it asserts
+        # on the committed config directly. The live mechanism — that a Keycloak
+        # CLIENT role on `openmrs`, name-matched literally against an OpenMRS
+        # Role, is what the unmodified oauth2login sync actually reads (NOT
+        # daher-realm.json's realm-level roles, which are inert for OpenMRS and
+        # load-bearing only for OpenELIS's SAML mapper) — was measured live
+        # against the disposable stack this ticket, not assumed. See
+        # PROJECT_STATE.md's ADR-017B entry for the runtime proof.
+        run: |
+          python - <<'PY'
+          import csv, json, re, sys
+          from pathlib import Path
+
+          bad = []
+
+          # 1. The three existing realm-level roles are untouched, and no
+          #    fourth was added there — a realm-level "reception" entry would
+          #    be misleading (it would imply OpenELIS/SAML participation that
+          #    reception, registration-only, never has).
+          realm = json.loads(Path("keycloak/realm-config/daher-realm.json").read_text())
+          realm_role_names = sorted(r["name"] for r in realm.get("roles", {}).get("realm", []))
+          if realm_role_names != ["clinician", "lab-tech", "sys-admin"]:
+              bad.append(
+                  "daher-realm.json roles.realm must stay exactly "
+                  f"[clinician, lab-tech, sys-admin], found {realm_role_names}"
+              )
+
+          # 2. reconcile-sso.sh creates/updates exactly the "Daher Reception"
+          #    client role on the openmrs client, additively (its own function,
+          #    never touching the openmrs/openelis client-update blocks above).
+          reconcile = Path("keycloak/reconcile-sso.sh").read_text()
+          if "reconcile_client_role" not in reconcile:
+              bad.append("reconcile-sso.sh: reconcile_client_role function is missing")
+          if 'reconcile_client_role "$openmrs_id" "Daher Reception"' not in reconcile:
+              bad.append("reconcile-sso.sh: does not reconcile the Daher Reception client role on openmrs")
+          if "roles-by-id" not in reconcile:
+              bad.append(
+                  "reconcile-sso.sh: reconcile_client_role must update via the "
+                  "realm-root roles-by-id endpoint (kcadm does not URL-encode "
+                  "spaces in a name-in-path lookup — proven live this ticket)"
+              )
+
+          # 3. The OpenMRS-side role CSV grants exactly the three privileges
+          #    ADR-017A proved sufficient — nothing broader, ever.
+          APPROVED = {"Edit Patient Identifiers", "Add Patients", "Get Patients"}
+          FORBIDDEN = {"Add Encounters", "Assign Beds", "Edit Patients", "Get Encounters"}
+          csv_path = Path("openmrs-config/initializer/roles/roles-daher.csv")
+          if not csv_path.exists():
+              bad.append("openmrs-config/initializer/roles/roles-daher.csv is missing")
+          else:
+              with csv_path.open(newline="", encoding="utf-8") as fh:
+                  rows = list(csv.DictReader(fh))
+              reception_rows = [r for r in rows if r.get("Role name") == "Daher Reception"]
+              if len(reception_rows) != 1:
+                  bad.append(f"roles-daher.csv: expected exactly one Daher Reception row, found {len(reception_rows)}")
+              else:
+                  row = reception_rows[0]
+                  privileges = {p.strip() for p in row.get("Privileges", "").split(";") if p.strip()}
+                  if privileges != APPROVED:
+                      bad.append(
+                          f"roles-daher.csv: Daher Reception privileges must be exactly {sorted(APPROVED)}, "
+                          f"found {sorted(privileges)}"
+                      )
+                  hit = privileges & FORBIDDEN
+                  if hit:
+                      bad.append(f"roles-daher.csv: Daher Reception must never carry {sorted(hit)}")
+                  if row.get("Inherited roles", "").strip():
+                      bad.append("roles-daher.csv: Daher Reception must not inherit any other role")
+                  # Do not silently redefine an upstream built-in role name.
+                  UPSTREAM = {
+                      "Privilege Level: Full", "Privilege Level: High",
+                      "Organizational: Doctor", "Organizational: Nurse",
+                      "Organizational: Registration Clerk",
+                      "Organizational: System Administrator",
+                  }
+                  if row.get("Role name") in UPSTREAM:
+                      bad.append("roles-daher.csv must not reuse an upstream built-in role name")
+
+          # 4. The mount that actually delivers roles-daher.csv to OpenMRS at
+          #    boot exists — a CSV nobody mounts is written, not provisioned.
+          compose = Path("docker-compose.yml").read_text()
+          if "openmrs-config/initializer/roles:/openmrs/distribution/openmrs_config/roles/zz-daher-health:ro" not in compose:
+              bad.append("docker-compose.yml: the roles Initializer directory is not mounted into the openmrs-backend service")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Daher Reception stays registration-only, additive, and existing roles are untouched")
+          PY
+
   compose:
     name: compose interpolates and parses
     runs-on: ubuntu-latest

@@ -1,0 +1,2 @@
+Uuid,Role name,Description,Inherited roles,Privileges,_order:1000
+a6972c41-8b91-4ef4-80e3-dae86e2edfd6,Daher Reception,ADR-017B — patient registration only. Experimentally proven minimum (ADR-017A); no admission or clinical privileges.,,Edit Patient Identifiers; Add Patients; Get Patients,

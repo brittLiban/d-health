@@ -76,6 +76,52 @@ reconcile_mapper() {
     fi
 }
 
+# ADR-017B: the openmrs client's "client roles" mapper (above) relays every
+# client role the authenticated user holds on this client into the JWT roles
+# claim; the unmodified oauth2login module then assigns any OpenMRS role
+# whose name matches a claim value exactly (config/oauth2.properties.template,
+# openmrs.mapping.user.roles=roles) — no separate translation table exists.
+# This means the Keycloak-side artifact for an OpenMRS role must be a client
+# role on `openmrs` named identically to the OpenMRS role, or the sync
+# silently grants nothing (proven, not assumed: ADR-017B evidence log).
+reconcile_client_role() {
+    local client_id=$1
+    local role_name=$2
+    local role_description=$3
+    local id name role_id
+    local -a role_ids=()
+
+    # kcadm does not URL-encode path segments, so a name-in-path lookup
+    # ("roles/$role_name") breaks outright on a space (e.g. "Daher
+    # Reception") instead of 404ing — list-and-filter avoids that, and
+    # roles-by-id (a Keycloak-native id-keyed alias) avoids it on update too.
+    while IFS=, read -r id name; do
+        if [[ "$name" = "$role_name" ]]; then
+            role_ids+=("$id")
+        fi
+    done < <("$kcadm" get "clients/$client_id/roles" \
+        --config "$config" -r "$realm" -F id,name --format csv --noquotes)
+
+    if [[ ${#role_ids[@]} -gt 1 ]]; then
+        echo "Duplicate Keycloak client role: $role_name" >&2
+        exit 1
+    fi
+
+    role_id=${role_ids[0]:-}
+    if [[ -n "$role_id" ]]; then
+        # roles-by-id is a realm-root endpoint, not nested under the client
+        # (unlike every other resource this script touches) — role ids are
+        # globally unique within a realm.
+        "$kcadm" update "roles-by-id/$role_id" \
+            --config "$config" -r "$realm" \
+            -s "description=$role_description" >/dev/null
+    else
+        "$kcadm" create "clients/$client_id/roles" \
+            --config "$config" -r "$realm" \
+            -s "name=$role_name" -s "description=$role_description" >/dev/null
+    fi
+}
+
 openmrs_id=$(client_uuid openmrs)
 "$kcadm" update "clients/$openmrs_id" --config "$config" -r "$realm" \
     -s protocol=openid-connect \
@@ -96,6 +142,13 @@ reconcile_mapper "$openmrs_id" "client roles" \
     /opt/daher/mappers/openmrs-client-roles-mapper.json
 reconcile_mapper "$openmrs_id" "provider disabled until approved" \
     /opt/daher/mappers/openmrs-provider-disabled-mapper.json
+
+# ADR-017B: registration-only reception role. Additive — clinician/lab-tech/
+# sys-admin's own client roles (created and assigned manually per ADR-017,
+# same as this one) are untouched. Does not assign the role to any staff
+# account; that stays a separate, manual, roster-driven step (ADR-017).
+reconcile_client_role "$openmrs_id" "Daher Reception" \
+    "ADR-017B: patient registration only. Maps 1:1 to the OpenMRS role of the same name."
 
 openelis_id=$(client_uuid openelis)
 "$kcadm" update "clients/$openelis_id" --config "$config" -r "$realm" \
