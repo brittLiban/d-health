@@ -48,6 +48,12 @@ class AuditAction(StrEnum):
     FACILITY_DECOMMISSION = "facility.decommission"
     AUTH_DENIED = "auth.denied"
     RATE_LIMITED = "auth.rate_limited"
+    # UI-010/DH-008E. One action per direction; AuditOutcome (SUCCESS/FAILURE/DENIED)
+    # carries the REQUESTED/ENABLED-or-FAILED distinction §17 asks for, the same way every
+    # other mutating action here already records intent-vs-outcome through `outcome` rather
+    # than a separate action per stage.
+    BREAK_GLASS_ENABLE = "facility.break_glass.enable"
+    BREAK_GLASS_DISABLE = "facility.break_glass.disable"
 
 
 class AuditOutcome(StrEnum):

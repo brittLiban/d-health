@@ -39,6 +39,13 @@ class JobVerb(StrEnum):
     STOP = "stop"
     STATUS = "status"
     BACKUP_NOW = "backup_now"
+    # UI-010/DH-008E: the explicit, operator-only emergency-authentication mode transition.
+    # Two verbs, not one "set_break_glass(bool)" — a fixed set of named operations is the
+    # whole point of this vocabulary (see the module docstring), and collapsing enable/
+    # disable into a boolean parameter is exactly the kind of "caller decides what happens"
+    # shape this file exists to keep out, even for a bool.
+    ENABLE_BREAK_GLASS = "enable_break_glass"
+    DISABLE_BREAK_GLASS = "disable_break_glass"
 
 
 class JobParams(BaseModel):

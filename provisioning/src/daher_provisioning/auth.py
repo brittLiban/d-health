@@ -39,10 +39,18 @@ class Scope(StrEnum):
     FACILITY_READ = "facility:read"
     CREDENTIALS_ROTATE = "credentials:rotate"
     FACILITY_DECOMMISSION = "facility:decommission"
+    # UI-010/DH-008E: one scope for both directions. Enabling and disabling break-glass need
+    # the same trust level — an operator authorized to declare an emergency is also the one
+    # who ends it — so splitting this into two scopes would not buy an isolation the threat
+    # model asks for, only two places to keep in sync.
+    BREAK_GLASS = "facility:break_glass"
 
 
 # What the portal holds. Deliberately not every scope — decommission stops a facility's
 # stack, so it is granted explicitly rather than by belonging to the default set.
+# BREAK_GLASS is withheld for the same reason: it is a privileged emergency action (§6),
+# not a routine portal operation, and is issued only to whichever separate operator
+# mechanism is authorized to invoke it.
 PORTAL_SCOPES = frozenset({Scope.FACILITY_CREATE, Scope.FACILITY_READ, Scope.CREDENTIALS_ROTATE})
 
 

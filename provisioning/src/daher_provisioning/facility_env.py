@@ -43,6 +43,11 @@ STACK_DEFAULTS: dict[str, str] = {
     # Fail closed. SSO activation needs the approved role matrix applied and real public
     # origins; a provisioned facility must not come up with it half-enabled.
     "SSO_ENABLED": "false",
+    # UI-010/DH-008E: independent of SSO_ENABLED on purpose — see AuthenticationMode's
+    # docstring for why collapsing the two was a real bug this repo caught before shipping.
+    # A freshly provisioned facility has never declared an emergency, so this starts false
+    # even though SSO_ENABLED also starts false.
+    "DAHER_BREAK_GLASS": "false",
     "OE_CERT_VALIDITY_DAYS": "825",
     "OE_CERT_RENEW_BEFORE_DAYS": "30",
     # ⚠️ Placeholders, not facility numbers. Additive-only (ADR-007): raising is free,
@@ -291,6 +296,74 @@ def rotate_env_values(contents: str, replacements: dict[str, str]) -> str:
     if absent:
         raise FacilityEnvError(f"env file has no entries for {sorted(absent)}; refusing to append")
     return "\n".join(lines) + "\n"
+
+
+def read_env_value(contents: str, name: str) -> str | None:
+    """Return one variable's value from rendered env contents, or None if absent.
+
+    Read-only counterpart to `rotate_env_values`/`set_sso_enabled` — used for status
+    reporting (UI-010/DH-008E's `authentication_mode`), where the caller must not be able to
+    mistake "never provisioned" for a real, known value.
+    """
+    for line in contents.splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, _, value = line.partition("=")
+            if key.strip() == name:
+                return value
+    return None
+
+
+def _replace_line_value(contents: str, name: str, value: str) -> str:
+    """Replace one `KEY=value` line, leaving every other line untouched.
+
+    Shared by `set_sso_enabled` and `set_break_glass_flag`: same refusal semantics, same
+    comment-skipping, same "absent means append nothing" rule. Not exposed itself — each
+    caller names its one key explicitly, so this stays an implementation detail rather than
+    a generic "set any key" primitive callers could reach directly (UI-010/DH-008E §5).
+    """
+    lines = []
+    seen = False
+    for line in contents.splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key = line.split("=", 1)[0].strip()
+            if key == name:
+                lines.append(f"{name}={value}")
+                seen = True
+                continue
+        lines.append(line)
+
+    if not seen:
+        raise FacilityEnvError(
+            f"env file has no {name} entry; refusing to append one to what may not be "
+            "a real facility env file"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def set_sso_enabled(contents: str, *, enabled: bool) -> str:
+    """Flip `SSO_ENABLED` in an existing env file, leaving every other value untouched.
+
+    Deliberately narrow rather than a generic "set any key" primitive (UI-010/DH-008E §5):
+    this is one of the two config flags break-glass needs to change, neither is a
+    credential, and neither is in `ROTATABLE`/`UNROTATABLE` — `rotate_env_values` is the
+    wrong function for it, both because those lists do not mention it and because
+    rotation's refusal semantics are about credentials, not this boolean.
+    """
+    return _replace_line_value(contents, "SSO_ENABLED", "true" if enabled else "false")
+
+
+def set_break_glass_flag(contents: str, *, active: bool) -> str:
+    """Flip `DAHER_BREAK_GLASS`, independently of `SSO_ENABLED` (UI-010/DH-008E).
+
+    Kept as a genuinely separate flag rather than inferred from `SSO_ENABLED` alone — see
+    `AuthenticationMode`'s docstring for the exact bug that shipping the inferred version
+    would have caused (every never-activated facility, including the real one, reading as
+    already in break-glass). The executor always writes this together with `set_sso_enabled`
+    in the same in-memory string before the one atomic `write_env` call, so the two flags
+    can never be individually torn by a partial disk write — only by the compose recreate
+    that follows failing, which is a different, already-documented failure mode (§16).
+    """
+    return _replace_line_value(contents, "DAHER_BREAK_GLASS", "true" if active else "false")
 
 
 def missing_required(contents: str, required: set[str]) -> set[str]:

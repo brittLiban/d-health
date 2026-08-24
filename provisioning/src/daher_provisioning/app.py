@@ -33,8 +33,10 @@ from daher_provisioning.facility_env import ROTATABLE, UNROTATABLE
 from daher_provisioning.hosts import HostError, HostRegistry
 from daher_provisioning.jobs import Job, JobParams, JobVerb
 from daher_provisioning.models import (
+    AuthenticationMode,
     BackupReport,
     BackupState,
+    BreakGlassRequest,
     CredentialReference,
     Facility,
     FacilityCreateRequest,
@@ -476,6 +478,9 @@ def create_app(
                 if latest
                 else "no infrastructure check has been reported for this facility yet"
             ),
+            authentication_mode=(
+                latest.authentication_mode if latest else AuthenticationMode.UNKNOWN
+            ),
             backup_state=latest_backup.state if latest_backup else BackupState.NEVER_RUN,
             # Only a genuine attempt counts as a "run" — NOT_CONFIGURED means the agent
             # correctly declined to run one at all, which `backup_last_run` must not imply.
@@ -549,6 +554,110 @@ def create_app(
                 "rotated": list(ROTATABLE),
                 "not_rotated": UNROTATABLE,
             }
+        )
+
+    async def _enqueue_break_glass(
+        *,
+        facility_id: str,
+        verb: JobVerb,
+        action: AuditAction,
+        job_prefix: str,
+        body: BreakGlassRequest,
+        request: Request,
+        principal: Principal,
+    ) -> JSONResponse:
+        """Shared by enable/disable (UI-010/DH-008E): same lookup, same job shape, same
+        audit call — only the verb, the audit action and the job-id prefix differ. Kept as
+        one function rather than duplicated bodies so the two directions cannot silently
+        drift (e.g. one gaining a check the other lacks).
+        """
+        try:
+            facility = facilities.get(facility_id)
+        except FacilityNotFound as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+        target_host = next(
+            (h.host_id for h in host_registry.list() if h.facility_id == facility_id), None
+        )
+        if target_host is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"facility {facility_id!r} is not bound to a registered host",
+            )
+
+        issued = datetime.now(UTC)
+        try:
+            queue.enqueue(
+                Job(
+                    job_id=f"job-{job_prefix}-{facility_id}-{int(issued.timestamp())}",
+                    host_id=target_host,
+                    verb=verb,
+                    params=JobParams(
+                        facility_id=facility_id,
+                        facility_type=facility.type.value,
+                        base_domain=base_domain,
+                    ),
+                    issued_at=issued,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            audit_log.record(
+                actor=principal.actor,
+                action=action,
+                outcome=AuditOutcome.FAILURE,
+                facility_id=facility_id,
+                message=(body.reason or "")[:200],
+                source_ip=_client_ip(request),
+            )
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+        audit_log.record(
+            actor=principal.actor,
+            action=action,
+            outcome=AuditOutcome.SUCCESS,
+            facility_id=facility_id,
+            message=(body.reason or "")[:200],
+            source_ip=_client_ip(request),
+        )
+        return JSONResponse({"queued": True})
+
+    @app.post("/facilities/{facility_id}/break-glass/enable")
+    async def enable_break_glass(
+        facility_id: str,
+        body: BreakGlassRequest,
+        request: Request,
+        principal: Principal = Depends(_scoped(Scope.BREAK_GLASS)),
+    ) -> JSONResponse:
+        """Queue the explicit, operator-only transition to emergency local authentication
+        (UI-010/DH-008E §5). Never automatic, never triggered by a Keycloak outage — the
+        only path to this verb is this authenticated, audited call.
+        """
+        return await _enqueue_break_glass(
+            facility_id=facility_id,
+            verb=JobVerb.ENABLE_BREAK_GLASS,
+            action=AuditAction.BREAK_GLASS_ENABLE,
+            job_prefix="bg-on",
+            body=body,
+            request=request,
+            principal=principal,
+        )
+
+    @app.post("/facilities/{facility_id}/break-glass/disable")
+    async def disable_break_glass(
+        facility_id: str,
+        body: BreakGlassRequest,
+        request: Request,
+        principal: Principal = Depends(_scoped(Scope.BREAK_GLASS)),
+    ) -> JSONResponse:
+        """Queue the explicit return to normal OIDC-only authentication."""
+        return await _enqueue_break_glass(
+            facility_id=facility_id,
+            verb=JobVerb.DISABLE_BREAK_GLASS,
+            action=AuditAction.BREAK_GLASS_DISABLE,
+            job_prefix="bg-off",
+            body=body,
+            request=request,
+            principal=principal,
         )
 
     @app.post("/facilities/{facility_id}/decommission", response_model=Facility)

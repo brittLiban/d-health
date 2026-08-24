@@ -145,6 +145,44 @@ class InfrastructureHealth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class AuthenticationMode(StrEnum):
+    """Which authentication path OpenMRS is configured to use (UI-010/DH-008E).
+
+    Read from the facility's env file at the moment of the check — this is the
+    **configured** mode the next boot will use, not a live probe of which module is
+    actually serving traffic right now. A container that has not yet been recreated since a
+    mode change lags this value; that is the same configured-vs-running drift bug 22 found
+    for a healthcheck probe, and this field does not by itself prove the running container
+    agrees with it.
+
+    ⚠️ **Deliberately not derived from `SSO_ENABLED` alone.** `STACK_DEFAULTS` sets
+    `SSO_ENABLED=false` fail-closed for every provisioned facility (BLOCKER-5 keeps it that
+    way until real activation), so `SSO_ENABLED=false` is the ordinary state of a facility
+    that has *never turned SSO on* — that is not an emergency and must not report the same
+    value as one. A second, independent flag (`DAHER_BREAK_GLASS`) is what the break-glass
+    verbs actually write; only that flag being true, with SSO off, means BREAK_GLASS.
+    Collapsing these was caught and fixed before this field shipped (see PROJECT_STATE.md's
+    UI-010 entry) — it would have made every never-activated facility, including the real
+    one, read as already in emergency mode.
+    """
+
+    # SSO_ENABLED=true. Break-glass is necessarily not active — see the module-lifecycle
+    # note on `set_break_glass_flag` for why SSO on always wins if the two flags ever
+    # disagree.
+    NORMAL = "normal"
+    # SSO_ENABLED=false and this facility has never turned SSO on in the first place
+    # (DAHER_BREAK_GLASS is false/absent). Its routine, un-emergency state — most facilities
+    # today, including the real one, are here.
+    LOCAL_ONLY = "local_only"
+    # SSO_ENABLED=false AND DAHER_BREAK_GLASS=true: an explicit emergency deviation FROM a
+    # normally-SSO-on facility, via the enable_break_glass verb specifically.
+    BREAK_GLASS = "break_glass"
+    # The env file is absent, unreadable, or does not declare both flags. Never a synonym
+    # for any of the above — an operator who cannot tell which mode is configured must see
+    # that plainly, not a default that happens to look reassuring.
+    UNKNOWN = "unknown"
+
+
 class ServiceHealth(ClosedModel):
     """One service's observed state. Infrastructure only."""
 
@@ -175,6 +213,9 @@ class InfrastructureReport(ClosedModel):
     checked_at: datetime
     # Why the health is what it is, in operator language. Never raw Docker JSON.
     reason: str | None = Field(default=None, max_length=512)
+    # UI-010/DH-008E: break-glass visibility. See `AuthenticationMode` for exactly what this
+    # does and does not prove.
+    authentication_mode: AuthenticationMode = AuthenticationMode.UNKNOWN
 
 
 class BackupReport(ClosedModel):
@@ -210,6 +251,9 @@ class FacilityStatus(ClosedModel):
     services: list[ServiceHealth] = Field(default_factory=list)
     services_running: int = Field(ge=0)
     services_expected: int = Field(ge=0)
+    # UI-010/DH-008E: the configured authentication mode from the last real check. See
+    # `AuthenticationMode` for what this proves and what it does not.
+    authentication_mode: AuthenticationMode = AuthenticationMode.UNKNOWN
     # What the LAST BACKUP_NOW REPORT said (DH-027G) — never inferred, since the control
     # plane never holds the passphrase that would let it know whether backup is configured
     # (ADR-025). Defaults to NEVER_RUN when no such report has ever arrived; that default is
@@ -254,6 +298,18 @@ class FacilityCreateRequest(ClosedModel):
         pattern=r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$",
         description="Optional explicit id. Permanent once volumes exist (DH-026).",
     )
+
+
+class BreakGlassRequest(ClosedModel):
+    """Body for the break-glass enable/disable endpoints (UI-010/DH-008E, §6).
+
+    `reason` is free text for the audit trail, not a credential and not PHI — callers must
+    not put either here. There is nothing else to accept: facility identity comes from the
+    URL, the initiating principal from the authenticated caller, and the timestamp from the
+    server, exactly like every other audited action in this file.
+    """
+
+    reason: str | None = Field(default=None, max_length=256)
 
 
 class FacilityCreateResponse(ClosedModel):

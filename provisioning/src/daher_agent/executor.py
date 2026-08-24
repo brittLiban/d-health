@@ -46,12 +46,16 @@ from daher_provisioning.facility_env import (
     ROTATABLE,
     BackupSettings,
     FacilityEnvError,
+    read_env_value,
     render_env,
     rotate_env_values,
+    set_break_glass_flag,
+    set_sso_enabled,
     write_env,
 )
 from daher_provisioning.jobs import Job, JobVerb
 from daher_provisioning.models import (
+    AuthenticationMode,
     BackupReport,
     BackupState,
     DeployTarget,
@@ -180,6 +184,12 @@ class ComposeExecutor:
             # Return in seconds; keeping them tight makes a hung command visible fast.
             JobVerb.STATUS: self.timeout_seconds,
             JobVerb.STOP: self.timeout_seconds,
+            # `--no-deps` skips the compose health-graph wait entirely — measured directly
+            # in bug-21 and bug-22, both landing in seconds. The fast bound is correct
+            # specifically because of `--no-deps`, not despite it; if this ever grows a
+            # dependency wait, this bound must move to `stack_timeout_seconds` with it.
+            JobVerb.ENABLE_BREAK_GLASS: self.timeout_seconds,
+            JobVerb.DISABLE_BREAK_GLASS: self.timeout_seconds,
         }[verb]
 
     def env_path(self, facility_id: str) -> Path:
@@ -244,6 +254,74 @@ class ComposeExecutor:
         # `up` re-runs the certs job, which finds a keystore it can no longer open and
         # regenerates it, and re-runs Keycloak reconciliation with the new client secrets.
         return self._argv(facility_id, "up", "--detach", "--force-recreate")
+
+    def _set_break_glass(self, facility_id: str, *, enabled: bool) -> list[str]:
+        """Flip `SSO_ENABLED` and recreate only `openmrs-backend` (UI-010/DH-008E).
+
+        `enabled=True` here means break-glass is being turned ON, i.e. `SSO_ENABLED=false`
+        — the inverse naming is deliberate: this method's parameter names the mode being
+        requested, not the env value, so callers read `_set_break_glass(id, enabled=True)`
+        as "turn break-glass on" rather than having to remember which boolean means what.
+
+        Recreates the same one service bug-21 and bug-22 already proved this pattern
+        against: `--no-deps` skips the compose health-graph wait entirely (both prior
+        incidents measured this landing in seconds, not the 5400s stack bound), and
+        touches no other container. `openmrs-backend`'s own `configure-sso.sh` and
+        `exclude-authentication-when-sso.sh` — proven in UI-007/008/009 — do the actual
+        module-lifecycle work from the new `SSO_ENABLED` value; this method's only job is
+        the env write and the narrow recreate that lets that startup path run again.
+
+        Does **not** touch Keycloak, OpenELIS, Caddy, the adapter, or any setup job — Caddy's
+        `depends_on: daher-ui: condition: service_healthy`-style coupling does not apply here
+        because `--no-deps` means compose does not even consult `openmrs-backend`'s own
+        dependents, let alone recreate them (confirmed empirically in bug-21/bug-22: every
+        other service's uptime was unchanged by a `--no-deps` recreate of one service).
+        """
+        path = self.env_path(facility_id)
+        if not path.is_file():
+            raise FacilityEnvError(f"no env file for {facility_id!r}; nothing to transition")
+
+        contents = path.read_text(encoding="utf-8")
+        contents = set_sso_enabled(contents, enabled=not enabled)
+        contents = set_break_glass_flag(contents, active=enabled)
+        write_env(path, contents, overwrite=True)
+        return self._argv(facility_id, "up", "--detach", "--no-deps", "openmrs-backend")
+
+    def _enable_break_glass(self, facility_id: str) -> list[str]:
+        return self._set_break_glass(facility_id, enabled=True)
+
+    def _disable_break_glass(self, facility_id: str) -> list[str]:
+        return self._set_break_glass(facility_id, enabled=False)
+
+    def _observe_authentication_mode(self, facility_id: str) -> AuthenticationMode:
+        """Read the *configured* mode from the env file (UI-010/DH-008E).
+
+        Deliberately not a live probe of the running container — see `AuthenticationMode`'s
+        docstring for exactly what that means and does not mean. A missing or unreadable env
+        file, or one that does not declare `SSO_ENABLED` at all, is UNKNOWN, never NORMAL:
+        defaulting an unreadable check to "normal" would hide exactly the state an operator
+        most needs to see.
+        """
+        path = self.env_path(facility_id)
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except OSError:
+            return AuthenticationMode.UNKNOWN
+
+        sso_enabled = read_env_value(contents, "SSO_ENABLED")
+        break_glass = read_env_value(contents, "DAHER_BREAK_GLASS")
+        if sso_enabled is None or break_glass is None:
+            return AuthenticationMode.UNKNOWN
+        # SSO on always wins if the two flags ever disagree (e.g. a hand-edited env file) —
+        # oauth2login being the active module is the fact that actually matters, and that is
+        # driven by SSO_ENABLED alone (configure-sso.sh), never by DAHER_BREAK_GLASS.
+        if sso_enabled == "true":
+            return AuthenticationMode.NORMAL
+        if sso_enabled == "false" and break_glass == "true":
+            return AuthenticationMode.BREAK_GLASS
+        if sso_enabled == "false" and break_glass == "false":
+            return AuthenticationMode.LOCAL_ONLY
+        return AuthenticationMode.UNKNOWN
 
     def _status(self, facility_id: str) -> ExecutionResult:
         """Observe the deployment: infrastructure health, and now scheduled backup evidence
@@ -310,6 +388,9 @@ class ComposeExecutor:
             # Unreadable output is UNKNOWN, never healthy.
             return ExecutionResult(True, "status unparseable", unknown_report(str(error)))
 
+        report = report.model_copy(
+            update={"authentication_mode": self._observe_authentication_mode(facility_id)}
+        )
         return ExecutionResult(
             True,
             f"{report.health.value}: {report.services_running}/{report.services_expected} services",
@@ -473,6 +554,10 @@ class ComposeExecutor:
                 argv = self._provision(facility_id, job.params.facility_type)
             elif job.verb is JobVerb.ROTATE_TLS:
                 argv = self._rotate_tls(facility_id)
+            elif job.verb is JobVerb.ENABLE_BREAK_GLASS:
+                argv = self._enable_break_glass(facility_id)
+            elif job.verb is JobVerb.DISABLE_BREAK_GLASS:
+                argv = self._disable_break_glass(facility_id)
             elif job.verb is JobVerb.START:
                 argv = self._argv(facility_id, "up", "--detach")
             elif job.verb is JobVerb.STOP:
