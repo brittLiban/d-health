@@ -424,13 +424,36 @@ jobs:
           if openmrs_block_match and "$openmrs_public_url/*" not in openmrs_block_match.group(0):
               bad.append("reconcile-sso.sh: the openmrs client update lost its own emr. redirect entry")
 
-          # The openelis SAML client's ACS-URL derivation is unresolved
-          # (ADR-027's open risk) — it must never gain the app. origin until
-          # that's proven safe, so this asserts absence, not just presence
-          # elsewhere.
+          # UI-005 measured OpenELIS's SAML ACS as per-request, app-origin-derived, and
+          # UI-011 (DH-008F) applied that: the openelis client must now ALSO carry the
+          # app. origin, additively, alongside its existing lab. entries — never
+          # replacing them, since lab.$BASE_DOMAIN must keep working natively.
           openelis_block_match = re.search(r"openelis_id=.*?reconcile_mapper", reconcile, re.S)
-          if openelis_block_match and "daher_app_url" in openelis_block_match.group(0):
-              bad.append("reconcile-sso.sh: the openelis client update must not reference daher_app_url (ACS derivation unresolved, ADR-027)")
+          if not openelis_block_match or "$daher_app_url" not in openelis_block_match.group(0):
+              bad.append("reconcile-sso.sh: the openelis client update does not include $daher_app_url (UI-011)")
+          if openelis_block_match and "$openelis_public_url/*" not in openelis_block_match.group(0):
+              bad.append("reconcile-sso.sh: the openelis client update lost its own lab. redirect entry")
+
+          if app_block_match:
+              app_block = app_block_match.group(1)
+              if "reverse_proxy https://openelis-webapp:8443" not in app_block:
+                  bad.append("app. block does not reverse_proxy to openelis-webapp:8443 (UI-011)")
+              if "/OpenELIS-Global/*" not in app_block:
+                  bad.append("app. block does not handle /OpenELIS-Global/* (UI-011)")
+              if "tls_trusted_ca_certs /etc/caddy/ca/openelis-ca.pem" not in app_block:
+                  bad.append("app. block's OpenELIS route is missing the trust-anchor lab. already uses")
+              # UI-005 measured OpenELIS's own cookie as already Secure; HttpOnly;
+              # SameSite=Strict — stricter than OpenMRS's — so unlike the OpenMRS handle
+              # above, this route must NOT rewrite Set-Cookie: there is nothing to harden,
+              # and weakening SameSite=Strict merely to look consistent would regress it.
+              openelis_handle_match = re.search(
+                  r"handle /OpenELIS-Global/\*\s*\{(.*?)\n\t\t\}", app_block, re.S
+              )
+              if openelis_handle_match and "header_down Set-Cookie" in openelis_handle_match.group(1):
+                  bad.append(
+                      "app. block's OpenELIS route rewrites Set-Cookie — SameSite=Strict "
+                      "must not be weakened (UI-011)"
+                  )
 
           # daher-ui must only be reachable through Caddy's app. route — a
           # published host port would let a client bypass the CSRF guard

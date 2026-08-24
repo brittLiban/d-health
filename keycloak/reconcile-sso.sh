@@ -15,8 +15,10 @@ openmrs_public_url=${OPENMRS_PUBLIC_URL:-https://emr.${BASE_DOMAIN}}
 openelis_public_url=${OPENELIS_PUBLIC_URL:-https://lab.${BASE_DOMAIN}}
 # UI-004 (ADR-027): the Daher UI's own origin, added to the openmrs client's
 # existing redirect/web-origin lists — never replacing emr.'s entries, never
-# a second OpenMRS client, and never touching the openelis SAML client at
-# all (its SAML ACS-URL derivation is unresolved; see ADR-027's "open risk").
+# a second OpenMRS client. UI-005 measured OpenELIS's SAML ACS as
+# per-request, app-origin-derived, conditional on the openelis client
+# accepting that origin — UI-011 (DH-008F) applies that same addition here,
+# additively, alongside lab.'s existing entries, never replacing them.
 daher_app_url=${DAHER_APP_PUBLIC_URL:-https://app.${BASE_DOMAIN}}
 
 for value in "$BASE_DOMAIN" "$openmrs_public_url" "$openelis_public_url" "$daher_app_url"; do
@@ -106,8 +108,8 @@ openelis_id=$(client_uuid openelis)
     -s serviceAccountsEnabled=false \
     -s "rootUrl=$openelis_public_url" \
     -s "baseUrl=$openelis_public_url" \
-    -s "redirectUris=[\"$openelis_public_url/*\",\"https://oe.openelis.org:8443/OpenELIS-Global/*\"]" \
-    -s "webOrigins=[\"$openelis_public_url\"]" \
+    -s "redirectUris=[\"$openelis_public_url/*\",\"https://oe.openelis.org:8443/OpenELIS-Global/*\",\"$daher_app_url/*\"]" \
+    -s "webOrigins=[\"$openelis_public_url\",\"$daher_app_url\"]" \
     -s 'attributes."saml.assertion.signature"=false' \
     -s 'attributes."saml.force.post.binding"=true' \
     -s 'attributes."saml.encrypt"=false' \

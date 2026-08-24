@@ -175,6 +175,24 @@ app.{$BASE_DOMAIN} {
 			}
 		}
 
+		# UI-011 (DH-008F, ADR-027): the browser holds a real OpenELIS session directly,
+		# same as /openmrs/* above — no service account, no BFF, no identity translation.
+		# UI-005 measured OpenELIS's own JSESSIONID as already Secure; HttpOnly;
+		# SameSite=Strict, stricter than OpenMRS's, so unlike the block above there is no
+		# cookie rewrite here: SameSite=Strict is not weakened merely to simplify a test,
+		# and UI-005's own full round trip already worked with it in place. Mirrors lab.'s
+		# existing TLS/trust-anchor handling below exactly, since it is the same upstream.
+		handle /OpenELIS-Global/* {
+			reverse_proxy https://openelis-webapp:8443 {
+				transport http {
+					tls
+					tls_trusted_ca_certs /etc/caddy/ca/openelis-ca.pem
+					tls_server_name oe.openelis.org
+				}
+				header_up X-Forwarded-Proto https
+			}
+		}
+
 		handle {
 			reverse_proxy daher-ui:80
 		}

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { OpenMrsPatient } from './api/types'
 import { AppShell, EmptyState, Navigation, type NavItem } from './design-system'
+import { logoutLocalSessions, navigateToKeycloakEndSession } from './features/auth/logout'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
 import { PatientWorkspace } from './features/patients/PatientWorkspace'
 
@@ -28,6 +29,15 @@ function App() {
     setSelectedPatient(null)
   }
 
+  // §8: both local sessions first, then a real top-level navigation to
+  // Keycloak's own end-session endpoint — UI-011 measured that neither
+  // ordering can be skipped or collapsed into a background fetch.
+  const handleLogout = () => {
+    void logoutLocalSessions().finally(() => {
+      navigateToKeycloakEndSession()
+    })
+  }
+
   let content
   if (activeNavId === 'patients') {
     content = selectedPatient ? (
@@ -48,6 +58,7 @@ function App() {
   return (
     <AppShell
       navigation={<Navigation items={NAV_ITEMS} activeId={activeNavId} onSelect={handleSelectNav} />}
+      onLogout={handleLogout}
     >
       {content}
     </AppShell>
