@@ -20,6 +20,25 @@ export interface OpenMrsPatient {
   person?: OpenMrsPerson
 }
 
+// UI-012: the one runtime-verified identifier source on this pinned stack
+// (docs/UI-001-CLINICAL-UX.md §13a.2 + live re-verification). `locationBehavior`
+// is read, not assumed — `NOT_USED` is the only value this ticket implements
+// against; anything else is treated as a configuration blocker, not guessed at.
+export interface IdentifierSource {
+  uuid: string
+  identifierTypeUuid: string
+  locationBehavior: string
+}
+
+// The verified minimum registration payload — no field OpenMRS merely
+// supports theoretically. Gender is OpenMRS's own single-letter code.
+export interface PatientRegistration {
+  givenName: string
+  familyName: string
+  gender: 'M' | 'F'
+  birthdate: string
+}
+
 // Fixed frontend-facing error vocabulary (docs/UI-001-CLINICAL-UX.md §20).
 // Never a raw backend message or stack trace — the dev proxy in vite.config.ts
 // already strips those before they reach this client.

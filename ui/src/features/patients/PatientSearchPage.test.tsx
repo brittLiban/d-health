@@ -2,11 +2,15 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { PatientSearchPage } from './PatientSearchPage'
-import { searchPatients } from '../../api/client'
+import { searchPatients, discoverIdentifierSource } from '../../api/client'
 import { ApiError, type OpenMrsPatient } from '../../api/types'
 
 vi.mock('../../api/client', () => ({
   searchPatients: vi.fn(),
+  discoverIdentifierSource: vi.fn(),
+  generateIdentifier: vi.fn(),
+  createPatient: vi.fn(),
+  findPatientByIdentifier: vi.fn(),
 }))
 
 const mockedSearch = vi.mocked(searchPatients)
@@ -70,6 +74,32 @@ describe('PatientSearchPage', () => {
     render(<PatientSearchPage onOpenPatient={vi.fn()} />)
     await runSearch('nobody')
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
+  })
+
+  it('opens the registration form from the zero-results state, prefilled from the search terms', async () => {
+    mockedSearch.mockResolvedValue([])
+    vi.mocked(discoverIdentifierSource).mockReturnValue(new Promise(() => {}))
+    render(<PatientSearchPage onOpenPatient={vi.fn()} />)
+    const user = await runSearch('Aicha Guelleh')
+    await user.click(await screen.findByRole('button', { name: 'Nouveau patient' }))
+    expect(screen.getByRole('heading', { name: 'Nouveau patient' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Prénom')).toHaveValue('Aicha')
+    expect(screen.getByLabelText('Nom')).toHaveValue('Guelleh')
+  })
+
+  it('a new search hides an open registration form', async () => {
+    mockedSearch.mockResolvedValueOnce([]).mockResolvedValueOnce([patient()])
+    render(<PatientSearchPage onOpenPatient={vi.fn()} />)
+    const user = await runSearch('nobody')
+    await user.click(await screen.findByRole('button', { name: 'Nouveau patient' }))
+    expect(screen.getByRole('heading', { name: 'Nouveau patient' })).toBeInTheDocument()
+
+    await user.clear(screen.getByLabelText('Rechercher un patient'))
+    await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
+    await user.click(screen.getByRole('button', { name: 'Rechercher' }))
+
+    expect(await screen.findByText('Verification Test')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Nouveau patient' })).not.toBeInTheDocument()
   })
 
   it('renders a connection banner, not a generic error, for NETWORK_ERROR', async () => {

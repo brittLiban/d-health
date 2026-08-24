@@ -10,6 +10,7 @@ import {
   PatientCard,
   SearchInput,
 } from '../../design-system'
+import { RegisterPatientForm } from './RegisterPatientForm'
 import { usePatientSearch } from './usePatientSearch'
 
 interface PatientSearchPageProps {
@@ -18,10 +19,12 @@ interface PatientSearchPageProps {
 
 export function PatientSearchPage({ onOpenPatient }: PatientSearchPageProps) {
   const [query, setQuery] = useState('')
+  const [showRegisterForm, setShowRegisterForm] = useState(false)
   const { state, search } = usePatientSearch()
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    setShowRegisterForm(false)
     void search(query)
   }
 
@@ -55,15 +58,21 @@ export function PatientSearchPage({ onOpenPatient }: PatientSearchPageProps) {
         <ErrorState code={state.code} onRetry={() => void search(query)} />
       )}
 
-      {state.status === 'success' && state.results.length === 0 && (
+      {state.status === 'success' && state.results.length === 0 && !showRegisterForm && (
         <EmptyState title="Aucun patient trouvé">
           Aucun résultat pour « {query} ».
           <div style={{ marginTop: 'var(--space-3)' }}>
-            <Button disabled title="L'enregistrement de patients n'est pas encore activé dans cette version.">
-              Nouveau patient
-            </Button>
+            <Button onClick={() => setShowRegisterForm(true)}>Nouveau patient</Button>
           </div>
         </EmptyState>
+      )}
+
+      {state.status === 'success' && state.results.length === 0 && showRegisterForm && (
+        <RegisterPatientForm
+          initialQuery={query}
+          onCancel={() => setShowRegisterForm(false)}
+          onCreated={onOpenPatient}
+        />
       )}
 
       {state.status === 'success' && state.results.length > 0 && (

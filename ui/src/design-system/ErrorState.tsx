@@ -17,7 +17,7 @@ export function ErrorState({ code, onRetry }: ErrorStateProps) {
       <p style={{ fontWeight: 600, margin: 0 }}>{title}</p>
       <p style={{ margin: 0 }}>{message}</p>
       {onRetry ? (
-        <Button variant="secondary" onClick={onRetry}>
+        <Button type="button" variant="secondary" onClick={onRetry}>
           Réessayer
         </Button>
       ) : null}
