@@ -1,0 +1,68 @@
+diff --git a/omod/src/main/java/org/openmrs/module/oauth2login/web/controller/OAuth2LoginController.java b/omod/src/main/java/org/openmrs/module/oauth2login/web/controller/OAuth2LoginController.java
+index ea1a131..a097077 100644
+--- a/omod/src/main/java/org/openmrs/module/oauth2login/web/controller/OAuth2LoginController.java
++++ b/omod/src/main/java/org/openmrs/module/oauth2login/web/controller/OAuth2LoginController.java
+@@ -14,6 +14,7 @@ import static org.springframework.web.bind.annotation.RequestMethod.GET;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+ import java.util.Collection;
++import java.util.List;
+ import java.util.Properties;
+ 
+ import org.apache.commons.lang3.StringUtils;
+@@ -43,7 +44,15 @@ import org.springframework.web.servlet.ModelAndView;
+ 
+ @Controller
+ public class OAuth2LoginController {
+-	
++
++	/**
++	 * DAHER PATCH (ADR-017E2/DH-008G): the exact OpenMRS client-role name that this deployment
++	 * already treats as the sole clinician-Provider signal (see openmrs.mapping.user.roles in
++	 * oauth2.properties -- the same claim OpenMRS role assignment itself consumes). Matched by
++	 * exact membership only, never substring.
++	 */
++	private static final String DAHER_PROVIDER_ROLE_NAME = "Provider";
++
+ 	protected final Log log = LogFactory.getLog(getClass());
+ 	
+ 	private String userInfoUri;
+@@ -98,7 +107,7 @@ public class OAuth2LoginController {
+ 				final String idToken = ((OAuth2RestOperations) restTemplate).getAccessToken().getAdditionalInformation()
+ 				        .get("id_token").toString();
+ 				user.setUserProperty(OAuth2LoginConstants.USER_PROP_ID_TOKEN, idToken);
+-				if ("true".equalsIgnoreCase(userInfo.getString(UserInfo.PROP_PROVIDER, "true"))) {
++				if (isProviderRoleGranted(userInfo)) {
+ 					activateProviderAccount(Context.getAuthenticatedUser());
+ 				} else {
+ 					deactivateProviderAccount(Context.getAuthenticatedUser());
+@@ -115,7 +124,28 @@ public class OAuth2LoginController {
+ 		
+ 		return new ModelAndView("redirect:" + getRedirectUri());
+ 	}
+-	
++
++	/**
++	 * DAHER PATCH (ADR-017E2/DH-008G): replaces upstream's own provider-claim check (which
++	 * defaulted a genuinely absent claim to "true" -- fail-open, see UserInfo#getString) with a
++	 * role-derived decision using the same client-role claim OpenMRS role assignment already
++	 * consumes as its sole source of truth. Exact membership only ("Provider", never a substring
++	 * match against something like "Provider Assistant" or "SuperProvider"); fails closed on a
++	 * missing, null, or malformed roles claim rather than throwing out of the login flow.
++	 * Package-private (not private) so ProviderRoleDerivationTest can call it directly, without
++	 * reflection.
++	 */
++	boolean isProviderRoleGranted(UserInfo userInfo) {
++		try {
++			List<String> roleNames = userInfo.getRoleNames();
++			return roleNames != null && roleNames.contains(DAHER_PROVIDER_ROLE_NAME);
++		}
++		catch (RuntimeException e) {
++			log.warn("Could not determine Provider role membership from the roles claim; failing closed.", e);
++			return false;
++		}
++	}
++
+ 	private void activateProviderAccount(User user) {
+ 		try {
+ 			Context.addProxyPrivilege(PrivilegeConstants.GET_PROVIDERS);
