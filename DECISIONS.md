@@ -2181,3 +2181,61 @@ is later flipped back to `true` (confirmed by recreating the disposable containe
 `ModuleFactory.unloadModule()` call; ON again on the same database → the module did not return,
 `/oauth2login` `404`d again). None of these three are solvable by extending UI-007's bridge patch;
 each needs its own human decision before real facility SSO can be turned on.
+
+---
+
+## ADR-028 — `Daher Maternity Admission`, a dedicated Daher-owned OpenMRS Visit type
+
+**Date:** 2026-08-25 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** BLOCKER-7 / NEEDS LIBAN #20 (raised by UI-013's own pre-write gate) found that no
+approved OpenMRS Visit type represented a Daher maternity admission. UI-001A's `Facility Visit` was
+explicitly recorded as "the closest generic match, not a clinical decision," and every later
+admission ticket (ADR-017C, ADR-017D, ADR-017E2) reused it unchanged only as an inherited
+authorization-test fixture. Liban's decision: create a dedicated Daher-owned Visit type,
+**`Daher Maternity Admission`**, rather than promote any of the five upstream generics
+(`Facility Visit`, `Home Visit`, `OPD Visit`, `Offline Visit`, `Group Session`). None of the five is
+modified, renamed, retired, or deleted.
+
+**Mechanism confirmed before writing any config, per the ticket's own instruction not to assume a
+CSV path or schema.** The pinned base image (`openmrs/openmrs-reference-application-3-backend:
+3.7.x`, digest-pinned in `openmrs-config/Dockerfile`) ships **Initializer 2.12.0**
+(`/openmrs/data/modules/initializer-2.12.0.omod`, confirmed by listing the running container's
+modules directory). Its `initializer-api-2.12.0.jar` was extracted and disassembled directly
+(`jar xf` + `javap -c -v`, not read from documentation):
+
+- `org.openmrs.module.initializer.Domain` is a Java `enum` with a `VISIT_TYPES` constant. Its
+  `getName()` method — bytecode-confirmed, not assumed — computes the on-disk domain folder name as
+  `name().replace("_", "").toLowerCase()`, i.e. `VISIT_TYPES` → **`visittypes`**. This is the exact
+  same mechanism already backing this repo's committed `locations`/`roles`/`globalproperties`
+  domains (`LOCATIONS`→`locations`, `ROLES`→`roles`, `GLOBAL_PROPERTIES`→`globalproperties`),
+  confirmed by the same disassembly technique, not by analogy alone.
+- `org.openmrs.module.initializer.api.visittypes.VisitTypeLineProcessor extends BaseLineProcessor
+  <VisitType>` — a first-class, supported CSV domain, not a workaround. Its `fill()` method
+  (bytecode-confirmed) reads exactly two domain-specific columns, `name` and `description` — both
+  matched case-insensitively per `BaseLineProcessor.createIndexMap()`'s own `.trim().toLowerCase()`
+  normalization — plus the generic `uuid`/`void/retire` columns every `BaseLineProcessor` domain
+  shares (also bytecode-confirmed against `BaseLineProcessor.class`'s own `HEADER_UUID="uuid"`,
+  `HEADER_VOID_RETIRE="void/retire"` constants). This is the identical CSV shape already used by
+  `openmrs-config/initializer/locations/locations-daher.csv` and
+  `openmrs-config/initializer/roles/roles-daher.csv` — no new schema was invented.
+
+**Decision — the exact artifacts committed:**
+
+| Layer | Artifact | Contents |
+|---|---|---|
+| OpenMRS | Visit type `Daher Maternity Admission` (`openmrs-config/initializer/visittypes/visittypes-daher.csv`, Initializer-provisioned, domain `visittypes`) | Fresh Daher-owned UUID `194bf546-68d7-42c0-8371-5b0f2b1cf5f3`, `Description` naming this as the Daher-owned replacement for using `Facility Visit` as anything beyond an experimental fixture |
+| Compose | New bind mount, `docker-compose.yml`, additive, alongside the existing three `zz-daher-health` domain mounts | `./openmrs-config/initializer/visittypes:/openmrs/distribution/openmrs_config/visittypes/zz-daher-health:ro` |
+
+**Explicitly not done:** no upstream Visit type (`Facility Visit`, `Home Visit`, `OPD Visit`,
+`Offline Visit`, `Group Session`) modified, voided, or retired — the CSV adds exactly one new row
+and touches nothing else; no patient, Visit, or Encounter written; no real staff or SSO activation;
+UI-013's admission workflow itself is not built here — this ticket only clears its pre-write gate.
+
+**Live proof — fresh database, already-initialized database, and idempotent second pass — is
+recorded in this ticket's own `PROJECT_STATE.md` log entry**, including the exact runtime query
+confirming exactly one `Daher Maternity Admission` result and zero drift on the five upstream types.
+
+**Consequence.** BLOCKER-7 / NEEDS LIBAN #20 is closed. UI-013 may resume against
+`Daher Maternity Admission` (name) / `194bf546-68d7-42c0-8371-5b0f2b1cf5f3` (UUID) and the
+already-committed `Admission` encounter type and `Maternité` location.

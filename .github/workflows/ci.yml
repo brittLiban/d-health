@@ -746,6 +746,72 @@ jobs:
           print("ok — Provider identity is role-derived, fails closed, and exactly one mechanism exists")
           PY
 
+      - name: ADR-028 — Daher Maternity Admission is a single, additive, Daher-owned Visit type
+        # UI-013's own pre-write gate found no approved OpenMRS Visit type for a
+        # Daher maternity admission (BLOCKER-7 / NEEDS LIBAN #20) — Facility
+        # Visit had only ever been an inherited authorization-test fixture
+        # (ADR-017C/D/E2), never an approval. ADR-028's decision: a dedicated
+        # Daher-owned Visit type, provisioned through Initializer 2.12.0's own
+        # native "visittypes" CSV domain (confirmed by disassembling the pinned
+        # module's own class files, not assumed) — the same mechanism and CSV
+        # shape already backing locations-daher.csv/roles-daher.csv. This guard
+        # cannot boot the real stack (see this file's header); it asserts on
+        # the committed CSV and compose mount. See PROJECT_STATE.md's BLOCKER-7
+        # entry for the fresh-database / existing-database / second-pass proof.
+        run: |
+          python - <<'PY'
+          import csv, sys
+          from pathlib import Path
+
+          bad = []
+
+          DAHER_VISIT_TYPE_NAME = "Daher Maternity Admission"
+          DAHER_VISIT_TYPE_UUID = "194bf546-68d7-42c0-8371-5b0f2b1cf5f3"
+          UPSTREAM_VISIT_TYPES = {"Facility Visit", "Home Visit", "OPD Visit", "Offline Visit", "Group Session"}
+
+          csv_path = Path("openmrs-config/initializer/visittypes/visittypes-daher.csv")
+          if not csv_path.exists():
+              bad.append("openmrs-config/initializer/visittypes/visittypes-daher.csv is missing")
+          else:
+              with csv_path.open(newline="", encoding="utf-8") as fh:
+                  rows = list(csv.DictReader(fh))
+
+              # Exactly one Daher-owned row — this ticket's own requirement,
+              # "one Daher-owned Visit type only."
+              if len(rows) != 1:
+                  bad.append(f"visittypes-daher.csv: expected exactly one row, found {len(rows)}")
+              else:
+                  row = rows[0]
+                  if row.get("Name") != DAHER_VISIT_TYPE_NAME:
+                      bad.append(f"visittypes-daher.csv: Name must be exactly {DAHER_VISIT_TYPE_NAME!r}, found {row.get('Name')!r}")
+                  if row.get("Uuid") != DAHER_VISIT_TYPE_UUID:
+                      bad.append(f"visittypes-daher.csv: Uuid must stay pinned to {DAHER_VISIT_TYPE_UUID!r} — changing it orphans any Visit already created with it")
+                  # Additive only — this row must never itself void/retire anything.
+                  if row.get("Void/Retire", "").strip():
+                      bad.append("visittypes-daher.csv: the Daher Maternity Admission row must not be voided/retired")
+                  if row.get("Name") in UPSTREAM_VISIT_TYPES:
+                      bad.append("visittypes-daher.csv must not reuse an upstream Visit type name")
+
+              # No second file in the same domain silently defines (or voids) an
+              # upstream Visit type — the CSV domain is additive-only by design.
+              for other in Path("openmrs-config/initializer/visittypes").glob("*.csv"):
+                  if other == csv_path:
+                      continue
+                  bad.append(f"{other}: unexpected extra file in the visittypes domain — only visittypes-daher.csv is provisioned")
+
+          # The mount that actually delivers visittypes-daher.csv to OpenMRS at
+          # boot exists, using Initializer's own domain folder name for
+          # VISIT_TYPES ("visittypes" — bytecode-confirmed, ADR-028) — a CSV
+          # nobody mounts is written, not provisioned.
+          compose = Path("docker-compose.yml").read_text()
+          if "openmrs-config/initializer/visittypes:/openmrs/distribution/openmrs_config/visittypes/zz-daher-health:ro" not in compose:
+              bad.append("docker-compose.yml: the visittypes Initializer directory is not mounted into the openmrs-backend service")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Daher Maternity Admission is a single, additive, Daher-owned Visit type")
+          PY
+
   oauth2login-provider-tests:
     # DH-008G-CI. The static ADR-017E2 guard above proves the committed patch
     # *text* has the right shape (method exists, exact-match constant, fails
