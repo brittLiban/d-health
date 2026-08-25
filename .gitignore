@@ -17,13 +17,16 @@ volumes/
 caddy/data/
 caddy/config/
 
+# ---- Python build/test artifacts (repo-wide: adapter/, provisioning/,
+# openmrs-config/seed/, openmrs-config/forms/, any future Python subtree) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
 # ---- Adapter ----
 adapter/node_modules/
-adapter/__pycache__/
-adapter/**/__pycache__/
-adapter/.venv/
-adapter/*.egg-info/
-adapter/.pytest_cache/
 
 # ---- Editors / OS ----
 .DS_Store
