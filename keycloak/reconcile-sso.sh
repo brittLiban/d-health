@@ -150,6 +150,14 @@ reconcile_mapper "$openmrs_id" "provider disabled until approved" \
 reconcile_client_role "$openmrs_id" "Daher Reception" \
     "ADR-017B: patient registration only. Maps 1:1 to the OpenMRS role of the same name."
 
+# ADR-017D: reception cannot admit (Add Visits/Add Encounters are blanket,
+# unscopable privileges — ADR-017C). Admission is clinician-only, via a
+# second, separate, self-contained Daher-owned role — never granted to
+# Daher Reception, no inheritance either direction. Additive: the reception
+# reconciliation above, and every other client/mapper call, is untouched.
+reconcile_client_role "$openmrs_id" "Daher Clinician Admission" \
+    "ADR-017D: admission only (Visit + linked Encounter), clinician-only. Maps 1:1 to the OpenMRS role of the same name."
+
 openelis_id=$(client_uuid openelis)
 "$kcadm" update "clients/$openelis_id" --config "$config" -r "$realm" \
     -s protocol=saml \

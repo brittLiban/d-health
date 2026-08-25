@@ -560,6 +560,99 @@ jobs:
           print("ok — Daher Reception stays registration-only, additive, and existing roles are untouched")
           PY
 
+      - name: ADR-017D — Daher Clinician Admission is self-contained, clinician-only, unreachable from reception
+        # ADR-017C proved Add Visits/Add Encounters are blanket, unscopable
+        # privileges in this OpenMRS distribution — no native way to restrict
+        # either to a specific type or location. ADR-017D's response is
+        # organizational, not technical: admission stays behind a SEPARATE
+        # Daher-owned role, granted only to clinicians, with zero inheritance
+        # path to or from Daher Reception. This guard cannot boot the real
+        # stack (see this file's header); it asserts on committed config.
+        # See PROJECT_STATE.md's ADR-017D entry for the runtime proof.
+        run: |
+          python - <<'PY'
+          import csv, sys
+          from pathlib import Path
+
+          bad = []
+
+          APPROVED_ADMISSION = {
+              "Get Patients", "Get Visit Types", "Add Visits", "Get Visits",
+              "Get Visit Attribute Types", "Get Beds", "Get Admission Locations",
+              "Add Encounters", "Get Encounters",
+          }
+          # Registration-write privileges (beyond the shared Get Patients read)
+          # and administrative privileges must never appear on the admission
+          # role — it must not become a second, broader reception role.
+          FORBIDDEN_ADMISSION = {
+              "Add Patients", "Edit Patient Identifiers", "Edit Patients",
+              "Assign Beds", "Edit Encounters",
+              "Manage Roles", "Add Users", "Edit Users", "Delete Users",
+              "Manage Privileges", "Manage Global Properties",
+          }
+          # Daher Reception must never gain any admission-shaped privilege,
+          # in addition to the exact-three-privileges check ADR-017B already runs.
+          FORBIDDEN_RECEPTION_ADMISSION = {
+              "Add Visits", "Add Encounters", "Get Encounters",
+              "Get Beds", "Get Admission Locations",
+          }
+
+          csv_path = Path("openmrs-config/initializer/roles/roles-daher.csv")
+          if not csv_path.exists():
+              bad.append("openmrs-config/initializer/roles/roles-daher.csv is missing")
+          else:
+              with csv_path.open(newline="", encoding="utf-8") as fh:
+                  rows = list(csv.DictReader(fh))
+
+              admission_rows = [r for r in rows if r.get("Role name") == "Daher Clinician Admission"]
+              if len(admission_rows) != 1:
+                  bad.append(f"roles-daher.csv: expected exactly one Daher Clinician Admission row, found {len(admission_rows)}")
+              else:
+                  row = admission_rows[0]
+                  privileges = {p.strip() for p in row.get("Privileges", "").split(";") if p.strip()}
+                  if privileges != APPROVED_ADMISSION:
+                      bad.append(
+                          f"roles-daher.csv: Daher Clinician Admission privileges must be exactly "
+                          f"{sorted(APPROVED_ADMISSION)}, found {sorted(privileges)}"
+                      )
+                  hit = privileges & FORBIDDEN_ADMISSION
+                  if hit:
+                      bad.append(f"roles-daher.csv: Daher Clinician Admission must never carry {sorted(hit)}")
+                  if row.get("Inherited roles", "").strip():
+                      bad.append("roles-daher.csv: Daher Clinician Admission must not inherit any other role (self-contained by design)")
+                  UPSTREAM = {
+                      "Privilege Level: Full", "Privilege Level: High",
+                      "Organizational: Doctor", "Organizational: Nurse",
+                      "Organizational: Registration Clerk",
+                      "Organizational: System Administrator",
+                  }
+                  if row.get("Role name") in UPSTREAM:
+                      bad.append("roles-daher.csv must not reuse an upstream built-in role name")
+
+              reception_rows = [r for r in rows if r.get("Role name") == "Daher Reception"]
+              if len(reception_rows) == 1:
+                  row = reception_rows[0]
+                  privileges = {p.strip() for p in row.get("Privileges", "").split(";") if p.strip()}
+                  hit = privileges & FORBIDDEN_RECEPTION_ADMISSION
+                  if hit:
+                      bad.append(f"roles-daher.csv: Daher Reception must never carry {sorted(hit)} (ADR-017D)")
+                  if row.get("Inherited roles", "").strip():
+                      bad.append("roles-daher.csv: Daher Reception must not inherit Daher Clinician Admission or any other role")
+
+          # reconcile-sso.sh must reconcile the new client role additively —
+          # same idempotent create-or-update-description function ADR-017B
+          # already proved, never a delete of any client role.
+          reconcile = Path("keycloak/reconcile-sso.sh").read_text()
+          if 'reconcile_client_role "$openmrs_id" "Daher Clinician Admission"' not in reconcile:
+              bad.append("reconcile-sso.sh: does not reconcile the Daher Clinician Admission client role on openmrs")
+          if "delete" in reconcile.lower():
+              bad.append("reconcile-sso.sh: must never delete a Keycloak role — reconciliation is additive-only")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Daher Clinician Admission is self-contained, clinician-only, and unreachable from reception")
+          PY
+
   compose:
     name: compose interpolates and parses
     runs-on: ubuntu-latest

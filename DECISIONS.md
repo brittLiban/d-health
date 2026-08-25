@@ -714,6 +714,45 @@ design question, same as ADR-017's own remaining gap.
 
 ---
 
+## ADR-017D — Commit clinician-only admission authorization
+
+**Date:** 2026-08-25 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** ADR-017C characterized, but did not choose between, three options for who may perform
+admission (Visit + linked Encounter). Liban chose **Option B**: admission stays clinician-only;
+reception never gains it. This entry records that choice and its implementation.
+
+**Why, stated precisely rather than left implicit:** ADR-017C proved `Add Visits` and `Add Encounters`
+are both genuinely blanket privileges in this OpenMRS distribution — no encounter-type, visit-type, or
+location scoping exists anywhere in the platform's supported authorization model (confirmed by schema:
+`encounter_type` carries `view_privilege`/`edit_privilege` columns but no create-privilege column;
+`visit_type` carries none at all; confirmed behaviorally: an admission-capable account created an
+unrelated encounter type and an unrelated visit type with identical ease to the intended ones). A role
+holding either privilege can therefore write **any** of the platform's configured encounter/visit
+types, not a narrow "can admit a maternity patient" capability. Because that authority is broad, it
+belongs only with the clinical user class this project already trusts with broad clinical authority
+(`clinician`, mapped to `Provider` + `Organizational: Nurse` per ADR-017) — not with reception, whose
+entire purpose (ADR-017B) is to hold the narrowest possible privilege set. The frontend does not and
+cannot narrow this; the server privilege is the only real boundary, and it is coarse. This is accepted
+as a **stated platform limitation for V1**, not solved around.
+
+**Decision — the exact artifacts committed:**
+
+| Layer | Artifact | Contents |
+|---|---|---|
+| OpenMRS | Role `Daher Clinician Admission` (`openmrs-config/initializer/roles/roles-daher.csv`, Initializer-provisioned, Daher-owned name, no inherited roles) | `Get Patients`, `Get Visit Types`, `Add Visits`, `Get Visits`, `Get Visit Attribute Types`, `Get Beds`, `Get Admission Locations`, `Add Encounters`, `Get Encounters` — nine privileges, self-contained (does not depend on also holding `Daher Reception`) |
+| Keycloak | Client role `Daher Clinician Admission` on the `openmrs` client (`keycloak/reconcile-sso.sh`'s existing `reconcile_client_role`, additive, idempotent) | Name-matches the OpenMRS role above; assigned to no one by this ticket |
+
+**Explicitly not done:** `Daher Reception` is not modified and never gains any of these nine
+privileges, in either direction — no inheritance path exists between the two roles. `Assign Beds` is
+not granted to either role; bed assignment stays a separate, unresolved question. No real staff
+assigned, no real SSO activation, no UI-013 frontend work — the role is deployable, not active.
+
+**What still needs the meeting:** which real clinician(s) hold this role, alongside ADR-017's own
+`clinician`/`lab-tech`/`sys-admin` roster gap and ADR-017B's `Daher Reception` roster gap.
+
+---
+
 ## ADR-018 — Order cancellation: revoke before acceptance, manual handling after
 
 **Date:** 2026-08-14 · **Status:** ACCEPTED (interim policy, to be validated against real workflow)

@@ -1,2 +1,3 @@
 Uuid,Role name,Description,Inherited roles,Privileges,_order:1000
 a6972c41-8b91-4ef4-80e3-dae86e2edfd6,Daher Reception,ADR-017B — patient registration only. Experimentally proven minimum (ADR-017A); no admission or clinical privileges.,,Edit Patient Identifiers; Add Patients; Get Patients,
+364b99ac-e1b4-49b2-bb1d-7139e0b4e84a,Daher Clinician Admission,ADR-017D — admission only (Visit + linked Encounter). Self-contained: does not depend on Daher Reception. Clinician-only by decision; OpenMRS cannot scope Add Visits/Add Encounters by type or location.,,Get Patients; Get Visit Types; Add Visits; Get Visits; Get Visit Attribute Types; Get Beds; Get Admission Locations; Add Encounters; Get Encounters,
