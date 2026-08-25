@@ -14,14 +14,24 @@ FROM maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14f
 # verified at the source/patch/toolchain level -- this exact clone command,
 # this exact patch, this exact base image digest -- not by asserting a fixed
 # artifact hash.
+#
+# ADR-017E2/DH-008G additionally applies OAuth2LoginController.java.patch,
+# which replaces upstream's own provider-claim check (a genuinely absent
+# claim silently defaults to Provider-activated -- fail-open) with a
+# role-derived, fail-closed decision reusing the same "roles" claim OpenMRS
+# role assignment already consumes: exact "Provider" client-role membership,
+# nothing else. See that patch file's own header comment and
+# PROVENANCE.md for the full account.
 COPY patches/oauth2login-bridge/OAuth2LoginBridgeFilter.java /patch/OAuth2LoginBridgeFilter.java
 COPY patches/oauth2login-bridge/config.xml.patch /patch/config.xml.patch
+COPY patches/oauth2login-bridge/OAuth2LoginController.java.patch /patch/OAuth2LoginController.java.patch
 RUN git clone --branch 1.5.0 --depth 1 \
       https://github.com/openmrs/openmrs-module-oauth2login.git /src \
     && test "$(git -C /src rev-parse HEAD)" = 2770233627343a53719ec981e997d94b1d90b7ad \
     && cp /patch/OAuth2LoginBridgeFilter.java \
         /src/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java \
     && git -C /src apply /patch/config.xml.patch \
+    && git -C /src apply /patch/OAuth2LoginController.java.patch \
     && mvn -B -f /src/pom.xml -Dmaven.test.skip=true package \
     && test -s /src/omod/target/oauth2login-1.5.0.omod
 

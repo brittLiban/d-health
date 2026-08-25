@@ -753,6 +753,419 @@ assigned, no real SSO activation, no UI-013 frontend work — the role is deploy
 
 ---
 
+## ADR-017E — OPEN: no supported Keycloak mechanism found for a conditional provider claim
+
+**Date raised:** 2026-08-24 · **Status:** SUPERSEDED by ADR-017E2 (2026-08-25) — see below. The
+finding stands (no config-only Keycloak mechanism exists); ADR-017E2 resolves it with a patch
+instead, which was outside this entry's own original scope ("not application code or a BFF").
+**Human Decision Required:** Yes — this blocks real SSO activation of any clinician identity.
+
+**Context.** ADR-017D closed with two known gaps explicitly out of scope for that ticket: (1)
+`Organizational: Nurse` inherits `Privilege Level: High` (tracked below as ADR-017F), and (2)
+`keycloak/mappers/openmrs-provider-disabled-mapper.json` still hardcodes `provider=false` for every
+OpenMRS OIDC login, despite ADR-017's own text saying clinician now maps to a provider. This ticket
+(DH-008G) was scoped to fix gap (2): make the `provider` claim conditional — true only for the
+clinician identity, false for reception/lab-tech/sys-admin — using Keycloak's existing supported
+protocol-mapper mechanism, not application code or a BFF.
+
+**Mechanism understood first, per the ticket's own requirement.** Read the pinned `oauth2login`
+1.5.0 source directly (`OAuth2LoginController.java`, `UserInfo.java`), not just its docs:
+`activateProviderAccount` is safely idempotent per-Person — it calls `ps.getProvidersByPerson()`
+before creating, so repeated login never duplicates a Provider, and correctly links to the
+authenticated user's own Person. The provider claim is read via
+`userInfo.getString(UserInfo.PROP_PROVIDER, "true")` — **a genuinely absent claim defaults to
+`true`** (fail-open), not false. That default is the load-bearing fact behind everything below.
+
+**What was tried, in a disposable environment (`kc-ui009` / `openmrs-adr017d2`), never production:**
+
+1. **`oidc-usermodel-client-role-mapper`, `multivalued=false`.** Hypothesis: emits a boolean signal
+   keyed to whether the user holds the `Provider` client role. Disproven live: it emits one arbitrary
+   role name from whatever client roles the user holds, non-deterministically when multiple are held.
+   A synthetic user holding both `Provider` and `Daher Clinician Admission` — the real clinician
+   identity's actual shape per ADR-017D — got `"Daher Clinician Admission"`, not `"Provider"`, as the
+   claim value. It also never produces the literal string `"true"` even for a user holding only
+   `Provider`, since the mapper emits the role's *name*, not a computed boolean.
+2. **`oidc-usermodel-attribute-mapper`, reading a per-user Keycloak attribute (`daher_provider`).**
+   Works correctly when the attribute is explicitly set (`probe-with-provider`, attribute `true`, got
+   a correctly-linked Provider). But when the attribute is **unset** — the case for every account not
+   individually configured — the mapper omits the claim entirely, and the absent-claim default in
+   `oauth2login` fires: a synthetic `Daher Reception`-only user with no attribute set was granted a
+   real `currentProvider`. **Confirmed by live login, not inferred from config.** A "reconcile writes
+   the attribute onto every managed user" pattern was considered and rejected: any user created
+   outside a reconcile run is fail-open until the next run, which is not a safety property, and it
+   would be a second materialized truth source alongside the client role that already signals
+   clinician identity (ADR-017B/D), which §5 of the ticket explicitly warned against inventing.
+3. **Two same-claim mappers simultaneously** (a fail-closed hardcoded `provider=false` baseline
+   alongside the attribute mapper, hypothesizing the per-user `true` would override the baseline
+   `false`). The baseline `false` won in every trial. Two independent attempts to invert the winner —
+   varying mapper creation order, then varying mapper name (alphabetical processing order) — both
+   failed to flip it. Keycloak's protocol-mapper REST schema exposes no priority/precedence field for
+   resolving same-claim-name collisions between mappers of different types. Without a documented,
+   citable ordering contract, this behavior cannot be trusted as a foundation for a clinical safety
+   property — a version upgrade or clustering difference could silently invert it.
+4. Keycloak 26.7.1's full registered protocol-mapper catalog was enumerated live
+   (`kcadm get serverinfo`): no role-conditional claim mapper exists. A scripted mapper is not
+   available in this Keycloak version, and would in any case be borderline "application code," which
+   the ticket excluded as a fix for an identity-claim configuration problem.
+
+**Conclusion.** No mechanism found in Keycloak 26.7.1's supported protocol-mapper catalog can emit a
+deterministic, fail-closed `provider` claim conditional on client-role membership, given that a real
+clinician holds multiple client roles simultaneously (`Provider`, `Organizational: Nurse`, `Daher
+Clinician Admission` — ADR-017D's own committed shape) and that `oauth2login` defaults an absent
+claim to `true`. This is reported as a genuine platform limitation rather than compensated for in
+frontend code, per the ticket's own explicit instruction.
+
+**What was left in place.** The stale, committed `openmrs-provider-disabled-mapper.json`
+(`claim.value: "false"`, unconditional) is **not changed** — it remains the safe interim posture:
+every OpenMRS user, including any real clinician, currently gets `currentProvider: null`. This is
+functionally wrong (no clinician can be attributed as a Provider yet) but it is fail-closed, which is
+the correct side to be wrong on. The disposable Keycloak realm used for this investigation was
+restored to that same single-mapper state before the session ended; two stray leftover mappers
+found live on `kc-ui009` mid-investigation (a hardcoded global `provider=true`, origin unverified —
+not present in this repo, and a throwaway `provider_probe` client-role probe created by this
+investigation) were deleted. One disposable artifact was **not** fully cleaned up: a synthetic
+`Daher Reception`-only user (`probe-without-provider`) was left holding a real, incorrectly-created
+Provider record on `openmrs-adr017d2` — deleting it requires a privilege (`Get Providers`) that
+reception correctly does not hold, and no admin credential was pursued to force it. This is a
+disposable, non-production artifact only; it does not persist past that container's lifetime.
+
+**Two candidate paths forward, neither implemented — this needs the meeting, not a unilateral pick:**
+
+- **Patch `oauth2login` itself**, changing the single default-value argument at the `getString`
+  call site from `"true"` to `"false"` — absent claim then defaults to *deny*, not *allow*. This is a
+  one-line change to logic this project already patches (`openmrs-config/Dockerfile` already carries
+  patches to this exact module for `OAuth2LoginBridgeFilter.java`). It would make the whole
+  same-claim-mapper-collision problem moot, and make even a single always-present mapper safe by
+  construction. Real cost: a maintained fork of upstream logic, not just config.
+- **Accept a manual, audited per-user attribute** as the clinician signal (`oidc-usermodel-attribute-mapper`
+  finding #2 above), with an explicit compensating control: a script that reports any OpenMRS-relevant
+  Keycloak user with the `daher_provider` attribute unset, run as part of onboarding/reconciliation, so
+  "unset" is a visible alarm rather than a silent fail-open. Real cost: an operational discipline
+  requirement, not a config-only fix, and the ticket's own §5 already flagged a second truth source as
+  something to avoid absent necessity.
+
+**Explicitly not done:** no real SSO activation, no real staff assigned, no repo file edited, no
+committed mapper changed, no CI run needed (HEAD unchanged from before this ticket started).
+
+---
+
+## ADR-017E2 — Role-derived, fail-closed clinician Provider identity (patches `oauth2login`)
+
+**Date:** 2026-08-25 · **Status:** ACCEPTED · **Decided by:** Liban (via the ticket's own explicit
+technical direction: patch `oauth2login` to derive Provider activation from the `roles` claim)
+
+**Context.** ADR-017E exhausted every config-only Keycloak mechanism and found none could emit a
+deterministic, fail-closed `provider` claim conditional on client-role membership — the two load
+bearing facts were `oauth2login`'s own absent-claim default (`getString(PROP_PROVIDER, "true")`,
+fail-*open*) and the real clinician identity's multi-role shape (`Provider` + `Organizational:
+Nurse` + `Daher Clinician Admission` simultaneously, per ADR-017D), which every mapper-based
+candidate either couldn't isolate deterministically or lost to under undefined same-claim-mapper
+precedence. This ticket's explicit technical direction supersedes ADR-017E's own "not application
+code" constraint: patch `oauth2login` itself to derive Provider activation directly from the same
+`roles` claim OpenMRS role assignment already consumes — exact `"Provider"` client-role membership,
+nothing else — reusing the project's existing patch/build mechanism for this exact module
+(`openmrs-config/patches/oauth2login-bridge/`, first established by UI-007/UI-008 for the
+`/oauth2login` dispatch bridge).
+
+**The failed design, recorded so it is not retried** (ADR-017E, in full): `oidc-usermodel-client-
+role-mapper` with `multivalued=false` emits one arbitrary role name, non-deterministically, when a
+user holds multiple client roles — proven live, not assumed. `oidc-usermodel-attribute-mapper`
+correctly emits `true`/`false` when a per-user attribute is explicitly set, but omits the claim
+entirely when unset, and the module's absent-claim default then activates a Provider anyway — a
+synthetic `Daher Reception`-only user with the attribute unset was live-confirmed to receive a real
+`currentProvider`. Layering a fail-closed hardcoded-`false` baseline alongside either candidate does
+not fix this: two mappers targeting the same `claim.name` have no documented precedence in
+Keycloak's protocol-mapper REST schema, and two independent attempts to invert which one won (by
+mapper creation order, then by mapper name) both failed — undefined behavior is not a foundation for
+a clinical safety property.
+
+**The final design — the exact rule.**
+
+```
+OpenMRS client role "Provider" (exact membership)
+              │
+              ▼
+      Keycloak "roles" claim   (existing "client roles" mapper — unchanged)
+              │
+              ▼
+   oauth2login's isProviderRoleGranted(UserInfo)   (new, patched)
+              │
+              ▼
+     activateProviderAccount() / deactivateProviderAccount()   (existing, unmodified)
+```
+
+One claim (`roles`), one Java-side decision, one existing persistence mechanism. Reception,
+lab-tech, and any user without the exact `Provider` role never satisfy the condition; there is no
+second truth source.
+
+**The patch — exactly what changed, and what did not.**
+`openmrs-config/patches/oauth2login-bridge/OAuth2LoginController.java.patch` (unified diff against
+the pinned `1.5.0` tag, commit `2770233627343a53719ec981e997d94b1d90b7ad` — the same clone/pin/patch
+mechanism `config.xml.patch` already uses, extended with one more `git apply` step in
+`openmrs-config/Dockerfile`) adds a package-private `isProviderRoleGranted(UserInfo)` method and a
+`DAHER_PROVIDER_ROLE_NAME = "Provider"` constant, and replaces the single line in `login()` that read
+`userInfo.getString(UserInfo.PROP_PROVIDER, "true")` with a call to it. The new method calls
+`userInfo.getRoleNames()` (an existing, unmodified method already used for OpenMRS role sync) and
+checks **exact** `List.contains` membership — never a substring, case-fold, or prefix match, so
+`"Provider Assistant"` or `"SuperProvider"` cannot qualify. Any `RuntimeException` from a missing,
+null, or malformed `roles` claim is caught and returns `false` — fails closed, does not propagate out
+of the login flow. `activateProviderAccount`/`deactivateProviderAccount` — the persistence mechanism
+itself, including its per-Person duplicate-prevention check (`getProvidersByPerson` before create)
+— is untouched by this patch; only *whether* it is called changed, not *how* it behaves once called,
+per the ticket's own §6 instruction.
+
+**Live proof, disposable environment only (`kc-ui009`, `mariadb-ui009`, a fresh clone
+`openmrs-adr017e2` built from the patched image `daher-health/openmrs-backend:adr017e2-test`, never
+`openmrs-adr017d2` or any other JVM with prior role/provider cache state):**
+
+- **Reproducible build.** The real `openmrs-config/Dockerfile` stage (`oauth2login-build`) built
+  clean end-to-end with the patch wired in: exact pinned clone, commit assertion, both patches
+  applied via `git apply`, Maven package, `.omod` produced. Independently, the exact committed patch
+  file was also verified to apply via plain `patch -p1` (not just `git apply`) against a fresh
+  archive of the pinned commit — two independent tools, same result, confirming the patch is a
+  standard, portable unified diff.
+- **Unit coverage, real `UserInfo` parsing, no mocking of that layer** — a new
+  `ProviderRoleDerivationTest` (`openmrs-config/patches/oauth2login-bridge/test-verification/`,
+  verification-only, not wired into the production build since the Dockerfile always skips tests):
+  10 cases, all passing — `["Provider"]`→true, `["Provider","Daher Clinician Admission"]`→true,
+  `["Daher Reception"]`→false, `["Organizational: Nurse"]`→false, `[]`→false, missing claim→false,
+  null claim→false, malformed (non-array) claim→false (no exception escapes), `["SuperProvider"]`→
+  false, `["Provider Assistant"]`→false. The existing `ProviderAttributeUserInfoTest` was updated
+  (its old fixture asserted the *opposite* of the new, correct behavior) rather than left
+  contradicting the shipped logic. Three pre-existing upstream integration tests
+  (`KeycloakAuthenticationTest`, `GoogleAPIAuthenticationTest`, `OAuth2LoginControllerTest`) fail
+  under this sandbox's JDK 17 Maven image on old CGLIB/PowerMock incompatibilities — confirmed, by a
+  control run against **pristine, unmodified** upstream source under the identical toolchain, to be
+  pre-existing and unrelated to this patch, not something it caused.
+- **Fresh synthetic clinician, genuine OIDC round trip, never-before-authenticated, exactly the
+  committed identity** (`Provider` + `Organizational: Nurse` + `Daher Clinician Admission`):
+  `authenticated: true`; Keycloak user id `6dcd82af-4cf8-40d6-a9eb-1cb6faa578c5`; OpenMRS user UUID
+  `04133caa-8b7f-4d89-8b01-20a349dca2aa`; Person UUID `36116ed9-13ce-425f-b438-42ce27d98331`;
+  Provider UUID `f870d211-e03a-4e12-9e5c-72a021939f62`; Provider identifier
+  `6dcd82af-4cf8-40d6-a9eb-1cb6faa578c5` (= the user's own `systemId`, matching `oauth2login`'s
+  documented identifier choice); Provider creator `daemon` (matching its documented proxy-privileged
+  creation); Provider's linked Person UUID = the authenticated user's own Person UUID, exactly;
+  `currentProvider` UUID = the Provider UUID, exactly. All required equalities hold, measured, not
+  assumed — even though the token's legacy `provider` claim (still `"false"` on this disposable
+  realm's leftover mapper at login time) said the opposite, proving the patch genuinely ignores that
+  claim rather than merely defaulting past it.
+- **Repeated-login idempotence, three total logins:** `users`, `provider`, and distinct-`person_id`
+  counts for this identifier were `1/1/1` before, and remained `1/1/1` after two additional logins;
+  `currentProvider` UUID identical across all three. Restart-survival was **not** re-confirmed this
+  ticket — blocked by this sandbox's own recurring, pre-existing `docker restart` permission denial
+  (documented at the end of nearly every prior ticket this session, unrelated to this change) — a
+  disclosed gap, not a fabricated pass.
+- **Reception negative control, fresh user, `Daher Reception` only:** `authenticated: true`,
+  `currentProvider: null`, zero Provider rows for that identifier, exactly the three approved
+  registration privileges present in the session. This is the exact fail-open failure mode ADR-017E's
+  attribute-mapper attempt produced — closed here.
+- **Zero-role negative control, fresh user with no client role at all:** `authenticated: false` —
+  `oauth2login`'s own pre-existing, unmodified role-sync/authentication logic does not complete
+  authentication for a zero-role user (a `Context.authenticate` failure this patch's own decision
+  method never reaches, since it only runs after `Context.isAuthenticated()` is already true); zero
+  Provider rows created. Consistent with the ticket's own anticipated fallback for this case.
+- **Sys-admin boundary — documented, not fabricated.** No OpenMRS client role currently exists for
+  `sys-admin` at all: ADR-017's `sys-admin → Organizational: System Administrator` mapping is a
+  realm-level row, inert for OpenMRS OIDC per ADR-017B's own finding, and no `reconcile_client_role`
+  call for it has ever been added (only `Daher Reception` and `Daher Clinician Admission` have).
+  Creating one here would be exactly the kind of roster/scope decision this ticket's own §12
+  explicitly excludes ("do not manufacture unsupported sys-admin mappings"). The nearest safe,
+  already-existing proxy for "broad administrative authority without the exact `Provider` role" was
+  used instead: a fresh user holding only `Organizational: Nurse` (which ADR-017D already found
+  carries `Privilege Level: High` — effectively the platform's full privilege set) —
+  `currentProvider: null`, zero Provider rows. Broad privilege alone does not imply clinical Provider
+  identity; only exact `Provider` membership does.
+- **Lab-tech boundary.** Zero OpenELIS/SAML files touched this ticket (`git diff` confirms it); no
+  OpenMRS client role exists for lab-tech; lab-tech does not authenticate to OpenMRS by design
+  (ADR-017B).
+- **Admission re-proof with the now-provider-enabled clinician:** patient → `POST /visit` (`201`,
+  `Facility Visit @ Inpatient Ward`) → `POST /encounter` (`201`, `Admission`, linked via `visit`) —
+  the existing UI-001A/ADR-017D payload, unmodified, `"encounterProviders": []`. Read-back (`v=full`)
+  on both: `auditInfo.creator.uuid` on Visit and Encounter both equal the authenticated clinician's
+  own OpenMRS user UUID — not admin, not `daemon`, not the registering reception account. Per the
+  ticket's own explicit instruction, **`encounterProviders` was not populated by OpenMRS merely
+  because `currentProvider` now exists**, and no provider field was added to the payload to
+  compensate — recorded as-is. Whether the Admission Encounter should explicitly name the clinical
+  Provider is a distinct clinical/data-contract question, not decided here.
+- **Three identities, explicitly separated, not conflated:** authenticated user (the synthetic
+  clinician's Keycloak/OpenMRS identity) = Visit/Encounter audit creator (same OpenMRS user UUID,
+  confirmed) ≠ clinical Provider (a separate `Provider` entity, correctly *linked* to the same Person
+  as the authenticated user, but not itself the audit creator of anything, and not present on the
+  Encounter's own `encounterProviders` field).
+- **Provider ambiguity control, isolated throwaway DB clone only (`openmrs_adr017e2_ambig`,
+  never the canonical `openmrs_adr017e2`):** a second, independent, non-retired `Provider` row was
+  inserted by direct SQL for the same Person as the synthetic clinician, then the clinician logged in
+  against a fresh container booted on that clone. Result: `activateProviderAccount` created no third
+  Provider (its existing per-Person check holds — confirmed, not merely cited); OpenMRS's own
+  session-context `currentProvider` computation — unmodified by this patch, pre-existing platform
+  behavior — returned **`null`**, not an arbitrary pick of either existing Provider. This is the safe
+  side of ambiguity: a clinician session never silently attaches to the wrong Provider. No STOP was
+  needed; the throwaway clone and its one-off container are the only artifacts affected.
+- **Fresh-realm / existing-realm parity, proven, not asserted:** `keycloak/realm-config/daher-
+  realm.json`'s `openmrs` client no longer carries the stale `provider disabled until approved`
+  mapper (removed, alongside the `client roles` mapper, which is unchanged). `keycloak/reconcile-
+  sso.sh` gained `remove_mapper_if_present` (mirrors `reconcile_mapper`'s own list-and-filter idiom,
+  applied to deletion) and calls it in place of the old `reconcile_mapper` call for that mapper name.
+  Run twice against the live disposable realm: run 1 removed the stale mapper (confirmed via listing:
+  only `client roles` remained afterward, all four existing client roles — `Daher Reception`, `Daher
+  Clinician Admission`, `Provider`, `Organizational: Nurse` — untouched); run 2 reconciled cleanly
+  with no error and no change. Importing `daher-realm.json` fresh into an independent test realm
+  produced the identical mapper set — exactly one mapper, `client roles`, generated ID differs (as
+  expected), semantics identical. Exactly one provider-relevant mechanism exists in either path: the
+  patched Java logic; zero Keycloak mappers reference a `provider` claim anywhere under `keycloak/`
+  after this ticket (grepped, not assumed).
+
+**CI guard, added and control-tested six ways.** A new `static` job step
+(`.github/workflows/ci.yml`, "ADR-017E2 — Provider identity is role-derived, fail-closed, and a
+single mechanism") asserts: the decision method and its call site exist in the committed patch; the
+legacy fail-open call is not reintroduced on an *added* diff line (distinct from the `-` line that
+legitimately still shows the old code being removed); the role constant is exactly `"Provider"`;
+membership is checked via exact `List.contains`, never a substring/case-fold/prefix pattern; the
+method fails closed on a caught exception; the Dockerfile applies the patch; no JSON file under
+`keycloak/` mentions a `provider` claim anywhere; the stale mapper file is gone; `reconcile-sso.sh`
+removes rather than recreates it. A pre-existing ADR-017D guard's blunt `"delete" in reconcile.lower()`
+check — which would have false-failed on this ticket's own legitimate `remove_mapper_if_present`
+mapper deletion — was narrowed to the specific dangerous shape (a *role* deletion call), since roles
+may carry real staff-assignment history and mappers do not. Six deliberate breaks were run in-memory
+(no file mutated) and each correctly failed the guard: reverting to the fail-open call site; making
+`"Daher Reception"` the role constant; substituting a substring match; reintroducing a global
+hardcoded `provider` mapper anywhere under `keycloak/`; leaving the stale mapper reconciled instead of
+removed; unwiring the patch from the Dockerfile. The unmodified baseline was re-confirmed passing
+after every break.
+
+**Regressions, checked not assumed.** `git diff` shows zero changes to any role-privilege file
+(`roles-daher.csv` untouched) and zero deletions of any existing client role, mapper (other than the
+one superseded), or reconcile-sso.sh block. `Daher Reception`, `Daher Clinician Admission`, `Provider`,
+`Organizational: Nurse` all survived two live reconciliation runs unchanged. No OpenELIS/SAML file
+touched. No application code (`adapter/`, `provisioning/`, `ui/`, `openmrs-config/seed/`,
+`openmrs-config/forms/`) touched — the 774-test baseline (adapter 94, provisioning 580, seed 16,
+form-safety 19, ui 65) is unaffected by construction, matching this exact repo's own established
+reasoning for config/infra-only tickets (ADR-017B/D).
+
+**Explicitly not done:** no real SSO activation, no real staff assigned, no real facility write, no
+patient/Visit/Encounter written outside the disposable/throwaway environments above, `Organizational:
+Nurse`'s own breadth left untouched (tracked separately as ADR-017F, not built here), OpenELIS
+untouched. `Organizational: Nurse`-only login, restart-survival, and the sys-admin/lab-tech client
+roles remain either honestly disclosed gaps or explicitly out of this ticket's scope, as recorded
+above rather than silently skipped.
+
+**Cleanup.** The disposable realm's now-superseded mapper, and the two stray leftover mappers found
+mid-investigation by ADR-017E, were removed from `kc-ui009` (not committed config, disposable-only).
+Five synthetic Keycloak users created this ticket
+(`adr017e2-clinician`, `adr017e2-reception`, `adr017e2-norole`, `adr017e2-nurse-only`, and ADR-017E's
+own three `probe-*` users) remain on `kc-ui009`, left in place deliberately, matching this session's
+established hygiene pattern (`Provider`/`Daher Reception` client roles have persisted the same way
+since ADR-017B). The throwaway ambiguity database (`openmrs_adr017e2_ambig`) and its throwaway user
+were dropped successfully; its one-off container (`openmrs-adr017e2-ambig`) could not be torn down —
+the same intermittent daemon-level `docker kill`/`rm` permission denial recorded at the end of nearly
+every prior ticket this session — needs a human `docker rm -f openmrs-adr017e2-ambig` alongside every
+prior ticket's own still-pending leftovers, plus this ticket's own new `openmrs-adr017e2` (the
+successfully-used clone) and its database `openmrs_adr017e2` in `mariadb-ui009`, and the throwaway
+realm-import test (`daher-fresh-test`) was already deleted cleanly via `kcadm`.
+
+### ADR-017E2 — final closure pass appended 2026-08-25 (before commit)
+
+**Test accounting, precise, not just "774 unchanged."** The 774-test repository baseline (adapter
+94, provisioning 580, seed 16, form-safety 19, ui 65) was **re-run live this pass**, not cited from
+memory: adapter under `python:3.13.14-slim-bookworm` (CI's exact pinned image) — `ruff check src
+tests migrations` clean, `ruff format --check` clean, `pytest` **94 passed**; provisioning, same
+image — `ruff check src tests` clean, `ruff format --check` clean, `pytest` **580 passed**; seed —
+`python -m unittest discover` **16 tests, OK**; form-safety — **19 tests, OK**; ui, Node 22 (CI's
+exact pinned version) — `oxlint` clean, `tsc -b --noEmit` clean, `vitest run` **65 passed**, `vite
+build` clean, secrets-in-bundle check clean. **Total: 774, confirmed live under CI's exact
+toolchain, unchanged.** Separately, the entire `static` job was re-run locally, including the new
+ADR-017E2 guard and the narrowed ADR-017D guard, plus `.env`-untracked, no-tracked-secrets,
+image-pinning, compose-invariants, shell-syntax, JSON/XML/CSV-parse, doc-links, and the
+`app.$BASE_DOMAIN` reconciliation checks — all pass. All three `compose` job profiles (default,
+`backup`, demo) parse clean with a throwaway env file.
+
+**The 10 new `ProviderRoleDerivationTest` cases are NOT part of any counted CI suite and were never
+claimed to be.** They live under `openmrs-config/patches/oauth2login-bridge/test-verification/`,
+test a third-party vendored module (`oauth2login`) that CI never compiles, tests, or even builds —
+no CI job builds `openmrs-config`'s Docker image at all (confirmed by reading every job in
+`.github/workflows/ci.yml`; the closest is `docker compose ... config -q`, which only parses YAML,
+never builds an image). The Dockerfile's own `oauth2login-build` stage runs Maven with
+`-Dmaven.test.skip=true`, so even a real image build would not execute them. They are a manual,
+out-of-band verification artifact for this ticket's Java patch, run by hand against the pinned
+Maven toolchain (documented above and in `PROVENANCE.md`) — real evidence that the patch behaves
+correctly, but not part of the repository's own gated test count, and the 774 figure has never
+included them.
+
+**Restart-survival, via a genuine fresh process — not a literal `docker restart`.** `docker
+restart`/`kill`/`rm` remain blocked by this sandbox's own recurring daemon-level permission denial
+(unchanged from every prior attempt this session). Instead: a **second, independently-booted**
+container (`openmrs-adr017e2-freshproc`, a distinct JVM/process, `docker run`, not `restart`) was
+started from the same final patched image against the **same, already-populated**
+`openmrs_adr017e2` database. A fresh OIDC login for the same synthetic clinician produced
+byte-identical results to the original process: OpenMRS user UUID `04133caa-8b7f-4d89-8b01-
+20a349dca2aa`, Person UUID `36116ed9-13ce-425f-b438-42ce27d98331`, Provider UUID `f870d211-e03a-
+4e12-9e5c-72a021939f62`, `currentProvider` equal to that Provider, and the Provider row count for
+that identifier held at exactly 1 both before and after. This is real evidence that Provider
+identity survives a fresh JVM reading persisted state — the honest scope of what was proven, not
+inflated to "restart-tested."
+
+**Negative controls, re-run against that same fresh process** (not merely cited from the prior
+process): `adr017e2-reception` — `authenticated: true`, `currentProvider: null`, 0 Provider rows.
+`adr017e2-nurse-only` (`Organizational: Nurse` only, no `Provider`) — `authenticated: true`,
+`currentProvider: null`, 0 Provider rows — the fail-closed non-Provider control, since a zero-role
+account's own authentication behavior is orthogonal to this patch (see below). `adr017e2-norole` —
+its **first-ever** login attempt still fails to authenticate (pre-existing `oauth2login` behavior:
+`Context.authenticate` rejects a user with zero roles), though the underlying User row is
+auto-provisioned regardless; a **second** login attempt against that now-existing zero-role User
+succeeded in authenticating with `roles: []`, and still correctly produced `currentProvider: null`,
+0 Provider rows — reported precisely because the two attempts differ, not smoothed into one claim.
+
+**Provider ambiguity, reconfirmed on the current final image, not merely cited from before.** A
+second isolated throwaway clone (`openmrs_adr017e2_ambig2`, never the canonical database) was built
+fresh this pass, a duplicate active Provider row inserted by direct SQL for the same Person, and the
+clinician logged in against a new container on that clone: no third Provider was created, and
+`currentProvider` returned **`null`** — identical to the first ambiguity run, confirming the
+unmodified upstream behavior is stable, not a one-off result.
+
+**Admission, reconfirmed on the fresh-process container**, a new patient (`10000NH`): `POST /visit`
+`201`, `POST /encounter` `201` (`Admission`, correctly linked to the Visit), `encounterProviders:
+[]` (still not auto-populated, still not compensated for in the payload), both Visit and Encounter
+`auditInfo.creator.uuid` equal to the authenticated clinician's own OpenMRS user UUID.
+
+**Provider-creation-failure control: PROVIDER CREATION FAILURE — source-inspected, not
+live-demonstrated.** `activateProviderAccount`'s own body wraps Provider creation in
+`try { ... } catch (Exception e) { log.error(...); }` with proxy privileges removed in a `finally`
+block regardless of outcome — a creation failure (e.g. a constraint violation) is caught, logged,
+and the method returns normally; it does not throw out of `login()`, corrupt the authenticated
+session, or attach the user to an unrelated Provider. This patch does not touch that method at all —
+only whether it is called. No live control was run to force a genuine creation failure this pass
+(doing so safely would require corrupting a throwaway database's schema/constraints in a way not
+yet designed); this remains residual, source-level evidence, not a completed live control, reported
+as such rather than inflated.
+
+**Fresh/existing Keycloak parity, reconfirmed a third time.** `kc-ui009`'s `daher` realm carries
+exactly one `openmrs`-client protocol mapper (`client roles`) after a third live reconciliation run
+this pass (converged identically to runs 1–2 from the prior pass — same mapper ID, zero
+duplication); all four client roles (`Daher Reception`, `Daher Clinician Admission`, `Provider`,
+`Organizational: Nurse`) intact. Grepping every JSON file under `keycloak/` finds zero references to
+a `provider` claim anywhere — zero unconditional `true` mappers, zero unconditional `false`
+mappers, confirmed on-disk this pass, not merely asserted.
+
+**Reproducible build, reconfirmed from the current tree, not the prior pass's cached artifact.** A
+clean rebuild of the full `openmrs-config` image from this pass's tree (`docker build`, both
+patches applied, Docker's own layer cache correctly recognized the patch inputs as byte-identical to
+the prior pass and reused that layer — the same build, not skipped) produced the identical `.omod`
+checksum: **`ae148634ec06817efcc99fdf9c0a1a4e05565ef76292c8eb7899b3b4aec8966b`**. That exact hash was
+independently confirmed to match the OMOD actually **loaded and running** inside
+`openmrs-adr017e2-freshproc` (`sha256sum` on `/openmrs/data/modules/oauth2login-1.5.0.omod` inside
+the live container) — direct proof the running disposable container uses the build produced from
+this exact final tree, not an assumption.
+
+**Cleanup, this pass.** `curl-ui010` (the shared driver container) had exited on its own after ~27h
+and was restarted via `docker start` (which, unlike `restart`/`kill`, is not blocked by this
+sandbox's permission issue). The second ambiguity clone's database (`openmrs_adr017e2_ambig2`) was
+dropped successfully; its one-off container (`openmrs-adr017e2-ambig2`) could not be torn down —
+same daemon-level denial. `openmrs-adr017e2-freshproc` is left running deliberately as this pass's
+primary evidence container. Needs a human `docker rm -f openmrs-adr017e2-ambig openmrs-adr017e2-
+ambig2` alongside every prior ticket's own still-pending leftovers.
+
+---
+
 ## ADR-018 — Order cancellation: revoke before acceptance, manual handling after
 
 **Date:** 2026-08-14 · **Status:** ACCEPTED (interim policy, to be validated against real workflow)

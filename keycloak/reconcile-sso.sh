@@ -76,6 +76,36 @@ reconcile_mapper() {
     fi
 }
 
+# ADR-017E2/DH-008G: deletes a superseded mapper by name if it is still present
+# (existing realms reconciled before this ticket), no-op on a realm that never
+# had it (fresh imports, or realms already reconciled since). Mirrors
+# reconcile_mapper's own list-and-filter idiom so the same duplicate-detection
+# guard applies on the way out as on the way in.
+remove_mapper_if_present() {
+    local client_id=$1
+    local mapper_name=$2
+    local id name mapper_id
+    local -a mapper_ids=()
+
+    while IFS=, read -r id name; do
+        if [[ "$name" = "$mapper_name" ]]; then
+            mapper_ids+=("$id")
+        fi
+    done < <("$kcadm" get "clients/$client_id/protocol-mappers/models" \
+        --config "$config" -r "$realm" -F id,name --format csv --noquotes)
+
+    if [[ ${#mapper_ids[@]} -gt 1 ]]; then
+        echo "Duplicate Keycloak mapper: $mapper_name" >&2
+        exit 1
+    fi
+
+    mapper_id=${mapper_ids[0]:-}
+    if [[ -n "$mapper_id" ]]; then
+        "$kcadm" delete "clients/$client_id/protocol-mappers/models/$mapper_id" \
+            --config "$config" -r "$realm" >/dev/null
+    fi
+}
+
 # ADR-017B: the openmrs client's "client roles" mapper (above) relays every
 # client role the authenticated user holds on this client into the JWT roles
 # claim; the unmodified oauth2login module then assigns any OpenMRS role
@@ -140,8 +170,15 @@ openmrs_id=$(client_uuid openmrs)
 
 reconcile_mapper "$openmrs_id" "client roles" \
     /opt/daher/mappers/openmrs-client-roles-mapper.json
-reconcile_mapper "$openmrs_id" "provider disabled until approved" \
-    /opt/daher/mappers/openmrs-provider-disabled-mapper.json
+
+# ADR-017E2/DH-008G: superseded. The patched oauth2login module (see
+# openmrs-config/patches/oauth2login-bridge/) no longer reads a "provider"
+# claim at all -- Provider activation is derived from the same "roles" claim
+# above (exact "Provider" client-role membership), removing the fail-open
+# absent-claim default and the two-competing-mappers risk a separate boolean
+# claim would otherwise introduce. Deletes the mapper on any realm that still
+# has it from before this ticket; no-op everywhere else.
+remove_mapper_if_present "$openmrs_id" "provider disabled until approved"
 
 # ADR-017B: registration-only reception role. Additive — clinician/lab-tech/
 # sys-admin's own client roles (created and assigned manually per ADR-017,

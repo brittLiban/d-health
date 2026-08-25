@@ -645,12 +645,105 @@ jobs:
           reconcile = Path("keycloak/reconcile-sso.sh").read_text()
           if 'reconcile_client_role "$openmrs_id" "Daher Clinician Admission"' not in reconcile:
               bad.append("reconcile-sso.sh: does not reconcile the Daher Clinician Admission client role on openmrs")
-          if "delete" in reconcile.lower():
-              bad.append("reconcile-sso.sh: must never delete a Keycloak role — reconciliation is additive-only")
+          # Roles are additive-only (may carry real staff assignment history);
+          # mappers are stateless claim configuration and ADR-017E2 legitimately
+          # deletes a superseded one via remove_mapper_if_present — narrowed to
+          # the specific dangerous shape (a role deletion call) rather than the
+          # bare word "delete", which that helper's own body also contains.
+          if 'delete "clients/$client_id/roles' in reconcile or 'delete "roles-by-id' in reconcile:
+              bad.append("reconcile-sso.sh: must never delete a Keycloak client role — reconciliation is additive-only for roles")
 
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
           print("ok — Daher Clinician Admission is self-contained, clinician-only, and unreachable from reception")
+          PY
+
+      - name: ADR-017E2 — Provider identity is role-derived, fail-closed, and a single mechanism
+        # ADR-017E found no supported Keycloak protocol mapper can emit a
+        # deterministic, fail-closed "provider" claim conditional on client-role
+        # membership: oauth2login defaults a genuinely absent claim to
+        # activated (fail-open), and every mapper-based candidate tried either
+        # produced a non-deterministic value or lost to a competing mapper
+        # under undefined precedence. ADR-017E2's fix instead patches
+        # oauth2login itself (openmrs-config/patches/oauth2login-bridge/
+        # OAuth2LoginController.java.patch) to derive Provider activation from
+        # the same "roles" claim OpenMRS role assignment already consumes —
+        # exact "Provider" client-role membership, nothing else — and removes
+        # the now-superseded unconditional provider claim mapper everywhere.
+        # This guard cannot boot the real stack (see this file's header); it
+        # asserts on committed config and patch source. See PROJECT_STATE.md's
+        # ADR-017E2 entry for the runtime proof.
+        run: |
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          bad = []
+
+          patch_path = Path("openmrs-config/patches/oauth2login-bridge/OAuth2LoginController.java.patch")
+          if not patch_path.exists():
+              bad.append("OAuth2LoginController.java.patch is missing")
+              patch_text = ""
+          else:
+              patch_text = patch_path.read_text()
+
+              # The role-derived decision method must exist and be wired into login().
+              if "isProviderRoleGranted" not in patch_text:
+                  bad.append("OAuth2LoginController.java.patch: isProviderRoleGranted is missing")
+              if "if (isProviderRoleGranted(userInfo))" not in patch_text:
+                  bad.append("OAuth2LoginController.java.patch: login() does not call isProviderRoleGranted")
+
+              # Upstream's own fail-open check must be removed (a "-" diff line),
+              # not reintroduced on an added ("+") line — the patch file's "-"
+              # lines legitimately still show the old code being deleted.
+              added_lines = [l for l in patch_text.splitlines() if l.startswith("+")]
+              if any('userInfo.getString(UserInfo.PROP_PROVIDER, "true")' in l for l in added_lines):
+                  bad.append("OAuth2LoginController.java.patch: still reads the legacy fail-open provider claim")
+
+              # Exact membership only — the constant must be the literal role name,
+              # checked via List.contains (exact equals), never a case-folded or
+              # substring-style comparison.
+              if 'DAHER_PROVIDER_ROLE_NAME = "Provider"' not in patch_text:
+                  bad.append('OAuth2LoginController.java.patch: DAHER_PROVIDER_ROLE_NAME must be exactly "Provider"')
+              if "roleNames.contains(DAHER_PROVIDER_ROLE_NAME)" not in patch_text:
+                  bad.append("OAuth2LoginController.java.patch: role check must be exact List.contains membership")
+              for bad_pattern in (".toLowerCase()", ".indexOf(", ".startsWith(", ".matches(", "Reception"):
+                  if bad_pattern in patch_text:
+                      bad.append(f"OAuth2LoginController.java.patch: unexpected pattern {bad_pattern!r} near the role check")
+
+              # Fails closed, not open, on a missing/null/malformed claim.
+              if "catch (RuntimeException e)" not in patch_text or "return false;" not in patch_text:
+                  bad.append("OAuth2LoginController.java.patch: does not fail closed on a missing/malformed roles claim")
+
+          dockerfile = Path("openmrs-config/Dockerfile").read_text()
+          if "OAuth2LoginController.java.patch" not in dockerfile:
+              bad.append("Dockerfile: does not apply OAuth2LoginController.java.patch")
+          if "git -C /src apply /patch/OAuth2LoginController.java.patch" not in dockerfile:
+              bad.append("Dockerfile: does not git apply OAuth2LoginController.java.patch")
+
+          # Exactly one provider-claim mechanism must exist overall: the patched
+          # Java logic above. No Keycloak mapper anywhere may still emit a
+          # "provider" claim — hardcoded true, hardcoded false, or otherwise —
+          # since that would be a second, competing, precedence-undefined
+          # mechanism (ADR-017E's own finding).
+          for path in Path("keycloak").rglob("*.json"):
+              text = path.read_text()
+              if "provider" in text.lower():
+                  bad.append(f"{path}: must not reference a provider claim — the Java patch is the sole mechanism now")
+
+          stale_mapper = Path("keycloak/mappers/openmrs-provider-disabled-mapper.json")
+          if stale_mapper.exists():
+              bad.append(f"{stale_mapper} must be removed — superseded by the role-derived patch")
+
+          reconcile = Path("keycloak/reconcile-sso.sh").read_text()
+          if 'reconcile_mapper "$openmrs_id" "provider disabled until approved"' in reconcile:
+              bad.append("reconcile-sso.sh: still reconciles (recreates) the superseded provider-disabled mapper")
+          if 'remove_mapper_if_present "$openmrs_id" "provider disabled until approved"' not in reconcile:
+              bad.append("reconcile-sso.sh: does not remove the superseded provider-disabled mapper on existing realms")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Provider identity is role-derived, fails closed, and exactly one mechanism exists")
           PY
 
   compose:

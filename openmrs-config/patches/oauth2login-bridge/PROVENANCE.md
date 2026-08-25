@@ -1,10 +1,13 @@
-# oauth2login bridge patch — provenance (UI-007 / DH-008B)
+# oauth2login patches — provenance
 
-Not wired into `openmrs-config/Dockerfile`. This directory records the patch source and its
-proof so it can be applied later, once the blockers in `PROJECT_STATE.md`'s UI-007 entry are
-resolved by a human decision. Applying it today would be inert anyway: even with the dispatch
-fixed, the `authentication` module collision (see PROJECT_STATE.md) stops real login from
-completing.
+This directory records the patch source and proof for every Daher-owned change to the pinned
+`oauth2login` module, applied by `openmrs-config/Dockerfile`'s `oauth2login-build` stage.
+
+- **The bridge patch** (`OAuth2LoginBridgeFilter.java`, `config.xml.patch`) — UI-007/DH-008B, wired
+  into the Dockerfile by UI-008/DH-008C. Makes `/oauth2login` reachable at all.
+- **The provider-role-derivation patch** (`OAuth2LoginController.java.patch`) — ADR-017E2/DH-008G,
+  wired into the Dockerfile the same ticket. Makes Provider activation derive from the OpenMRS
+  client-role claim instead of a separate, fail-open provider claim. See its own section below.
 
 ## Upstream
 
@@ -66,3 +69,49 @@ provider identity, restart, and Keycloak-outage fail-closed behavior), and the n
 controls that were and were not able to be run. All testing was against a disposable
 Keycloak + OpenMRS + MariaDB stack with synthetic data only; no real facility SSO was enabled
 and no production file was modified to run these tests.
+
+---
+
+## `OAuth2LoginController.java.patch` — provenance (ADR-017E2 / DH-008G)
+
+Also applied on top of the same pinned source/commit/toolchain above (both patches apply to the
+same clone, in sequence — bridge filter first, then this one).
+
+## Patch contents
+
+- `OAuth2LoginController.java.patch` — unified diff against
+  `omod/src/main/java/org/openmrs/module/oauth2login/web/controller/OAuth2LoginController.java`.
+  Adds a `DAHER_PROVIDER_ROLE_NAME` constant and a package-private `isProviderRoleGranted(UserInfo)`
+  method; replaces the single line in `login()` that read
+  `userInfo.getString(UserInfo.PROP_PROVIDER, "true")` with a call to it. No other method is
+  touched — `activateProviderAccount`/`deactivateProviderAccount` and their existing per-Person
+  duplicate-prevention logic are unmodified; only *whether* they are called changed.
+- `test-verification/ProviderRoleDerivationTest.java` — new file, focused unit tests for the
+  decision method (10 cases). **Not applied by the Dockerfile** — the build always runs with
+  `-Dmaven.test.skip=true`, so this is verification-only, kept for anyone re-proving the patch.
+- `test-verification/ProviderAttributeUserInfoTest.java.patch` — unified diff updating an existing
+  upstream integration test whose old fixture asserted the pre-patch (fail-open-adjacent) behavior;
+  also verification-only, not applied by the Dockerfile.
+
+## Checksum
+
+`.omod` produced by the real `openmrs-config/Dockerfile` `oauth2login-build` stage, both patches
+applied (`daher-health/openmrs-backend:adr017e2-test` image, 2026-08-25):
+
+`ae148634ec06817efcc99fdf9c0a1a4e05565ef76292c8eb7899b3b4aec8966b`
+
+As with the bridge patch above, this is not expected to be byte-reproducible across rebuilds
+(Maven jar-entry timestamps) — reproducibility is verified at the source/patch/toolchain level:
+the exact pinned clone, the exact patch content (applied successfully via both `git apply` and
+plain `patch -p1`, independently), the exact base image digest.
+
+## How this was proven
+
+See `DECISIONS.md`'s `ADR-017E2` entry and `PROJECT_STATE.md`'s `ADR-017E2 / DH-008G` entry for
+the full account: unit coverage for all 9 required decision-table cases plus one extra, a live
+fresh-synthetic-clinician OIDC round trip with every identifier read back and cross-checked,
+repeated-login idempotence, reception/zero-role/broad-non-Provider-role negative controls, an
+admission re-proof, and a provider-ambiguity control run on an isolated throwaway database clone
+(never the canonical disposable database). All testing was against a disposable Keycloak +
+OpenMRS + MariaDB stack with synthetic data only; no real facility SSO was enabled and no
+production file was modified to run these tests.

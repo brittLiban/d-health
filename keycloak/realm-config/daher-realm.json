@@ -80,20 +80,6 @@
             "claim.name": "roles",
             "jsonType.label": "String"
           }
-        },
-        {
-          "name": "provider disabled until approved",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-hardcoded-claim-mapper",
-          "consentRequired": false,
-          "config": {
-            "claim.value": "false",
-            "userinfo.token.claim": "true",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "provider",
-            "jsonType.label": "String"
-          }
         }
       ]
     },
