@@ -1164,6 +1164,69 @@ same daemon-level denial. `openmrs-adr017e2-freshproc` is left running deliberat
 primary evidence container. Needs a human `docker rm -f openmrs-adr017e2-ambig openmrs-adr017e2-
 ambig2` alongside every prior ticket's own still-pending leftovers.
 
+### DH-008G-CI — the 10 provider-derivation tests are now mandatory CI, not manual-only
+
+**Gap closed.** ADR-017E2's static `static` job guard proves the committed patch *text* has the
+right shape; it never compiled or ran a single line of the patched Java. A new job,
+`oauth2login-provider-tests`, closes that: it runs inside the exact pinned
+`maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82`
+image (byte-identical to `openmrs-config/Dockerfile`'s own build stage, not a generic runner
+toolchain), clones the pinned `oauth2login` `1.5.0` commit
+(`2770233627343a53719ec981e997d94b1d90b7ad`) and fails if that commit ever moves, applies the same
+committed patch files the Docker build consumes (bridge patch, then the ADR-017E2 controller
+patch — not a test-only approximation), installs `ProviderRoleDerivationTest.java`, and runs
+`mvn package` scoped to the `omod` module, asserting the literal Maven output line
+`Tests run: 10, Failures: 0, Errors: 0, Skipped: 0 ... ProviderRoleDerivationTest`. Compiles and
+executes the real patched Java — a string-search assertion would not have caught this ticket's own
+first draft bug (see below).
+
+**`ProviderAttributeUserInfoTest` deliberately excluded from the gate.** It is a full
+Spring-context integration test (extends `BaseModuleContextSensitiveTest`) that fails to load its
+`ApplicationContext` under this exact JDK17/CGLIB toolchain — the same pre-existing failure
+ADR-017E2 already confirmed via a control run against pristine, unpatched upstream source. Gating
+CI on infrastructure this repo does not own and cannot fix would make the new job flaky, not
+stronger. It remains a documented, manually-verified artifact (`PROVENANCE.md`), unchanged.
+
+**A real bug in the gate's own first draft, caught by control-testing, not assumed correct.** The
+first version anchored its result check to `^Tests run: 10, Failures: 0, Errors: 0` (line-start).
+Every line Maven prints is prefixed `[INFO] `, so that anchor never matches anything — the check
+would have silently reported the gate as failing on every genuinely passing run, including this
+ticket's own first attempt. Caught by actually running the job locally end-to-end rather than
+reasoning about the regex; fixed to `Tests run: 10, ... Skipped: 0.*ProviderRoleDerivationTest`
+(unanchored, tied to the specific class name so a passing-looking match from an unrelated class
+elsewhere in the log could not slip through).
+
+**Control-tested, four ways, on a throwaway copy — never the committed patch file.** (1) Substring
+matching instead of exact `List.contains` (`roleNames.toString().contains(...)`) — 2 test failures
+(`SuperProvider`, `Provider Assistant` now incorrectly qualify), gate correctly failed. (2) Missing/
+malformed roles made fail-open (`roleNames == null || ...`, catch block returns `true`) — 2 test
+failures (missing-claim and malformed-claim cases), gate correctly failed. (3) The role constant
+changed from `"Provider"` to `"Daher Reception"` — 3 test failures (both exact-`Provider` cases now
+wrongly fail, `Daher Reception`-only now wrongly passes), gate correctly failed. (4) A patch context
+line corrupted so `git apply` itself cannot locate its anchor — `git apply` failed outright with
+"patch does not apply", halting the pipeline before any test ran, exit nonzero. All four restored
+to the exact committed content afterward; a `diff` against the real committed file confirmed
+byte-identical restoration.
+
+**CI runtime.** Warm (Maven dependency cache hit via `actions/cache`, keyed on the pinned commit —
+a fixed upstream `pom.xml` at a fixed SHA fully determines the dependency set, so the key never
+goes stale): clone + patch + compile + test in well under a minute. Cold (cache miss, full
+dependency download): ~4 minutes, matching ADR-017E2's own manual build timings. No clinical stack
+is built or booted — only the two-module `oauth2login` Maven reactor (`api` + `omod`), consistent
+with this file's own header ("What is deliberately NOT here: the ~50-minute clinical cold boot").
+
+**Test accounting, honest, not inflated.** Application test total stays **774** (adapter 94,
+provisioning 580, seed 16, form-safety 19, ui 65) — this ticket touches only
+`.github/workflows/ci.yml`. `oauth2login` provider-patch tests: **10**, now genuinely gated by CI
+for the first time, reported as a separate figure rather than folded into 774 — the project's
+convention for counting third-party-patched-module tests has not been changed, and this ticket does
+not change it.
+
+**No provider architecture change.** `OAuth2LoginController.java.patch` itself, the Keycloak
+mappings, role privileges, `Daher Reception`, `Daher Clinician Admission`, `Organizational: Nurse`,
+UI code, and OpenELIS are all byte-for-byte untouched — confirmed via `git diff --stat` showing
+exactly one file changed. No real facility state touched.
+
 ---
 
 ## ADR-018 — Order cancellation: revoke before acceptance, manual handling after
