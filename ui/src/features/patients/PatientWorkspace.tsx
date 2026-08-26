@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { OpenMrsPatient } from '../../api/types'
 import { Button, EmptyState, PatientHeader } from '../../design-system'
 import { formatBirthInfo, formatIdentifier } from '../../design-system/formatPatient'
+import { AdmissionPanel } from '../admission/AdmissionPanel'
 import styles from './PatientWorkspace.module.css'
 
 const TABS = [
@@ -67,7 +68,8 @@ export function PatientWorkspace({ patient, onBack }: PatientWorkspaceProps) {
             <p>
               <strong>Genre :</strong> {patient.person?.gender ?? 'Non renseigné'}
             </p>
-            <EmptyState title="Admission et contexte de grossesse non disponibles">
+            <AdmissionPanel patientUuid={patient.uuid} />
+            <EmptyState title="Contexte de grossesse non disponible">
               Ces informations nécessitent un appel API distinct, non couvert par cette version.
             </EmptyState>
           </div>

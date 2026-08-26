@@ -1,10 +1,17 @@
 import {
   ApiError,
+  type ActiveVisit,
   type IdentifierSource,
   type OpenMrsPatient,
+  type OpenMrsSession,
   type PatientRegistration,
   type ErrorCode,
 } from './types'
+import {
+  ADMISSION_ENCOUNTER_TYPE_UUID,
+  DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID,
+  MATERNITE_LOCATION_UUID,
+} from './admissionConstants'
 
 interface NormalizedErrorBody {
   error?: { code?: string; message?: string }
@@ -256,5 +263,238 @@ export async function createPatient(
     // connection — the server-side outcome is not something this response
     // can confirm, so it is treated the same way: reconcile, never retry.
     throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'enregistrement est incertain.")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI-013 — clinician maternity admission.
+//
+// Two mutation boundaries (Visit, then linked Encounter), not one. ADR-017C
+// found the Encounter POST can persist while the response itself 500s
+// (a serialization failure unrelated to whether the write committed) — so
+// unlike `writeErrorFromBody` above, a 5xx on either admission write is
+// never treated as a definite failure. `admissionWriteErrorFromBody` is a
+// deliberately different, more conservative classifier for exactly this
+// reason: only a body containing "Privileges required" or a 4xx status is
+// evidence of a genuine pre-save rejection; everything else — including a
+// 5xx — is AMBIGUOUS_WRITE and must be reconciled against server state,
+// never retried blindly.
+function admissionWriteErrorFromBody(status: number, rawText: string): ApiError {
+  if (rawText.includes('Privileges required')) {
+    return new ApiError('NOT_AUTHORIZED', 'Accès refusé.')
+  }
+  if (status === 401) {
+    return new ApiError('NOT_AUTHORIZED', 'Accès refusé.')
+  }
+  if (status >= 400 && status < 500) {
+    return new ApiError('VALIDATION_ERROR', 'Requête invalide.')
+  }
+  return new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+}
+
+interface MetadataCandidate {
+  uuid: string
+  retired?: boolean
+}
+
+async function fetchMetadataCandidates(resource: string, query: string): Promise<MetadataCandidate[]> {
+  let response: Response
+  try {
+    response = await fetch(
+      `/openmrs/ws/rest/v1/${resource}?q=${encodeURIComponent(query)}&v=custom:(uuid,retired)`,
+      { headers: { Accept: 'application/json' } },
+    )
+  } catch {
+    throw new ApiError('NETWORK_ERROR', 'Connexion au serveur impossible.')
+  }
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw writeErrorFromBody(response.status, rawText)
+  }
+  let body: { results?: MetadataCandidate[] }
+  try {
+    body = JSON.parse(rawText)
+  } catch {
+    throw new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+  }
+  return Array.isArray(body.results) ? body.results : []
+}
+
+function assertPinnedMatch(candidates: MetadataCandidate[], expectedUuid: string): void {
+  const active = candidates.filter((candidate) => !candidate.retired)
+  if (active.length !== 1 || active[0].uuid !== expectedUuid) {
+    // Fail closed on 0, >1, a retired-only result, or a UUID that no
+    // longer matches the pinned Daher-owned artifact (§3) — never silently
+    // fall back to whichever result comes back first.
+    throw new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+  }
+}
+
+/**
+ * Drift check only — never the source of the mutation payload (§3, §13,
+ * §14 use the pinned constants directly). Confirms exactly one, non-retired,
+ * UUID-matching result for each of the three canonical admission artifacts.
+ * Never falls back to an upstream generic (Facility Visit, Inpatient Ward)
+ * on a mismatch — it throws instead.
+ */
+export async function verifyAdmissionMetadata(): Promise<void> {
+  const [visitTypes, encounterTypes, locations] = await Promise.all([
+    fetchMetadataCandidates('visittype', 'Daher Maternity Admission'),
+    fetchMetadataCandidates('encountertype', 'Admission'),
+    fetchMetadataCandidates('location', 'Maternité'),
+  ])
+  assertPinnedMatch(visitTypes, DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID)
+  assertPinnedMatch(encounterTypes, ADMISSION_ENCOUNTER_TYPE_UUID)
+  assertPinnedMatch(locations, MATERNITE_LOCATION_UUID)
+}
+
+/**
+ * GET /session. `user.roles` is what the frontend uses for UX-only role
+ * gating (ADR-017D §5 — the server privilege set is the real boundary);
+ * `currentProvider` is what ADR-017E2 proved is non-null only for the exact
+ * "Provider" client role, with no second truth source.
+ */
+export async function getSession(): Promise<OpenMrsSession> {
+  let response: Response
+  try {
+    response = await fetch('/openmrs/ws/rest/v1/session', {
+      headers: { Accept: 'application/json' },
+    })
+  } catch {
+    throw new ApiError('NETWORK_ERROR', 'Connexion au serveur impossible.')
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw writeErrorFromBody(response.status, rawText)
+  }
+
+  try {
+    return JSON.parse(rawText) as OpenMrsSession
+  } catch {
+    throw new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+  }
+}
+
+// The one read call UI-013 measured live (docs/UI-013 handoff §9): a single
+// custom representation carrying visitType/location plus embedded encounters
+// (encounterType, voided) — no obs/orders/diagnoses, so no clinical content
+// beyond what admission-state derivation needs ever crosses the wire. This
+// is reused for the preflight read AND both post-write reconciliation reads
+// (§16, §17) — one mechanism, not three.
+const ACTIVE_VISIT_REPRESENTATION =
+  'custom:(uuid,visitType:(uuid,display),location:(uuid,display),stopDatetime,' +
+  'encounters:(uuid,encounterType:(uuid,display),voided))'
+
+/**
+ * GET /visit?patient=<uuid>&includeInactive=false&v=custom:(...). Returns
+ * every active visit for the patient, of any type — admission-specific
+ * filtering (Daher Maternity Admission + Maternité) happens in
+ * `deriveAdmissionState`, not here, so this function has exactly one
+ * server contract to characterize regardless of what the caller does with
+ * the result.
+ */
+export async function getActiveVisits(patientUuid: string): Promise<ActiveVisit[]> {
+  let response: Response
+  try {
+    response = await fetch(
+      `/openmrs/ws/rest/v1/visit?patient=${encodeURIComponent(patientUuid)}` +
+        `&includeInactive=false&v=${encodeURIComponent(ACTIVE_VISIT_REPRESENTATION)}`,
+      { headers: { Accept: 'application/json' } },
+    )
+  } catch {
+    throw new ApiError('NETWORK_ERROR', 'Connexion au serveur impossible.')
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw writeErrorFromBody(response.status, rawText)
+  }
+
+  let body: { results?: ActiveVisit[] }
+  try {
+    body = JSON.parse(rawText)
+  } catch {
+    throw new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+  }
+  return Array.isArray(body.results) ? body.results : []
+}
+
+/**
+ * POST /visit with the pinned Daher Maternity Admission visit type and
+ * Maternité location (ADR-028) — the exact payload shape UI-001A proved
+ * (`{patient, visitType, location}`, docs/UI-001-CLINICAL-UX.md §13a.5).
+ * A dropped connection or unparsable 2xx is AMBIGUOUS_WRITE, exactly like
+ * `createPatient` above: never retried here, only reconciled by the caller
+ * via `getActiveVisits`.
+ */
+export async function createMaternityVisit(patientUuid: string): Promise<{ uuid: string }> {
+  let response: Response
+  try {
+    response = await fetch('/openmrs/ws/rest/v1/visit', {
+      method: 'POST',
+      headers: { ...MUTATION_HEADERS, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        patient: patientUuid,
+        visitType: DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID,
+        location: MATERNITE_LOCATION_UUID,
+      }),
+    })
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw admissionWriteErrorFromBody(response.status, rawText)
+  }
+
+  try {
+    const body = JSON.parse(rawText) as { uuid?: string }
+    if (!body.uuid) throw new Error('missing uuid')
+    return { uuid: body.uuid }
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+}
+
+/**
+ * POST /encounter, only ever called with an already-confirmed Visit uuid
+ * (§12/§14). Deliberately does NOT send `encounterProviders` — ADR-017E2
+ * proved a valid admission completes with `encounterProviders: []` even
+ * when `currentProvider` exists, and this ticket preserves that exact
+ * contract rather than inferring provider attribution (§6).
+ */
+export async function createAdmissionEncounter(
+  patientUuid: string,
+  visitUuid: string,
+): Promise<{ uuid: string }> {
+  let response: Response
+  try {
+    response = await fetch('/openmrs/ws/rest/v1/encounter', {
+      method: 'POST',
+      headers: { ...MUTATION_HEADERS, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        patient: patientUuid,
+        encounterType: ADMISSION_ENCOUNTER_TYPE_UUID,
+        location: MATERNITE_LOCATION_UUID,
+        visit: visitUuid,
+      }),
+    })
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw admissionWriteErrorFromBody(response.status, rawText)
+  }
+
+  try {
+    const body = JSON.parse(rawText) as { uuid?: string }
+    if (!body.uuid) throw new Error('missing uuid')
+    return { uuid: body.uuid }
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
   }
 }

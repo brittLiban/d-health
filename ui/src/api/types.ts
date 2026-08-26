@@ -39,6 +39,39 @@ export interface PatientRegistration {
   birthdate: string
 }
 
+// GET /session — shape observed live against the pinned OpenMRS build (UI-013,
+// matching ADR-017E2's own characterization): `user.roles` carries the exact
+// OpenMRS role names oauth2login assigns from the Keycloak `roles` claim;
+// `currentProvider` is `null` unless the session's exact "Provider" role
+// activated one (ADR-017E2). Only the fields this ticket actually reads.
+export interface OpenMrsSession {
+  authenticated: boolean
+  user?: {
+    uuid: string
+    roles?: Array<{ name: string }>
+  }
+  currentProvider?: { uuid: string } | null
+}
+
+// GET /visit?v=custom:(...) — the read contract UI-013 measured live
+// (docs/UI-013 handoff): one call, embedded encounters, no obs/orders/
+// diagnoses. `stopDatetime` present means the visit is closed; the server's
+// own `includeInactive=false` filter is the source of truth for "active",
+// not a client-side re-derivation of it.
+export interface AdmissionEncounterRef {
+  uuid: string
+  encounterType: { uuid: string; display?: string }
+  voided: boolean
+}
+
+export interface ActiveVisit {
+  uuid: string
+  visitType: { uuid: string; display?: string }
+  location: { uuid: string; display?: string }
+  stopDatetime?: string | null
+  encounters: AdmissionEncounterRef[]
+}
+
 // Fixed frontend-facing error vocabulary (docs/UI-001-CLINICAL-UX.md §20).
 // Never a raw backend message or stack trace — the dev proxy in vite.config.ts
 // already strips those before they reach this client.
