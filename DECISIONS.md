@@ -2239,3 +2239,77 @@ confirming exactly one `Daher Maternity Admission` result and zero drift on the 
 **Consequence.** BLOCKER-7 / NEEDS LIBAN #20 is closed. UI-013 may resume against
 `Daher Maternity Admission` (name) / `194bf546-68d7-42c0-8371-5b0f2b1cf5f3` (UUID) and the
 already-committed `Admission` encounter type and `Maternité` location.
+
+---
+
+## ADR-029 — Make the existing "Admission" Encounter type reproducible on fresh deployments
+
+**Date:** 2026-08-26 · **Status:** ACCEPTED · **Decided by:** Liban
+
+**Context.** UI-013's live closure pass found that a genuinely fresh OpenMRS database, booted
+against the current committed Daher configuration, has **zero** Encounter types beyond the core
+`Attachment Upload` — no `Admission` type at all, the one UI-013's Encounter-half payload requires.
+Recorded as **BLOCKER-8 / NEEDS LIBAN #21**.
+
+**Root cause, re-confirmed with evidence before this ticket touched anything:**
+
+- The real main stack's `encounter_type` table shows **all 19 encounter types** (`Admission`,
+  `Vitals`, `Discharge`, …) created within the same 2-second window, `2026-08-11 09:35:50`–`52`, by
+  `creator=2` (the daemon/system account) — a single historical bulk upstream reference-content
+  import, not Daher config. `visit_type` shows the identical pattern one second earlier for the
+  five upstream Visit types. Only `Attachment Upload` (core platform, not reference-app content)
+  falls outside that cluster.
+- No file in this repo defines it: `openmrs-config/initializer/` had no `encountertypes/` domain
+  directory before this ticket, and the base image's own
+  `/openmrs/distribution/openmrs_config/encountertypes/` directory exists but ships **empty**.
+- UUID `e22e39fd-7db2-45e7-80f1-60fa0d5a4378` has been the same value across every characterization
+  of it this repo has ever done (UI-001A, ADR-017C, ADR-017D, ADR-017E2, this ticket) — stable for
+  this pinned upstream content, just not reproducible from an empty database today.
+
+**Decision.** Liban approved reproducing the **existing** upstream semantic — same name (`Admission`),
+same UUID (`e22e39fd-7db2-45e7-80f1-60fa0d5a4378`) — as committed, reproducible Daher config. This is
+explicitly **not** a new clinical concept: no `Daher Admission` type, no rename, no change to what
+the type means. It is a deployment-reproducibility fix for content that already existed and was
+already in use (ADR-017C, ADR-017D, ADR-017E2 all proved admission against this exact type), which
+historical/reference-content seeding cannot be relied on to reproduce for a future fresh deployment.
+
+**Mechanism confirmed by disassembly, not assumed to mirror ADR-028's `visittypes` domain** (`jar
+xf` + `javap -c` against the pinned `initializer-2.12.0.omod`'s `initializer-api-2.12.0.jar`):
+`Domain.ENCOUNTER_TYPES.getName()` computes `"encountertypes"` (same `name().replace("_","")
+.toLowerCase()` mechanism, bytecode-confirmed) — and the distribution's own `encountertypes/`
+directory (present, empty) corroborates this independently. `EncounterTypeLineProcessor extends
+BaseLineProcessor<EncounterType>` — a **different shape** from `VisitTypeLineProcessor`: it calls
+`CsvLine.getName(true)` (name required) and `.get("description")` (not `.getString()`), and
+additionally supports two **optional** columns, `view privilege` and `edit privilege`
+(`HEADER_VIEW_PRIV`/`HEADER_EDIT_PRIV`, bytecode-confirmed literal header strings) — if non-empty,
+resolved via `Utils.fetchPrivilege` and thrown as `IllegalArgumentException` if the named privilege
+doesn't exist. The existing `Admission` row has `view_privilege`/`edit_privilege` both `NULL` in the
+live database (`SELECT … FROM encounter_type`, confirmed directly), so both CSV columns are left
+blank — preserving the exact existing state rather than introducing a privilege scope that was
+never there.
+
+**Decision — the exact artifact committed:**
+
+| Layer | Artifact | Contents |
+|---|---|---|
+| OpenMRS | Encounter type `Admission` (`openmrs-config/initializer/encountertypes/encountertypes-daher.csv`, Initializer-provisioned, domain `encountertypes`) | Existing UUID `e22e39fd-7db2-45e7-80f1-60fa0d5a4378`, existing name `Admission`, existing description ("Indicates that the patient has been admitted for inpatient care, and is not expected to leave the hospital unless discharged."), `View privilege`/`Edit privilege` left blank to match the existing `NULL`/`NULL` state, `Void/Retire` empty |
+| Compose | New additive bind mount in `docker-compose.yml`, alongside the existing four `zz-daher-health` domain mounts, none of which were touched | `./openmrs-config/initializer/encountertypes:/openmrs/distribution/openmrs_config/encountertypes/zz-daher-health:ro` |
+
+**Explicitly not done:** no new Encounter type concept (`Daher Admission` or otherwise); no
+unrelated encounter type provisioned, renamed, or retired; no upstream Visit type touched; no
+change to `Daher Maternity Admission` (ADR-028) or `Maternité` (ADR-017B); no patient/Visit/Encounter
+write; no real SSO activation; no real staff assigned; no OpenELIS touched.
+
+**Live proof, existing-database gate and fresh-database gate — recorded in full, including an
+honestly-disclosed environmental blocker, in `PROJECT_STATE.md`'s own BLOCKER-8 closure entry.**
+
+**Consequence.** BLOCKER-8 / NEEDS LIBAN #21 is closed — decision, mechanism, and existing-database
+reproducibility are all proven. **Liban reviewed the fresh-database boot failure and accepted it as
+a DH-017 fresh-deployment verification item, not a gap in this decision**: the Initializer
+mechanism was confirmed directly from the pinned module, the exact existing semantic/UUID was
+preserved, existing-database provisioning and a second idempotent pass both succeeded, the CI guard
+and its five controls all behaved correctly, and the fresh-boot failure reproduced identically on a
+config-identical control with the new mount removed — so the `/initialsetup` failure does not
+implicate this config. DH-017's eventual fresh-VM walkthrough is where a genuine fresh boot gets
+demonstrated. UI-013 itself remains uncommitted and unaffected; its canonical Encounter UUID
+(`e22e39fd-7db2-45e7-80f1-60fa0d5a4378`) required no change.

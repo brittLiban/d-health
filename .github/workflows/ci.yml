@@ -812,6 +812,80 @@ jobs:
           print("ok — Daher Maternity Admission is a single, additive, Daher-owned Visit type")
           PY
 
+      - name: ADR-029 — Admission Encounter type is reproducible, upstream semantics preserved
+        # UI-013's live closure pass found a genuinely fresh database has zero
+        # Encounter types beyond the core "Attachment Upload" — "Admission" (the
+        # type UI-013's Encounter POST requires) only exists on today's stacks
+        # because a bulk upstream reference-content import fired once,
+        # historically (BLOCKER-8). ADR-029's decision: pin that EXACT existing
+        # upstream semantic (same name, same UUID) as reproducible Daher config
+        # via Initializer 2.12.0's native "encountertypes" CSV domain (bytecode-
+        # confirmed — a different shape from "visittypes": EncounterTypeLineProcessor
+        # additionally supports optional "view privilege"/"edit privilege"
+        # columns, deliberately left blank here to match the existing row's own
+        # NULL/NULL state) — not a new "Daher Admission" concept. This guard
+        # cannot boot the real stack (see this file's header); it asserts on the
+        # committed CSV and compose mount. See PROJECT_STATE.md's BLOCKER-8 entry
+        # for the fresh-database / existing-database / second-pass proof.
+        run: |
+          python - <<'PY'
+          import csv, sys
+          from pathlib import Path
+
+          bad = []
+
+          ADMISSION_NAME = "Admission"
+          ADMISSION_UUID = "e22e39fd-7db2-45e7-80f1-60fa0d5a4378"
+
+          csv_path = Path("openmrs-config/initializer/encountertypes/encountertypes-daher.csv")
+          if not csv_path.exists():
+              bad.append("openmrs-config/initializer/encountertypes/encountertypes-daher.csv is missing")
+          else:
+              with csv_path.open(newline="", encoding="utf-8") as fh:
+                  rows = list(csv.DictReader(fh))
+
+              # Exactly one committed row — reproducing the one existing
+              # semantic, not introducing a second Daher-owned Encounter type.
+              if len(rows) != 1:
+                  bad.append(f"encountertypes-daher.csv: expected exactly one row, found {len(rows)}")
+              else:
+                  row = rows[0]
+                  if row.get("Name") != ADMISSION_NAME:
+                      bad.append(f"encountertypes-daher.csv: Name must be exactly {ADMISSION_NAME!r}, found {row.get('Name')!r}")
+                  if row.get("Uuid") != ADMISSION_UUID:
+                      bad.append(f"encountertypes-daher.csv: Uuid must stay pinned to {ADMISSION_UUID!r} — this is the existing upstream semantic, not a new one")
+                  if row.get("Void/Retire", "").strip():
+                      bad.append("encountertypes-daher.csv: the Admission row must not be voided/retired")
+                  # No new clinical semantics: this ticket pins the EXISTING
+                  # meaning only, so it must not carry a privilege scope the
+                  # existing row never had (both are NULL upstream — ADR-029).
+                  if row.get("View privilege", "").strip() or row.get("Edit privilege", "").strip():
+                      bad.append("encountertypes-daher.csv: must not set View/Edit privilege — the existing Admission row has neither")
+
+              # No second file in the same domain, and no name colliding with
+              # "Daher Admission" or similar — this is reproducibility of the
+              # existing semantic, never a second/renamed admission concept.
+              for other in Path("openmrs-config/initializer/encountertypes").glob("*.csv"):
+                  if other == csv_path:
+                      continue
+                  bad.append(f"{other}: unexpected extra file in the encountertypes domain — only encountertypes-daher.csv is provisioned")
+              if csv_path.exists():
+                  names = [r.get("Name", "") for r in rows]
+                  if any(n != ADMISSION_NAME and "admission" in n.lower() for n in names):
+                      bad.append("encountertypes-daher.csv: must not introduce a second admission-named Encounter type (e.g. 'Daher Admission')")
+
+          # The mount that actually delivers encountertypes-daher.csv to
+          # OpenMRS at boot exists, using Initializer's own domain folder name
+          # for ENCOUNTER_TYPES ("encountertypes" — bytecode-confirmed, ADR-029).
+          compose = Path("docker-compose.yml").read_text()
+          if "openmrs-config/initializer/encountertypes:/openmrs/distribution/openmrs_config/encountertypes/zz-daher-health:ro" not in compose:
+              bad.append("docker-compose.yml: the encountertypes Initializer directory is not mounted into the openmrs-backend service")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Admission Encounter type is reproducible, upstream semantics preserved")
+          PY
+
   oauth2login-provider-tests:
     # DH-008G-CI. The static ADR-017E2 guard above proves the committed patch
     # *text* has the right shape (method exists, exact-match constant, fails

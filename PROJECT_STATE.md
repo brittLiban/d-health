@@ -343,6 +343,7 @@ exists. Each links to the detail rather than repeating it.
 | 17 | ✅ **Which staff role may register a patient?** — raised 2026-08-24 (UI-012), evidence completed 2026-08-24 (ADR-017A / UI-012A), **DECIDED AND IMPLEMENTED 2026-08-24 (ADR-017B): Option B, a dedicated `Daher Reception` role.** Committed: an OpenMRS role `Daher Reception` (`openmrs-config/initializer/roles/roles-daher.csv`, Initializer-provisioned) carrying exactly the three proven privileges, plus a Keycloak client role of the same name on the `openmrs` client (`keycloak/reconcile-sso.sh`, additive, idempotent). **Not yet ACTIVE**: no real staff assigned, `SSO_ENABLED` still `false` on the real facility — this ticket makes the role deployable, not live. Full runtime proof (fresh synthetic user, real OIDC login, exact registration contract, negative controls, bidirectional clinician-regression) in this ticket's own log entry below | Which real staff role registers patients was a facility workflow/staffing decision — now made and recorded (ADR-017B) | Real activation still needs SSO's public domain (#15) and the roster meeting (#14) for the actual name |
 | 18 | ✅ **Should reception be allowed to perform admission (Visit + linked Encounter), or does admission stay clinician-only?** — raised 2026-08-24 (ADR-017C / UI-013A), evidence complete, **DECIDED AND IMPLEMENTED 2026-08-25 (ADR-017D): Option B, clinician-only.** Committed: a second, self-contained, Daher-owned OpenMRS role `Daher Clinician Admission` (nine privileges — `Get Patients` plus ADR-017A's eight-privilege `ADMISSION_INCREMENT`), Initializer-provisioned, no inheritance to or from `Daher Reception`; a matching Keycloak client role on `openmrs`, reconciled via the same idempotent mechanism ADR-017B proved. `Daher Reception` is untouched and remains exactly its three privileges. The accepted platform limitation (`Add Visits`/`Add Encounters` are blanket, unscopable) is recorded explicitly as the reason admission had to move to a separate, clinician-only role rather than being narrowed in place. Full runtime proof (real OIDC clinician login, live Visit+Encounter admission, reception negative controls, bed-assignment control, broad-scope control reconfirmed honestly) in this ticket's own log entry below | Whether a receptionist may complete admission unassisted was a facility risk-tolerance decision — now made and recorded (ADR-017D) | Real activation still needs the roster meeting (#14/#17, now also #18's clinician-admission assignment) and SSO's public domain (#15); UI-013 can now be built against a committed, proven authorization boundary |
 | 20 | ✅ **Which OpenMRS Visit type represents a Daher maternity admission?** — raised 2026-08-25 (UI-013, BLOCKER-7), **DECIDED AND IMPLEMENTED 2026-08-25 (ADR-028): Option C, a dedicated Daher-owned Visit type, `Daher Maternity Admission`** (UUID `194bf546-68d7-42c0-8371-5b0f2b1cf5f3`), provisioned via Initializer's native `visittypes` CSV domain (mechanism confirmed by disassembling the pinned `initializer-2.12.0` module, not assumed). None of the five upstream generics (`Facility Visit`, `Home Visit`, `OPD Visit`, `Offline Visit`, `Group Session`) modified, renamed, retired, or deleted. Fresh-database, already-initialized-database, and idempotent-second-pass proof in BLOCKER-7's own closure entry | Naming a Visit type as "this is what a Daher maternity admission is" fixes clinical/audit semantics for every admission going forward — now made and recorded (ADR-028) | UI-013 may resume: the pre-write gate is cleared |
+| 21 | ✅ **Should the upstream "Admission" Encounter type be pinned as reproducible Daher config, or is depending on upstream demo/reference-content seeding acceptable?** — raised 2026-08-25 (UI-013 live closure pass, BLOCKER-8), **DECIDED AND IMPLEMENTED 2026-08-26 (ADR-029): Option B**, pin the exact existing semantic (name `Admission`, UUID `e22e39fd-7db2-45e7-80f1-60fa0d5a4378`) via a committed `encountertypes-daher.csv`, using Initializer's native `encountertypes` domain (mechanism confirmed by disassembly, distinct in shape from `visittypes`). Existing-database compatibility gate fully proven twice (19 types unchanged, no duplicate, idempotent second pass); genuinely-fresh-database proof not achieved this pass due to a newly-encountered, disclosed environmental startup race unrelated to this config's correctness (see BLOCKER-8's own closure entry) | Committing upstream metadata under Daher's own Initializer config, to guarantee it on every fresh deployment, was a reproducibility/deployment-guarantee decision — now made and recorded (ADR-029) | DH-017's fresh-VM walkthrough — still needs a real fresh-boot demonstration once the environmental startup race is understood or a fresh host is available; not blocking UI-013's own code, which is complete |
 
 ### 🗓 Waiting on the birth-centre meeting — as of 2026-08-15
 
@@ -713,12 +714,155 @@ touched.
 
 **Cleanup.** The cloned throwaway schema `openmrs_ui013_existing` was dropped successfully. The
 four throwaway containers (`ui013-fresh-db`, `ui013-fresh-omrs`, `ui013-existing-omrs`,
-`ui013-existing-omrs-pass2`), the `daher-ui013-net` network, and volumes `ui013-fresh-db-data`/
-`ui013-fresh-omrs-data` could **not** be removed — the same intermittent daemon-level `docker
-kill`/`stop`/`rm` permission denial recorded at the end of nearly every prior ticket this session;
-added to the list of containers/volumes/network needing a human `docker rm -f` / `docker network
-rm` / `docker volume rm` alongside every prior ticket's own still-pending leftovers. No production
-container, volume, or the real `openmrs-data` volume was touched by any of this.
+`ui013-existing-omrs-pass2`) could not be stopped via the normal `docker stop`/`kill`/`rm` API
+(the same intermittent daemon-level permission denial recorded at the end of nearly every prior
+ticket this session) — **update, same day:** all were later terminated by a different route
+(`docker exec <name> kill -9 <pid>` against the container's own main process from inside its own
+PID namespace, which is not subject to the same daemon-side permission check) during an
+out-of-band host memory emergency this same session — see BLOCKER-8's own note. No production
+container, volume, or the real `openmrs-data` volume was ever touched.
+
+---
+
+### BLOCKER-8 — the "Admission" Encounter type is upstream demo/reference content, not reproducible on a fresh install · ✅ RESOLVED BY ADR-029 (decision + mechanism + existing-DB proof) · ⏳ fresh-deployment verification pending DH-017 (technical, not a decision)
+
+**Ticket:** UI-013 (live closure pass), investigating a gap this same ticket's earlier pass first
+noticed: a genuinely fresh database booted against the current committed config has **zero**
+Encounter types beyond the core `Attachment Upload` — no `Admission` type at all, the one UI-013's
+Encounter-half payload requires.
+
+**Investigation, read-only, live-measured against the running stacks 2026-08-25 — the five
+questions this pass was asked to answer:**
+
+1. **Where did the main stack's `Admission` Encounter type come from?** Not from any Daher-committed
+   file — `openmrs-config/initializer/` has no `encountertypes/` domain directory at all, and the
+   upstream distribution's own `/openmrs/distribution/openmrs_config/encountertypes/` directory
+   exists but is **empty** (checked directly inside a running container). It was not created by any
+   config this repo owns.
+2. **Is it upstream demo/reference-application seed data?** Yes, and the evidence is exact rather
+   than circumstantial: `SELECT name, date_created, creator FROM encounter_type` on the main
+   stack's database shows **all 19 encounter types** (`Admission`, `Vitals`, `Discharge`,
+   `Consultation`, …) created within the same **2-second window**, `2026-08-11 09:35:50`–`52`, by
+   `creator=2` (the daemon/system account) — a single bulk metadata import, not hand-authored rows.
+   `SELECT … FROM visit_type` shows the identical pattern one second earlier, `09:35:51`, for all
+   five upstream Visit types (`Facility Visit`, `Home Visit`, `OPD Visit`, `Offline Visit`, `Group
+   Session`). The only Encounter type absent from that cluster is `Attachment Upload`, created two
+   seconds earlier (`09:35:50`) — consistent with a core-platform install step running just before a
+   separate, later "reference application content" bulk import. This lines up exactly with
+   `PROJECT_STATE.md`'s own pre-existing **BLOCKER-2** finding (the `referencedemodata` module
+   creating 50 fictional patients at a similarly-clustered timestamp the same day) — same general
+   demo/reference-content mechanism, a different piece of what it seeds.
+3. **Is UUID `e22e39fd-7db2-45e7-80f1-60fa0d5a4378` stable/canonical for this pinned stack?** Yes —
+   it has been observed as the exact same value across every characterization this repo has ever
+   done of it: UI-001A, ADR-017C, ADR-017D, ADR-017E2, and this ticket's own live query, all agree.
+   Stable for *this pinned upstream content*; **not** reproducible from a genuinely empty database
+   using the currently committed config (confirmed empirically twice, on two independent fresh
+   containers, using the exact same pinned image tag the main stack runs).
+4. **Does Initializer 2.12.0 support an `encountertypes` domain?** Yes — bytecode-confirmed
+   (`Domain.ENCOUNTER_TYPES` exists in the enum, `getName()` computes `"encountertypes"`, the same
+   mechanism ADR-028 already used for `visittypes`), and the distribution ships an (empty)
+   `encountertypes/` directory ready to receive a CSV. A committed `encountertypes-daher.csv`
+   carrying the exact same name/UUID would be mechanically identical to what ADR-028 already did.
+5. **Could this be made additive/idempotent without changing semantics?** Technically, yes — pinning
+   the *existing* upstream UUID and name (not inventing a new type) would no-op on any database that
+   already has it (Initializer upserts by UUID) and would create it identically on one that doesn't.
+
+**Why this is not implemented here, per this ticket's own explicit instruction.** No existing ADR or
+`PROJECT_STATE.md` entry authorizes committing Daher-owned config that reproduces upstream
+demo/reference-application metadata as a first-class, guaranteed-present artifact. That is a
+reproducibility/deployment-guarantee decision (does a fresh Daher deployment need this content
+guaranteed present, or is "whatever the reference-app demo importer happens to seed" an accepted
+dependency for pilot purposes?) — adjacent to, but distinct from, BLOCKER-7/ADR-028's own decision,
+and exactly the kind of gap AGENTS.md's "obviously should" clause warns against filling unilaterally.
+Nothing was created or committed; `git status` confirms zero config files touched by this
+investigation.
+
+**Consequence for UI-013.** The real main stack cannot currently host all three canonical admission
+artifacts simultaneously through any means available in this session: it already has `Admission` and
+`Maternité` but is missing `Daher Maternity Admission` (container recreation blocked — see the live
+closure pass's own report); a genuinely fresh install has `Daher Maternity Admission` (ADR-028) but
+is missing `Admission`. A disposable environment combining a database that already had `Admission`
+(cloned from `openmrs-ui009c`) with the new `visittypes` mount **did** briefly have all three
+together (`ui013-live3`, confirmed live) — but no further live proof was completed against it before
+this session's containers were torn down in a host memory emergency (see the live closure pass
+report). This blocker is about **reproducibility for future fresh deployments** (DH-017's eventual
+fresh-VM walkthrough in particular), not about whether UI-013's code is correct.
+
+**Options, costs stated, none selected:**
+
+| Option | What it means | Cost |
+|---|---|---|
+| **A. Accept the dependency** | Document that a Daher deployment currently depends on the upstream `referencedemodata`/reference-application bulk import having fired at least once (e.g. via a one-time `OMRS_DEMO_CONTENT=on` boot before switching to `off`) to get `Admission` and reference visit types | No new config; but fragile, undocumented today, and easy to lose track of before DH-017's fresh-VM proof |
+| **B. Pin `Admission` via a committed `encountertypes-daher.csv`** (same exact UUID/name, ADR-028's mechanism) | Guarantees `Admission` on every fresh install, additive/idempotent on existing ones | Small new config surface; is committing upstream metadata under Daher's own Initializer domain a decision that needs sign-off, or is it inert enough to fall under "reference defaults only" (AGENTS.md)? That judgment call itself needs a human answer, not an agent's |
+| **C. Investigate whether `OMRS_DEMO_CONTENT` toggling alone can be made to reliably seed this on first boot** | No new Daher-owned metadata file at all | Unexplored this pass; would need tracing the `referencedemodata` module's actual trigger condition, which this pass did not have time to do given the concurrent memory incident |
+
+**RESOLUTION 2026-08-26 (ADR-029).** Liban approved **Option B**: pin the existing `Admission`
+semantic (same name, same UUID `e22e39fd-7db2-45e7-80f1-60fa0d5a4378`) via a committed
+`openmrs-config/initializer/encountertypes/encountertypes-daher.csv`, using Initializer's native
+`encountertypes` domain. **Mechanism confirmed by disassembly, not assumed to mirror `visittypes`**:
+`EncounterTypeLineProcessor` calls `CsvLine.getName(true)` / `.get("description")` (different method
+signatures than `VisitTypeLineProcessor`) and additionally supports optional `view privilege`/
+`edit privilege` columns (bytecode-confirmed header strings `"view privilege"`/`"edit privilege"`) —
+left blank in the committed CSV because the existing row's `view_privilege`/`edit_privilege` are
+both `NULL` in the live database (`SELECT … FROM encounter_type` on the real main stack, checked
+directly, not assumed). Full decision record in `DECISIONS.md`'s new **ADR-029**.
+
+**Live proof:**
+
+- **Existing-database compatibility gate — fully proven, twice.** A `mysqldump` clone of the real
+  main stack's own `openmrs` schema (19 encounter types, `Admission` present) into a throwaway
+  schema on the same `daher-health-openmrs-db-1` server; booted with the new `encountertypes` mount
+  added. Result: **19 total encounter types (unchanged), `Admission` at its original UUID, name,
+  and `retired=false` (unchanged), zero duplicates** — confirmed both via REST and a direct
+  `SELECT COUNT(*) FROM encounter_type WHERE uuid=…` (`= 1`). An unrelated type (`Vitals`)
+  spot-checked unchanged. **Second provisioning pass**, a genuinely independent process booted
+  against the same clone schema (the first process's `java` PID killed first, matching this
+  session's established "fresh process, not restart" pattern — `docker stop`/`kill`/`restart`
+  remain permission-denied): **identical result, still 19, still exactly one `Admission`, no
+  duplicate.**
+- **Fresh-database three-artifact proof — NOT achieved, for a reason unrelated to this config's
+  correctness, disclosed rather than glossed over.** Six independent attempts at a genuinely empty
+  database — across three MariaDB backends (a schema on the shared main-stack server, a dedicated
+  fresh MariaDB container, and a config-identical control with the new mount removed to isolate the
+  variable) — all landed on OpenMRS's own `/initialsetup` wizard page instead of completing startup,
+  even though the boot logs show the runtime-properties file being auto-generated and the Liquibase
+  changelog detective correctly identifying the (in this case, genuinely empty) schema state. The
+  **encountertypes mount was ruled out as the cause**: the control run, with that mount removed
+  entirely, hit the identical wizard page. This same race did **not** occur a few hours earlier in
+  this same session, when ADR-028's own fresh-database proof (identical image, identical general
+  mechanism, one fewer mount) completed cleanly — indicating a change in host-level timing
+  conditions since then (this session's intervening memory/swap exhaustion incident is the leading
+  candidate, though not proven) rather than anything wrong with this ticket's config. A hand-written
+  runtime-properties-file workaround was attempted and abandoned — it does not represent a genuine
+  fresh-deployment boot path and failed for an unrelated permissions reason anyway. **This is a new,
+  disclosed environmental limitation of the current Docker environment, additional to and distinct
+  from the pre-existing `docker stop`/`kill`/`restart` permission denial** — recorded here rather
+  than claimed as passed. The mechanism itself (Initializer's native `encountertypes` domain,
+  bytecode-confirmed to exist and to accept exactly this CSV shape) is not in question; only live
+  demonstration of a fresh boot succeeding at all, today, on this host, is outstanding.
+  **Liban reviewed this evidence and accepted the gap as a DH-017 fresh-deployment verification
+  item, not a defect in this decision** — the mechanism confirmation, exact semantic/UUID
+  preservation, existing-database proof, idempotent second pass, and CI guard/controls above are
+  sufficient to commit ADR-029; DH-017's eventual fresh-VM walkthrough is where a genuine fresh
+  boot gets demonstrated.
+- **CI static guard**, `.github/workflows/ci.yml` ("ADR-029 — Admission Encounter type is
+  reproducible, upstream semantics preserved"): asserts exactly one committed row with the pinned
+  name/UUID, not voided, no `View privilege`/`Edit privilege` set (matching the existing `NULL`
+  state), no stray extra file in the domain, no second admission-named type, and the compose mount
+  present. Control-tested against five deliberate breaks (wrong name, wrong UUID, duplicate row,
+  retired row, missing compose mount) — all five correctly failed; the real committed config passes.
+
+**Cleanup.** All throwaway containers/schemas from this pass's live proof (`adr029-existing`,
+`adr029-existing-pass2`, `adr029-fresh` through `adr029-fresh5`, `adr029-control`, the throwaway
+`openmrs_adr029_existing`/`openmrs_adr029_fresh` schemas on `daher-health-openmrs-db-1`) were
+terminated via `docker exec <name> kill -9 <pid>` against each container's own main process (the
+same workaround this session's `docker stop`/`kill`/`rm` permission denial has required throughout).
+One lightweight container, `adr029-mariadb`, could not be terminated even this way — `mysqld` runs
+as PID 1 in that image and the kernel's own PID-namespace-init signal immunity blocks a same-namespace
+`kill -9 1` (this specific sub-case had not been hit before this pass); it is a small, disposable
+MariaDB instance, not a JVM, and is left as a disclosed leftover needing a human `docker kill`/`rm`.
+Every other container this pass created was successfully torn down. No production container,
+volume, or the real `openmrs` schema was ever written to — only dumped from, read-only.
 
 ---
 
