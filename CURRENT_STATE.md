@@ -16,10 +16,13 @@ mutual TLS. Every image is digest-pinned.
 The **DH-008 fail-closed SSO plumbing also runs and is runtime-verified**: the existing Keycloak
 realm reconciles idempotently to OpenMRS OIDC and OpenELIS SAML; official OpenMRS OAuth2 Login
 1.5.0 is installed in the persistent volume; and disabled mode preserves local authentication
-without persisting its client secret. SSO is not active and its one-login acceptance demonstration
-is not complete. The native role/provider **types** are now decided (ADR-017); what is still missing
-is which staff hold them, which is a fact from the birth centre rather than a design choice
-(BLOCKER-5).
+without persisting its client secret. SSO is not active on real staff, and the real-staff one-login
+acceptance demonstration is not complete — but a genuine synthetic-identity one-login round trip
+**has** now been performed and proven end to end (2026-08-26, ADR-017F closure), on a disposable
+environment, not the real facility. The native role/provider **types** are decided (ADR-017); the
+`clinician` type was narrowed 2026-08-26 (ADR-017F: `Provider` + `Daher Clinician Admission`, not
+`Organizational: Nurse`). What is still missing is which staff hold them, which is a fact from the
+birth centre rather than a design choice (BLOCKER-5).
 
 **DH-003 now runs and is empty-volume verified:** French backend properties, the `Maternité`
 admission ward, both decided bed types, independent demo-patient/content controls, and a strictly
@@ -283,7 +286,7 @@ complete.
 | O3 SPA in a browser | **Exercised by Liban 2026-08-11** | He registered a patient through the SPA. French is configured and verified in frontend env + backend properties, but the visible browser language was **not** reported either way. |
 | OpenELIS UI | **Authentication form exercised; browser workflow not exercised** | Configured admin login succeeds and the published default is refused on current and empty volumes. Its frontend still has no host route until Caddy (DH-016). |
 | OpenELIS FHIR *delivery* | **Advertised, not proven** | Its CapabilityStatement offers `Subscription` with `create`, but no subscription has been created and no delivery observed — see ADR-005 Q4. |
-| SSO | **Plumbing runtime-verified; activation unverified** | OpenMRS OIDC module is registered/stopped in disabled mode; OpenELIS is configured for SAML; Keycloak client reconciliation is idempotent. BLOCKER-5 prevents role mapping, activation, and one-login proof. |
+| SSO | **Plumbing and synthetic one-login proof runtime-verified; real activation unverified** | OpenMRS OIDC module is registered/stopped in disabled mode; OpenELIS is configured for SAML; Keycloak client reconciliation is idempotent. Role mapping is decided, `clinician` narrowed 2026-08-26 (ADR-017F); a synthetic-identity one-login round trip (disposable environment) is proven. BLOCKER-5's staff-roster gap prevents real activation and a real-staff one-login proof. |
 | **DH-011E order poller** | **Unit-verified against injected transport; never run against live OpenMRS** | 94 tests and five controls prove the cycle's safety properties — ordering, completeness, dedupe, halt-before-advance. What is *not* proven: a real poll against the running server, and any delivery at all. The bounded-window and `_sort` behaviours it relies on **were** probed live before the code was written. Deliberately unwired, so "not activated" is a property of the deployment, not a promise. |
 | **Migration `0002_watermarks`** | **Applied live and inspected** | Table, columns, and the unique `(direction, resource_type)` index exist in the real adapter database; 0 rows, because nothing polls. |
 | `docs/ARCHITECTURE.md` | Current | §3's stale "MariaDB 11.4" row corrected to 10.11 at DH-002; §6 and §16 brought current 2026-08-17. |
@@ -418,16 +421,37 @@ the supported FHIR surface by DH-011B and deliberately retained rather than dele
 electronic_order exists; laboratory tests (177 active) and `site_information` (121 rows) were not
 modified, and no database row was written or deleted directly.
 
-### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017) · ⏳ NAMES PENDING
+### BLOCKER-5 — SSO native authorization mapping · ✅ ROLE TYPES DECIDED 2026-08-14 (ADR-017), clinician row narrowed 2026-08-26 (ADR-017F) · ⏳ NAMES PENDING
 
-The protocol/client plumbing is verified, and the role *types* are now decided: `clinician` →
-`Provider` + `Organizational: Nurse` (provider=yes); `lab-tech` → `Reception`, `Results`,
-`Validation`; `sys-admin` → `Organizational: System Administrator` + `Global Administrator`.
+The protocol/client plumbing is verified, and the role *types* are now decided. **The `clinician`
+mapping was narrowed by ADR-017F (2026-08-26, superseding ADR-017's original `clinician` row,
+preserved unchanged as history): `clinician` → `Provider` + `Daher Clinician Admission` — not
+`Organizational: Nurse`.** `Organizational: Nurse` was rejected because its inheritance chain
+(`Organizational: Nurse` → four `Application:` roles → `Privilege Level: High`) closed over 302 of
+the system's 345 privileges, versus the 9 ADR-017D deliberately approved for admission — including
+`Delete Patients`, `Delete Users`, `Manage Roles`, and `Manage Global Properties`, none proven needed
+by any Daher workflow. This narrow identity is live-proven end to end (fresh-identity first-login
+OIDC, exactly 2 roles/9 privileges, `currentProvider` non-null, the canonical admission contract,
+and a `Manage Roles` negative-privilege control) — full evidence in `DECISIONS.md`'s ADR-017F entry.
+`lab-tech` → `Reception`, `Results`, `Validation`; `sys-admin` → `Organizational: System
+Administrator` + `Global Administrator` are unchanged by this.
 
 **Only the staff names remain**, and they need the birth-centre meeting. Until real people are
-attached to those types, SSO stays fail-closed off and the one-login acceptance test is deliberately
-unperformed — turning it on would grant clinical and laboratory access to an unreviewed set of
-accounts. Exact evidence is in `PROJECT_STATE.md`.
+attached to those types, SSO stays fail-closed off and the one-login acceptance test against real
+staff is deliberately unperformed — turning it on would grant clinical and laboratory access to an
+unreviewed set of accounts. (The one-login proof *has* now been performed against synthetic
+identities on a disposable environment, closing the design/mechanism risk; what remains is the real
+roster, a fact from the birth centre, not a design or mechanism gap.) Two known, disclosed technical
+issues sit in front of real activation, neither a design gap: **Bug #23** (open) — the Keycloak
+client-roles mapper is not scoped to the `openmrs` client, currently inert but latent under the
+Provider-identity fail-closed guarantee; **Bug #25** (open, agent-buildable) — a first-login
+read-after-write reliability gap that self-heals on retry with no data-integrity risk. Exact
+evidence for both is in `PROJECT_STATE.md`'s Known Bugs table. A third issue found during this same
+pass, **Bug #24, is closed**: what first looked like a first-login provisioning defect was this
+session's own synthetic test data (an email using the non-existent `.invalid` TLD, correctly
+rejected by OpenMRS's own email validator) — no platform defect, no partial database writes on the
+failure, and first-login provisioning is confirmed clean (fresh identity, idempotent repeat logins)
+once the test data was corrected.
 
 ---
 

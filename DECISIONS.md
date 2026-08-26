@@ -632,7 +632,10 @@ confirmed test identities before any import fix is attempted.
 
 ## ADR-017 — SSO authorization matrix (role types now, named people later)
 
-**Date:** 2026-08-14 · **Status:** ACCEPTED · **Decided by:** Liban
+**Date:** 2026-08-14 · **Status:** ACCEPTED · **Decided by:** Liban · **The `clinician` row's target
+mapping is superseded by ADR-017F (2026-08-26): `clinician` is now `Provider` + `Daher Clinician
+Admission`, `Organizational: Nurse` excluded. The table below is preserved unchanged as the
+historical record of what was originally decided and why; it is not the current target mapping.**
 
 **Context.** BLOCKER-5 held DH-008 activation on "the SSO authorization matrix", which was treated
 as a single blocker needing the staff roster. It is two things: the **role-type mapping**, which is
@@ -2313,3 +2316,382 @@ config-identical control with the new mount removed — so the `/initialsetup` f
 implicate this config. DH-017's eventual fresh-VM walkthrough is where a genuine fresh boot gets
 demonstrated. UI-013 itself remains uncommitted and unaffected; its canonical Encounter UUID
 (`e22e39fd-7db2-45e7-80f1-60fa0d5a4378`) required no change.
+
+---
+
+## ADR-017F — `Organizational: Nurse` closes over 302 of 345 privileges; clinician identity narrowed
+
+**Date raised:** 2026-08-26 · **Date decided:** 2026-08-26 (Bug #24 ticket) · **Status:** ACCEPTED ·
+**Decided by:** Liban — **Option A**: the Daher clinician identity is `Provider` + `Daher Clinician
+Admission`. `Organizational: Nurse` is excluded from the Daher clinician authorization model going
+forward; no broader nurse permissions are implemented. Live proof of this exact narrow identity is
+appended below (§ Live closure proof, 2026-08-26) — this entry was not marked ACCEPTED until that
+proof succeeded, per this ticket's own instruction not to claim closure early.
+
+**Context.** ADR-017D closed with a disclosed, out-of-scope gap: the synthetic clinician identity
+(`Provider` + `Organizational: Nurse` + `Daher Clinician Admission`, per ADR-017's own committed
+mapping) authenticated with "the full nine-privilege admission set plus (unexpectedly) hundreds
+more," traced to `Organizational: Nurse` inheriting `Application: Enters ADT Events` (among three
+others), which itself inherits `Privilege Level: High`. That finding was reported but never
+enumerated, categorized, or tested for removal — tracked here as ADR-017F. This ticket's job is not
+to count privileges but to determine whether `Organizational: Nurse` is actually necessary for any
+proven Daher clinician workflow, and to establish the narrowest safe role model before real
+clinician SSO activation.
+
+**§3/§4 — the role graph, DB- and REST-verified, both directions of a naming trap resolved before
+trusting either.** `role_role`'s raw columns are `parent_role`/`child_role`; a naive read (`parent_role`
+as "the role", `child_role` as "what it inherits") is **backwards** — confirmed by cross-checking
+against the OpenMRS REST API's own `inheritedRoles` representation (`GET /role/{uuid}?v=full`), which
+disagreed with the naive SQL join and settled it: **`child_role` is the inheriting role, `parent_role`
+is what it inherits** (Hibernate's mapping predates and inverts the plain-English column names). Read
+against the main stack's own database (`daher-health-openmrs-db-1`, carrying the full committed
+Initializer config plus upstream reference content — not `openmrs-ui009c`, whose `Daher Reception` row
+ADR-017C/D already documented as a JVM-cache-stuck, privilege-less husk):
+
+```
+Organizational: Nurse (1 direct: "App: Service Queues Clinician")
+      ↓ inherits
+Application: Enters ADT Events, Application: Enters Vitals,
+Application: Records Allergies, Application: Uses Patient Summary
+      (0 direct privileges each)
+      ↓ each inherits
+Privilege Level: High
+      ↓
+301 direct privileges — 87.2% of the 345 privileges that exist in this system
+```
+
+`Provider` — confirmed **0** direct privileges, no inherited roles (matches PROJECT_STATE.md's
+existing citation; re-verified, not re-cited from memory). `Daher Clinician Admission` — confirmed
+exactly the 9 committed privileges, no inherited roles. `Daher Reception` — confirmed exactly its 3
+committed privileges, no inherited roles.
+
+**§4 — the difference, computed, not asserted:**
+
+```
+EFFECTIVE_CURRENT   = Provider(0) ∪ Organizational: Nurse(closure, 302) ∪ Daher Clinician Admission(9)
+                    = 302   (all 9 approved admission privileges are already a strict subset of the
+                              Nurse closure — confirmed by set intersection, not eyeballed)
+APPROVED_ADMISSION  = 9     (Get Patients, Get Visit Types, Add Visits, Get Visits,
+                              Get Visit Attribute Types, Get Beds, Get Admission Locations,
+                              Add Encounters, Get Encounters — ADR-017D's own committed set)
+EXTRA_PRIVILEGES    = 293
+```
+
+**§5 — the 293 extras, categorized by real name, not summarized as "Privilege Level: High":**
+
+| Category | Representative privileges | Risk |
+|---|---|---|
+| Destructive delete/purge (30) | `Delete Patients`, `Delete Users`, `Delete Encounters`, `Delete Visits`, `Delete Orders`, `Delete People`, `Delete Relationships`, `Delete Patient Identifiers/Programs`, `Purge Cashier Bills/Metadata/Timesheets`, `Purge Queues/Queue Entries/Rooms`, `Purge Procedures/Procedure Types/Field Types`, `Delete Cohorts`, `Delete Concept Proposals`, `Delete Conditions`, `Delete Diagnoses`, `Delete HL7 Inbound Archive/Exception/Queue`, `Delete Medication Dispense`, `Delete Notes`, `Delete Observations`, `Delete Report Objects`, `Delete Reports`, `Delete Tasks` | High — irreversible data loss, none proven needed by any Daher workflow |
+| User/role administration | `Add Users`, `Edit Users`, `Manage Roles` | High — self-service privilege escalation surface |
+| Provider administration | `Manage Providers`, `Manage Provider Roles`, `Get Providers`, `Get Provider Attribute Types`, `Get Provider Roles`, `Appointments: Invite Providers` | Medium-high — can create/edit other clinicians' Provider records |
+| Concept administration (25) | `Manage Concepts`, `Manage Concept Classes/Datatypes/Sources/Map Types/Attribute Types/Name tags/Stop Words/Reference Terms`, `Add/Edit/Delete Concept Proposals` | Medium — can alter the shared clinical vocabulary underlying every form |
+| Encounter (broad) | `Delete Encounters`, `Edit Encounters`, `Manage Encounter Roles/Types` | High — write access to every encounter type, not just the 9 approved admission privileges' scope |
+| Order (full CRUD) | `Add Orders`, `Edit Orders`, `Delete Orders`, `Manage Order Types/Frequencies/Sets/OrderTemplates` | High — order entry/deletion is not part of the proven admission workflow at all |
+| Global properties / system | `Manage Global Properties`, `Get/View Global Properties`, `Manage Modules`, `Assign System Developer Role` | Critical — system-wide configuration and module control |
+| Patient (broad) | `Delete Patients`, `Edit Patients`, `Add/Delete/Edit Patient Identifiers/Programs`, plus 11 Patient Dashboard/Overview view sections | High — full patient CRUD, not the read/admit scope the approved 9 privileges grant |
+
+No destructive live test was run against the real facility database or any non-disposable
+environment — this table is built from the committed privilege names and OpenMRS's own privilege
+table, cross-checked against the approved-9 set by exact string match, not from guessing at what a
+name implies.
+
+**§6 — why `Organizational: Nurse` was present, evidenced, not assumed.** Traced across every
+committed reference: `grep -rn "Organizational: Nurse"` outside `DECISIONS.md`/`PROJECT_STATE.md`
+finds exactly two hits — a CI guard's denylist (`roles-daher.csv` must not reuse this upstream role
+*name*, unrelated to granting it) and a UI unit test (`deriveReadiness.test.ts`) asserting the
+frontend **never** treats it as sufficient for the admission workflow. `keycloak/reconcile-sso.sh`
+has no `reconcile_client_role` call for `Provider` or `Organizational: Nurse` at all — only `Daher
+Reception` and `Daher Clinician Admission` are provisioned by committed automation; the code's own
+comment says the other two are "created and assigned manually per ADR-017, same as this one." There
+is therefore no committed assignment mechanism to remove — the only artifact asserting `clinician =
+Provider + Organizational: Nurse` is **ADR-017's own decision table**, with its stated rationale
+("Midwives are the primary users… One `clinician` role, mapped to `Organizational: Nurse`"). Answers,
+evidenced:
+
+- Required for OIDC authentication? **No** — both halves of the narrow shape have each independently
+  authenticated in a real OIDC round trip without it: ADR-017B live-proved a fresh user holding only
+  the `Provider` client role authenticates (`roles:[Provider]`, `privileges:[]`); UI-013's own log
+  entry live-proved a fresh user holding exactly `Daher Clinician Admission` without `Provider`
+  authenticates too. Neither path inspects `Organizational: Nurse`. The `Provider`+`Daher Clinician
+  Admission` two-role *union* has not itself been round-tripped this pass (see §7 below).
+- Required for OpenMRS user creation? **No** — not referenced anywhere in the creation path.
+- Required for Provider creation / `currentProvider`? **No** — ADR-017E2's own live proof: a
+  `Organizational: Nurse`-only user (no `Provider`) got `currentProvider: null`, zero Provider rows;
+  derivation is exact `"Provider"` client-role membership in the patched Java, nothing else. Adding
+  `Organizational: Nurse` alongside a working `Provider`-only login cannot change that outcome — the
+  decision method never inspects it.
+- Required by UI-013? **No** — `ui/src/features/admission/deriveReadiness.test.ts` explicitly tests
+  that it is *not* sufficient for the admission role; `git grep` finds no reference to it in
+  `ui/src/api/client.ts` or any admission code path.
+- Required by any other committed Daher workflow? **No** committed reference found.
+
+`Organizational: Nurse` is present in the clinician identity for exactly one reason: on 2026-08-14
+(ADR-017), it was the OpenMRS role whose *name* matched the workforce ("midwives are the primary
+users"), chosen before its `Privilege Level: High` inheritance chain was known — that chain was only
+discovered eleven days later, mid-ticket, in ADR-017D.
+
+**§7/§8/§9/§10 — NOT DEMONSTRATED this pass, blocked on a newly found, unrelated bug — disclosed
+rather than worked around with a guess.** A disposable `kc-ui009`/cloned-OpenMRS environment
+(`openmrs-adr017f`, cloned from `openmrs_ui013_live` — the lineage carrying the full canonical
+contract: `Daher Maternity Admission`, `Admission`, `Maternité`, all three roles) was stood up for a
+genuine `/oauth2login` round trip on three fresh synthetic identities (`adr017f-narrow` =
+`Provider`+`Daher Clinician Admission`; `adr017f-current` = `Provider`+`Organizational: Nurse`+`Daher
+Clinician Admission`; `adr017f-reception` = `Daher Reception`). Both `adr017f-narrow` and
+`adr017f-current` failed **identically** — same `authenticated:false`, same malformed 6617-byte JSON
+exception body, same `OAuth2LoginController.login(118)` WARN — on **first-time login**, in
+`Daemon.createUser` → `RequiredDataAdvice`/`ValidateUtil.validate` throwing a `ValidationException`
+whose field-level detail Jackson fails to serialize (the response body itself is truncated/malformed
+JSON, confirmed reproducible, not a transient glitch). Ruled out by reading the pinned upstream
+source (`UserInfo.java`, `OAuth2UserInfoAuthenticationScheme.java`, `Daemon.java`) rather than
+guessing: gender (`PersonValidator` only length-checks it, and `"n/a"` is supplied as a default —
+confirmed via source, not assumed), given/family name (present and mapped correctly, confirmed by
+decoding the real ID token), username pattern (matches prior tickets' own successful synthetic
+usernames), and — the one genuine, disclosed side-finding — a **mapper-scoping discrepancy**:
+`keycloak/mappers/openmrs-client-roles-mapper.json` carries no `usermodel.clientRoleMapping.clientId`
+key, live or committed, contradicting ADR-017B's own text ("scoped to
+`usermodel.clientRoleMapping.clientId=openmrs`"); the `roles` claim measurably included Keycloak's
+default `account`-client roles (`manage-account`, `manage-account-links`, `view-profile`) until they
+were stripped from the two test users by removing `default-roles-daher`. **This is not merely a
+documentation mismatch: ADR-017E2 made exact `"Provider"` client-role membership the sole,
+fail-closed signal for clinical Provider identity, and an unscoped mapper means that membership is
+not actually confined to the `openmrs` client — a client role named `Provider` on *any* client in
+the realm would reach `getRoleNames()` and satisfy `isProviderRoleGranted`.** Nothing collides today
+(`manage-account` etc. match no OpenMRS role, and no other client currently defines a `Provider`
+role) and SSO is not live, so there is no active exposure — but it is a latent gap directly under
+ADR-017E2's fail-closed property, not cosmetic. That fix did **not** resolve
+the `createUser` failure (re-tested, byte-for-byte identical result after the roles claim was
+confirmed clean via direct ID-token decode), so it is reported as a real, separate discrepancy — not
+the cause of this failure. The root cause of the `createUser` failure itself was **not isolated**
+this pass (a genuinely fresh empty-database boot, which would have given working local Basic Auth to
+diagnose it cleanly, stalled for 15+ minutes on liquibase with no progress between two checks and was
+abandoned rather than waited on indefinitely). One candidate lead, found in the upstream source and
+recorded as a lead only, **not a confirmed cause**: `Daemon.createUser`'s role-resolution
+(`roleNames.stream().map(...getRole...).collect(...)`) does not filter `null` results before
+`user.addRole(role)`, whereas the existing-user update path (`UpdateUserTask.updated`) explicitly does
+(`.filter(r -> r != null)`) — an asymmetry that could matter for *some* malformed-claim shape, though
+it did not reproduce this specific failure once the claim was cleaned.
+
+Because this failure is **symmetric across both identity shapes under test**, it is direct evidence
+that whatever is broken is orthogonal to `Organizational: Nurse` — but it also means no *new* live
+OIDC evidence was produced this pass for either shape. The nearest existing evidence is ADR-017E2's
+own already-proven, already-committed result, cited rather than restated as new: a `Provider`-only
+user authenticated with `currentProvider` non-null and correct admission-audit attribution; an
+`Organizational: Nurse`-only user (no `Provider`) authenticated with `currentProvider: null`; a
+`Daher Reception`-only user authenticated with the three registration privileges and `currentProvider:
+null`. Those results establish that `Provider` and `Organizational: Nurse` act on independent code
+paths for provider derivation — narrowing evidence, not full proof that a
+`Provider`+`Daher Clinician Admission`-only identity completes a live admission end-to-end, which
+remains undemonstrated.
+
+**§11/§12 — architectural outcome.** All three of §11's outcomes reduce to the same gate at §12:
+**No**, removal is not a purely technical cleanup, for two independent reasons that each alone would
+be sufficient. First, the evidence itself: `EXTRA_PRIVILEGES` is 293 privileges wide, including
+destructive (`Delete Patients`, `Delete Users`), administrative (`Manage Roles`, `Manage Global
+Properties`, `Manage Modules`), and clinically consequential (full `Order` CRUD, `Manage Concepts`)
+capability — removing it plainly changes what a real clinician account can do, which is exactly the
+class of change AGENTS.md requires stopping for. Second, structurally: there is no committed
+mechanism to "remove" — the only committed artifact is **ADR-017's own decision table**, a
+Liban-decided mapping with a stated clinical-workforce rationale. Changing it supersedes a recorded
+human decision about scope of practice, not a technical narrowing, regardless of how the privilege
+evidence comes out.
+
+**What the evidence *does* support, offered as the narrowest evidenced floor, not a recommendation to
+implement without sign-off:** every one of the 9 privileges ADR-017D approved for admission is
+already a strict subset of `Organizational: Nurse`'s closure, and `Provider` contributes zero direct
+privileges of its own. If Liban decides clinician identity should be narrowed, **`Provider` + `Daher
+Clinician Admission`** is not a guess — it is the measured floor for every Daher workflow this repo
+has actually proven (registration is a separate role; nothing else has been characterized). Whether
+real nurses/midwives need any of the 293 extra privileges for work outside what this repo has built
+(e.g. vitals entry, allergy recording — several of the `Organizational: Nurse` inherited roles' own
+names suggest legitimate clinical uses this project has simply never characterized) is **explicitly a
+clinical scope-of-practice question this ticket does not answer** — per §12, that is Liban's call, not
+inferred from "no code currently uses it."
+
+**Options, costs stated, none selected:**
+
+| Option | What it means | Cost |
+|---|---|---|
+| **A. Narrow clinician to `Provider` + `Daher Clinician Admission`** | Removes all 293 extra privileges; matches the measured floor for every proven Daher workflow | Real clinicians lose whatever legitimate non-admission capability `Organizational: Nurse`'s inherited roles were meant to provide (vitals entry, allergy recording, ADT events, patient summary) — none of which this repo has built UI for yet, but which may be expected at the birth centre regardless |
+| **B. Keep `Organizational: Nurse`, accept the residual breadth** | No change; matches ADR-017's original decision and its stated rationale | Every real clinician account (midwife or doctor) carries `Delete Patients`, `Delete Users`, `Manage Roles`, `Manage Global Properties`, and 289 other privileges never exercised by anything this project has built or tested |
+| **C. A new, Daher-owned, narrower "clinical" role** carrying only specific inherited-role privileges (e.g. `Application: Enters Vitals`, `Application: Records Allergies`) without `Privilege Level: High` | Preserves legitimate non-admission clinical capability without the destructive/administrative tail | Requires Liban to specify which non-admission clinical actions real staff actually need — an even more explicit scope-of-practice decision than A, and this ticket's §12/AGENTS.md forbid inventing it |
+
+**Explicitly not done:** no committed role/mapping file changed (`roles-daher.csv`,
+`reconcile-sso.sh`, `daher-realm.json` all byte-for-byte unchanged — confirmed by `git status`); no
+real staff assigned; no real SSO activation; no production/facility database touched (every read
+against `daher-health-openmrs-db-1` was `SELECT`-only); no mutation on anything but the disposable
+`kc-ui009`/`mariadb-ui009` environment; no CI guard added (nothing to guard — no config changed); the
+mapper-scoping discrepancy and the `createUser` bug are both **reported, not fixed** — fixing either
+would be new, separate scope.
+
+**Disposable leftovers, disclosed for a human `docker rm -f` / `DROP DATABASE` pass:** container
+`openmrs-adr017f` (SSO-enabled, cloned from `openmrs_ui013_live`, network `daher-ui009_internal`,
+network-alias `openmrs-gateway`) and its database `openmrs_adr017f` in `mariadb-ui009`; three
+synthetic Keycloak users on `kc-ui009` (`adr017f-narrow`, `adr017f-current`, `adr017f-reception` —
+`default-roles-daher` deliberately removed from all three during diagnosis, a disposable-only,
+a reversible change); one additive redirect URI added to the `openmrs` client on
+`kc-ui009` (`http://openmrs-gateway:8080/*`, alongside the existing four, none removed) so the
+disposable container's own `/oauth2login` redirect would validate. `openmrs-adr017f-fresh` and its
+databases (`openmrs_adr017f_fresh`, `openmrs_adr017f_probe`) were already torn down this ticket.
+`kc-ui009`/`mariadb-ui009` themselves were left running (matching this session's established
+hygiene pattern of leaving the shared disposable test harness up between tickets).
+
+**Tests.** No application, config, or CI file changed — the existing baseline (adapter 94,
+provisioning 580, seed 16, form-safety 19, ui 148 = application total 857; oauth2login provider
+tests 10/10) is unaffected by construction, matching this repo's established reasoning for
+evidence-only tickets (ADR-017A/C/E). Not re-run this pass since `git diff` confirms zero source
+changes.
+
+**READY TO COMMIT (at the time this gate was first written): No. HUMAN DECISION REQUIRED: Yes.**
+Liban's decision (Option A, above) was made outside a live agent session and delivered as this
+follow-up ticket's own starting instruction. What follows is that ticket's live closure proof.
+
+---
+
+### ADR-017F — live closure proof, 2026-08-26 (Bug #24/#25 ticket)
+
+**What this section proves.** With Liban's Option A decision given, this pass produced the live
+OIDC round trip §7/§8/§9/§10 of the original ticket could not — first-login proof for the exact
+narrow identity, the canonical admission contract, and a dangerous-privilege negative control — on
+a fresh synthetic clinician that had never before authenticated. Full method/tooling detail (the
+disposable `openmrs-adr017f`/`kc-ui009` environment, the `/oauth2login` curl round-trip script) is
+unchanged from the prior evidence-gathering pass; only the results are new. **What blocked this the
+first time and how it was actually root-caused is Bug #24, documented separately in
+`PROJECT_STATE.md`'s Known Bugs table — it was this ticket's own prior-session synthetic test data
+(an email using the `.invalid` TLD), not a platform defect.** Once corrected, first-login
+provisioning worked cleanly.
+
+**Scope of what this proves, stated precisely.** This entire proof ran against `openmrs-adr017f`, a
+disposable container built from `daher-health/openmrs-backend:3.7-off` (the image DH-028 built and
+verified carries both patches, tag `f1376269c286`) on a *clone* of the `openmrs_ui013_live` database
+lineage — never the main stack's own running container or database. **DH-028's own redeploy has
+since been completed and independently re-verified in this pass, correcting an earlier stale
+statement**: the real main stack's running OpenMRS container (`daher-health-openmrs-backend-1`) is
+confirmed on image `sha256:f1376269c286fd94c5559a18d429acaf70cf9b7f0e801b89d38d2e23a048e0ed`, its
+`oauth2login-1.5.0.omod` confirmed by direct `sha256sum` at
+`ae148634ec06817efcc99fdf9c0a1a4e05565ef76292c8eb7899b3b4aec8966b`, and `OAuth2LoginBridgeFilter`
+confirmed present in that exact artifact (`unzip -l`/Python `zipfile` listing, not assumed from the
+hash alone). `SSO_ENABLED=false` (unchanged, deliberate), REST `/session` and FHIR `/metadata` both
+`200`. Data preservation reconfirmed by direct count: patient `103`, users `6`, encounter `725`,
+visit `143` — unchanged, matching DH-028's own pre-redeploy sentinels. **The main stack now runs the
+same patched image this proof used on the disposable clone** — DH-028 is done, not a remaining
+prerequisite. Real SSO activation still needs BLOCKER-5's roster names and SSO's public domain
+(#15); it does not additionally need a main-stack image change.
+
+**Fresh clinician OIDC, never-before-authenticated (`adr017f-narrow`, Keycloak user
+`ad1d5b37-c694-455c-a3eb-aa5eba28a76c`), genuine `/oauth2login` round trip:**
+
+- `authenticated: true`.
+- Exactly **one** Person (`1bb04f84-8833-46ac-9d14-544b093b7107`), **one** User
+  (`8ce2a54e-5d48-4cf7-ad1e-f87d87421424`), **one** Provider (`34145f4c-c761-4938-bea2-d57684968cf8`)
+  — measured by direct `SELECT COUNT(*)` against `users`/`person`/`provider`, joined on this
+  identity, not inferred from the session response alone.
+- `roles: [Daher Clinician Admission, Provider]` — **exactly** the intended set. **No
+  `Organizational: Nurse`.**
+- `privileges`: exactly the 9 approved (`Get Encounters`, `Get Visit Types`, `Add Visits`, `Get
+  Visit Attribute Types`, `Get Visits`, `Get Patients`, `Get Admission Locations`, `Get Beds`, `Add
+  Encounters`) — count and names both confirmed, not just counted. **No `Privilege Level: High`
+  inheritance reached this session** — the same DB closure computed in this ADR's original pass
+  (§3/§4 above) has no path from either `Provider` or `Daher Clinician Admission` to `Privilege
+  Level: High`, and the live session's 9-privilege count confirms it empirically as well as
+  structurally.
+- `currentProvider`: non-null (`34145f4c-c761-4938-bea2-d57684968cf8`), role-derived per ADR-017E2,
+  reconfirmed working with the narrow identity specifically (ADR-017E2's own live proof used the
+  broader three-role shape; this is the first live confirmation with `Organizational: Nurse` absent).
+- **Repeat-login idempotence, three total logins:** two additional logins after the first, `users`/
+  `person`/`provider` counts identical (`1/1/1`) after each, same three UUIDs throughout, no
+  duplicate rows at any point.
+
+**Canonical admission contract, disposable synthetic patient (`9b1ae281-48b4-4222-987d-fa04a836648c`,
+identifier `10000LM`, registered via a genuine `Daher Reception` OIDC session, not fabricated by
+SQL):**
+
+- `POST /visit` with `{patient, visitType: "Daher Maternity Admission" (194bf546-…), location:
+  "Maternité" (6538f097-…)}` → **201**, `Visit` UUID `5f385a1f-6cae-40a5-8445-81f4fbd53d8d`.
+- `POST /encounter` with `{patient, encounterType: "Admission" (e22e39fd-…), visit: <above>,
+  location: Maternité, encounterProviders: []}` → **201**, `Encounter` UUID
+  `72446fb7-b6d9-44ee-bf95-684e447ba428`, linked (`encounter.visit.uuid` = the Visit UUID above).
+- **Linkage confirmed via read-back**, not assumed from the write payload alone.
+- **Audit creator**: `v=full` read-back on both — `Visit.auditInfo.creator.uuid` and
+  `Encounter.auditInfo.creator.uuid` both equal `8ce2a54e-…`, the authenticated clinician's own
+  OpenMRS user UUID exactly. Not admin, not daemon, not the registering reception account.
+- `encounterProviders: []` on read-back, unmodified — exactly the ADR-017E2/UI-013 contract; no
+  provider field was added to compensate for the narrower identity.
+
+**Dangerous-privilege negative control.** Two candidates were probed, one discarded honestly rather
+than silently swapped for a cleaner result: `GET /ws/rest/v1/systemsetting` returned **200** for the
+narrow clinician — this is **not** evidence of excess privilege, it reconfirms ADR-017A's own
+already-recorded finding that global-property reads are open to any authenticated session
+regardless of privilege level, unrelated to `Organizational: Nurse`. `GET /ws/rest/v1/role`
+(requires `Manage Roles`, part of the 293 extra privileges the Nurse closure carried and the narrow
+identity does not) returned **403**, `"Privileges required: Manage Roles"` — the intended,
+successful negative control: an operation the *previous* three-role shape would have passed is
+cleanly denied to the narrow one.
+
+**Reception, fresh synthetic (`adr017f-reception`), genuine first `/oauth2login`:**
+
+- `authenticated: true`, `currentProvider: null`, roles `[Daher Reception]`, privileges exactly the
+  3 approved (`Add Patients`, `Edit Patient Identifiers`, `Get Patients`).
+- **Registration intact**: this exact session registered the synthetic patient used for the
+  admission contract above (`201`, real write, not simulated).
+- **Admission denied**: `POST /visit` → `400` ("visitType on class org.openmrs.Visit" — the same
+  `ConversionException`-during-deserialization shape ADR-017C/D already characterized); `POST
+  /encounter` → `403`, `"Privileges required: Edit Encounters,Add Encounters"`. Both writes refused.
+- This also demonstrates first-login auto-provisioning is not clinician-specific — Reception's own
+  first login provisioned cleanly once its test email carried a valid TLD, the identical fix as the
+  clinician identity.
+
+**Partial-write safety, explicitly tested, not assumed.** A deliberately bad-email synthetic user
+(`adr017f-pwtest`, same `.invalid`-TLD trigger later diagnosed as Bug #24's cause) was logged in
+once: `authenticated: false`, and **zero** rows in `users`/`person` — the failed `createUser` call's
+transaction rolled back completely, confirmed by direct count, not inferred from the error response.
+The identical user, corrected to a valid-TLD email, then authenticated cleanly on a subsequent
+attempt with no orphaned state from the failed one. **Separately, a genuinely new finding surfaced
+during this test — recorded as Bug #25, not folded into this ADR's own decision**: a deterministic
+(reproduced on the very first attempt of a dedicated, single-shot repro user, `adr017f-race1`)
+same-request read-after-write gap — most probably (mechanism narrowed, not independently confirmed
+at the transaction/isolation level) `Daemon.createUser`'s cross-thread commit not yet visible to
+the calling thread's own re-fetch — reporting `authenticated: false` to the caller while User+Person
+were in fact persisted (Provider not yet created, no error logged anywhere — a silent soft-fail, not
+an exception). The **very next** login (now hitting the existing-user path) completed normally with
+no duplicate Person/User/Provider. This is a real, disclosed, open bug — full detail in
+`PROJECT_STATE.md`'s Known Bugs table (#25) — but it is **not** a §13 STOP: no duplicate or
+ambiguous identity occurred in any trial; the system converges to exactly one of each row every
+time, just not always on the very first attempt.
+
+**Bug #23 boundary, observed not fixed, exactly per this ticket's own instruction.** The unscoped
+`openmrs-client-roles-mapper` (Known Bug #23) was reconfirmed reproducing on a token from a user
+still carrying `default-roles-daher` (`adr017f-pwtest`/`adr017f-race1`): `roles` claim included
+`manage-account`, `manage-account-links`, `view-profile` alongside the two real `openmrs`-client
+roles. Confirmed still inert: OpenMRS's own session for that same login shows exactly `[Daher
+Clinician Admission, Provider]` server-side and exactly 9 privileges — the leaked names don't
+name-match any OpenMRS role, so they were silently dropped, not escalated. Left open, not fixed,
+per this ticket's own §14 boundary (fixing it was not required to reproduce or resolve Bug #24/#25).
+
+**Regressions, checked not assumed.** `git diff` against the session start shows zero changes to
+any application, config, or CI file — `DECISIONS.md`/`PROJECT_STATE.md` only. The 857-test
+application baseline and the 10/10 `oauth2login` provider-patch tests were not re-run this pass
+(no source changed to re-run them against); `git diff` is the basis for that claim, not a copied
+figure. No new automated coverage was added: no source or config was patched (Bug #24 was test
+data, not code; Bug #25 is reported, not fixed), so there is no CI job to extend per this ticket's
+own conditional instruction, and the role-derivation properties this ticket's §15 asked to cover
+(`Provider` role creates a Provider only when exact `Provider` membership exists; Reception never
+becomes Provider) are already covered by ADR-017E2's existing 10-case `ProviderRoleDerivationTest`
+suite — this pass's live proof exercises those same properties end-to-end rather than duplicating
+them as new unit tests.
+
+**Disposable leftovers, this pass, disclosed alongside the prior pass's own list (still pending):**
+containers `openmrs-adr017f` (unchanged from before), `mariadb-ui009`/`kc-ui009` (still running);
+database `openmrs_adr017f` now additionally carries the `adr017f-narrow`/`-current`/`-reception`
+Persons/Users/Providers created this pass, one synthetic patient (`9b1ae281-…`, identifier
+`10000LM`), one Visit (`5f385a1f-…`), one Encounter (`72446fb7-…`), and two throwaway diagnostic
+identities (`adr017f-pwtest`, `adr017f-race1`, both partially or fully provisioned, harmless
+synthetic data). On Keycloak (`kc-ui009`): the three original test users' `email` attributes were
+changed from the `.invalid`-TLD originals to `@example.com` (the fix); `default-roles-daher` was
+**removed** (not additive — a reversible change) from `adr017f-narrow`/`-current`/`-reception`;
+two new synthetic users (`adr017f-pwtest`, `adr017f-race1`) were created and left in place. No
+production/facility state touched — every write above was against the disposable
+`openmrs_adr017f` schema on `mariadb-ui009`.
+
+**READY TO COMMIT: Yes** — this section is evidence/decision-recording only, no source or config
+touched, matching this repo's own precedent for evidence-only tickets (ADR-017A/B/C/E). **Per this
+ticket's own §20, no commit was made regardless** — stopped for Liban's authorization as instructed.
