@@ -1,0 +1,29 @@
+diff --git a/api/src/main/java/org/openmrs/module/oauth2login/authscheme/OAuth2UserInfoAuthenticationScheme.java b/api/src/main/java/org/openmrs/module/oauth2login/authscheme/OAuth2UserInfoAuthenticationScheme.java
+index 96dcd14..38e4e4a 100644
+--- a/api/src/main/java/org/openmrs/module/oauth2login/authscheme/OAuth2UserInfoAuthenticationScheme.java
++++ b/api/src/main/java/org/openmrs/module/oauth2login/authscheme/OAuth2UserInfoAuthenticationScheme.java
+@@ -83,9 +83,7 @@ public class OAuth2UserInfoAuthenticationScheme extends DaoAuthenticationScheme
+ 		User user = getContextDAO().getUserByUsername(credentials.getClientName());
+ 		if (!creds.isServiceAccount()) {
+ 			if (user == null) {
+-				createUser(creds.getUserInfo());
+-				// Get the user again after the user has been created
+-				user = getContextDAO().getUserByUsername(credentials.getClientName());
++				user = createUser(creds.getUserInfo());
+ 			} else {
+ 				updateUser(user, creds.getUserInfo());
+ 			}
+@@ -95,11 +93,11 @@ public class OAuth2UserInfoAuthenticationScheme extends DaoAuthenticationScheme
+ 		return new BasicAuthenticated(user, credentials.getAuthenticationScheme());
+ 	}
+ 	
+-	private void createUser(UserInfo userInfo) throws ContextAuthenticationException {
++	private User createUser(UserInfo userInfo) throws ContextAuthenticationException {
+ 		try {
+ 			User user = userInfo.getOpenmrsUser("n/a");
+ 			String password = RandomStringUtils.random(100, true, true);
+-			getContextDAO().createUser(user, password, userInfo.getRoleNames());
++			return getContextDAO().createUser(user, password, userInfo.getRoleNames());
+ 		}
+ 		catch (Exception e) {
+ 			throw new ContextAuthenticationException(e.getMessage(), e);

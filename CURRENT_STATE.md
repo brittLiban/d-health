@@ -441,13 +441,16 @@ attached to those types, SSO stays fail-closed off and the one-login acceptance 
 staff is deliberately unperformed — turning it on would grant clinical and laboratory access to an
 unreviewed set of accounts. (The one-login proof *has* now been performed against synthetic
 identities on a disposable environment, closing the design/mechanism risk; what remains is the real
-roster, a fact from the birth centre, not a design or mechanism gap.) Two known, disclosed technical
-issues sit in front of real activation, neither a design gap: **Bug #23** (open) — the Keycloak
-client-roles mapper is not scoped to the `openmrs` client, currently inert but latent under the
-Provider-identity fail-closed guarantee; **Bug #25** (open, agent-buildable) — a first-login
-read-after-write reliability gap that self-heals on retry with no data-integrity risk. Exact
-evidence for both is in `PROJECT_STATE.md`'s Known Bugs table. A third issue found during this same
-pass, **Bug #24, is closed**: what first looked like a first-login provisioning defect was this
+roster, a fact from the birth centre, not a design or mechanism gap.) One known, disclosed technical
+issue still sits in front of real activation: **Bug #23** (open) — the Keycloak client-roles mapper
+is not scoped to the `openmrs` client, currently inert but latent under the Provider-identity
+fail-closed guarantee. **Bug #25 is fixed, automated-tested, and disposable-live-demonstrated**:
+oauth2login now uses the authoritative committed User returned by OpenMRS's daemon creation call
+instead of rereading through its old `REPEATABLE-READ` transaction snapshot; two fresh clinicians
+and one fresh Reception identity authenticated on their first callbacks with no duplicates or
+partial state. Exact evidence is in `PROJECT_STATE.md`'s Known Bugs table and `DECISIONS.md`'s Bug
+#25 implementation record. A third issue found during this same pass, **Bug #24, is closed**: what
+first looked like a first-login provisioning defect was this
 session's own synthetic test data (an email using the non-existent `.invalid` TLD, correctly
 rejected by OpenMRS's own email validator) — no platform defect, no partial database writes on the
 failure, and first-login provisioning is confirmed clean (fresh identity, idempotent repeat logins)

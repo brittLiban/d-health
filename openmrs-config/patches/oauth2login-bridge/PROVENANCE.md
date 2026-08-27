@@ -8,6 +8,10 @@ This directory records the patch source and proof for every Daher-owned change t
 - **The provider-role-derivation patch** (`OAuth2LoginController.java.patch`) — ADR-017E2/DH-008G,
   wired into the Dockerfile the same ticket. Makes Provider activation derive from the OpenMRS
   client-role claim instead of a separate, fail-open provider claim. See its own section below.
+- **The first-login authentication patch** (`OAuth2UserInfoAuthenticationScheme.java.patch`) —
+  Bug #25, wired into the Dockerfile with focused CI coverage. Preserves the authoritative `User`
+  returned by OpenMRS's daemon creation contract instead of rereading through the caller's older
+  transaction snapshot. See its own section below.
 
 ## Upstream
 
@@ -115,3 +119,72 @@ admission re-proof, and a provider-ambiguity control run on an isolated throwawa
 (never the canonical disposable database). All testing was against a disposable Keycloak +
 OpenMRS + MariaDB stack with synthetic data only; no real facility SSO was enabled and no
 production file was modified to run these tests.
+
+---
+
+## `OAuth2UserInfoAuthenticationScheme.java.patch` — provenance (Bug #25)
+
+Also applied on top of the same pinned source/commit/toolchain above, after the bridge and
+provider-role patches.
+
+## Patch contents
+
+- `OAuth2UserInfoAuthenticationScheme.java.patch` — unified diff against
+  `api/src/main/java/org/openmrs/module/oauth2login/authscheme/OAuth2UserInfoAuthenticationScheme.java`.
+  Changes the private `createUser` wrapper to return the `User` produced by
+  `ContextDAO.createUser`, and assigns that return value in `authenticate`. It removes the single
+  same-transaction post-create username reread. No transaction annotation, isolation level,
+  lookup key, role mapping, Provider reconciliation, retry, delay, cache, or session behavior is
+  otherwise changed.
+- `test-verification/FirstLoginAuthenticationTest.java` — three focused JUnit 4 cases that execute
+  the patched authentication method against a `ContextDAO` whose username lookup deliberately
+  remains blind after creation while `createUser` returns the authoritative committed `User`.
+  They prove first-login authentication uses that return value, prove there is exactly one
+  pre-create lookup and no old-snapshot reread, and prove creation failure still propagates.
+  The test avoids upstream Mockito 1/CGLIB, which cannot initialize on the pinned JDK 17 toolchain.
+
+## Root-cause evidence
+
+The pinned OpenMRS 2.8.7 `Daemon.createUser` implementation creates the Person/User/roles in a
+separate daemon thread and Hibernate session, waits on `Future.get()`, and returns the created
+`User`. Instrumentation in the disposable stack measured the outer
+`OAuth2UserInfoAuthenticationScheme.authenticate` transaction as active at MariaDB
+`REPEATABLE-READ`: its initial lookup returned null; the awaited daemon call returned a populated
+User; an immediate reread in the same outer transaction still returned null. At that point an
+independent SQL connection already saw the committed User/Person/roles, and the next HTTP request's
+fresh transaction saw the same User. The original method therefore constructed
+`BasicAuthenticated` with a null User, causing the first callback to report unauthenticated and
+skip controller-level Provider reconciliation.
+
+Before the fix, ten completely fresh valid-`@example.com` clinicians failed their genuine first
+OIDC callback this way: **10 failures / 10 attempts**. Each had one User, one Person, the exact two
+roles, and zero Providers; the following request authenticated and reconciled exactly one Provider.
+This is a measured 100% reproduction series, not a claim that every possible deployment schedule
+must reproduce it.
+
+## Verification
+
+- Patched focused Maven tests: `FirstLoginAuthenticationTest` **3/3** and the unchanged
+  `ProviderRoleDerivationTest` **10/10**, using the exact pinned clone and build image.
+- Negative control on unpatched upstream: the first-login suite ran 3 tests and failed the two
+  properties the patch changes (returned authenticated User was null; username lookup count was
+  two rather than one). The creation-failure propagation case remained green as expected.
+- Static guard rejects missing Dockerfile wiring, failure to consume the daemon result, and
+  retry/sleep/global-cache-flush workarounds. A throwaway mutation removing the assignment failed
+  that guard for the intended reason.
+- The real `openmrs-config/Dockerfile` `off` target built successfully with all three patches.
+- Disposable live proof used two fresh clinicians. Each authenticated on the first callback with
+  exactly one Person/User/Provider, the exact ADR-017F roles and nine privileges, and stable UUIDs
+  across two further logins. A fresh Reception user authenticated on its first callback with no
+  Provider; registration succeeded and admission was denied. A deliberately invalid email produced
+  zero User, Person, Provider, and role-assignment rows.
+
+The live proof artifact's OMOD SHA-256 was
+`5f2a7e064e490668f8311097e3e9cc94e9ff6a179621a31e14c091cb140b12f7`. As above, Maven archive
+timestamps mean that checksum is evidence for the tested artifact, not a byte-reproducibility
+promise.
+
+All authentication writes and experiments were confined to the disposable
+`openmrs-adr017f`/`mariadb-ui009`/`kc-ui009` environment with synthetic data. The real facility
+backend was not restarted or written, its SSO remained disabled, and no real staff or patients
+were used.

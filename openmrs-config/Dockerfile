@@ -22,9 +22,18 @@ FROM maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14f
 # role assignment already consumes: exact "Provider" client-role membership,
 # nothing else. See that patch file's own header comment and
 # PROVENANCE.md for the full account.
+#
+# Bug #25 additionally applies OAuth2UserInfoAuthenticationScheme.java.patch.
+# OpenMRS creates first-login users in a daemon thread/session and returns the
+# committed User, while oauth2login 1.5.0 discarded that return value and
+# reread through its already-open REPEATABLE_READ transaction. The reread
+# cannot see the new row, so the first response is unauthenticated. The patch
+# uses OpenMRS's authoritative returned User directly; it adds no retry, sleep,
+# cache flush, or new transaction boundary.
 COPY patches/oauth2login-bridge/OAuth2LoginBridgeFilter.java /patch/OAuth2LoginBridgeFilter.java
 COPY patches/oauth2login-bridge/config.xml.patch /patch/config.xml.patch
 COPY patches/oauth2login-bridge/OAuth2LoginController.java.patch /patch/OAuth2LoginController.java.patch
+COPY patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch /patch/OAuth2UserInfoAuthenticationScheme.java.patch
 RUN git clone --branch 1.5.0 --depth 1 \
       https://github.com/openmrs/openmrs-module-oauth2login.git /src \
     && test "$(git -C /src rev-parse HEAD)" = 2770233627343a53719ec981e997d94b1d90b7ad \
@@ -32,6 +41,7 @@ RUN git clone --branch 1.5.0 --depth 1 \
         /src/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java \
     && git -C /src apply /patch/config.xml.patch \
     && git -C /src apply /patch/OAuth2LoginController.java.patch \
+    && git -C /src apply /patch/OAuth2UserInfoAuthenticationScheme.java.patch \
     && mvn -B -f /src/pom.xml -Dmaven.test.skip=true package \
     && test -s /src/omod/target/oauth2login-1.5.0.omod
 

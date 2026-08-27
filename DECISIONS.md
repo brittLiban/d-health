@@ -2695,3 +2695,109 @@ production/facility state touched — every write above was against the disposab
 **READY TO COMMIT: Yes** — this section is evidence/decision-recording only, no source or config
 touched, matching this repo's own precedent for evidence-only tickets (ADR-017A/B/C/E). **Per this
 ticket's own §20, no commit was made regardless** — stopped for Liban's authorization as instructed.
+
+---
+
+## Bug #25 — use OpenMRS's authoritative daemon-created User on the first OIDC callback
+
+**Date:** 2026-08-26
+**Status:** Implemented, automated-tested, and live-demonstrated on the disposable SSO stack; not
+committed; real facility not redeployed and SSO remains off.
+**Human Decision Required:** No. This is a narrow correction to third-party integration lifecycle
+usage. It does not change clinical content, role policy, patient-data routing, or global OpenMRS
+transaction behavior.
+
+**Measured reproduction.** Ten completely fresh synthetic clinicians with valid `@example.com`
+emails and exactly `Provider` + `Daher Clinician Admission` were each sent through one genuine OIDC
+callback against the pre-fix disposable artifact. **10 failures / 10 attempts** returned
+`authenticated:false`. Direct database checks after every attempt found exactly one User, one
+Person, the exact two role assignments, and zero Providers. Separate exploratory smoke/probe users
+were not counted in that formal rate. The series is 100% for the measured conditions; this record
+does not generalize it to every possible database/isolation schedule by calling it deterministic.
+
+**Pinned execution path and proven root cause.** oauth2login tag `1.5.0`, commit
+`2770233627343a53719ec981e997d94b1d90b7ad`, ran with OpenMRS API 2.8.7. The callback enters
+`OAuth2LoginController.login`, which calls `Context.authenticate(new OAuth2TokenCredentials(...))`.
+`OAuth2UserInfoAuthenticationScheme` is class-level `@Transactional`; `authenticate` first calls
+`ContextDAO.getUserByUsername(preferred_username)`. For a new identity it constructs the OpenMRS
+User and calls `ContextDAO.createUser`, which delegates to OpenMRS 2.8.7's `Daemon.createUser`.
+That pinned implementation performs duplicate checks (id, UUID, username, email), resolves roles,
+starts a separate daemon thread/session, calls `UserService.createUser`, waits synchronously on
+`Future.get()`, and returns the newly created `User` to the caller.
+
+Disposable instrumentation measured the outer authentication transaction active at MariaDB
+isolation `REPEATABLE-READ`, with auto-commit off. Its initial username lookup returned null and
+established the snapshot. The awaited daemon call returned a fully populated User (User id, Person
+id, username, Keycloak-subject systemId, and both roles), proving creation and daemon completion.
+The immediate same-outer-transaction `getUserByUsername` still returned null. At that exact point a
+separate SQL connection already saw the committed User/Person/roles, and a subsequent HTTP request
+with a fresh transaction saw the User. Thus persistence flush/commit was complete; this was not a
+delayed daemon write. The outer session had made no write to flush, and neither flushing nor global
+cache invalidation could make an older `REPEATABLE-READ` snapshot see the newer commit.
+
+oauth2login 1.5.0's private `createUser` wrapper discarded `ContextDAO.createUser`'s return value,
+then performed that invalid reread. It consequently returned `new BasicAuthenticated(null, ...)`.
+`Context.isAuthenticated()` was false, so the controller did not execute its property or Provider
+reconciliation. The second HTTP request diverged only because its fresh transaction's *initial*
+username lookup saw the committed User; authentication succeeded and controller-level Provider
+reconciliation created exactly one Provider for that Person. The lookup key remained the same
+`preferred_username` both times; the created `systemId` remained the Keycloak subject. Direct
+instrumentation and source tracing ruled out username/systemId mismatch, a stale pre-provision
+UserInfo object, OpenMRS authentication/user cache, daemon completion timing, and Provider timing as
+the cause. A separately instrumented new Hibernate session inside the original HTTP request was not
+introduced; the daemon's own fresh session returned the committed object, the independent SQL
+connection saw it, and the following request's fresh Hibernate transaction saw it.
+
+**Implementation.** `OAuth2UserInfoAuthenticationScheme.java.patch` changes the private wrapper
+from `void createUser(...)` to `User createUser(...)`, returns
+`getContextDAO().createUser(...)`, and assigns that authoritative result in `authenticate`. The
+same-transaction post-create username reread is removed. No sleep, retry, browser redirect, manual
+pre-provisioning, cache flush, transaction annotation, isolation setting, or global OpenMRS
+semantic was added or changed. `openmrs-config/Dockerfile` applies the patch after the existing
+bridge and ADR-017E2 patches. CI applies the same production patch to the exact pinned upstream
+clone and runs both identity suites.
+
+**Automated proof and negative controls.** New `FirstLoginAuthenticationTest` executes the actual
+authentication method for three properties: use the authoritative DAO-created User when the
+calling snapshot remains blind; perform exactly one pre-create username lookup and no post-create
+reread; propagate creation failure. It passes **3/3** with the patch. On pristine upstream, the
+same suite ran all three and failed exactly the first two (null authenticated User; two lookups),
+while failure propagation remained green. ADR-017E2's unchanged exact-role suite passes **10/10**,
+including missing/malformed/non-exact role fail-closed cases. The companion static guard checks the
+production patch and Dockerfile wiring and rejects retry/sleep/cache workarounds; a throwaway
+mutation removing `user =` made it fail specifically because authentication no longer used the
+created User. The real Dockerfile `off` target built successfully. Application tests rerun:
+adapter 94, provisioning 580, seed 16, form safety 19 (one expected skip), UI 148; **857 total**.
+Compose interpolation, affected static guards, Ruff/format/type/build checks, and diff whitespace
+validation passed.
+
+**Identity safety and live proof.** Creation before Provider reconciliation remains OpenMRS's
+existing daemon transaction: validation failure rolls back Person/User/roles together. A fresh
+invalid-email identity was demonstrated returning unauthenticated with **0 Person, 0 User,
+0 Provider, and 0 role rows**. Duplicate checks remain in `Daemon.createUser`. After successful
+authentication, the unmodified controller looks Providers up by the same Person: zero creates one;
+an existing one is reused/unretired. If Provider persistence itself throws, upstream already logs
+and swallows that reconciliation error, leaving the unique User authenticatable so a later login
+can reconcile the Provider; this pre-existing behavior was not broadened or hidden by this patch.
+No ambiguous identity state or duplicate path was found.
+
+Two fresh disposable clinicians then authenticated on their genuine first callbacks. Each had
+exactly one Person/User/Provider, a non-null currentProvider, exactly `Provider` +
+`Daher Clinician Admission`, exactly nine privileges, and neither `Organizational: Nurse` nor
+`Privilege Level: High`. Each logged in twice more: all six callbacks returned authenticated and
+kept identical User/Person/Provider UUIDs and counts. Clinician 1 created a canonical `Daher
+Maternity Admission` Visit and linked `Admission` Encounter at `Maternité`; both audit creators were
+that clinician and encounterProviders remained `[]`. A fresh Reception identity authenticated on
+its first callback with `currentProvider:null`, registered one synthetic patient, and was refused
+admission. These were synthetic writes confined to `openmrs_adr017f`/`kc-ui009`.
+
+**Boundaries.** Bug #23 remains open and unchanged; this fix neither edits the Keycloak mapper nor
+weakens exact Provider role matching. The main facility stack was read-only: no restart, image or
+OMOD replacement, staff/patient write, OpenELIS change, SSO activation, or configuration change.
+The tested disposable OMOD SHA-256 was
+`5f2a7e064e490668f8311097e3e9cc94e9ff6a179621a31e14c091cb140b12f7`.
+
+**Decision/result:** Bug #25 is closed at source and disposable proof level. The smallest correct
+fix is to honor the existing OpenMRS return-value contract; a fresh query or broader transaction
+change is unnecessary. **READY TO COMMIT: Yes**, subject to Liban's review. Per ticket instruction,
+no commit or push was made.

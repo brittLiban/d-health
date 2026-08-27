@@ -746,6 +746,48 @@ jobs:
           print("ok — Provider identity is role-derived, fails closed, and exactly one mechanism exists")
           PY
 
+      - name: Bug #25 — first-login authentication uses daemon create result
+        # OpenMRS's ContextDAO.createUser contract returns the User committed by
+        # its daemon thread/session. oauth2login 1.5.0 discarded it and reread
+        # through the caller's old REPEATABLE_READ snapshot, producing a null
+        # authenticated User on the first response. This static companion to
+        # FirstLoginAuthenticationTest guards the exact production patch wiring
+        # and refuses retry/sleep/cache-flush workarounds.
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          bad = []
+          patch_path = Path("openmrs-config/patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch")
+          patch_text = patch_path.read_text() if patch_path.exists() else ""
+          if not patch_text:
+              bad.append("OAuth2UserInfoAuthenticationScheme.java.patch is missing")
+          else:
+              added = [line[1:] for line in patch_text.splitlines() if line.startswith("+") and not line.startswith("+++")]
+              added_text = "\n".join(added)
+              if "user = createUser(creds.getUserInfo());" not in added_text:
+                  bad.append("authentication does not use createUser's returned User")
+              if "private User createUser(UserInfo userInfo)" not in added_text:
+                  bad.append("createUser wrapper does not return User")
+              if "return getContextDAO().createUser(user, password, userInfo.getRoleNames());" not in added_text:
+                  bad.append("createUser wrapper does not return ContextDAO.createUser's authoritative result")
+              forbidden = ("Thread.sleep", "sleep(", "retry", "clearEntireCache", "flushSession", "refreshEntity")
+              for pattern in forbidden:
+                  if pattern in added_text:
+                      bad.append(f"first-login patch contains forbidden workaround {pattern!r}")
+
+          dockerfile = Path("openmrs-config/Dockerfile").read_text()
+          if "COPY patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch" not in dockerfile:
+              bad.append("Dockerfile does not copy the first-login patch")
+          if "git -C /src apply /patch/OAuth2UserInfoAuthenticationScheme.java.patch" not in dockerfile:
+              bad.append("Dockerfile does not apply the first-login patch")
+
+          if bad:
+              print("\n".join(f"::error::{item}" for item in bad)); sys.exit(1)
+          print("ok — first-login auth uses the committed daemon result with no visibility workaround")
+          PY
+
       - name: ADR-028 — Daher Maternity Admission is a single, additive, Daher-owned Visit type
         # UI-013's own pre-write gate found no approved OpenMRS Visit type for a
         # Daher maternity admission (BLOCKER-7 / NEEDS LIBAN #20) — Facility
@@ -887,14 +929,15 @@ jobs:
           PY
 
   oauth2login-provider-tests:
-    # DH-008G-CI. The static ADR-017E2 guard above proves the committed patch
+    # DH-008G-CI / Bug #25. The static guards above prove the committed patches'
     # *text* has the right shape (method exists, exact-match constant, fails
     # closed, no competing mapper) -- it never compiles or runs a single line
     # of the patched Java. This job is the behavioral companion: it fetches
     # the exact pinned oauth2login source, verifies the commit, applies the
     # SAME committed patch files openmrs-config/Dockerfile consumes (not a
     # test-only approximation), and actually executes
-    # ProviderRoleDerivationTest's 10 cases. Static guard + this job together;
+    # ProviderRoleDerivationTest's 10 cases and FirstLoginAuthenticationTest's
+    # 3 cases. Static guards + this job together;
     # neither replaces the other.
     #
     # Runs inside the exact pinned Maven/JDK image the Dockerfile itself
@@ -911,7 +954,7 @@ jobs:
     # cannot fix would make the gate flaky, not stronger. It stays a
     # documented, manually-verified artifact (PROVENANCE.md) exactly as
     # before.
-    name: oauth2login — patched provider-identity tests
+    name: oauth2login — patched identity tests
     runs-on: ubuntu-latest
     container:
       image: maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82
@@ -952,13 +995,16 @@ jobs:
             "$OAUTH2LOGIN_SRC/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java"
           git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/config.xml.patch"
           git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2LoginController.java.patch"
+          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch"
 
-      - name: Install the provider-derivation test-verification artifact
+      - name: Install the identity test-verification artifacts
         run: |
           cp openmrs-config/patches/oauth2login-bridge/test-verification/ProviderRoleDerivationTest.java \
             "$OAUTH2LOGIN_SRC/omod/src/test/java/org/openmrs/module/oauth2login/web/controller/ProviderRoleDerivationTest.java"
+          cp openmrs-config/patches/oauth2login-bridge/test-verification/FirstLoginAuthenticationTest.java \
+            "$OAUTH2LOGIN_SRC/api/src/test/java/org/openmrs/module/oauth2login/authscheme/FirstLoginAuthenticationTest.java"
 
-      - name: Compile the affected module and run the focused provider tests
+      - name: Compile the affected modules and run the focused identity tests
         # package, not test: the omod module's own reactor build needs the
         # api module already packaged (an unpack-dependencies step fails on
         # a reactor artifact that only reached the test phase) -- package
@@ -967,7 +1013,7 @@ jobs:
         run: |
           mvn -B -f pom.xml -pl omod -am \
             -Dsurefire.failIfNoSpecifiedTests=false \
-            -Dtest=ProviderRoleDerivationTest \
+            -Dtest=FirstLoginAuthenticationTest,ProviderRoleDerivationTest \
             package | tee /tmp/mvn-output.log
           # Every line Maven prints is "[INFO] ..." -- this must not be
           # anchored to the start of the line, and must be tied to the
@@ -975,6 +1021,8 @@ jobs:
           # log), or a passing-looking but wrong-scoped run would slip by.
           grep -qE 'Tests run: 10, Failures: 0, Errors: 0, Skipped: 0.*ProviderRoleDerivationTest' /tmp/mvn-output.log \
             || { echo "::error::expected exactly 10 passing ProviderRoleDerivationTest cases"; exit 1; }
+          grep -qE 'Tests run: 3, Failures: 0, Errors: 0, Skipped: 0.*FirstLoginAuthenticationTest' /tmp/mvn-output.log \
+            || { echo "::error::expected exactly 3 passing FirstLoginAuthenticationTest cases"; exit 1; }
 
   compose:
     name: compose interpolates and parses
