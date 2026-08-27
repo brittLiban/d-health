@@ -746,6 +746,109 @@ jobs:
           print("ok — Provider identity is role-derived, fails closed, and exactly one mechanism exists")
           PY
 
+      - name: Bug #23 — OpenMRS client-role mapper never leaks another client's roles
+        # Known Bug #23: `keycloak/mappers/openmrs-client-roles-mapper.json`
+        # (oidc-usermodel-client-role-mapper, claim "roles") shipped with no
+        # usermodel.clientRoleMapping.clientId, which is Keycloak's all-clients
+        # form — it relays every client role the user holds on ANY client, not
+        # just openmrs. Measured live: a synthetic user holding only a foreign
+        # client's role named exactly "Provider" (no openmrs "Provider" grant)
+        # produced a roles claim containing "Provider", indistinguishable from
+        # a genuine grant by ADR-017E2's exact-string check — a real
+        # cross-client privilege-escalation path, not inert noise (a realm's
+        # own default-roles-daher composite already leaked account-client
+        # roles the same way, confirmed both pre- and post-fix). The fix scopes
+        # the mapper to the openmrs client only, in both the fresh-realm import
+        # (daher-realm.json) and the existing-realm reconciliation fragment
+        # (keycloak/mappers/openmrs-client-roles-mapper.json) — Keycloak-native,
+        # no oauth2login/Java change, ADR-017E2's exact-match logic untouched.
+        # This cannot boot the real stack (see this file's header); it asserts
+        # on committed config. See PROJECT_STATE.md/DECISIONS.md's Bug #23 entry
+        # for the live disposable-Keycloak token proof (both paths, all
+        # negative/mixed/composite/realm-role controls).
+        run: |
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          bad = []
+
+          external_path = Path("keycloak/mappers/openmrs-client-roles-mapper.json")
+          realm_path = Path("keycloak/realm-config/daher-realm.json")
+
+          external = json.loads(external_path.read_text())
+          realm = json.loads(realm_path.read_text())
+
+          openmrs_clients = [c for c in realm["clients"] if c["clientId"] == "openmrs"]
+          if len(openmrs_clients) != 1:
+              bad.append(f"daher-realm.json: expected exactly one openmrs client, found {len(openmrs_clients)}")
+              inline = None
+          else:
+              role_mappers = [m for m in openmrs_clients[0]["protocolMappers"] if m.get("name") == "client roles"]
+              if len(role_mappers) != 1:
+                  bad.append(f"daher-realm.json: expected exactly one 'client roles' mapper on openmrs, found {len(role_mappers)}")
+                  inline = None
+              else:
+                  inline = role_mappers[0]
+
+          # The two files are the only reason fresh-realm import and
+          # existing-realm reconciliation stay in agreement — reconcile-sso.sh
+          # applies the external file via reconcile_mapper, the realm JSON
+          # applies the inline copy on --import-realm. Drift between them is
+          # exactly how this class of bug survives a partial fix.
+          if inline is not None and inline != external:
+              bad.append(
+                  "the inline 'client roles' mapper in daher-realm.json and "
+                  "keycloak/mappers/openmrs-client-roles-mapper.json have drifted "
+                  "apart — both must stay byte-identical"
+              )
+
+          for label, mapper in (("external mapper file", external), ("inline realm mapper", inline)):
+              if mapper is None:
+                  continue
+              if mapper.get("protocolMapper") != "oidc-usermodel-client-role-mapper":
+                  bad.append(f"{label}: protocolMapper must stay oidc-usermodel-client-role-mapper")
+              config = mapper.get("config", {})
+              if config.get("usermodel.clientRoleMapping.clientId") != "openmrs":
+                  bad.append(
+                      f"{label}: usermodel.clientRoleMapping.clientId must be exactly \"openmrs\" — "
+                      "absent or any other value is Keycloak's all-clients form (Bug #23)"
+                  )
+              if config.get("claim.name") != "roles":
+                  bad.append(f"{label}: claim.name must stay \"roles\" — oauth2login.mapping.user.roles reads this exact claim")
+              if config.get("multivalued") != "true":
+                  bad.append(f"{label}: multivalued must stay \"true\"")
+
+          # Scoping this one mapper is worthless if a second mapper on the same
+          # client also emits the "roles" claim — ADR-017E found exactly this
+          # "two competing mappers, undefined precedence" failure mode once
+          # already. Exactly one mapper may emit this claim.
+          if openmrs_clients:
+              roles_claim_mappers = [
+                  m for m in openmrs_clients[0]["protocolMappers"]
+                  if (m.get("config") or {}).get("claim.name") == "roles"
+              ]
+              if len(roles_claim_mappers) != 1:
+                  bad.append(
+                      "daher-realm.json: exactly one mapper on the openmrs client may emit the "
+                      f'"roles" claim, found {len(roles_claim_mappers)}: '
+                      f"{[m.get('name') for m in roles_claim_mappers]}"
+                  )
+
+          # The external file being correct proves nothing for an already-existing
+          # realm unless reconcile-sso.sh still applies it there.
+          reconcile = Path("keycloak/reconcile-sso.sh").read_text()
+          if 'reconcile_mapper "$openmrs_id" "client roles"' not in reconcile:
+              bad.append(
+                  "reconcile-sso.sh: no longer reconciles the openmrs 'client roles' mapper — "
+                  "existing realms would never receive the Bug #23 scoping fix"
+              )
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — the OpenMRS client-role mapper is scoped to the openmrs client only, in both provisioning paths")
+          PY
+
       - name: Bug #25 — first-login authentication uses daemon create result
         # OpenMRS's ContextDAO.createUser contract returns the User committed by
         # its daemon thread/session. oauth2login 1.5.0 discarded it and reread

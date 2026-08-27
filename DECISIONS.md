@@ -2801,3 +2801,210 @@ The tested disposable OMOD SHA-256 was
 fix is to honor the existing OpenMRS return-value contract; a fresh query or broader transaction
 change is unnecessary. **READY TO COMMIT: Yes**, subject to Liban's review. Per ticket instruction,
 no commit or push was made.
+
+---
+
+## Bug #23 — scope the OpenMRS client-role mapper to the openmrs client only
+
+**Date:** 2026-08-27
+**Status:** Fixed, automated-tested, and live-demonstrated on disposable Keycloak/OpenMRS; not
+committed; real facility not redeployed and SSO remains off.
+**Human Decision Required:** No. Keycloak-native mapper configuration scoping; no clinical content,
+role policy, or patient-data routing change; ADR-017E2's exact-match Provider derivation untouched.
+
+**Pre-fix mapper, traced exactly.** `keycloak/mappers/openmrs-client-roles-mapper.json` (applied to
+both the fresh-realm import at `keycloak/realm-config/daher-realm.json`, inline and byte-identical,
+and the existing-realm path via `reconcile-sso.sh`'s `reconcile_mapper`) configures Keycloak's
+built-in `oidc-usermodel-client-role-mapper` on the `openmrs` client, emitting claim `roles`
+(`multivalued`, present on id/access/userinfo tokens). This mapper type has an optional
+`usermodel.clientRoleMapping.clientId` config key that scopes it to one client's roles; **the
+committed config never set it**, on either path. Confirmed on a disposable Keycloak 26.7.1 realm
+imported from the committed JSON: the running mapper's config had no such key. Separately confirmed
+`fullScopeAllowed: true` on the `openmrs` client (also absent from committed config — Keycloak's
+import default), which is what lets a foreign client's roles reach this client's token at all before
+the mapper even runs.
+
+**Pre-fix claim contents, measured, not assumed.** A genuine first-callback OIDC login for a fresh
+`openmrs` → `Provider` + `Daher Clinician Admission` clinician produced `roles: ["Daher Clinician
+Admission", "Provider", "manage-account", "manage-account-links", "view-profile"]` — the last three
+are the built-in `account` client's default roles, reaching the token via the realm's own
+`default-roles-daher` composite role (§11/§12: this is real composite-role expansion in this realm,
+not a hypothetical one, and it is realm-composite-driven, not realm-role-driven — a
+realm-role-only identity, tested below, got no such leak because it carried no client-role grant to
+relay). Confirmed inert for that specific case: no OpenMRS role is named `manage-account` etc.
+
+**Foreign-Provider collision — the dangerous negative control.** A disposable `foreign-test-client`
+was created on the same realm with client roles named exactly `Provider`, `Daher Clinician
+Admission`, and `Daher Reception` — none assigned as `openmrs` roles. A synthetic user given
+*only* `foreign-test-client` → `Provider` (plus, for the OpenMRS-side proof, the minimum legitimate
+`openmrs` → `Daher Reception` grant needed for OpenMRS itself to authenticate the user, per this
+ticket's own §9 instruction) produced a pre-fix `roles` claim of `["Daher Reception",
+"manage-account", "manage-account-links", "view-profile", "Provider"]` — **`Provider` present**,
+despite zero `openmrs`-client `Provider` grant. ADR-017E2's derivation is `roleNames.contains("Provider")`,
+an exact string match against the `roles` claim's contents with no client-origin check — this
+positively would have granted Provider identity to that user. **Privilege escalation was possible,
+not merely a token-shape defect.** The two other foreign-role collisions (`Daher Clinician
+Admission`, `Daher Reception`, each foreign-only) also leaked into `roles` pre-fix, confirming the
+vector is general, not `Provider`-specific.
+
+**Root cause.** Keycloak's `oidc-usermodel-client-role-mapper` relays *all* client roles a user holds,
+across every client in the realm, unless `usermodel.clientRoleMapping.clientId` names one client.
+The committed mapper omitted that key on both provisioning paths — an under-scoped mapper
+configuration, not an oauth2login or ADR-017E2 defect.
+
+**Fix.** Added `"usermodel.clientRoleMapping.clientId": "openmrs"` to the mapper `config`, in both
+`keycloak/mappers/openmrs-client-roles-mapper.json` and the inline copy in
+`keycloak/realm-config/daher-realm.json` — the two files were already byte-identical duplicates
+before this change and remain so after. No Java/oauth2login change; ADR-017E2's exact-`Provider`
+membership check, `Daher Reception`/`Daher Clinician Admission` reconciliation, `fullScopeAllowed`,
+OpenELIS's SAML client/mapper, and every other Keycloak/OpenMRS config are untouched — `git diff
+--stat` shows exactly 3 files: the two mapper configs and a new CI guard step.
+
+**Files changed:** `keycloak/mappers/openmrs-client-roles-mapper.json`,
+`keycloak/realm-config/daher-realm.json`, `.github/workflows/ci.yml` (new static guard).
+
+**Fresh-realm mapper, live.** A second disposable Keycloak 26.7.1 realm was imported from the
+*fixed* `daher-realm.json` from scratch. Its `openmrs` client's `client roles` mapper carried
+`usermodel.clientRoleMapping.clientId: "openmrs"` natively, with no reconciliation step. A synthetic
+user with only a foreign client's `Provider` role authenticated against this fresh realm and
+produced `roles: null` (absent claim — zero `openmrs`-client roles held) and `resource_access`
+still showed the foreign client, proving the token carried the grant elsewhere but the OpenMRS
+claim excluded it.
+
+**Existing-realm reconciliation, live.** `reconcile-sso.sh` was re-run against the *same running*
+pre-fix disposable realm (`kc-ui009`, unchanged admin credentials, unchanged `openmrs` client secret)
+with only the mapper file's content changed. It updated the existing mapper (not create — reused the
+existing mapper id, confirmed by `reconcile_mapper`'s own update-not-create branch) and reported
+success. Every subsequent test below authenticates through this exact reconciled realm.
+
+**Post-fix token proof, both paths, all six identities (pure-Keycloak `kc23-*` test identities on
+the disposable `keycloak-bug23` realm — distinct from the `bug23-*` identities in the OpenMRS-side
+proof below, which used a smaller role set per identity):**
+
+| Identity | openmrs-client roles held | foreign-client roles held | `roles` claim (post-fix) |
+|---|---|---|---|
+| genuine clinician | `Provider`, `Daher Clinician Admission` | — | `[Daher Clinician Admission, Provider]` |
+| genuine Reception | `Daher Reception` | — | `[Daher Reception]` |
+| **foreign-Provider negative control** | `Daher Reception` | `Provider` | `[Daher Reception]` — **no `Provider`** |
+| foreign-Admission-only | — | `Daher Clinician Admission` | absent (no `roles` claim at all) |
+| foreign-Reception-only | — | `Daher Reception` | absent |
+| mixed (genuine Provider+Admission, foreign Provider+arbitrary-role) | `Provider`, `Daher Clinician Admission` | `Provider`, `arbitrary-role` | `[Daher Clinician Admission, Provider]` — foreign roles make no difference |
+| realm-role-only (`clinician` realm role, no client roles) | — | — | absent |
+
+No `manage-account`/`manage-account-links`/`view-profile` leakage in any row — the `account`-client
+composite contribution is now excluded exactly like any other foreign client's roles.
+
+**OpenMRS-side end-to-end proof, disposable `openmrs-adr017f` (unchanged image/env from the Bug
+#25 proof) against the fixed, reconciled `kc-ui009` realm, database `openmrs_adr017f`:**
+
+- **Two fresh clinicians** (`bug23-clinician1`, `bug23-clinician2`), each a genuine first `/oauth2login`
+  callback: `authenticated: true`, `currentProvider` non-null, exactly 9 privileges, roles exactly
+  `[Daher Clinician Admission, Provider]` — exactly two entries, so neither `Organizational: Nurse`
+  nor `Privilege Level: High` is present. The actual ID token OpenMRS
+  itself consumed was decoded server-side (from `user.userProperties.oauth2IdToken`) and its `roles`
+  claim was exactly `["Daher Clinician Admission", "Provider"]` — the fix reached the real
+  authentication path, not just a standalone token probe.
+- **Fresh Reception** (`bug23-reception`): `currentProvider: null`, roles `[Daher Reception]`,
+  3 privileges.
+- **Foreign-Provider negative control** (`bug23-foreign-provider`, `foreign-test-client → Provider`
+  plus the minimum legitimate `openmrs → Daher Reception`): `authenticated: true`, roles
+  `[Daher Reception]`, `currentProvider: null`. **Direct database query** (`users` joined to
+  `provider` on `person_id`, `retired = 0`) found **zero** Provider rows for this identity — not
+  inferred from the session response, counted directly. This is the load-bearing proof: the foreign
+  `Provider` grant did not create a Provider.
+- **Mixed identity** (`bug23-mixed` — genuine `Provider`+`Daher Clinician Admission` plus *only*
+  foreign `Provider`; the pure-Keycloak `kc23-mixed` above additionally carried a foreign
+  `arbitrary-role`, not repeated here since it added nothing OpenMRS-relevant to check):
+  `currentProvider` resolved to exactly one Provider row (via the genuine grant), roles exactly the
+  two genuine ones — the foreign `Provider` role was present in the user's overall Keycloak grants
+  but absent from the `openmrs` claim and made no difference to the outcome.
+- **Repeat logins:** `bug23-clinician1` logged in twice more after its first callback; all three
+  logins kept the identical User UUID (`2c67d291-…`) and Provider UUID (`f959edaf-…`) — Bug #25's
+  first-login fix is not regressed by this change.
+- **Canonical admission contract**, disposable synthetic patient (`1bdc7ccb-…`, identifier
+  `20000A8`, registered via a genuine `Daher Reception` session): Reception's own attempt to create
+  a `Daher Maternity Admission` visit was refused (`400`, the same `ConversionException`-during-
+  deserialization shape ADR-017C/D already characterized — unchanged by this fix); `bug23-clinician1`
+  then created the Visit (`201`) and a linked `Admission` Encounter (`201`) — read-back confirmed
+  `encounter.visit.uuid` matched, `encounterProviders: []` unmodified, and both `auditInfo.creator.uuid`
+  equalled the clinician's own OpenMRS user UUID, not admin or daemon.
+
+**Composite- and realm-role behavior (§11/§12), settled by direct observation, not assumption.** No
+`openmrs`-client role in this realm is itself composite; the only composite in play is the realm's
+built-in `default-roles-daher`, which composes in the `account` client's own default roles — that is
+exactly the pre-fix leak, and the fix's client-scoping correctly suppresses it (the mapper still only
+looks at direct `openmrs`-client role grants, and Keycloak's realm-composite-to-client-role expansion
+resolves those `account` roles as belonging to `account`, not `openmrs`). Realm-level roles
+(`clinician`, `lab-tech`, `sys-admin`) were never the leak vector and remain irrelevant to this
+claim — a realm-role-only identity produced no `roles` claim at all, both before and after the fix,
+because the mapper has only ever read client-role grants.
+
+**OpenELIS boundary.** `git diff` against session start shows exactly 3 changed files, none touching
+`keycloak/reconcile-sso.sh`'s `openelis`-client block or `keycloak/mappers/openelis-role-list-mapper.json`.
+No live OpenELIS SAML flow was exercised — none was needed: the change is scoped to one config key on
+one OIDC client's protocol mapper, with no code path by which it could reach a separate SAML client's
+configuration.
+
+**New automated guard.** `.github/workflows/ci.yml` gained a static-guard step ("Bug #23") asserting,
+on committed config only (this job cannot boot the real stack, matching every other guard in this
+file): the inline `daher-realm.json` mapper and the external `openmrs-client-roles-mapper.json` stay
+byte-identical; both carry `usermodel.clientRoleMapping.clientId == "openmrs"`, `claim.name ==
+"roles"`, `multivalued == "true"`, and `protocolMapper == "oidc-usermodel-client-role-mapper"`;
+exactly one mapper on the `openmrs` client emits the `"roles"` claim (a second, competing mapper —
+ADR-017E's own previously-recorded "undefined precedence" failure mode — would otherwise pass
+silently); and `reconcile-sso.sh` still calls `reconcile_mapper` for the `"client roles"` mapper (the
+external file being correct proves nothing for an already-existing realm if reconciliation stopped
+applying it). **Control-tested, not merely asserted to work:** seven deliberate regressions were
+applied to in-memory copies of the two files and `reconcile-sso.sh`'s text (never the committed
+files) and the guard logic re-run against each — (1) the pristine pre-fix mapper (key removed from
+both) failed on both files' `clientId` check; (2) the key pointed at `openelis` instead of `openmrs`,
+failed the same check; (3) only the external file fixed, the inline copy left pre-fix (simulating a
+partial fix), failed both the byte-identical-drift check and the inline file's `clientId` check;
+(4) `claim.name` renamed, failed the drift check and the `claim.name` check; (5) `protocolMapper`
+retyped to a realm-role mapper, failed the type check; (6) a second mapper added to the `openmrs`
+client with `claim.name: "roles"`, failed the exactly-one-`roles`-mapper check (found 2); (7) the
+`reconcile_mapper "$openmrs_id" "client roles"` line stripped from `reconcile-sso.sh`, failed the
+reconciliation-coverage check. Each failed for its specific asserted reason, none for an unrelated
+one.
+
+**Application test baseline.** No adapter/provisioning/seed/form-safety/UI source is in this pass's
+diff (`git diff --stat`: two Keycloak JSON configs and one new CI step only), and a grep for any
+Python/JS/Java source referencing `daher-realm.json`, the mapper files, or `reconcile-sso.sh` found
+none — so the 857-test application baseline, the 10/10 oauth2login `ProviderRoleDerivationTest`
+suite, and the 3/3 `FirstLoginAuthenticationTest` suite were not re-run: there is no source in the
+diff those suites read, verified by grep rather than assumed, matching this repo's own established
+precedent for a config-only pass (e.g. this file's own ADR-017F boundary-observation section).
+`docker compose config` validated cleanly; both JSON files parsed; the new CI step's YAML parsed;
+`git diff --check` reported no whitespace issues.
+
+**Remaining risk, disclosed rather than silently accepted.** `fullScopeAllowed: true` remains set
+(Keycloak's import default; absent from committed config, not something this ticket changed) on the
+`openmrs` client. Foreign roles and foreign clients therefore still reach `resource_access` and
+`aud` in the token — harmless here only because `openmrs.mapping.user.roles=roles`
+(`config/oauth2.properties.template`) reads the one claim this fix scoped, and oauth2login was
+observed reading no other claim for role/Provider derivation. Setting `fullScopeAllowed: false` would
+change that client's whole token surface and is out of this ticket's scope — not done, flagged here
+for a future ticket if a narrower token is ever wanted.
+
+**Disposable leftovers, this pass, disclosed.** New containers: `mariadb-bug23`, `keycloak-bug23`,
+`keycloak-bug23-fresh` (left running), and `openmrs-bug23` (stopped, not removed, after this pass —
+it never reached a usable state: a fresh `/openmrs/data` volume attached to the already-migrated
+`openmrs_adr017f` schema left it mid-first-boot, so it never authenticated anyone or wrote anything;
+it shared that database with `openmrs-adr017f`, but because it could only have added rows had it
+worked, and every Provider UUID observed in this pass's evidence matches the UUID each login response
+itself returned, its presence does not affect the "zero Provider rows" negative-control claim).
+Restarted from prior sessions and left running: `mariadb-ui009`, `kc-ui009`, `openmrs-adr017f`. New
+Keycloak realm content on `kc-ui009`: a `foreign-test-client` (disposable, roles
+`Provider`/`arbitrary-role`), five new synthetic users
+(`bug23-clinician1`, `bug23-clinician2`, `bug23-reception`, `bug23-foreign-provider`, `bug23-mixed`),
+and the `openmrs` client's `redirectUris` gained `http://openmrs-gateway:8080/*` (disposable-test-only,
+matching the same addition a prior session made and this session's reconciliation run reset, then
+re-added). Database `openmrs_adr017f` gained five new Person/User rows, three new Provider rows, one
+synthetic patient (`1bdc7ccb-…`, identifier `20000A8`), one Visit, one Encounter. No production/
+facility state touched; every write above was against disposable containers/realms.
+
+**Decision/result:** Bug #23 is closed at source and disposable proof level. The smallest correct fix
+is the missing Keycloak-native scoping key, applied identically on both provisioning paths; no
+oauth2login change, no weakening of ADR-017E2's exact-match logic, no broader mapper redesign was
+needed or made. **READY TO COMMIT: Yes**, subject to Liban's review. Per ticket instruction, no
+commit or push was made.

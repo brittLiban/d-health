@@ -441,10 +441,23 @@ attached to those types, SSO stays fail-closed off and the one-login acceptance 
 staff is deliberately unperformed — turning it on would grant clinical and laboratory access to an
 unreviewed set of accounts. (The one-login proof *has* now been performed against synthetic
 identities on a disposable environment, closing the design/mechanism risk; what remains is the real
-roster, a fact from the birth centre, not a design or mechanism gap.) One known, disclosed technical
-issue still sits in front of real activation: **Bug #23** (open) — the Keycloak client-roles mapper
-is not scoped to the `openmrs` client, currently inert but latent under the Provider-identity
-fail-closed guarantee. **Bug #25 is fixed, automated-tested, and disposable-live-demonstrated**:
+roster, a fact from the birth centre, not a design or mechanism gap.) **Bug #23 is now fixed,
+automated-tested, and disposable-live-demonstrated**: the `openmrs` client's `oidc-usermodel-client-
+role-mapper` (claim `roles`) shipped with no `usermodel.clientRoleMapping.clientId`, Keycloak's
+all-clients form — it relayed every client role a user held on *any* client, not just `openmrs`. This
+was proven exploitable, not inert: a synthetic user holding only a foreign client's role named
+exactly `Provider` (no `openmrs` `Provider` grant) produced a `roles` claim containing `Provider`,
+indistinguishable from a genuine grant by ADR-017E2's exact-string check, and — critically — OpenMRS
+itself would have created a `currentProvider` from that. The fix adds
+`usermodel.clientRoleMapping.clientId: "openmrs"` to the mapper, in both the fresh-realm import
+(`daher-realm.json`) and the existing-realm reconciliation fragment
+(`keycloak/mappers/openmrs-client-roles-mapper.json`) — Keycloak-native, no oauth2login/Java change,
+ADR-017E2's exact-match logic untouched. Live-proven end-to-end on a disposable Keycloak 26.7.1 +
+`openmrs-adr017f`: post-fix, a user with only the foreign `Provider` role plus `openmrs` → `Daher
+Reception` authenticated with `roles: [Daher Reception]`, `currentProvider: null`, and **zero**
+Provider database rows — the escalation path is closed. Full evidence, both provisioning paths, all
+negative/mixed/composite/realm-role controls, and the CI static guard are in `DECISIONS.md`'s Bug #23
+entry. **Bug #25 is fixed, automated-tested, and disposable-live-demonstrated**:
 oauth2login now uses the authoritative committed User returned by OpenMRS's daemon creation call
 instead of rereading through its old `REPEATABLE-READ` transaction snapshot; two fresh clinicians
 and one fresh Reception identity authenticated on their first callbacks with no duplicates or

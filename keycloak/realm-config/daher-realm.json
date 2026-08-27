@@ -78,7 +78,8 @@
             "id.token.claim": "true",
             "access.token.claim": "true",
             "claim.name": "roles",
-            "jsonType.label": "String"
+            "jsonType.label": "String",
+            "usermodel.clientRoleMapping.clientId": "openmrs"
           }
         }
       ]
