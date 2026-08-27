@@ -72,6 +72,23 @@ export interface ActiveVisit {
   encounters: AdmissionEncounterRef[]
 }
 
+// UI-014 — GET /visit?location=&visitType=&includeInactive=false, the
+// facility-wide (not per-patient) query the maternity board uses. Measured
+// live: the embedded `patient` sub-representation honors `uuid`/`display`/
+// `identifiers`, but NOT a nested `person` field at any representation
+// depth tried (custom or full) — contradicting UI-001A §13a.1's claim that
+// search results carry age/DOB. Birth info is a genuinely separate resource
+// (`GET /person/{uuid}`), never embedded here — this type has no `person`
+// field because nothing populates one via this call.
+export interface MaternityBoardVisit {
+  uuid: string
+  startDatetime: string
+  stopDatetime?: string | null
+  visitType: { uuid: string; display?: string }
+  location: { uuid: string; display?: string }
+  patient: OpenMrsPatient
+}
+
 // Fixed frontend-facing error vocabulary (docs/UI-001-CLINICAL-UX.md §20).
 // Never a raw backend message or stack trace — the dev proxy in vite.config.ts
 // already strips those before they reach this client.

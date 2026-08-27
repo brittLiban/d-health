@@ -3,17 +3,22 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { axe } from 'jest-axe'
 import App from './App'
-import { searchPatients } from './api/client'
+import { getMaternityBoardVisits, searchPatients } from './api/client'
+import { DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID, MATERNITE_LOCATION_UUID } from './api/admissionConstants'
 
 vi.mock('./api/client', () => ({
   searchPatients: vi.fn(),
+  getMaternityBoardVisits: vi.fn(),
 }))
 
 const mockedSearch = vi.mocked(searchPatients)
+const mockedBoard = vi.mocked(getMaternityBoardVisits)
 
 describe('accessibility', () => {
   beforeEach(() => {
     mockedSearch.mockReset()
+    mockedBoard.mockReset()
+    mockedBoard.mockResolvedValue({ visits: [], truncated: false })
   })
 
   it('the empty search screen has no detectable axe violations', async () => {
@@ -40,6 +45,35 @@ describe('accessibility', () => {
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
     await user.click(await screen.findByRole('button', { name: 'Ouvrir le dossier' }))
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('the empty maternity board has no detectable axe violations', async () => {
+    const user = userEvent.setup()
+    const { container } = render(<App />)
+    await user.click(screen.getByRole('button', { name: /Maternité/ }))
+    await screen.findByText('Aucune patiente actuellement admise en maternité.')
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('a populated maternity board has no detectable axe violations', async () => {
+    mockedBoard.mockResolvedValue({
+      visits: [
+        {
+          uuid: 'visit-1',
+          startDatetime: '2026-08-20T08:00:00.000+0000',
+          stopDatetime: null,
+          visitType: { uuid: DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID, display: 'Daher Maternity Admission' },
+          location: { uuid: MATERNITE_LOCATION_UUID, display: 'Maternité' },
+          patient: { uuid: 'p1', display: 'Amina Warsame', identifiers: [{ identifier: '10001AA' }] },
+        },
+      ],
+      truncated: false,
+    })
+    const user = userEvent.setup()
+    const { container } = render(<App />)
+    await user.click(screen.getByRole('button', { name: /Maternité/ }))
+    await screen.findByText('Amina Warsame')
     expect(await axe(container)).toHaveNoViolations()
   })
 })

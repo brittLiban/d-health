@@ -18,20 +18,25 @@ type Tab = (typeof TABS)[number]
 interface PatientWorkspaceProps {
   patient: OpenMrsPatient
   onBack: () => void
+  // UI-014 — the maternity board opens this same workspace/identity path
+  // (§5), but "Retour à la recherche" would be false when arriving from
+  // Maternité rather than Patients. Defaults to the original copy so every
+  // existing caller is unchanged.
+  backLabel?: string
 }
 
 // Only Résumé renders real data — the exact fields UI-001A confirmed the
 // patient-search response carries (docs/UI-001-CLINICAL-UX.md §13a.1). Every
 // other tab is an honest "not yet available" rather than invented pregnancy,
 // labour, or lab content (§7, AGENTS.md's "never invent clinical content").
-export function PatientWorkspace({ patient, onBack }: PatientWorkspaceProps) {
+export function PatientWorkspace({ patient, onBack, backLabel = '← Retour à la recherche' }: PatientWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<Tab>('Résumé')
 
   return (
     <div>
       <div style={{ padding: 'var(--space-3) var(--space-4) 0' }}>
         <Button variant="secondary" onClick={onBack}>
-          ← Retour à la recherche
+          {backLabel}
         </Button>
       </div>
       <PatientHeader patient={patient} />

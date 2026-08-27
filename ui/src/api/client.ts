@@ -2,6 +2,7 @@ import {
   ApiError,
   type ActiveVisit,
   type IdentifierSource,
+  type MaternityBoardVisit,
   type OpenMrsPatient,
   type OpenMrsSession,
   type PatientRegistration,
@@ -455,6 +456,65 @@ export async function createMaternityVisit(patientUuid: string): Promise<{ uuid:
     return { uuid: body.uuid }
   } catch {
     throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI-014 — Maternity board (Patientes actuellement admises en Maternité).
+//
+// Facility-wide, not per-patient — the one authoritative query for "who is
+// currently admitted", proven live (PROJECT_STATE.md's UI-014 entry): both
+// `location` and `visitType` are genuinely enforced server-side filters (a
+// nonexistent location 404s rather than being silently ignored), and
+// combining them returns the intersection, not either alone. Read-only:
+// this never mutates anything.
+const MATERNITY_BOARD_REPRESENTATION =
+  'custom:(uuid,startDatetime,stopDatetime,visitType:(uuid,display),location:(uuid,display),' +
+  'patient:(uuid,display,identifiers:(identifier)))'
+
+// `webservices.rest.maxResultsDefault` is 50 on the pinned stack (confirmed
+// live via GET /systemsetting) — an unbounded query silently truncates past
+// that. 100 is the server's own `webservices.rest.maxResultsAbsolute`
+// ceiling; asking for more never returns more. A `next` pagination link in
+// the response at that ceiling means more admissions exist than are shown —
+// `truncated` surfaces that honestly rather than silently dropping rows.
+const MATERNITY_BOARD_PAGE_SIZE = 100
+
+export interface MaternityBoardPage {
+  visits: MaternityBoardVisit[]
+  truncated: boolean
+}
+
+export async function getMaternityBoardVisits(): Promise<MaternityBoardPage> {
+  let response: Response
+  try {
+    response = await fetch(
+      `/openmrs/ws/rest/v1/visit?location=${MATERNITE_LOCATION_UUID}` +
+        `&visitType=${DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID}&includeInactive=false` +
+        `&limit=${MATERNITY_BOARD_PAGE_SIZE}&v=${encodeURIComponent(MATERNITY_BOARD_REPRESENTATION)}`,
+      { headers: { Accept: 'application/json' } },
+    )
+  } catch {
+    throw new ApiError('NETWORK_ERROR', 'Connexion au serveur impossible.')
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    // A retired/renamed Maternité location produces a raw 404 with a full
+    // Java stack trace in `detail` (measured live) — writeErrorFromBody
+    // never surfaces that text; it falls through to SERVER_ERROR here.
+    throw writeErrorFromBody(response.status, rawText)
+  }
+
+  let body: { results?: MaternityBoardVisit[]; links?: Array<{ rel?: string }> }
+  try {
+    body = JSON.parse(rawText)
+  } catch {
+    throw new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+  }
+  return {
+    visits: Array.isArray(body.results) ? body.results : [],
+    truncated: Array.isArray(body.links) && body.links.some((link) => link.rel === 'next'),
   }
 }
 

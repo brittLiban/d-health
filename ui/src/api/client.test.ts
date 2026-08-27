@@ -7,6 +7,7 @@ import {
   findPatientByIdentifier,
   generateIdentifier,
   getActiveVisits,
+  getMaternityBoardVisits,
   getSession,
   searchPatients,
   verifyAdmissionMetadata,
@@ -583,5 +584,81 @@ describe('createAdmissionEncounter', () => {
     } catch (error) {
       expect((error as ApiError).message).not.toContain('org.openmrs')
     }
+  })
+})
+
+describe('getMaternityBoardVisits', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('fetches the facility-wide query — location + visitType + includeInactive=false, no patient filter', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(textResponse(true, 200, { results: [] }))
+    vi.stubGlobal('fetch', fetchSpy)
+    await getMaternityBoardVisits()
+    const [url] = fetchSpy.mock.calls[0] as [string]
+    expect(url).toContain('/openmrs/ws/rest/v1/visit?location=' + MATERNITE_LOCATION_UUID)
+    expect(url).toContain('visitType=' + DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID)
+    expect(url).toContain('includeInactive=false')
+    expect(url).not.toContain('patient=')
+    expect(url).toContain('identifiers')
+  })
+
+  it('returns the parsed visits array and truncated=false when there is no next link', async () => {
+    const visit = {
+      uuid: 'visit-1',
+      startDatetime: '2026-08-20T08:00:00.000+0000',
+      stopDatetime: null,
+      visitType: { uuid: DAHER_MATERNITY_ADMISSION_VISIT_TYPE_UUID, display: 'Daher Maternity Admission' },
+      location: { uuid: MATERNITE_LOCATION_UUID, display: 'Maternité' },
+      patient: { uuid: 'p1', display: 'Patiente Un', identifiers: [{ identifier: '10001AA' }] },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(true, 200, { results: [visit] })))
+    await expect(getMaternityBoardVisits()).resolves.toEqual({ visits: [visit], truncated: false })
+  })
+
+  it('truncated=true when the response carries a "next" pagination link — the ward exceeds the page size', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(textResponse(true, 200, { results: [], links: [{ rel: 'next' }] })),
+    )
+    await expect(getMaternityBoardVisits()).resolves.toEqual({ visits: [], truncated: true })
+  })
+
+  it('propagates NOT_AUTHORIZED on a Reception-shaped 403, never an empty board', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(textResponse(false, 403, { error: { detail: 'Privileges required: Get Visit Types' } })),
+    )
+    await expect(getMaternityBoardVisits()).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' })
+  })
+
+  it('a missing/retired location 404 (with a full Java stack trace in `detail`) maps to SERVER_ERROR without leaking the trace', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        textResponse(false, 404, {
+          error: {
+            message: "Object with given uuid doesn't exist [null]",
+            detail: 'org.openmrs.module.webservices.rest.web.response.ObjectNotFoundException\n\tat org.openmrs...',
+          },
+        }),
+      ),
+    )
+    try {
+      await getMaternityBoardVisits()
+      expect.unreachable()
+    } catch (error) {
+      expect((error as ApiError).code).toBe('SERVER_ERROR')
+      expect((error as ApiError).message).not.toContain('org.openmrs')
+    }
+  })
+
+  it('NETWORK_ERROR on a dropped connection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError('fetch failed')),
+    )
+    await expect(getMaternityBoardVisits()).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
   })
 })
