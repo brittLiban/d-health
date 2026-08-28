@@ -1,4 +1,4 @@
-FROM maven:3-eclipse-temurin-21 AS openelis-order-correlation-build
+FROM maven:3-eclipse-temurin-21@sha256:8f6ac126f7810bb5549c4cd122d2bf0e9cda5bdeb0838aa928f09e779fd8bef8 AS openelis-order-correlation-build
 
 # DH-011D (BLOCKER-6/ADR-026, Option F): the pinned OpenELIS-Global-2 webapp image
 # (itechuw/openelis-global-2:3.2.1.11, see docker-compose.yml) ships unpatched. This
@@ -69,7 +69,7 @@ RUN --mount=type=cache,target=/root/.m2,sharing=locked \
 
 # Run stage -- identical to upstream's own Dockerfile run stage at this pinned
 # commit, just sourced from the patched build above instead of a prebuilt image.
-FROM tomcat:10-jre21
+FROM tomcat:10-jre21@sha256:d936144d55fab00e7d2b73a1fff338600e2fc6597af9472617ad12f31b6bcafe
 
 COPY --from=openelis-order-correlation-build /build/install/createDefaultPassword.sh ./
 

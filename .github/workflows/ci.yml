@@ -1064,102 +1064,6 @@ jobs:
           print("ok — Admission Encounter type is reproducible, upstream semantics preserved")
           PY
 
-  oauth2login-provider-tests:
-    # DH-008G-CI / Bug #25. The static guards above prove the committed patches'
-    # *text* has the right shape (method exists, exact-match constant, fails
-    # closed, no competing mapper) -- it never compiles or runs a single line
-    # of the patched Java. This job is the behavioral companion: it fetches
-    # the exact pinned oauth2login source, verifies the commit, applies the
-    # SAME committed patch files openmrs-config/Dockerfile consumes (not a
-    # test-only approximation), and actually executes
-    # ProviderRoleDerivationTest's 10 cases and FirstLoginAuthenticationTest's
-    # 3 cases. Static guards + this job together;
-    # neither replaces the other.
-    #
-    # Runs inside the exact pinned Maven/JDK image the Dockerfile itself
-    # builds with, not a generic runner toolchain -- byte-identical to
-    # production, not "close enough".
-    #
-    # ProviderAttributeUserInfoTest (the other test-verification artifact) is
-    # deliberately NOT run here: it's a full Spring-context integration test
-    # (extends BaseModuleContextSensitiveTest) that fails to load its
-    # ApplicationContext under this exact JDK17/CGLIB combination -- the same
-    # pre-existing failure ADR-017E2 already found and confirmed via a
-    # control run against pristine, unpatched upstream source (not caused by
-    # either patch). Gating CI on infrastructure this repo does not own and
-    # cannot fix would make the gate flaky, not stronger. It stays a
-    # documented, manually-verified artifact (PROVENANCE.md) exactly as
-    # before.
-    name: oauth2login — patched identity tests
-    runs-on: ubuntu-latest
-    container:
-      image: maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82
-    env:
-      # Same pin openmrs-config/Dockerfile and PROVENANCE.md record. Not read
-      # from those files at run time on purpose -- a moving reference here
-      # would silently stop testing what actually ships. If the pin ever
-      # changes, this line must change with it, deliberately, in the same
-      # commit as the Dockerfile.
-      OAUTH2LOGIN_PINNED_COMMIT: 2770233627343a53719ec981e997d94b1d90b7ad
-      OAUTH2LOGIN_SRC: /tmp/oauth2login-src
-    steps:
-      - uses: actions/checkout@v5
-
-      # Standard actions/cache mechanism, keyed on the pinned commit -- that
-      # commit fully determines the dependency set (a fixed upstream pom.xml
-      # at a fixed SHA), so the key never goes stale and never needs manual
-      # invalidation.
-      - name: Cache Maven dependencies
-        uses: actions/cache@v4
-        with:
-          path: /root/.m2/repository
-          key: m2-oauth2login-${{ env.OAUTH2LOGIN_PINNED_COMMIT }}
-
-      - name: Fetch exact pinned oauth2login source and verify the commit
-        run: |
-          git clone --branch 1.5.0 --depth 1 \
-            https://github.com/openmrs/openmrs-module-oauth2login.git "$OAUTH2LOGIN_SRC"
-          actual="$(git -C "$OAUTH2LOGIN_SRC" rev-parse HEAD)"
-          if [ "$actual" != "$OAUTH2LOGIN_PINNED_COMMIT" ]; then
-            echo "::error::oauth2login tag 1.5.0 resolved to $actual, expected $OAUTH2LOGIN_PINNED_COMMIT -- the upstream tag moved or was force-pushed"
-            exit 1
-          fi
-
-      - name: Apply the production patches (the same files the Docker build consumes)
-        run: |
-          cp openmrs-config/patches/oauth2login-bridge/OAuth2LoginBridgeFilter.java \
-            "$OAUTH2LOGIN_SRC/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java"
-          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/config.xml.patch"
-          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2LoginController.java.patch"
-          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch"
-
-      - name: Install the identity test-verification artifacts
-        run: |
-          cp openmrs-config/patches/oauth2login-bridge/test-verification/ProviderRoleDerivationTest.java \
-            "$OAUTH2LOGIN_SRC/omod/src/test/java/org/openmrs/module/oauth2login/web/controller/ProviderRoleDerivationTest.java"
-          cp openmrs-config/patches/oauth2login-bridge/test-verification/FirstLoginAuthenticationTest.java \
-            "$OAUTH2LOGIN_SRC/api/src/test/java/org/openmrs/module/oauth2login/authscheme/FirstLoginAuthenticationTest.java"
-
-      - name: Compile the affected modules and run the focused identity tests
-        # package, not test: the omod module's own reactor build needs the
-        # api module already packaged (an unpack-dependencies step fails on
-        # a reactor artifact that only reached the test phase) -- package
-        # still runs surefire first, so tests execute exactly the same way.
-        working-directory: /tmp/oauth2login-src
-        run: |
-          mvn -B -f pom.xml -pl omod -am \
-            -Dsurefire.failIfNoSpecifiedTests=false \
-            -Dtest=FirstLoginAuthenticationTest,ProviderRoleDerivationTest \
-            package | tee /tmp/mvn-output.log
-          # Every line Maven prints is "[INFO] ..." -- this must not be
-          # anchored to the start of the line, and must be tied to the
-          # specific class (not just any "Tests run: 10" elsewhere in the
-          # log), or a passing-looking but wrong-scoped run would slip by.
-          grep -qE 'Tests run: 10, Failures: 0, Errors: 0, Skipped: 0.*ProviderRoleDerivationTest' /tmp/mvn-output.log \
-            || { echo "::error::expected exactly 10 passing ProviderRoleDerivationTest cases"; exit 1; }
-          grep -qE 'Tests run: 3, Failures: 0, Errors: 0, Skipped: 0.*FirstLoginAuthenticationTest' /tmp/mvn-output.log \
-            || { echo "::error::expected exactly 3 passing FirstLoginAuthenticationTest cases"; exit 1; }
-
       - name: DH-011D order-correlation patch content guards
         # This job cannot boot the real OpenELIS stack (see this file's header), so it asserts
         # on committed patch/config source, mirroring the oauth2login guards above. Runtime
@@ -1310,6 +1214,102 @@ jobs:
           print("ok — DH-011D order-correlation patch set has all required components, "
                 "no forbidden fuzzy-matching patterns, and the uniqueness index stays scoped to FHIR-typed rows")
           PY
+
+  oauth2login-provider-tests:
+    # DH-008G-CI / Bug #25. The static guards above prove the committed patches'
+    # *text* has the right shape (method exists, exact-match constant, fails
+    # closed, no competing mapper) -- it never compiles or runs a single line
+    # of the patched Java. This job is the behavioral companion: it fetches
+    # the exact pinned oauth2login source, verifies the commit, applies the
+    # SAME committed patch files openmrs-config/Dockerfile consumes (not a
+    # test-only approximation), and actually executes
+    # ProviderRoleDerivationTest's 10 cases and FirstLoginAuthenticationTest's
+    # 3 cases. Static guards + this job together;
+    # neither replaces the other.
+    #
+    # Runs inside the exact pinned Maven/JDK image the Dockerfile itself
+    # builds with, not a generic runner toolchain -- byte-identical to
+    # production, not "close enough".
+    #
+    # ProviderAttributeUserInfoTest (the other test-verification artifact) is
+    # deliberately NOT run here: it's a full Spring-context integration test
+    # (extends BaseModuleContextSensitiveTest) that fails to load its
+    # ApplicationContext under this exact JDK17/CGLIB combination -- the same
+    # pre-existing failure ADR-017E2 already found and confirmed via a
+    # control run against pristine, unpatched upstream source (not caused by
+    # either patch). Gating CI on infrastructure this repo does not own and
+    # cannot fix would make the gate flaky, not stronger. It stays a
+    # documented, manually-verified artifact (PROVENANCE.md) exactly as
+    # before.
+    name: oauth2login — patched identity tests
+    runs-on: ubuntu-latest
+    container:
+      image: maven:3.9.11-eclipse-temurin-17@sha256:e4a7ace3dc0d645ed97f8d9ad0b0d3f0b14fa8d150138f27f116d7105a639b82
+    env:
+      # Same pin openmrs-config/Dockerfile and PROVENANCE.md record. Not read
+      # from those files at run time on purpose -- a moving reference here
+      # would silently stop testing what actually ships. If the pin ever
+      # changes, this line must change with it, deliberately, in the same
+      # commit as the Dockerfile.
+      OAUTH2LOGIN_PINNED_COMMIT: 2770233627343a53719ec981e997d94b1d90b7ad
+      OAUTH2LOGIN_SRC: /tmp/oauth2login-src
+    steps:
+      - uses: actions/checkout@v5
+
+      # Standard actions/cache mechanism, keyed on the pinned commit -- that
+      # commit fully determines the dependency set (a fixed upstream pom.xml
+      # at a fixed SHA), so the key never goes stale and never needs manual
+      # invalidation.
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: /root/.m2/repository
+          key: m2-oauth2login-${{ env.OAUTH2LOGIN_PINNED_COMMIT }}
+
+      - name: Fetch exact pinned oauth2login source and verify the commit
+        run: |
+          git clone --branch 1.5.0 --depth 1 \
+            https://github.com/openmrs/openmrs-module-oauth2login.git "$OAUTH2LOGIN_SRC"
+          actual="$(git -C "$OAUTH2LOGIN_SRC" rev-parse HEAD)"
+          if [ "$actual" != "$OAUTH2LOGIN_PINNED_COMMIT" ]; then
+            echo "::error::oauth2login tag 1.5.0 resolved to $actual, expected $OAUTH2LOGIN_PINNED_COMMIT -- the upstream tag moved or was force-pushed"
+            exit 1
+          fi
+
+      - name: Apply the production patches (the same files the Docker build consumes)
+        run: |
+          cp openmrs-config/patches/oauth2login-bridge/OAuth2LoginBridgeFilter.java \
+            "$OAUTH2LOGIN_SRC/omod/src/main/java/org/openmrs/module/oauth2login/web/filter/OAuth2LoginBridgeFilter.java"
+          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/config.xml.patch"
+          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2LoginController.java.patch"
+          git -C "$OAUTH2LOGIN_SRC" apply "$GITHUB_WORKSPACE/openmrs-config/patches/oauth2login-bridge/OAuth2UserInfoAuthenticationScheme.java.patch"
+
+      - name: Install the identity test-verification artifacts
+        run: |
+          cp openmrs-config/patches/oauth2login-bridge/test-verification/ProviderRoleDerivationTest.java \
+            "$OAUTH2LOGIN_SRC/omod/src/test/java/org/openmrs/module/oauth2login/web/controller/ProviderRoleDerivationTest.java"
+          cp openmrs-config/patches/oauth2login-bridge/test-verification/FirstLoginAuthenticationTest.java \
+            "$OAUTH2LOGIN_SRC/api/src/test/java/org/openmrs/module/oauth2login/authscheme/FirstLoginAuthenticationTest.java"
+
+      - name: Compile the affected modules and run the focused identity tests
+        # package, not test: the omod module's own reactor build needs the
+        # api module already packaged (an unpack-dependencies step fails on
+        # a reactor artifact that only reached the test phase) -- package
+        # still runs surefire first, so tests execute exactly the same way.
+        working-directory: /tmp/oauth2login-src
+        run: |
+          mvn -B -f pom.xml -pl omod -am \
+            -Dsurefire.failIfNoSpecifiedTests=false \
+            -Dtest=FirstLoginAuthenticationTest,ProviderRoleDerivationTest \
+            package | tee /tmp/mvn-output.log
+          # Every line Maven prints is "[INFO] ..." -- this must not be
+          # anchored to the start of the line, and must be tied to the
+          # specific class (not just any "Tests run: 10" elsewhere in the
+          # log), or a passing-looking but wrong-scoped run would slip by.
+          grep -qE 'Tests run: 10, Failures: 0, Errors: 0, Skipped: 0.*ProviderRoleDerivationTest' /tmp/mvn-output.log \
+            || { echo "::error::expected exactly 10 passing ProviderRoleDerivationTest cases"; exit 1; }
+          grep -qE 'Tests run: 3, Failures: 0, Errors: 0, Skipped: 0.*FirstLoginAuthenticationTest' /tmp/mvn-output.log \
+            || { echo "::error::expected exactly 3 passing FirstLoginAuthenticationTest cases"; exit 1; }
 
   compose:
     name: compose interpolates and parses
