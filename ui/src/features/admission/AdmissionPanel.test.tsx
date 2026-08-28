@@ -17,6 +17,7 @@ vi.mock('../../api/client', () => ({
   getActiveVisits: vi.fn(),
   createMaternityVisit: vi.fn(),
   createAdmissionEncounter: vi.fn(),
+  endAdmission: vi.fn(),
 }))
 
 const PATIENT_UUID = 'patient-uuid'
@@ -116,7 +117,7 @@ describe('AdmissionPanel', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/pas prêt/i)
   })
 
-  it('COMPLETE renders Admise with no mutation action', async () => {
+  it('COMPLETE renders Admise, with Terminer l’admission as the only action (UI-015)', async () => {
     const m = mocked()
     m.verifyMetadata.mockResolvedValue(undefined)
     m.getSession.mockResolvedValue(CLINICIAN_READY)
@@ -126,6 +127,7 @@ describe('AdmissionPanel', () => {
     expect(await screen.findByText('Admise')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /admettre/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reprendre/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: "Terminer l'admission" })).toBeInTheDocument()
   })
 
   it('PARTIAL_VISIT renders Admission incomplète with a Reprendre l’admission action', async () => {

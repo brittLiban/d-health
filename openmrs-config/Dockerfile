@@ -45,11 +45,25 @@ RUN git clone --branch 1.5.0 --depth 1 \
     && mvn -B -f /src/pom.xml -Dmaven.test.skip=true package \
     && test -s /src/omod/target/oauth2login-1.5.0.omod
 
+FROM maven:3.9-eclipse-temurin-8@sha256:15522857a08bc468b05f4284d4a5a6c49eff7af7abfe16dc7770609484a67b8b AS daherendadmission-build
+
+# ADR-030/UI-015E ("Terminer l'admission" -- see DECISIONS.md ADR-030): builds the module from the
+# source already committed in this repo (openmrs-config/modules/daherendadmission/), the same
+# reproducible-from-source approach oauth2login-build above uses for its pinned upstream clone --
+# not an opaque prebuilt .omod. JDK 8, matching the toolchain this module was actually built and
+# live-proven against (openmrs.platform.version=2.8.7).
+COPY modules/daherendadmission /src
+RUN mvn -q -B -f /src/pom.xml -Dmaven.test.skip=true package \
+    && test -s /src/omod/target/daherendadmission-1.0.0.omod
+
 FROM openmrs/openmrs-reference-application-3-backend:3.7.x@sha256:440bf92f4749faa38ca48a3e09f6651dee016089f0cbf6031dc5b1a979000ed7 AS base
 
 COPY --from=oauth2login-build --chown=1001:1001 \
   /src/omod/target/oauth2login-1.5.0.omod \
   /openmrs/distribution/openmrs_modules/oauth2login-1.5.0.omod
+COPY --from=daherendadmission-build --chown=1001:1001 \
+  /src/omod/target/daherendadmission-1.0.0.omod \
+  /openmrs/distribution/openmrs_modules/daherendadmission-1.0.0.omod
 COPY --chmod=0755 configure-sso.sh /openmrs/configure-sso.sh
 COPY --chmod=0644 exclude-authentication-when-sso.sh /openmrs/exclude-authentication-when-sso.sh
 COPY --chmod=0644 activate-oauth2login-if-needed.sh /openmrs/activate-oauth2login-if-needed.sh
@@ -103,6 +117,30 @@ RUN upstream_demo_file=/openmrs/distribution/openmrs_config/globalproperties/ref
        "$upstream_demo_file" \
     && ! grep -q referencedemodata.createDemoPatientsOnNextStartup "$upstream_demo_file" \
     && test "$(grep -c globalProperty "$upstream_demo_file")" = 12
+USER 1001
+
+# UI-015E/ADR-030: OWASP CSRFGuard (bundled with OpenMRS core, WEB-INF/csrfguard.properties inside
+# openmrs.war) rejects any POST not in its unprotected allowlist by default -- only
+# %servletContext%/ws/*, /initialsetup, and /csrfguard are covered out of the box, not arbitrary
+# module servlet paths. Live-tested before writing this: sed-patching the exploded
+# webapps/openmrs/WEB-INF/csrfguard.properties directly on a running container does NOT survive a
+# restart, because Tomcat re-explodes that directory from openmrs.war whenever their mtimes
+# differ, discarding the live edit -- the WAR itself has to carry the patch. This uses the JDK's
+# own `jar` tool (already on PATH in this base image) to extract, append one line to, and
+# re-insert the single properties file -- no new third-party dependency, and it removes CSRFGuard
+# protection only for this one narrow endpoint prefix, not app-wide (the endpoint's own
+# authorization -- see DaherMaternityAdmissionServiceImpl -- and the existing X-Daher-App-Request
+# convention are what still gate it).
+USER root
+RUN war=/openmrs/distribution/openmrs_core/openmrs.war \
+    && workdir=$(mktemp -d) \
+    && cd "$workdir" \
+    && jar xf "$war" WEB-INF/csrfguard.properties \
+    && ! grep -q '^org.owasp.csrfguard.unprotected.DaherEndAdmission' WEB-INF/csrfguard.properties \
+    && printf '%s\n' 'org.owasp.csrfguard.unprotected.DaherEndAdmission = %servletContext%/moduleServlet/daherendadmission/*' \
+       >> WEB-INF/csrfguard.properties \
+    && jar uf "$war" WEB-INF/csrfguard.properties \
+    && cd / && rm -rf "$workdir"
 USER 1001
 
 CMD ["/openmrs/configure-sso.sh"]

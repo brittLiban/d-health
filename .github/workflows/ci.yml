@@ -288,6 +288,34 @@ jobs:
           print("ok — every external image reference is digest-pinned")
           PY
 
+      - name: No "--" inside an XML comment body (openmrs-config)
+        run: |
+          # UI-015D/UI-015E found this twice in one session: a "--" used as a dash inside a
+          # <!-- --> comment is invalid XML, and when it lands in an OpenMRS module's
+          # moduleApplicationContext.xml or config.xml it breaks Spring context refresh for the
+          # ENTIRE running instance, not just the one module (org.xml.sax.SAXParseException:
+          # "The string '--' is not permitted within comments"). Scoped to openmrs-config/ since
+          # that is the only tree whose XML actually loads into a live OpenMRS Spring context.
+          python - <<'PY'
+          import re, subprocess, sys
+          from pathlib import Path
+
+          out = subprocess.run(["git", "ls-files", "openmrs-config/**/*.xml"], capture_output=True, text=True).stdout
+          files = [f for f in out.splitlines() if f]
+          bad = []
+          for path in files:
+              text = Path(path).read_text()
+              for m in re.finditer(r"<!--(.*?)-->", text, re.S):
+                  body = m.group(1)
+                  if "--" in body:
+                      line = text.count("\n", 0, m.start()) + 1
+                      bad.append(f"{path}:{line} contains '--' inside an XML comment body")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print(f"ok — no invalid '--' inside any XML comment across {len(files)} openmrs-config XML files")
+          PY
+
       - name: Compose invariants that a regression would silently undo
         run: |
           python - <<'PY'

@@ -156,6 +156,7 @@ services:
       - ./openmrs-config/initializer/roles:/openmrs/distribution/openmrs_config/roles/zz-daher-health:ro
       - ./openmrs-config/initializer/visittypes:/openmrs/distribution/openmrs_config/visittypes/zz-daher-health:ro
       - ./openmrs-config/initializer/encountertypes:/openmrs/distribution/openmrs_config/encountertypes/zz-daher-health:ro
+      - ./openmrs-config/initializer/attributetypes:/openmrs/distribution/openmrs_config/attributetypes/zz-daher-health:ro
       - ./openmrs-config/demo/patients.${OMRS_DEMO_PATIENTS:-off}.xml:/openmrs/distribution/openmrs_config/globalproperties/zz-daher-patient-control/patients.xml:ro
       # ---- Demo patients: on/off switch (BLOCKER-2) --------------------------
       # The O3 distro can create 50 fictional patients on first boot. The local

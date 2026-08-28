@@ -4,6 +4,7 @@ import {
   createMaternityVisit,
   createPatient,
   discoverIdentifierSource,
+  endAdmission,
   findPatientByIdentifier,
   generateIdentifier,
   getActiveVisits,
@@ -660,5 +661,109 @@ describe('getMaternityBoardVisits', () => {
       vi.fn().mockRejectedValue(new TypeError('fetch failed')),
     )
     await expect(getMaternityBoardVisits()).rejects.toMatchObject({ code: 'NETWORK_ERROR' })
+  })
+})
+
+// UI-015F §13 — fault injection at the actual fetch boundary, not just against
+// an already-classified ApiError. These are the cases a live container cannot
+// cleanly reproduce (a commit whose response is lost in transit) — this is
+// the honest way to cover them, per the ticket's own instruction not to burn
+// time trying to induce real mid-flight network loss against a live backend.
+describe('endAdmission', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs the narrow path with the visit uuid, no request body, and the CSRF header', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      textResponse(true, 200, { status: 'ENDED', stopDatetime: '2026-08-28T00:00:00.000Z' }),
+    )
+    vi.stubGlobal('fetch', fetchSpy)
+    await endAdmission('visit-uuid-1')
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      '/openmrs/moduleServlet/daherendadmission/daherEndMaternityAdmission/visit-uuid-1/end',
+    )
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['X-Daher-App-Request']).toBe('1')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('a definite server failure before commit (400) maps to VALIDATION_ERROR', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(false, 400, { status: 'WRONG_VISIT_TYPE' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+  })
+
+  it('a definite server failure before commit (404) maps to NOT_FOUND', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(false, 404, { status: 'VISIT_NOT_FOUND' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('a definite authorization failure (401 or 403) maps to NOT_AUTHORIZED', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(false, 403, { status: 'FORBIDDEN' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(false, 401, { status: 'UNAUTHENTICATED' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' })
+  })
+
+  it('a 500 maps to SERVER_ERROR, deliberately NOT AMBIGUOUS_WRITE — ADR-030 proves the whole ' +
+    'operation is transactional, so a 500 here means nothing committed, unlike core’s own /visit ' +
+    'endpoint (createMaternityVisit above, which treats 5xx as ambiguous)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(false, 500, { status: 'OPERATION_FAILED' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'SERVER_ERROR' })
+  })
+
+  it('a timeout/dropped connection after the request was sent is AMBIGUOUS_WRITE — the request may ' +
+    'have already reached the server and committed before the response was lost', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'AMBIGUOUS_WRITE' })
+  })
+
+  it('an unparsable "successful" 200 response body is AMBIGUOUS_WRITE, never trusted as ENDED', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => 'not json' }))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'AMBIGUOUS_WRITE' })
+  })
+
+  it('a well-formed 200 body missing the documented status/stopDatetime fields is AMBIGUOUS_WRITE, not silently accepted', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(true, 200, { status: 'SOMETHING_ELSE' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'AMBIGUOUS_WRITE' })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(textResponse(true, 200, { stopDatetime: '2026-08-28T00:00:00.000Z' })))
+    await expect(endAdmission('v1')).rejects.toMatchObject({ code: 'AMBIGUOUS_WRITE' })
+  })
+
+  it('a genuine 200 ENDED response resolves with the exact status and stopDatetime, nothing else', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(textResponse(true, 200, { status: 'ENDED', stopDatetime: '2026-08-28T00:00:00.000Z' })),
+    )
+    await expect(endAdmission('v1')).resolves.toEqual({ status: 'ENDED', stopDatetime: '2026-08-28T00:00:00.000Z' })
+  })
+
+  it('a genuine 200 ALREADY_ENDED response resolves distinctly from ENDED', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        textResponse(true, 200, { status: 'ALREADY_ENDED', stopDatetime: '2026-08-28T00:00:00.000Z' }),
+      ),
+    )
+    await expect(endAdmission('v1')).resolves.toEqual({
+      status: 'ALREADY_ENDED',
+      stopDatetime: '2026-08-28T00:00:00.000Z',
+    })
+  })
+
+  it('never leaks a raw backend detail into the thrown error, regardless of status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(textResponse(false, 500, { status: 'OPERATION_FAILED', detail: 'org.openmrs.SomeException' })),
+    )
+    try {
+      await endAdmission('v1')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as ApiError).message).not.toContain('org.openmrs')
+    }
   })
 })

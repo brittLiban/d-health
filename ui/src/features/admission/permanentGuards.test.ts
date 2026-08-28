@@ -19,6 +19,7 @@ vi.mock('../../api/client', () => ({
   getActiveVisits: vi.fn(),
   createMaternityVisit: vi.fn(),
   createAdmissionEncounter: vi.fn(),
+  endAdmission: vi.fn(),
 }))
 
 // Raw source text via Vite's own glob import (no Node fs/path — this
@@ -61,6 +62,19 @@ describe('permanent safety guards — static source checks', () => {
 
   it('never references browser persistence (localStorage/sessionStorage/indexedDB) in the admission feature', () => {
     expect(featureSourceText()).not.toMatch(/localStorage|sessionStorage|indexedDB/i)
+  })
+
+  // UI-015/ADR-030 — "Terminer l'admission" is deliberately narrower than
+  // core's /visit endpoint: no stopDatetime, discharge, transfer, diagnosis,
+  // or outcome field is ever part of this feature's own request shape. These
+  // guards must fail if a future change reintroduces any of them.
+  it('never sends a request body on the end-admission call — the Visit UUID in the URL path is the only input', () => {
+    expect(clientSourceText()).not.toMatch(/endAdmission[\s\S]{0,400}?body:/)
+  })
+
+  it('never references discharge, transfer, or diagnosis anywhere in the admission feature or client', () => {
+    const text = featureSourceText() + clientSourceText()
+    expect(text).not.toMatch(/discharge|transfer|diagnosis/i)
   })
 })
 

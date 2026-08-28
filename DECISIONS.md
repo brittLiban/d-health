@@ -3008,3 +3008,634 @@ is the missing Keycloak-native scoping key, applied identically on both provisio
 oauth2login change, no weakening of ADR-017E2's exact-match logic, no broader mapper redesign was
 needed or made. **READY TO COMMIT: Yes**, subject to Liban's review. Per ticket instruction, no
 commit or push was made.
+
+---
+
+## ADR-030 — ACCEPTED / IMPLEMENTED (2026-08-28, UI-015F closure pass): a narrow Daher-owned OpenMRS module endpoint for ending a maternity admission without broadening clinician privileges
+
+**Date raised:** 2026-08-27 · **Status:** SELECTED (Option D, by Liban, 2026-08-27). The original
+proposed mechanism (Daemon-context `saveVisit()`, no outer transaction of its own) was live-disproven
+on two of its three required properties — see "Selection and falsification (2026-08-27)" below. A
+**revised mechanism** (a module-owned outer transaction, still calling the existing `saveVisit()`
+rather than bypassing it) was then built as a second disposable spike and **live re-validated on both
+previously-failed properties** — see "Mechanism revised and re-validated (UI-015D, 2026-08-27/28)"
+further below. **Still NOT IMPLEMENTED** — no production module exists. The original entry (unedited
+below) remains the accurate record of what was first proposed and why; it is superseded, not deleted,
+by the two sections that follow it.
+**Human Decision Required:** Yes — not whether the mechanism works (it now does, with live evidence),
+but whether to proceed to the full UI-015 production implementation on this revised mechanism
+**Supersedes nothing. Does not reopen ADR-027.** Recorded because the candidate sits close enough to
+ADR-027's own subject (the Daher UI's identity/trust boundary) that leaving it undocumented risked a
+future reader mistaking it for something ADR-027 already ruled on either way. It does not.
+
+**Context.** BLOCKER-10 (UI-015/UI-015A/UI-015B/UI-015C, `PROJECT_STATE.md`) found that ending an
+OpenMRS Visit through the only real mechanism (`POST /ws/rest/v1/visit/{uuid}
+{"stopDatetime":…}`) requires, on the pinned stack, at minimum four privileges beyond the nine
+`Daher Clinician Admission` already holds — `Assign Beds`, `Edit Admission Locations`, `Get Queue
+Entries`, and `Edit Visits` — two of which (`Assign Beds`, `Edit Admission Locations`) are
+bytecode-confirmed globally unscoped (`assignPatientToBed(Patient, Encounter, String)` takes no
+location/type parameter at all) and grant facility-wide bed-assignment/ward-configuration authority
+with no relationship to closing one maternity admission. `Edit Visits` is separately
+bytecode-confirmed (`VisitServiceImpl.saveVisit():176`) to be required, unconditionally, for editing
+**any** already-persisted Visit of **any** type at **any** location — OpenMRS has no per-visit-type
+or per-location edit privilege anywhere in the system (exhaustively enumerated, `PROJECT_STATE.md`).
+Patching only the two module hooks (bedmanagement, queue) — an earlier pass's recommendation,
+corrected in the same `PROJECT_STATE.md` entry — would still leave the canonical clinician unable
+to end the Visit, because the third gate is unpatched OpenMRS core, not a module.
+
+**The candidate.** A small, Daher-owned OpenMRS module exposing exactly one server-side operation —
+"end the canonical Daher Maternity Admission Visit" — reachable only by the already-authenticated
+real clinician's own existing browser session (no new login, no new client, no service-account
+credential introduced anywhere). Internally, after authenticating the caller and independently
+re-verifying (server-side, never trusting the client) that the target Visit's `visitType.uuid`,
+`location.uuid`, and `stopDatetime == null` all match the canonical contract, the operation elevates
+to OpenMRS's own `Daemon.runInDaemonThread()` execution context — the same system-context mechanism
+this codebase already relies on elsewhere (`Daemon.createUser`, first-login auto-provisioning,
+characterized in the Bug #24/#25 record) — to perform the actual `stopDatetime` write plus whatever
+bedmanagement/queue cleanup applies, all inside one transaction opened by Daher's own code, so the
+browser session itself is never granted `Assign Beds`, `Edit Admission Locations`, `Get Queue
+Entries`, or `Edit Visits`. Full design (authorization checks, transaction boundary, audit-provenance
+mechanism, negative-case list) recorded in `PROJECT_STATE.md`'s BLOCKER-10 "UI-015C follow-up".
+
+**Why this is not simply "the BFF ADR-027 rejected."** ADR-027's decision was specifically about a
+**separate service holding its own credential**, standing in for the browser's authentication to
+OpenMRS — "no service account, anywhere, ever stands in for a staff user for a write," rejected
+because it replaces the user's own authorization with "whatever the [intermediary]'s account can
+see." This candidate does not introduce a second authenticating identity, a second network hop, or a
+second stored credential: the browser still authenticates to OpenMRS exactly as it does for every
+other call in this app (the clinician's own OIDC session), and the elevation happens **inside the
+same OpenMRS process**, for one narrow, server-validated operation, closer in kind to how OpenMRS's
+own core already uses `Daemon` for specific system operations than to a proxying BFF. **This
+distinction is a judgment call, not a settled fact** — the candidate does mean the system performs a
+mutation the caller's own privileges don't directly authorize, which is philosophically adjacent to
+the audit-identity concern ADR-027 raised, and is exactly why this is recorded as its own OPEN entry
+rather than asserted as automatically ADR-027-compliant.
+
+**What is NOT yet proven, disclosed rather than assumed favorable:** whether OpenMRS's own
+`changedBy`/`dateChanged` audit fields, if explicitly pre-set on the Visit object before handing it
+to the Daemon-context save, survive being overwritten by the Daemon user — this could not be proven
+without writing and deploying prototype module code, outside this evidence-only ticket's own scope.
+The recorded design does not depend on it either way: it specifies a durable, explicit initiator
+record (a dedicated, non-clinical `VisitAttributeType`, since `Get Visit Attribute Types` is already
+part of the approved nine privileges) as the primary audit mechanism, with native `changedBy`
+attribution as a secondary check to verify empirically once a prototype exists, not the sole record.
+
+**Not selected. Not built.** No module, patch, role, or Keycloak config was created by this entry.
+Options A–D and the technical recommendation are in `PROJECT_STATE.md`'s BLOCKER-10 record.
+
+**Consequence.** If Liban selects this option, implementing it is its own ticket (an actual OpenMRS
+module, a CI-tested build, a real live proof against the disposable stack) — this entry only records
+that the candidate exists, was evaluated against ADR-027, and needs its own decision, not a decision
+of a decision this repo has not yet made.
+
+---
+
+### Selection and falsification (2026-08-27)
+
+Liban selected Option D and approved the narrow "Terminer l'admission" semantics (ends `stopDatetime`
+only — see BLOCKER-10's own restated §14 in `PROJECT_STATE.md`, unaffected by this update). The
+implementation ticket's own requirement #29 instructed: *"If the design cannot preserve atomicity or
+audit attribution safely, STOP rather than weakening the design."* Both properties this entry names
+as the design's job — attribution (line "What is NOT yet proven" above) and atomicity (the "all
+inside one transaction opened by Daher's own code" claim above) — were exactly the two things that
+had not actually been built and tested yet. Before writing the full production module, a minimal
+spike was built and live-deployed into the real disposable OpenMRS stack (`openmrs-adr017f`) to test
+them first. Full evidence, the exact spike architecture, and the before/after DB-state table are in
+`PROJECT_STATE.md`'s BLOCKER-10 "UI-015/ADR-030 implementation attempt (2026-08-27)" subsection.
+Summary:
+
+- **Audit attribution: disproven as a passive property.** Pre-setting `visit.changedBy` to the
+  initiating clinician before the Daemon-context `saveVisit()` call has no effect — OpenMRS's own
+  `RequiredDataAdvice` save-handler chain overwrites `changedBy`/`dateChanged` from
+  `Context.getAuthenticatedUser()` at save time, which inside a daemon thread is OpenMRS's own fixed
+  daemon user (`Daemon.DAEMON_USER_UUID`). This confirms — does not merely leave open — that this
+  entry's own fallback (a dedicated `VisitAttributeType` audit record) is required, not optional.
+  That fallback's own durability under a daemon-context save has not yet been tested.
+- **Atomicity: disproven, not merely unverified.** This entry's claim that the operation would run
+  "all inside one transaction opened by Daher's own code" was not, in fact, what the spike built or
+  what `Daemon.runInDaemonThreadAndWait()` wrapping the existing `VisitService.saveVisit()` call
+  actually provides. A live induced-failure test (a genuine, non-privilege exception — the same
+  `QueueEntry.sortWeight` not-null defect UI-015B already characterized — thrown partway through the
+  module-hook cascade) left `visit.date_stopped` and the bed release durably committed while the
+  queue entry was left corrupted. Wrapping the call in `Daemon` removes the specific *privilege-throw*
+  trigger UI-015A/B observed, but not the underlying cause: `VisitService.saveVisit()`'s
+  AOP-attached module hooks (bedmanagement's, queue's `SaveHandler`/`Validator` beans) do not commit
+  as a single transaction with the core Visit save, regardless of caller or thread.
+
+**What this means.** Option D as a general architecture (a narrow, Daher-owned module endpoint,
+elevating via the browser's own already-authenticated session, no new credential or hop) is not
+itself disproven — the ADR-027 compatibility judgment above still stands on its own terms. What is
+disproven is this entry's specific proposed *mechanism*: delegate the actual mutation to the existing
+`VisitService.saveVisit()` call, merely wrapped in `Daemon`. A viable alternative likely exists —
+the module constructing its own explicit transaction and deliberately orchestrating the Visit/bed/
+queue writes itself, rather than delegating to `saveVisit()`'s hook chain — but building and proving
+that is a **scope change from what was approved** (the approved read was "wrap the existing
+mechanism," not "replace it with a new one"), so per requirement #29 this was not designed or built
+without stopping here first. No production module, UI code, or test files exist for UI-015/ADR-030 as
+of this entry. `PROJECT_STATE.md`'s BLOCKER-10 stays OPEN; UI-015 has not been started.
+
+---
+
+### Mechanism revised and re-validated (UI-015D, 2026-08-27/28)
+
+The falsification above left one specific, narrow question open, and a follow-up ticket (UI-015D)
+was scoped exactly to it: does wrapping the *existing* `VisitService.saveVisit()` call inside a
+**module-owned outer transaction** — rather than bypassing it with hand-rolled DAO orchestration —
+close the atomicity and audit gaps? It does, live-proven, without needing the DAO-bypass alternative
+the previous section speculated about.
+
+**Root cause, proven from source.** `applicationContext-service.xml` (pinned openmrs-core 2.8.7)
+wires every core service — and bedmanagement wires its own `bedManagementService` identically — as a
+`TransactionProxyFactoryBean` with `preInterceptors: serviceInterceptors`, a list including
+`RequiredDataAdvice`. Spring applies `preInterceptors` *before* the `TransactionInterceptor` — outside
+the transaction the proxy itself opens. `RequiredDataAdvice.before()` dispatches all registered
+`SaveHandler<Visit>` beans (bedmanagement's, queue's) before the target service's own transaction has
+even started; bedmanagement's handler calls its own separately-transactional
+`unAssignBedsInEndedVisit()`, which — no ambient transaction yet existing — opens and commits its own.
+`Context.openSession()`/`closeSession()` bind one Hibernate session to the whole "unit of work"
+(Context.java's own documented contract), so an in-memory `stopDatetime` mutation made before calling
+`saveVisit()` gets auto-flushed as a side effect of bedmanagement's unrelated commit — durably
+persisting the Visit's `stopDatetime` before `VisitServiceImpl.saveVisit()`'s own body ever runs.
+Queue's handler then fails in its own, later, independent transaction, rolling back only itself. This
+is why the first spike's state partially committed regardless of Daemon; Daemon only bypasses
+privilege checks, it does not affect Spring transaction boundaries.
+
+**The fix, live-proven.** Register a module-owned service, wired with the *same*
+`TransactionProxyFactoryBean` pattern core and bedmanagement already use (shared `transactionManager`/
+`transactionAttributeSource`/`serviceInterceptors` beans), and call it — not `saveVisit()` directly —
+as the outermost entry point on the daemon thread. Spring proxying confirmed empirically
+(`TransactionSynchronizationManager.isActualTransactionActive()` was `true` on entry and remained the
+same active transaction through the `saveVisit()` call). Because a transaction is now already ambient
+when bedmanagement's/queue's own nested `@Transactional` calls execute, Spring's default REQUIRED
+propagation makes them join it instead of opening independent ones. **No DAO-level bypass of
+`saveVisit()`'s hook chain was built or needed** — bedmanagement's and queue's own SaveHandlers/
+Validators still run unchanged, just inside one shared transaction boundary.
+
+**Live rollback negative control** (exact UI-015B worst case: bed-assigned, queue-present Visit, same
+`QueueEntry.sortWeight`-null failure trigger): before/after state — `visit.date_stopped`,
+`bed.status`, `bed_patient_assignment_map.date_stopped`, and `queue_entry.sort_weight` (including the
+deliberate-corruption SQL itself) **all unchanged** after the induced exception. Zero partial state —
+stronger than the minimum bar, since even the raw `executeSQL()` call used to induce the failure
+rolled back with everything else.
+
+**Live success control**, run twice (bed+queue present; no-bed/no-queue): `Visit.stopDatetime` set
+correctly, bed released, queue entry closed, linked Encounter untouched in both cases. **Idempotence**,
+live-confirmed: a second call on an already-ended Visit returns the same result with zero additional
+writes.
+
+**Audit design, solved and live-proven**, not merely designed: a dedicated, non-clinical
+`VisitAttributeType` technical record (`operationType=END_DAHER_MATERNITY_ADMISSION;
+initiatingUserUuid=…;timestamp=…;result=SUCCESS`), added to the Visit in the same service method
+before `saveVisit()`, commits together with the mutation on success — holding the **true initiating
+clinician's UUID**, not the daemon user's — and does not exist at all after the rollback above,
+satisfying the "never record success when clinical state rolled back" requirement without any
+compensating logic. Native `Visit.changedBy` is still overwritten by the daemon user under this
+mechanism too (unchanged from the first spike) — this was always the anticipated fallback position in
+this entry's original "What is NOT yet proven" paragraph (dedicated attribute as the primary record,
+native `changedBy` as a secondary check only), now empirically confirmed rather than assumed.
+
+**Split-context execution (preserving native `changedBy` by alternating the authenticated user
+mid-transaction) was considered and rejected as an approach**: OpenMRS has no supported API for
+"become another user for one call, then become the original user again" within a single thread, and
+manually swapping `UserContext` objects mid-method would be exactly the unsafe `Context` impersonation
+this repo's own standing caution warns against. Since the `VisitAttributeType` record above already
+solves attribution without touching authentication state, there is no remaining reason to pursue it.
+
+**Not yet built or tested**: the security boundary (this spike has no `Provider`+`Daher Clinician
+Admission` role check at all — Daemon bypasses privilege checks universally, so Reception could call
+it too as built; the production module must add its own independent check, exactly as this entry
+always specified); true concurrent-request race behavior (only sequential double-invocation was
+tested); the idempotency-key/ambiguous-response client design; and everything belonging to the actual
+production module and UI (the 25 specified tests, the French UI, live OIDC proof of the finished
+feature). None of these are open feasibility questions — they are ordinary remaining implementation
+work now that the architecture question is answered.
+
+**Consequence.** Option D is now **VIABLE**, with live evidence rather than a proposed design, on the
+specific dimensions that were previously disproven. Building the production module, UI, and full test
+suite is its own ticket. Full transaction-map proof, evidence tables, and the disposable-environment
+notes (including an unrelated operational finding — two OpenMRS modules must never share a
+`<servlet-name>`, which broke Spring context refresh for the entire instance until corrected) are in
+`PROJECT_STATE.md`'s BLOCKER-10 "UI-015D follow-up" subsection.
+
+---
+
+### Production module built and live-proven; UI/tests not yet started (UI-015E, 2026-08-28)
+
+The production module (`openmrs-config/modules/daherendadmission/`) has been built on the proven
+UI-015D mechanism (module-owned `TransactionProxyFactoryBean` service, called as the outermost
+transactional entry point on the daemon thread) and live-proven, end to end, against the disposable
+stack — first as a `docker cp` deployment onto the existing image, then re-proven against a rebuilt
+image with the module and the CSRF fix below baked in at build time. **Still NOT `IMPLEMENTED`** — no
+UI, no automated test suite, no documentation-complete BLOCKER-10 closure. Status label is
+deliberately `SELECTED DIRECTION — MECHANISM PROVEN, IMPLEMENTATION IN PROGRESS`, not `IMPLEMENTED`,
+per this ticket's own gating (§26–§28 — UI, tests, full verification suite — are unstarted).
+
+**Two genuine bugs found and fixed this pass, both load-bearing, neither present in the UI-015D
+spike's own (narrower) test surface:**
+
+1. **`req.getPathInfo()` under OpenMRS's module-servlet dispatcher includes the `/{moduleId}/
+   {servletName}` prefix, not just the trailing path.** OpenMRS's single Tomcat servlet mapped at
+   `/moduleServlet/*` resolves `moduleId`/`servletName` itself and invokes the target servlet's
+   `service()` method directly — it does not forward/include in a way that rewrites `getPathInfo()`
+   to be relative to the target servlet's own mapping. A regex written assuming `getPathInfo()` would
+   be `/{visitUuid}/end` (relative to `EndMaternityAdmissionServlet` itself) instead needed to match
+   `/daherendadmission/daherEndMaternityAdmission/{visitUuid}/end` — found by adding a temporary
+   diagnostic response body (`debugPathInfo`/`debugRequestURI`/`debugServletPath`, reverted before
+   this entry was written, never committed) after every real request failed `400 MALFORMED_REQUEST`.
+   The fixed pattern is in `EndMaternityAdmissionServlet.PATH_INFO_PATTERN`'s own javadoc, with an
+   explicit note that it must stay in sync with `pom.xml`'s artifactId and `config.xml`'s
+   `<servlet-name>`.
+2. **Authorization cannot be checked in the servlet's un-elevated request thread.** The missing-
+   Provider fail-closed check (`Daher Clinician Admission` role but no `Provider` record) requires
+   `ProviderService.getProvidersByPerson()`, which requires the `Get Providers` privilege — deliberately
+   **not** one of the canonical clinician's nine (this ticket's own instruction: "Do NOT go back to
+   broad clinician privileges"). Checking it in the servlet before elevating therefore always threw
+   `APIAuthenticationException: Privileges required: Get Providers`, failing every call, including the
+   correctly-authorized clinician's. **Fix:** the full authorization check
+   (`DaherMaternityAdmissionServiceImpl.isAuthorizedInitiator`) now runs *inside* the daemon-elevated
+   transactional service call, as the very first thing it does (before the pessimistic-lock visit
+   lookup) — not in the servlet. This is not a weakening: identity is trusted only via
+   `initiatingUserUuid`, captured by the servlet from `Context.getAuthenticatedUser()` **before** any
+   elevation and passed as a plain string; the service method must never substitute
+   `Context.getAuthenticatedUser()` for it, since inside a daemon thread that resolves to the daemon
+   user, not the caller. A new `UNAUTHORIZED` outcome (→ HTTP 403, body `{"status":"FORBIDDEN"}`, no
+   detail) was added so an authorization failure is never conflated with `OPERATION_FAILED` (500).
+
+**A methodology trap in constructing the missing-Provider negative control, worth recording so it is
+not rediscovered as a surprise.** The obvious way to build this control — pick an existing OpenMRS
+user who holds `Daher Clinician Admission` but has no `provider` row in the database — is **wrong**
+and produces a false pass. ADR-017E2 activates (creates, if absent) a `Provider` record **at login
+time** for any Keycloak identity holding the exact `Provider` client role, via
+`oauth2login`'s patched `isProviderRoleGranted`/`activateProviderAccount`. Every leftover synthetic
+test user from earlier tickets (`bug25-*`) that had no `provider` row simply hadn't logged in yet in
+this environment — the very act of calling `oidc_login()` in the test driver created one on the spot
+(confirmed live: `provider.date_created` matched the endpoint call's own `stopDatetime` to the
+second, `provider.creator = daemon`, `provider.identifier` = the Keycloak user id). **The only valid
+way to build this control is a Keycloak identity that holds `Daher Clinician Admission` but explicitly
+does *not* hold the `Provider` client role** (`ui015e-missing-provider`, created for this purpose,
+`bug23pass`) — confirmed after login: OpenMRS role `Daher Clinician Admission` present, `provider_id`
+`NULL`, endpoint call → `403 FORBIDDEN`, and `provider_id` still `NULL` afterward (no Provider
+fabricated by this endpoint or by the failed call itself).
+
+**Rollback and concurrency, proven against the production module without touching production code
+to induce failure.** Both controls were built to avoid the trap the very first spike's own evidence
+warned about (a test-only failure hook baked into the code under test, requiring a separate
+rebuild/un-rebuild cycle and leaving every other control proven against a different binary):
+- **Rollback**: a `BEFORE UPDATE` trigger on `queue_entry` (`SIGNAL SQLSTATE '45000'` when
+  `ended_at` transitions from `NULL`), installed and removed by plain SQL, no Java changed. Against a
+  fixture with bed + queue attached: before/after snapshot across `visit.date_stopped`, `bed.status`,
+  `bed_patient_assignment_map.date_stopped`, `queue_entry.ended_at`, and the `visit_attribute` row
+  count for that visit — **byte-identical**, HTTP `500 OPERATION_FAILED`. The trigger was then
+  dropped and the identical fixture retried successfully (`200 ENDED`), confirming the 500 was
+  genuinely the induced failure, not an unrelated defect.
+- **Concurrency**: two distinct authorized clinicians (`bug23-clinician1`, `bug23-clinician2`), each
+  fully OIDC-authenticated *before* either POST fires, released simultaneously via
+  `threading.Barrier(2)` so the pessimistic lock (`DaherEndAdmissionDaoImpl.getVisitByUuidForUpdate`,
+  `LockMode.PESSIMISTIC_WRITE`) is genuinely contended rather than one request finishing before the
+  second's login completes. Result: exactly one `200 ENDED`, one `200 ALREADY_ENDED`, identical
+  `stopDatetime`, and **exactly one** `visit_attribute` audit row (holding the winning clinician's own
+  UUID) — the row count is the actual proof the lock serialized the two transactions, not just the
+  HTTP response shape.
+- **Not directly re-instrumented in the production binary**: UI-015D's
+  `TransactionSynchronizationManager.isActualTransactionActive()` logging lived only in the spike. The
+  rollback control above is strong indirect evidence of the same property (a broken transaction
+  boundary would have left the Visit/bed mutation committed despite the queue-side failure, which it
+  did not), but the direct instrumentation was not re-run against this production class. Recorded as a
+  disclosed gap, not silently assumed equivalent.
+
+**The CSRFGuard fix is a new class of patch for this repo, recorded on its own terms.** OWASP
+CSRFGuard (bundled with OpenMRS core, `WEB-INF/csrfguard.properties`, baked into `openmrs.war` itself)
+rejects any POST outside its allowlist by default; only `%servletContext%/ws/*`, `/initialsetup`, and
+`/csrfguard` were covered, not arbitrary module servlet paths. No config-only route exists: the file
+is a Java properties file *inside the WAR*, not reachable from `openmrs-config/openmrs_config/` the
+way Initializer-driven config is, and CSRFGuard's own "config overlay" mechanism
+(`org.owasp.csrfguard.configOverlay.hierarchy`) is commented out by default and, if enabled, still
+resolves from the classpath (i.e. still inside the WAR) — not from an externally-mountable location.
+The fix patches the WAR at Docker build time: `openmrs-config/Dockerfile`'s `base` stage now extracts
+`WEB-INF/csrfguard.properties` from `/openmrs/distribution/openmrs_core/openmrs.war` (not
+`/usr/local/tomcat/webapps/openmrs.war`, which does not exist at build time — confirmed by inspecting
+the base image directly; `startup.sh:59`'s `cp -r "${OMRS_DISTRO_CORE}/." "${TOMCAT_WEBAPPS_DIR}"`
+re-copies the distribution tree into `webapps/` on **every** container boot, which is also why a
+live `sed` patch of the exploded `webapps/openmrs/WEB-INF/csrfguard.properties` was live-tested and
+confirmed **not** to survive a restart before this Dockerfile fix was written), appends one
+`org.owasp.csrfguard.unprotected.DaherEndAdmission = %servletContext%/moduleServlet/daherendadmission/*`
+line, and re-inserts it with the JDK's own `jar` tool (already on `PATH` in the base image — no new
+third-party dependency). **This measurably narrows CSRFGuard's protection surface** — POSTs to
+`/moduleServlet/daherendadmission/*` no longer carry a CSRF-token check from this mechanism. What
+still gates the endpoint: its own authorization (role + Provider, proven above), same-origin cookie
+auth (no cross-site credential exists to forge), and the app's existing
+`X-Daher-App-Request` header convention on the UI's own mutating fetch calls (ADR-027/UI-011) —
+CSRFGuard was never the only defense in depth for this app's mutating endpoints, but this is the
+first time a Daher change has deliberately narrowed its coverage, and that fact belongs here rather
+than as a build-step footnote.
+
+**Rebuilt-image re-proof, and what it does and does not cover.** All of the above was first proven
+against a `docker cp` deployment of the module onto the existing image, then **entirely re-run**
+(success with/without bed+queue, idempotence, malformed UUID, Reception denial, missing-Provider
+denial, generic-mutation denial, rollback, concurrency) against an image built from the edited
+`Dockerfile` (`docker build --target off`), with the module compiled from committed source in a new
+`daherendadmission-build` stage (mirroring `oauth2login-build`'s reproducible-from-pinned-source
+pattern) and the CSRF patch applied at build time — all passed identically. Two things this re-proof
+does **not** cover, disclosed rather than glossed over:
+- The rebuilt image was run against the **already-migrated** `openmrs_adr017f` database, not a
+  from-scratch one. A fresh-DB boot was started (`OMRS_CONFIG_CREATE_TABLES=true` against a new
+  schema) and abandoned after ~15 minutes of Liquibase changesets (the `stockmanagement` module alone
+  runs dozens of ~50-second-each foreign-key changesets) — unrelated to this module, and not
+  reproduced further on time grounds. Fresh-DB bootstrap correctness for the platform generally is a
+  pre-existing property, not something this ticket touched.
+- The container was started with a bespoke `docker run` (replicating the disposable stack's existing
+  env vars/mounts/network by hand, plus the new `attributetypes` mount), not `docker compose up`. The
+  `docker-compose.yml` mount line was verified for *equivalence* (same host path, same container
+  target path as what was hand-mounted; Initializer found the existing `VisitAttributeType` by UUID
+  and did not duplicate it) rather than by actually invoking compose. `docker compose config` in the
+  verification suite checks the file's syntax, not this runtime behavior.
+
+**Status.** ADR-030's mechanism is now proven end-to-end at the module/backend level, against a
+reproducible build, including the two properties (atomicity, audit) originally disproven and the two
+UI-015D flagged as unbuilt (authorization, true concurrency). See `PROJECT_STATE.md`'s BLOCKER-10
+"UI-015E follow-up" subsection for the full evidence table.
+
+---
+
+### Frontend, module tests, and full verification (UI-015E continued, 2026-08-28)
+
+**Frontend.** `ui/src/features/admission/EndAdmissionPanel.tsx` + `useEndAdmission.ts`, wired into
+`AdmissionPanel.tsx`'s existing `COMPLETE` branch (`ui/src/api/client.ts` gained `endAdmission()`).
+Mirrors this codebase's own established conventions exactly — `useAdmission`'s in-flight ref guard,
+`ApiError`/`ErrorCode` vocabulary (no new error code needed; the endpoint's 401/403/404/4xx/5xx map
+onto the existing six), `ErrorState` for rendering, unconditional post-mutation reconciliation via the
+caller's own `refresh()` (never a locally-invented "ended" display state — once the Visit is actually
+ended, the next authoritative read no longer classifies it as an active admission and `AdmissionPanel`
+stops rendering this branch on its own). French copy: button "Terminer l'admission"; confirmation
+`role="alertdialog"` "Terminer cette admission en maternité ?" / Confirmer / Annuler. States actually
+implemented: idle, Provider-missing (button disabled, explanatory text — same fail-closed pattern as
+`AdmissionPanel`'s own admit gate), confirming, pending, error (by `ErrorCode`, via `ErrorState`), and
+the parent-driven disappearance once ended. **The original ticket's "8 required UI states" could not
+be recovered verbatim after context compaction this session — the count above is what was actually
+built and reasoned through fresh, not a reproduction of a list this session could no longer read; it
+has not been checked against the original enumeration.** UI-014 (`useMaternityBoard`) needed no
+integration code: it already refetches authoritatively on every screen mount (no shared cache), so a
+patient whose admission was ended stops appearing on the board the next time it is opened, with no new
+invalidation mechanism.
+
+**Tests.** 18 new UI tests (`useEndAdmission.test.ts` ×7, `EndAdmissionPanel.test.tsx` ×9, two new
+`permanentGuards.test.ts` static-source guards — no request body ever sent on the end-admission call;
+discharge/transfer/diagnosis never referenced) plus one `AdmissionPanel.test.tsx` update. Full suite:
+**213/213 passing** (195 pre-existing + 18 new), `tsc -b` clean, `oxlint` clean, `vite build` clean,
+the bundle secret scan clean. Module-side: 18 new plain-JUnit tests
+(`EndMaternityAdmissionServletTest`, no `BaseModuleContextSensitiveTest`, no OpenMRS `Context`) —
+deliberately scoped to what a context-free unit test can actually guard (the path-parsing regex that
+was the session's first real bug, and the complete, closed outcome→HTTP-status/JSON-shape mapping),
+because neither of the two real bugs this module shipped would have been caught by an H2
+context-sensitive suite: both needed the real module-servlet dispatcher or the real privilege graph.
+Transaction, bed, queue, and concurrency behavior remain covered by the live proof above, not by
+JUnit — recorded as a deliberate scope boundary, not an oversight. `mvn -f
+openmrs-config/modules/daherendadmission/pom.xml test`: **18/18 passing.** This is a manual
+verification step; the module's own Docker build stage still runs `-Dmaven.test.skip=true`
+(matching `oauth2login-build`'s existing, pre-existing behavior) and does not execute tests as part of
+the image build.
+
+**One real defect fixed, one recurring toolchain characteristic disclosed, not silently
+worked around.** `git diff --check` first found one genuine, one-time defect: a line of
+`moduleApplicationContext.xml` mixed spaces and tabs in its indentation. Fixed by rewriting that one
+line to plain spaces. Separately — and this is the part that must not be read as fixed —
+`maven-parent-openmrs-module`'s inherited `license:format`/`spotless:apply` plugins (run automatically
+on every `mvn package`/`mvn test` against this module) write a single tab character on every blank
+line inside a Java class body, which `git diff --check` reports as trailing whitespace. This is not a
+defect in this module's own code; every OpenMRS module built through this same parent POM carries the
+identical pattern. The working tree was stripped clean of it as the **final** step of this pass (after
+every Maven invocation this pass performed, including the module rebuild and the Docker image rebuild
+that bundles it), and `git diff --check` passes as of that final state — but **any future `mvn
+test`/`mvn package` run against this module will reintroduce it**. Whoever next builds this module
+needs to either strip trailing whitespace again after their last build, or decide the pattern is
+acceptable as-is (it is exactly what upstream OpenMRS modules already carry, unmodified). This is
+recorded here specifically so the next person who runs Maven and then sees `git diff --check` fail
+does not mistake a known toolchain behavior for something they broke.
+
+**Precisely what was live-tested against which build, stated plainly rather than implied equivalent.**
+No Java logic changed after the `httpStatusFor`/`toResultJson`/`toStatusJson` extraction refactor —
+every build after it differs only by whitespace. Against that refactored build: success (with/without
+bed+queue), idempotence, Reception denial, and missing-Provider denial were all re-run and passed.
+Rollback and concurrency were **not** re-run against that exact build — their last live confirmation
+was against the build immediately before the refactor (identical outcome-mapping logic, reorganized
+into named helper methods, nothing behavioral). After the whitespace investigation and the two
+`sed` strips described above, one further rebuild was made and live-tested for a single case (success/
+`ENDED`) to confirm the module still loads and responds correctly; the other cases were not repeated a
+further time. The working tree as it now stands (after the final strip) was never itself built into an
+image — it differs from the last-built image only by the same cosmetic whitespace, not by any Java
+change.
+
+**The `--`-in-XML-comment CI guard, actually verified against these files, not just written.** Its
+`git ls-files "openmrs-config/**/*.xml"` pathspec was confirmed (via `git ls-files --others
+--exclude-standard` against the same glob, since the module's files are still untracked) to correctly
+match all 5 of the module's XML files including the nested `moduleApplicationContext.xml`/`config.xml`
+— git's `**` pathspec glob does match recursively, unlike a naive shell glob. The guard will fire
+correctly once these files are committed; it has not literally run inside a CI job this session (no
+GitHub Actions run was triggered), only its exact Python logic, run locally against the real file set.
+
+**`docker compose config`**: clean; the new `attributetypes` bind mount renders with the correct
+source/target paths.
+
+**Still not done**: no GitHub Actions CI run was triggered (all `static`-job-equivalent checks above
+were run manually, matching the job's own commands); no UI browser smoke test was performed — this
+environment has no browser automation tool, so the extensive React Testing Library coverage above
+(real DOM, real fired click/keyboard events, real focus assertions) is what stands in for it, not a
+substitute claimed as equivalent. `CURRENT_STATE.md` has not been updated. ADR-030 remains gated on
+Liban's own review before status can move to `IMPLEMENTED`.
+
+---
+
+### Closure pass (UI-015F, 2026-08-28) — the eight required UI states, and re-verification against a live, unchanged backend
+
+**No architecture change.** This ticket was scoped as closure only: resolve the disclosed proof
+gaps from the previous pass, re-run the load-bearing safety evidence, and determine whether
+BLOCKER-10/ADR-030/UI-015 can close. Nothing in the module (`openmrs-config/modules/daherendadmission/`)
+changed this pass — confirmed via `git diff --stat` showing zero delta for that tree — so every live
+proof below re-runs against the exact same production-built image (`daher-health/openmrs-backend:ui015e-rebuild`)
+already in place, not a new build.
+
+**The eight required UI states, reconstructed and implemented exactly.** The previous pass could not
+recover the ticket's own literal 8-state list after context compaction and built a smaller,
+functionally-adjacent set instead. This pass received the canonical list — ACTIVE, CONFIRMATION,
+SUBMITTING, ENDED, ALREADY_ENDED, AMBIGUOUS, UNAVAILABLE, ERROR — and rebuilt `useEndAdmission.ts`
+and `EndAdmissionPanel.tsx` as a closed state-union matching it exactly (`EndAdmissionState` in
+`useEndAdmission.ts`). The mapping from `ApiError` codes to these states:
+
+| Server outcome | UI state |
+|---|---|
+| `NOT_AUTHORIZED` (403 `FORBIDDEN` from the endpoint's own authorization check) | `UNAVAILABLE` |
+| `AMBIGUOUS_WRITE` (dropped connection, unparsable 2xx, or a well-formed 2xx missing the documented fields) | resolved via reconciliation (see below), landing on `ENDED`, `ERROR`, or staying `AMBIGUOUS` |
+| `VALIDATION_ERROR` / `NOT_FOUND` / `SERVER_ERROR` / `CONFLICT` (a definite, synchronously-answered rejection, or a 500 that ADR-030's own proven atomicity guarantees changed nothing) | `ERROR` |
+| 200 `ENDED` | `ENDED` |
+| 200 `ALREADY_ENDED` | `ALREADY_ENDED` (deliberately distinct — a zero-write idempotent close, not conflated with a real mutation) |
+
+**The AMBIGUOUS resolution is the load-bearing new logic** (§13's own requirement: "after possible
+commit: authoritative reconciliation; if Visit stopped: ENDED; if Visit definitely active:
+ERROR/retryable; if authoritative state cannot be obtained: AMBIGUOUS; never blind retry"). Implemented
+by widening `useAdmission`'s `refresh()` to *return* the resolved `AdmissionReadState` rather than only
+setting it, so `useEndAdmission`'s `resolveAmbiguous()` can inspect what an authoritative re-read
+actually found: Visit no longer `COMPLETE` → `ENDED` (the response was lost, not the commit); Visit
+still `COMPLETE` → `ERROR` with code `AMBIGUOUS_WRITE` (a known, retryable failure — the mutation did
+not go through); the reconciliation read itself failing → stays `AMBIGUOUS`. The mutation
+(`endAdmission()`) is never resent as part of this resolution — only `getActiveVisits` is, via the
+existing `reconcile` callback. `ERROR`'s own retry action, by contrast, **does** resubmit directly
+(an explicit human click, not a "blind" retry) — this asymmetry is deliberate and is the single most
+important behavioral distinction in the redesigned hook.
+
+**`ENDED`/`ALREADY_ENDED` reconciliation is deferred to an explicit "Fermer" dismissal**, not fired
+automatically on success. An earlier draft of this fix considered auto-firing the parent's
+reconciliation the instant a 200 arrived, reasoned as satisfying "successful authoritative
+reconciliation" fastest — rejected during design because it races the terminal message's own
+visibility: the parent's `refresh()` would flip `read.status` away from `COMPLETE` and unmount
+`EndAdmissionPanel` before a human (or a test) could observe "Admission terminée." Deferring
+reconciliation to the user's own "Fermer" click makes both the state and its test deterministic, and
+still satisfies §12's own reconciliation requirement — just user-triggered, matching the existing
+`AdmissionPanel` `AMBIGUOUS` state's "Vérifier à nouveau" convention rather than inventing a new one.
+
+**Tests**: 15 new `useEndAdmission.test.ts` (state-machine transitions, the AMBIGUOUS resolution's
+three branches, the ERROR-vs-AMBIGUOUS retry asymmetry, the in-flight double-submit guard), 13
+rewritten `EndAdmissionPanel.test.tsx` (one explicit test per required state, named for it), and 12
+new `client.test.ts` `endAdmission` tests — this last group is §13's own fault-injection requirement,
+done at the actual `fetch` boundary (mocked timeouts/rejections/unparsable bodies/every documented
+HTTP status), not merely against an already-classified `ApiError`, since a live container cannot
+cleanly simulate "the server committed but the response was lost in transit." Total UI suite:
+**236/236 passing** (up from 213), `tsc -b`/`oxlint`/`vite build`/bundle-secret-scan all clean. No
+module Java changed, so the 18 module JUnit tests were not re-run via Maven this pass (deliberately —
+re-running would re-dirty the working tree via the known spotless/license whitespace behavior for no
+verification gain); their source (`grep -c "@Test"`) was confirmed still 18, matching the last actually-
+executed run.
+
+**Live re-verification against the unchanged production image**, with exact before/after values
+recorded, not inferred from exception text:
+
+- **§4 authorization, enumerated not name-checked.** `SELECT rp.privilege FROM role_privilege WHERE
+  role=...` (not a role-name check) confirmed exactly 9 privileges for `Daher Clinician Admission`
+  (`Add Encounters, Add Visits, Get Admission Locations, Get Beds, Get Encounters, Get Patients, Get
+  Visit Attribute Types, Get Visit Types, Get Visits` — alphabetical, no `Assign Beds`/`Edit
+  Visits`/`Edit Admission Locations`/`Manage Queue Entries`/`Get Providers`) and exactly 3 for `Daher
+  Reception`. `git diff --stat -- openmrs-config/initializer/roles/` is empty — zero privilege-roster
+  changes this entire effort. Live: clinician → `200 ENDED`; Reception → `403 FORBIDDEN`;
+  `ui015e-missing-provider` (role held, `Provider` client role withheld, per the methodology already
+  recorded above) → `403 FORBIDDEN`; clinician against generic `POST /visit/{uuid}` (`Edit Visits`) →
+  `403`; generic `POST /queue` → `403`; generic `GET /bed` (a legitimate, retained read) → `200`; a
+  direct `POST /beds/1` bed-reassignment attempt → `403 Privileges required: Assign Beds` (a new
+  control this pass, isolating the exact privilege denied rather than only observing a generic 403).
+- **§5 rollback**, a fresh fixture (bed + queue attached), the same external `BEFORE UPDATE` trigger
+  on `queue_entry` (no code change): before/after recorded across `visit.date_stopped` (`NULL` →
+  `NULL`), `bed.status` (`OCCUPIED` → `OCCUPIED`), `bed_assign.date_stopped` (`NULL` → `NULL`),
+  `queue.ended_at` (`NULL` → `NULL`), `encounter.date_voided` (`NULL` → `NULL`),
+  `encounter_provider_count` (`0` → `0`), `audit_rows` (`0` → `0`) — byte-identical, `500
+  OPERATION_FAILED`.
+- **§6 success, three cases, exact values.** Case A (no bed, no queue): `visit.date_stopped` set,
+  `visit.uuid`/`visit_type_id`(6)/`location_id`(62) unchanged, `encounter.date_voided` unchanged,
+  exactly 1 audit row (`initiatingUserUuid=2c67d291-...`, the real clinician). Case B (bed, no queue):
+  same, plus `bed.status` OCCUPIED→AVAILABLE, `bed_assign.date_stopped` set,
+  `encounter_provider_count` 0→0. Case C (bed + queue): same, plus `queue.ended_at` set. All three:
+  exactly one audit row, correct clinician UUID, `Encounter`/`encounterProviders` untouched.
+- **§7 concurrency**, real result not just unit-test behavior: two distinct clinicians
+  (`bug23-clinician1`, `bug23-clinician2`) behind a `threading.Barrier(2)` against the same active
+  Visit → `CALL0 200 ALREADY_ENDED`, `CALL1 200 ENDED`, identical `stopDatetime`, and querying the DB
+  directly: exactly one `visit_attribute` row, holding `bug23-clinician2`'s own UUID (the winner).
+  This original concurrency fixture had **no bed and no queue attached** — it proved exactly-once
+  closure and single-winner audit attribution under contention, but left bed/queue cleanup under
+  contention unproven (bed/queue cleanup had only been proven separately, under a *single* request,
+  in Case C above).
+
+  **§7.B — bed+queue-under-contention closure (UI-015 micro-closure, 2026-08-28), the gap above
+  resolved with a real proof.** A fresh disposable admission (patient 133, `visit_id=57`,
+  `encounter_id=51`) was built with a genuine assigned bed (`bed_id=2`, status `OCCUPIED`,
+  `bed_patient_assignment_map_id=13`, `date_stopped=NULL`) and a genuine open queue entry
+  (`queue_entry_id=14`, `visit_id=57`, `ended_at=NULL`), zero ADR-030 audit rows initially. Two
+  distinct clinicians (`bug23-clinician1`, `bug23-clinician2`) behind a `threading.Barrier(2)` closed
+  it simultaneously against the final production-built image: `CALL0 200 ENDED`, `CALL1 200
+  ALREADY_ENDED`, identical `stopDatetime` (`2026-08-28T05:05:02.000+0000`). Authoritative DB read
+  after: `visit.date_stopped` set once, `visit.uuid`/`visit_type_id`(6)/`location_id`(62) unchanged,
+  `bed.status` OCCUPIED→AVAILABLE, exactly one `bed_patient_assignment_map` row for that bed with
+  `date_stopped` set once (no duplicate cleanup row), exactly one `queue_entry` row for that visit
+  with `ended_at` set once (no duplicate), `encounter.date_voided` still NULL,
+  `encounter_provider_count` still 0, and exactly **one** `visit_attribute` audit row
+  (`visit_attribute_id=22`) holding `initiatingUserUuid=2c67d291-...` — `bug23-clinician1`'s own UUID,
+  the actual winner (`CALL0`/`ENDED`). A further sequential call afterward returned `200
+  ALREADY_ENDED` with the same `stopDatetime`, and the audit/bed/queue row counts were unchanged
+  (still exactly 1/1/1) — zero new writes. Bed+queue cleanup racing two simultaneous closers is no
+  longer untested; it is proven, with exact before/after values, not inferred from the two separate
+  proofs above.
+- **§8 idempotence**: a further call on the already-ended Case C visit → `200 ALREADY_ENDED`, same
+  `stopDatetime`, `audit_rows` still exactly 1, `Encounter` unchanged.
+- **§9 audit**, all items reconfirmed with exact values: native `visit.changed_by` = user_id 2 =
+  `daemon` for every successful case (proven, not assumed); the dedicated type
+  (`visit_attribute_type_id=8`, name `Daher End-Admission Audit`, UUID
+  `a66602e1-a519-4bea-a460-f4993fec5afb`, datatype `FreeTextDatatype`, `min_occurs=0`/`max_occurs=1`,
+  not retired) correctly holds the real initiating clinician's UUID in every case; commits only on
+  success (audit_rows=1 in every §6/§7/§8 case) and rolls back with everything else on failure
+  (audit_rows=0 in §5); the stored value (`operationType=...;initiatingUserUuid=...;timestamp=...`) is
+  a plain technical string — no token, session id, or credential of any kind; the clinical UI never
+  requests or renders `VisitAttribute` data at all (structural — `ActiveVisit`'s own type has no
+  `attributes` field, and no query in `client.ts` asks for one).
+- **§10 VisitAttributeType provisioning, existing-DB idempotence.** A full container restart against
+  the same already-migrated database (re-running Initializer's `attributetypes` CSV pass): the row
+  count for that UUID stayed exactly 1, same `visit_attribute_type_id=8` — a second provisioning pass
+  did not duplicate it. The genuinely-fresh-database attempt is recorded separately below.
+- **§11 CSRF/security boundary.** The one new `csrfguard.properties` line
+  (`org.owasp.csrfguard.unprotected.DaherEndAdmission = %servletContext%/moduleServlet/daherendadmission/*`)
+  is still the only change, confirmed live in the running image. A **new control this pass**: `POST
+  /openmrs/moduleServlet/tasks/formDownload` (a different, pre-existing module's own moduleServlet
+  path, chosen because it is the only other module in this image with one) — still returns the
+  "Invalid or Missing CSRF Token" page, proving the exemption is scoped exactly to
+  `daherendadmission/*` and did not weaken CSRFGuard for any other module servlet. An unauthenticated
+  POST to the narrow endpoint itself → `302` to the OIDC login (OpenMRS's own SSO filter denies it
+  before CSRFGuard or the servlet is ever reached — still a denial, just via redirect). A **new
+  payload-injection control**: a POST carrying a JSON body with `startDatetime`, `stopDatetime`,
+  `visitType`, `location`, `patient`, `bed`, and `queue` fields, all attacker-supplied and wrong —
+  the endpoint ignored all of them (it never reads the request body at all); the resulting Visit's
+  `visit_type_id`/`location_id`/`patient_id` and the actual `stopDatetime` written were exactly the
+  server's own real values, confirmed by direct DB read, not the injected ones.
+- **§14 UI-014 removal proof, via the real server query** (`GET /visit?location=...&visitType=...`,
+  the exact query `getMaternityBoardVisits()` issues — not local card state): before ending a fresh
+  fixture, the board query included the patient (`True`); after, it did not (`False`).
+
+**§10.C — fresh-database boot, with a genuine control, deferred to DH-017 as an unrelated
+environmental race, not a module defect.** Two containers were booted in parallel against two
+independently fresh, empty MariaDB databases: the **treatment** (`daher-health/openmrs-backend:ui015e-rebuild`,
+this module baked in, the `attributetypes` mount present) and the **control**
+(`daher-health/openmrs-backend:bug25-final`, a real image built the day before ADR-030's first line of
+code, no module, no `attributetypes` mount). Both were driven by identical Liquibase migration content
+from the moment they started: the same changeset IDs, in the same order, at points several minutes in
+diverging by no more than single-digit milliseconds. At the specific point this was stopped, both had
+independently executed `liquibase.xml::stockmanagement-1758855877841-128::dev` — a changeset belonging
+to the pre-existing `stockmanagement` module, nothing to do with ADR-030 — completing in **the
+identical 53117ms**, confirmed via each container's own log (`grep -c` showed 128 stockmanagement
+changesets processed on each side at the moment of comparison, matching line for line). This is not a
+timing coincidence read charitably; it is two independent processes hitting the same real bottleneck
+(most plausibly I/O contention on the shared `mariadb-ui009` container, worsened by running three
+OpenMRS boots against it simultaneously) at a rate of roughly one changeset per 50+ seconds, well
+before either process reaches the point where this module's own Initializer-driven `attributetypes`
+CSV would even be read. **Since this module carries zero Liquibase changesets of its own** — its only
+schema-adjacent artifact is the Initializer CSV, which runs after all Liquibase migrations, not during
+them — there is no mechanism by which ADR-030 could be contributing to this specific slowdown, and the
+controlled pair above demonstrates it does not, empirically rather than by that structural argument
+alone. Neither boot was carried to full readiness (both were stopped by the same budgeted-single-attempt
+constraint this ticket set, after confirming the identical-changeset/identical-duration match, rather
+than waiting out what full-clone tests would put at another 15–20+ minutes of the same stockmanagement
+phase alone). **The specific verification this leaves undone** — proving the audit `VisitAttributeType`
+is provisioned exactly once by Initializer on a truly from-scratch database, end to end — is deferred
+as evidence debt under **DH-017**, consistent with the precedent ADR-029 already established for an
+unrelated first-install/module-migration race. This is explicitly NOT a module-specific bootstrap
+failure (the pinned closure criterion for treating it as blocking): the identical image family without
+this module hits the identical wall.
+
+**Closure verdict.** Every mandatory gate this ticket set has a passing, live-evidenced result against
+the current, unchanged production build: the eight required UI states exist and are individually
+tested; the authorization boundary is enumerated (not name-checked) at exactly 9/3 privileges with
+zero roster changes; rollback, all three success cases, concurrency, and idempotence are re-proven
+with exact recorded values; the audit mechanism's type, attribution, and rollback behavior are
+confirmed; generic Visit/bed/queue authority remains denied by direct, isolated controls; the CSRF
+boundary is confirmed both present and narrowly scoped via a real sibling-module control; arbitrary
+payload injection is confirmed inert; UI-014 removal is confirmed via the real server query; the full
+UI test suite (236/236), lint, typecheck, build, and secret scan are green; `git diff --check` and
+`docker compose config` are clean. The one item not fully closed — a truly from-scratch database boot
+— is deferred to DH-017 with a genuine controlled-pair proof that the blocking factor is a pre-existing
+platform characteristic, not this module. **ADR-030 moves to `ACCEPTED / IMPLEMENTED`.** This is
+Liban's own review to confirm, not this pass's to declare launched — "pilot-ready", never
+"launched" or "in production" (AGENTS.md's own standing rule), and nothing here has touched a real
+patient, real staff account, or the real facility.

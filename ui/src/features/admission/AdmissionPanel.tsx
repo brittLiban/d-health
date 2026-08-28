@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Button, LoadingSkeleton, StatusBadge } from '../../design-system'
 import { ErrorState } from '../../design-system/ErrorState'
+import { EndAdmissionPanel } from './EndAdmissionPanel'
 import { useAdmission } from './useAdmission'
 
 interface AdmissionPanelProps {
@@ -77,9 +78,12 @@ export function AdmissionPanel({ patientUuid }: AdmissionPanelProps) {
         ) : null}
 
         {read.status === 'COMPLETE' ? (
-          <p>
-            <strong>Admission :</strong> <StatusBadge label="Admise" tone="success" />
-          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <p>
+              <strong>Admission :</strong> <StatusBadge label="Admise" tone="success" />
+            </p>
+            <EndAdmissionPanel visitUuid={read.visit.uuid} readiness={readiness} reconcile={refresh} />
+          </div>
         ) : null}
 
         {read.status === 'AMBIGUOUS' ? (

@@ -25,7 +25,10 @@ interface UseAdmissionResult {
   mutationError: ErrorCode | null
   admit: () => Promise<void>
   resume: () => Promise<void>
-  refresh: () => Promise<void>
+  // UI-015F §13 — returns the freshly resolved state, not just void, so a
+  // caller (EndAdmissionPanel's AMBIGUOUS-write resolution) can inspect what
+  // reconciliation actually found rather than only triggering a re-render.
+  refresh: () => Promise<AdmissionReadState>
 }
 
 function codeOf(error: unknown): ErrorCode {
@@ -93,20 +96,25 @@ export function useAdmission(patientUuid: string): UseAdmissionResult {
     }
   }, [])
 
-  const loadAdmissionState = useCallback(async () => {
+  const loadAdmissionState = useCallback(async (): Promise<AdmissionReadState> => {
     try {
       const visits = await getActiveVisits(patientUuid)
-      setRead({ kind: 'resolved', ...deriveAdmissionState(visits) })
+      const resolved: AdmissionReadState = { kind: 'resolved', ...deriveAdmissionState(visits) }
+      setRead(resolved)
+      return resolved
     } catch (error) {
       if (error instanceof ApiError && error.code === 'NOT_AUTHORIZED') {
-        setRead({ kind: 'unavailable' })
-        return
+        const unavailable: AdmissionReadState = { kind: 'unavailable' }
+        setRead(unavailable)
+        return unavailable
       }
-      setRead({ kind: 'read_error', code: codeOf(error) })
+      const readError: AdmissionReadState = { kind: 'read_error', code: codeOf(error) }
+      setRead(readError)
+      return readError
     }
   }, [patientUuid])
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<AdmissionReadState> => {
     setRead({ kind: 'loading' })
     setMutationError(null)
     try {
@@ -115,11 +123,13 @@ export function useAdmission(patientUuid: string): UseAdmissionResult {
       // than silently proceeding against whatever the pinned constants say.
       await verifyAdmissionMetadata()
     } catch (error) {
-      setRead({ kind: 'read_error', code: codeOf(error) })
+      const readError: AdmissionReadState = { kind: 'read_error', code: codeOf(error) }
+      setRead(readError)
       setReadiness(null)
-      return
+      return readError
     }
-    await Promise.all([loadReadiness(), loadAdmissionState()])
+    const [, admissionState] = await Promise.all([loadReadiness(), loadAdmissionState()])
+    return admissionState
   }, [loadReadiness, loadAdmissionState])
 
   useEffect(() => {

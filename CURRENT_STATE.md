@@ -240,6 +240,29 @@ proof, maternity clinical forms, adapter transport, notifications, off-site back
 restore drill, and publicly trusted TLS all remain incomplete. The maternity ward/bed foundation
 itself is complete. Human decisions are collected under **NEEDS LIBAN** in `PROJECT_STATE.md`.
 
+**BLOCKER-10 / ADR-030's "Terminer l'admission" (UI-015F, 2026-08-28): closed — code complete and
+live-proven, not yet committed, reviewed, or deployed to the real facility.** A Daher-owned OpenMRS
+module and its React frontend (all eight required UI states — ACTIVE/CONFIRMATION/SUBMITTING/ENDED/
+ALREADY_ENDED/AMBIGUOUS/UNAVAILABLE/ERROR — individually tested) both run and are proven against the
+disposable stack: live rollback proof (an external DB trigger, not a code change), live
+true-concurrency proof (a real race behind a thread barrier, exactly one audit row written), three
+live success cases with exact recorded DB values, exhaustive authorization proof (privileges
+*enumerated*, not name-checked — exactly 9/3, zero roster change), a real CSRF-scoping control
+(a sibling module's own servlet path still denied), and a payload-injection control (attacker-supplied
+fields silently ignored). 236 UI tests and 18 module JUnit tests passing, full lint/typecheck/build/
+secret-scan/`git diff --check`/`docker compose config` clean, all re-confirmed against the same
+from-source Docker rebuild (module + the CSRFGuard WAR patch, both baked in at build time) as the
+prior pass, since no backend Java changed this pass. **This is code-complete, not facility-live** —
+nothing here has been committed, pushed, reviewed by Liban, or deployed to the real Daher birth
+centre; no real patient or staff record was ever touched. One disclosed, deliberately-deferred item
+remains: a genuinely-fresh-database boot was attempted with a real controlled pair (this image vs. a
+pre-ADR-030 image, both against independently fresh databases) and found both hitting the identical
+`stockmanagement` Liquibase changeset at the identical duration — confirming the slow phase is a
+shared-platform characteristic, not this module's — so the specific "does the audit type provision
+exactly once from true scratch" check is carried as `DH-017` evidence debt (ADR-029 precedent), not
+treated as a blocker. Full evidence in `PROJECT_STATE.md`'s BLOCKER-10 (now ✅ CLOSED) and
+`DECISIONS.md`'s ADR-030 (now `ACCEPTED / IMPLEMENTED`).
+
 ---
 
 ## 2. What is running

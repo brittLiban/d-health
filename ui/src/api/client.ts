@@ -558,3 +558,76 @@ export async function createAdmissionEncounter(
     throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
   }
 }
+
+// ---------------------------------------------------------------------------
+// UI-015/ADR-030 — "Terminer l'admission". Sets the canonical Daher Maternity
+// Admission Visit's stopDatetime and nothing else — no other clinical field,
+// judgment, or record (DECISIONS.md ADR-030's own narrow scope decision).
+// Reaches a Daher-owned OpenMRS module, not core's own /visit endpoint,
+// specifically so the browser's own session is never granted any of the
+// broader Visit-editing or bed/queue-management privileges BLOCKER-10's
+// record enumerates.
+
+export interface EndAdmissionResponse {
+  status: 'ENDED' | 'ALREADY_ENDED'
+  stopDatetime: string
+}
+
+/**
+ * The endpoint's own response body is always the fixed {status} vocabulary
+ * it documents (never a privilege name, internal user, or stack trace) — see
+ * EndMaternityAdmissionServlet's own class javadoc — so, unlike
+ * writeErrorFromBody above, this never needs to scan rawText for a substring.
+ * A 500 here means the whole operation rolled back (ADR-030's own proven
+ * atomicity guarantee): SERVER_ERROR, not AMBIGUOUS_WRITE — the caller does
+ * not need to reconcile server state to know nothing changed. Only a dropped
+ * connection (the catch block below, never reaching this function) is
+ * genuinely ambiguous.
+ */
+function endAdmissionErrorFromBody(status: number): ApiError {
+  if (status === 401 || status === 403) {
+    return new ApiError('NOT_AUTHORIZED', 'Accès refusé.')
+  }
+  if (status === 404) {
+    return new ApiError('NOT_FOUND', "L'admission demandée est introuvable.")
+  }
+  if (status >= 400 && status < 500) {
+    return new ApiError('VALIDATION_ERROR', 'Requête invalide.')
+  }
+  return new ApiError('SERVER_ERROR', 'Une erreur du serveur est survenue.')
+}
+
+/**
+ * POST /moduleServlet/daherendadmission/daherEndMaternityAdmission/{visitUuid}/end.
+ * The Visit UUID embedded in the URL path is the ONLY input — no request
+ * body is sent; the server determines stopDatetime itself and re-validates
+ * visit type/location/state authoritatively rather than trusting the caller.
+ */
+export async function endAdmission(visitUuid: string): Promise<EndAdmissionResponse> {
+  let response: Response
+  try {
+    response = await fetch(
+      `/openmrs/moduleServlet/daherendadmission/daherEndMaternityAdmission/` +
+        `${encodeURIComponent(visitUuid)}/end`,
+      { method: 'POST', headers: { ...MUTATION_HEADERS, Accept: 'application/json' } },
+    )
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+
+  const rawText = await response.text()
+  if (!response.ok) {
+    throw endAdmissionErrorFromBody(response.status)
+  }
+
+  try {
+    const body = JSON.parse(rawText) as { status?: string; stopDatetime?: string }
+    if (body.status !== 'ENDED' && body.status !== 'ALREADY_ENDED') {
+      throw new Error('unexpected status')
+    }
+    if (!body.stopDatetime) throw new Error('missing stopDatetime')
+    return { status: body.status, stopDatetime: body.stopDatetime }
+  } catch {
+    throw new ApiError('AMBIGUOUS_WRITE', "L'état de l'admission est incertain.")
+  }
+}

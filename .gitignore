@@ -28,6 +28,10 @@ __pycache__/
 # ---- Adapter ----
 adapter/node_modules/
 
+# ---- OpenMRS module builds (Maven; root-owned when built via the pinned Docker toolchain) ----
+openmrs-config/modules/*/target/
+openmrs-config/modules/*/*/target/
+
 # ---- Editors / OS ----
 .DS_Store
 .idea/

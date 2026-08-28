@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    This Source Code Form is subject to the terms of the Mozilla Public License,
+    v. 2.0. If a copy of the MPL was not distributed with this file, You can
+    obtain one at http://mozilla.org/MPL/2.0/. OpenMRS is also distributed under
+    the terms of the Healthcare Disclaimer located at http://openmrs.org/license.
+
+    Copyright (C) OpenMRS Inc. OpenMRS is a registered trademark and the OpenMRS
+    graphic logo is a trademark of OpenMRS Inc.
+
+-->
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+                           http://www.springframework.org/schema/beans/spring-beans-3.0.xsd">
+
+	<bean id="daherEndAdmissionDao" class="org.openmrs.module.daherendadmission.db.DaherEndAdmissionDaoImpl">
+		<property name="sessionFactory" ref="sessionFactory"/>
+	</bean>
+
+	<bean id="daherMaternityAdmissionServiceTarget"
+	      class="org.openmrs.module.daherendadmission.DaherMaternityAdmissionServiceImpl">
+		<property name="dao" ref="daherEndAdmissionDao"/>
+	</bean>
+
+	<!-- Wired identically to how core (patientService, visitService, etc.) and modules
+	     (bedmanagement's bedManagementService) wire their own transactional services: the same
+	     shared transactionManager, serviceInterceptors, and transactionAttributeSource beans
+	     OpenMRS core already registers. This bean, called as the outermost entry point, is what
+	     makes visitService.saveVisit()'s nested bedmanagement/queue calls join one shared
+	     transaction instead of each opening an independent one. See ADR-030 (DECISIONS.md) and
+	     BLOCKER-10's "UI-015D follow-up" (PROJECT_STATE.md) for the full proof. -->
+	<bean id="daherMaternityAdmissionService"
+	      class="org.springframework.transaction.interceptor.TransactionProxyFactoryBean">
+		<property name="transactionManager" ref="transactionManager"/>
+		<property name="target" ref="daherMaternityAdmissionServiceTarget"/>
+		<property name="preInterceptors" ref="serviceInterceptors"/>
+		<property name="transactionAttributeSource" ref="transactionAttributeSource"/>
+	</bean>
+
+</beans>

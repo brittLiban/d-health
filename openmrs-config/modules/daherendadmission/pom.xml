@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.openmrs.maven.parents</groupId>
+		<artifactId>maven-parent-openmrs-module</artifactId>
+		<version>2.2.0</version>
+	</parent>
+
+	<groupId>org.openmrs.module</groupId>
+	<artifactId>daherendadmission</artifactId>
+	<version>1.0.0</version>
+	<packaging>pom</packaging>
+	<name>Daher End Maternity Admission</name>
+	<description>
+		Narrow, Daher-owned OpenMRS module (ADR-030, Option D). Exposes exactly one operation: end
+		the active canonical Daher Maternity Admission Visit by setting its stopDatetime. Never
+		grants the browser session Edit Visits, Assign Beds, Edit Admission Locations, Manage Queue
+		Entries, or Get Concepts -- the elevation exists only inside this one server-side operation.
+		See DECISIONS.md ADR-030 and PROJECT_STATE.md BLOCKER-10 for the full design record.
+	</description>
+
+	<modules>
+		<module>api</module>
+		<module>omod</module>
+	</modules>
+
+	<properties>
+		<openmrs.platform.version>2.8.7</openmrs.platform.version>
+	</properties>
+
+	<repositories>
+		<repository>
+			<id>openmrs-repo</id>
+			<name>OpenMRS Nexus Repository</name>
+			<url>https://openmrs.jfrog.io/artifactory/public</url>
+		</repository>
+	</repositories>
+	<pluginRepositories>
+		<pluginRepository>
+			<id>openmrs-repo</id>
+			<name>OpenMRS Nexus Repository</name>
+			<url>https://openmrs.jfrog.io/artifactory/public</url>
+		</pluginRepository>
+	</pluginRepositories>
+</project>
