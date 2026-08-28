@@ -72,6 +72,34 @@ larger OpenELIS patch than the evidence supports. Bug 19 adds a third constraint
 No `sample`, `analysis` or `electronic_order` was ever created, so laboratory workflow state and
 cancellation remain unverified.
 
+**BLOCKER-6 resolved by decision 2026-08-28 (DH-011D/DH-011D2): Liban selected Option F, and the
+`ServiceRequest`-owned external identifier as the correlation direction.** This closes the
+architecture question; it does not close DH-011. What actually changed in code, honestly split:
+**built, tested, and live-verified** — `adapter/src/daher_adapter/openelis.py` (the Option-F HTTP
+Basic client, exact identifier search, read-back-verified Patient/Practitioner create defending
+against bug 19, and the DH-025 `TargetProbe` binding for `ServiceRequest`), `Settings
+.openelis_site_code`/`service_request_delivery_ready` (rejects `DEV01` and non-numeric values, never
+invents a digit count), and **three** OpenELIS source patches now, not one:
+`ServiceRequestProvider`'s missing `identifier` search parameter, its new inbound
+correlation-extraction and `electronic_order` creation logic, and `FhirTransformServiceImpl`'s
+outbound identifier echo — plus a real Liquibase migration adding a PostgreSQL partial unique index
+(`electronic_order(external_id) WHERE type='FHIR'`). All built from the exact pinned upstream
+commit via `openelis-config/Dockerfile`. Live-proven on a fully isolated, disposable three-container
+stack (the real stack's database was never touched once this build gained its own schema migration):
+the migration applies cleanly on a fresh database; search still goes 400→200 with its scoping and
+auth controls intact; and a real two-process PostgreSQL concurrency race against the patched schema
+produced exactly the required result — one commit, one constraint-violation rejection, exactly one
+row persisted per correlation — with a parallel control confirming existing HL7/CSV duplicate
+tolerance is untouched. 126 adapter tests pass (was 122), `ruff` clean. Two new CI static guards
+added and control-tested. **What remains unprovable, and only because it needs a real
+`ServiceRequest`**: end-to-end create→persist→search against an actual business-API create; the
+full Java-layer concurrency race (as opposed to the raw-SQL proof above); live search cardinality
+beyond zero-match. Exact accounting: `openelis-config/patches/order-correlation/PROVENANCE.md`.
+**Still blocked, unchanged by this pass**: the numeric site code itself (NEEDS LIBAN #7), the
+patient-identifier system decision (DH-011G), real requester approval (DH-011H, NEEDS LIBAN #6), and
+test mapping (DH-011I, DH-006). The production polling loop remains unwired — this pass did not
+touch that, deliberately.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now

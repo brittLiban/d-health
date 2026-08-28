@@ -1,0 +1,34 @@
+diff --git a/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java b/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
+index b65773221..19328f750 100644
+--- a/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
++++ b/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
+@@ -93,6 +93,7 @@ import org.openelisglobal.dataexchange.fhir.exception.FhirLocalPersistingExcepti
+ import org.openelisglobal.dataexchange.fhir.exception.FhirPersistanceException;
+ import org.openelisglobal.dataexchange.fhir.exception.FhirTransformationException;
+ import org.openelisglobal.dataexchange.fhir.service.FhirPersistanceServiceImpl.FhirOperations;
++import org.openelisglobal.dataexchange.fhir.DaherOrderCorrelation;
+ import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrder;
+ import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrderType;
+ import org.openelisglobal.dataexchange.service.order.ElectronicOrderService;
+@@ -1052,6 +1053,21 @@ public class FhirTransformServiceImpl implements FhirTransformService {
+         if (facilityId != null) {
+             serviceRequest.addIdentifier(facilityId);
+         }
++        // DH-011D: echo the Daher order correlation back onto the outbound-synced resource so
++        // the search half (patched separately) can actually find it. Read exclusively through
++        // sample.clinicalOrderId -- never sample.referringId, which the existing basedOn/intent
++        // logic a few lines below already owns for a different purpose (see
++        // ServiceRequestProvider.persistDaherOrderCorrelation's javadoc for why conflating the
++        // two would misclassify every first-time Daher order as "based on" a prior one).
++        String clinicalOrderId = sample.getClinicalOrderId();
++        if (!GenericValidator.isBlankOrNull(clinicalOrderId)) {
++            ElectronicOrder linkedOrder = electronicOrderService.get(clinicalOrderId);
++            if (linkedOrder != null && ElectronicOrderType.FHIR.equals(linkedOrder.getType())
++                    && !GenericValidator.isBlankOrNull(linkedOrder.getExternalId())) {
++                serviceRequest.addIdentifier(
++                        this.createIdentifier(DaherOrderCorrelation.SYSTEM, linkedOrder.getExternalId()));
++            }
++        }
+         serviceRequest.setRequisition(this.createIdentifier(fhirConfig.getOeFhirSystem() + "/samp_labNo",
+                 analysis.getSampleItem().getSample().getAccessionNumber()));
+         if (organization != null) {

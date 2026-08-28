@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011D (Daher Health, BLOCKER-6/ADR-026 Option F, patches/order-correlation/PROVENANCE.md):
+    a Daher-originated FHIR ServiceRequest's external order correlation
+    (electronic_order.external_id, type='FHIR') must be unique: at most one native order per
+    correlation, matching DH-025's exact 0/1/2+ reconciliation contract.
+
+    Scoped to type='FHIR' only, deliberately: existing/future HL7- and CSV-sourced
+    electronic_order rows (type='HL7_V2') are untouched and keep their existing, deliberate
+    "last one wins" tolerance for a duplicate external_id (ElectronicOrderDAOImpl.
+    getElectronicOrdersByExternalId already returns a list and existing callers already rely on
+    that). This migration does not change that behavior for any row it does not itself create.
+
+    Fails safely, not destructively: if type='FHIR' rows with a duplicate external_id already
+    exist, CREATE UNIQUE INDEX fails with a constraint-violation error and Liquibase does not
+    mark this changeset as applied. No row is deleted, merged, or rewritten to force it through.
+    As of this patch, zero electronic_order rows of any type exist in the deployment this was
+    authored and live-verified against (see PROVENANCE.md's live-proof section); re-verify
+    this on any database this migration is about to run against before assuming it is a no-op.
+  -->
+  <changeSet id="daher-011d-001-electronic-order-correlation-unique" author="daher-health">
+    <sql>
+      CREATE UNIQUE INDEX electronic_order_daher_correlation_uk
+        ON electronic_order (external_id)
+        WHERE type = 'FHIR';
+    </sql>
+    <rollback>
+      <sql>DROP INDEX IF EXISTS electronic_order_daher_correlation_uk;</sql>
+    </rollback>
+  </changeSet>
+</databaseChangeLog>

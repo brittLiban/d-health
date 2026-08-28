@@ -1,0 +1,189 @@
+diff --git a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
+index 53c07a0f0..59cc0218b 100644
+--- a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
++++ b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
+@@ -29,6 +29,7 @@ import org.hibernate.StaleObjectStateException;
+ import org.hl7.fhir.instance.model.api.IBaseResource;
+ import org.hl7.fhir.r4.model.Bundle;
+ import org.hl7.fhir.r4.model.IdType;
++import org.hl7.fhir.r4.model.Identifier;
+ import org.hl7.fhir.r4.model.Patient;
+ import org.hl7.fhir.r4.model.Practitioner;
+ import org.hl7.fhir.r4.model.ServiceRequest;
+@@ -42,12 +43,17 @@ import org.openelisglobal.common.services.DisplayListService;
+ import org.openelisglobal.common.services.DisplayListService.ListType;
+ import org.openelisglobal.common.services.IStatusService;
+ import org.openelisglobal.common.services.StatusService.AnalysisStatus;
++import org.openelisglobal.common.services.StatusService.ExternalOrderStatus;
+ import org.openelisglobal.common.util.ConfigurationProperties;
+ import org.openelisglobal.common.util.ConfigurationProperties.Property;
+ import org.openelisglobal.common.util.DateUtil;
+ import org.openelisglobal.common.util.validator.GenericValidator;
++import org.openelisglobal.dataexchange.fhir.DaherOrderCorrelation;
+ import org.openelisglobal.dataexchange.fhir.FhirUtil;
+ import org.openelisglobal.dataexchange.fhir.service.FhirTransformService;
++import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrder;
++import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrderType;
++import org.openelisglobal.dataexchange.service.order.ElectronicOrderService;
+ import org.openelisglobal.patient.action.IPatientUpdate.PatientUpdateStatus;
+ import org.openelisglobal.patient.action.bean.PatientManagementInfo;
+ import org.openelisglobal.patient.service.PatientService;
+@@ -62,6 +68,7 @@ import org.openelisglobal.sample.form.SamplePatientEntryForm;
+ import org.openelisglobal.sample.service.PatientManagementUpdate;
+ import org.openelisglobal.sample.service.SampleEditService;
+ import org.openelisglobal.sample.service.SamplePatientEntryService;
++import org.openelisglobal.sample.service.SampleService;
+ import org.openelisglobal.sample.validator.SampleEditFormValidator;
+ import org.openelisglobal.sample.valueholder.Sample;
+ import org.openelisglobal.samplehuman.service.SampleHumanService;
+@@ -84,6 +91,20 @@ public class ServiceRequestProvider implements IResourceProvider {
+     @Autowired
+     private SamplePatientEntryService samplePatientService;
+ 
++    // DH-011D (Daher Health): the Daher order correlation is persisted to a dedicated,
++    // explicitly FHIR-typed ElectronicOrder row, isolated from
++    // SamplePatientEntryController/RestController's existing "external order number" UI
++    // field, which shares the same underlying column but different, human-entry semantics
++    // (lookup-only against orders a prior HL7/CSV import already created). Reusing that
++    // shared lookup-and-link path (SamplePatientUpdateData.setElectronicOrderIfNeeded) for
++    // FHIR-originated creation would silently change what a mistyped or non-matching human
++    // entry does today -- see patches/order-correlation/PROVENANCE.md.
++    @Autowired
++    private ElectronicOrderService electronicOrderService;
++
++    @Autowired
++    private SampleService sampleService;
++
+     @Autowired
+     private AnalysisService analysisService;
+ 
+@@ -179,6 +200,20 @@ public class ServiceRequestProvider implements IResourceProvider {
+             requireTrue(serviceRequest.hasSubject(), "ServiceRequest.subject is required");
+             requireTrue(serviceRequest.hasCode(), "ServiceRequest.code is required");
+ 
++            // DH-011D: fail closed before any DB work if the Daher order correlation is
++            // missing, duplicated, or malformed -- an order DH-025 cannot reconcile must never
++            // be accepted silently.
++            final String daherOrderId = extractDaherOrderIdentifier(serviceRequest);
++
++            // Fast, non-authoritative uniqueness check -- a clear error for the common case.
++            // The authoritative guarantee is the DB-level partial unique index (see the
++            // Liquibase changeset this patch adds); this check only improves the error message
++            // for the non-racing case and is not itself what makes a duplicate impossible.
++            if (!electronicOrderService.getElectronicOrdersByExternalId(daherOrderId).isEmpty()) {
++                throw new InvalidRequestException(
++                        "Daher order correlation is already in use: " + daherOrderId);
++            }
++
+             final String patientRefId = requireNonBlank(serviceRequest.getSubject().getReferenceElement().getIdPart(),
+                     "ServiceRequest.subject reference is invalid");
+ 
+@@ -274,6 +309,12 @@ public class ServiceRequestProvider implements IResourceProvider {
+             requireNonNull(updateData.getSample(), "Persisted sample is invalid");
+             requireNonNull(updateData.getSample().getId(), "Persisted sample ID is invalid");
+ 
++            // DH-011D: persist the Daher order correlation now that a native sample exists to
++            // link it to. The authoritative uniqueness guarantee is the DB-level partial unique
++            // index; a race that slips past the fast check above surfaces here as a genuine
++            // constraint violation, not a silently accepted duplicate.
++            persistDaherOrderCorrelation(daherOrderId, updateData.getSample(), sysuserId);
++
+             final SampleHuman lookup = new SampleHuman();
+             lookup.setSampleId(updateData.getSample().getId());
+ 
+@@ -534,6 +575,14 @@ public class ServiceRequestProvider implements IResourceProvider {
+ 
+             @OptionalParam(name = ServiceRequest.SP_CODE) TokenAndListParam code,
+ 
++            // DH-011D (Daher Health): exact identifier search was structurally unsupported here --
++            // absent from this method's declared search parameters, HAPI's REST layer rejects
++            // `identifier` with HTTP 400 before the request ever reaches forwardSearchToFhirStore
++            // below, unlike PatientProvider/PractitionerProvider which already declare it. This
++            // patch only makes the parameter valid; it changes no persistence or query logic --
++            // forwardSearchToFhirStore proxies the full raw query string exactly as before.
++            @OptionalParam(name = ServiceRequest.SP_IDENTIFIER) TokenAndListParam identifier,
++
+             @OptionalParam(name = ServiceRequest.SP_REQUESTER, chainWhitelist = { "", Practitioner.SP_IDENTIFIER,
+                     Practitioner.SP_GIVEN, Practitioner.SP_FAMILY,
+                     Practitioner.SP_NAME }, targetTypes = Practitioner.class) ReferenceAndListParam participantReference,
+@@ -580,6 +629,80 @@ public class ServiceRequestProvider implements IResourceProvider {
+         }
+     }
+ 
++    /**
++     * DH-011D: extracts the exactly-one Daher order-correlation identifier from an inbound
++     * ServiceRequest. Fails closed -- an order DH-025 cannot deterministically reconcile must
++     * never be silently accepted. System and value comparisons are both exact: no case
++     * folding, no substring, no fuzzy matching. Identifiers on other systems (accession,
++     * requisition, or anything else a caller attaches) are ignored entirely and never
++     * mistaken for this one.
++     */
++    private String extractDaherOrderIdentifier(ServiceRequest serviceRequest) {
++        List<Identifier> matches = new ArrayList<>();
++        if (serviceRequest.hasIdentifier()) {
++            for (Identifier identifier : serviceRequest.getIdentifier()) {
++                if (identifier != null && DaherOrderCorrelation.SYSTEM.equals(identifier.getSystem())) {
++                    matches.add(identifier);
++                }
++            }
++        }
++        if (matches.isEmpty()) {
++            throw new InvalidRequestException("ServiceRequest.identifier must carry exactly one "
++                    + DaherOrderCorrelation.SYSTEM + " identifier; found none");
++        }
++        if (matches.size() > 1) {
++            throw new InvalidRequestException("ServiceRequest.identifier must carry exactly one "
++                    + DaherOrderCorrelation.SYSTEM + " identifier; found " + matches.size());
++        }
++        String value = matches.get(0).getValue();
++        if (GenericValidator.isBlankOrNull(value)
++                || !DaherOrderCorrelation.VALUE_PATTERN.matcher(value).matches()) {
++            throw new InvalidRequestException("The " + DaherOrderCorrelation.SYSTEM
++                    + " identifier value is malformed -- expected a 64-character lowercase hex digest");
++        }
++        return value;
++    }
++
++    /**
++     * DH-011D: persists the Daher order correlation into a dedicated, explicitly FHIR-typed
++     * {@code ElectronicOrder} row (native storage: {@code clinlims.electronic_order
++     * .external_id}, already indexed) and links it to the just-created sample. Deliberately
++     * separate from {@code SamplePatientUpdateData.setElectronicOrderIfNeeded}, which is
++     * shared with the human "external order number" accessioning field and must not gain
++     * silent auto-create behavior as a side effect of this patch.
++     *
++     * <p>Uniqueness: the fast check in {@code createServiceRequest} covers the non-racing
++     * case; the authoritative guarantee is the DB-level partial unique index this patch's
++     * Liquibase changeset adds on {@code electronic_order(external_id) WHERE type = 'FHIR'}. A
++     * genuine race surfaces here as a constraint-violation exception, not a silently accepted
++     * duplicate.
++     *
++     * <p><b>Deliberately does not set {@code sample.referringId}.</b> That field is what
++     * {@code transformToServiceRequest}'s existing, unrelated {@code basedOn}/{@code intent}
++     * logic already keys off (via {@code getElectronicOrdersByExternalId(sample
++     * .getReferringId())}) to decide whether a ServiceRequest is based on a prior one. Setting
++     * it here would make that pre-existing logic treat this opaque correlation value as a FHIR
++     * ServiceRequest reference and misclassify every first-time Daher order as "based on"
++     * something. Linking is done exclusively through {@code sample.clinicalOrderId}, which
++     * that logic does not read; the outbound identifier echo in
++     * {@code FhirTransformServiceImpl.transformToServiceRequest} reads the linked
++     * {@code ElectronicOrder} through that field instead, precisely to avoid this collision.
++     */
++    private void persistDaherOrderCorrelation(String daherOrderId, Sample sample, String sysuserId) {
++        ElectronicOrder electronicOrder = new ElectronicOrder();
++        electronicOrder.setExternalId(daherOrderId);
++        electronicOrder.setData("");
++        electronicOrder.setType(ElectronicOrderType.FHIR);
++        electronicOrder.setStatusId(statusService.getStatusID(ExternalOrderStatus.Realized));
++        electronicOrder.setOrderTimestamp(DateUtil.getNowAsTimestamp());
++        electronicOrder.setSysUserId(sysuserId);
++        String electronicOrderId = electronicOrderService.insert(electronicOrder);
++
++        sample.setClinicalOrderId(electronicOrderId);
++        sample.setSysUserId(sysuserId);
++        sampleService.save(sample);
++    }
++
+     /**
+      * Prevents NPE when logging exception messages
+      */

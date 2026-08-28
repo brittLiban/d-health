@@ -188,7 +188,8 @@ present with **0 members** exactly as intended.
 | 🔨 Built + locally verified, external input to finish | **DH-016** (routing/TLS verified locally; public certificates wait on #15 DNS) |
 | 🗓 Blocked on the birth-centre meeting | **DH-004** (ADR-006 guard built; fields await sign-off), **DH-006** (mechanism built; contents await sign-off), **DH-008** activation (staff **names** only — types decided, ADR-017) |
 | 🟢 Built + verified, **not activated** | **DH-011E** (OpenMRS poller + durable watermark, 94 tests, 5 controls — no loop runs it and no delivery target exists) |
-| 🛑 Blocked on **BLOCKER-6** (human) | **DH-011** target leg — DH-011C (correlation binding), DH-011J (cancellation), DH-011K (crash points), DH-011L (demonstration). BLOCKER-3 is closed; this is a *new* blocker found by probing on 2026-08-16 |
+| ✅ **BLOCKER-6 RESOLVED BY DECISION** 2026-08-28 | Option F selected (ADR-026); adapter Option-F client + DH-025 binding built and tested (126 adapter tests); OpenELIS search + persistence + uniqueness all built, compiled, and live-proven on isolated infrastructure (real DB concurrency race proven). DH-011 itself is **not** complete — see below |
+| 🛑 Blocked on **NEEDS LIBAN #7 / #6, DH-006** | **DH-011** remaining leg — DH-011C's `ServiceRequest` half, DH-011D's identifier-persistence half (designed, not built), DH-011G (patient identity — human decision on identifier system, not resolved), DH-011H (real requester, NEEDS LIBAN #6), DH-011I (test mapping, DH-006), DH-011J (cancellation), DH-011K (crash points beyond what DH-025's generic tests already cover), DH-011L (demonstration) — all downstream of the numeric site code (NEEDS LIBAN #7) or a human decision, not an architecture question |
 | 🔨 Provisioning control plane | **DH-026** (facility parameterisation), **DH-027** (API, portal, agent, durable state — works end to end **on a stand-in**; no clinical stack has booted this way) |
 | ✅ Done (infrastructure) | **DH-027M** (CI — 700 tests now gated, every check control-tested), **DH-027B** (compensated facility creation — not a single ACID transaction; see its entry), **DH-027F** (atomic env writes; rotation rollback still open), **DH-027E** (real soft decommission), **DH-027C** (lifecycle state machine), **DH-027D** (observed infrastructure status), **bug 18** (agent polls through a long job), **DH-027G** (backup bootstrap/off-site wiring), **DH-027H** (nightly-scheduler backup evidence reaches the control plane) |
 | ⏭ Deferred to v1.1 by decision | **DH-023** (analyzer interface — ADR-016) |
@@ -708,7 +709,7 @@ No role equivalence was inferred. Until the matrix is approved, the Keycloak `pr
 hard-coded false, SSO defaults disabled, both local login paths remain available, and the one-login
 acceptance test is deliberately unperformed.
 
-### BLOCKER-6 — how an order actually enters OpenELIS · 🛑 OPEN 2026-08-16 · **Human Decision Required: Yes**
+### BLOCKER-6 — how an order actually enters OpenELIS · ✅ RESOLVED BY DECISION 2026-08-28 (architecture + correlation direction — DH-011 itself is NOT complete, see below) · was 🛑 OPEN 2026-08-16
 
 **Ticket:** DH-011 (order path). Found by probing the running stack before writing transport code.
 
@@ -756,6 +757,146 @@ guess. The read-only evidence above is enough to state the fork; it is not enoug
 **Consequence for DH-011:** the OpenMRS-side poller and watermark are still buildable and are
 unaffected by this choice. The OpenELIS write, DH-025's correlation binding, and ADR-018's status
 mapping are all downstream of it.
+
+### RESOLVED 2026-08-28 (DH-011D ticket) — Option F selected, correlation direction decided
+
+**Liban selected Option F** — the adapter posts to OpenELIS's embedded business FHIR API
+(`/OpenELIS-Global/fhir/*`, HAPI 7.0.2), never the standalone `openelis-fhir` store (Option C's
+target), never a third exchange datastore (D), never making the adapter a FHIR server (B), never
+pointing OpenELIS directly at OpenMRS (A). Full architecture and reasoning recorded in `DECISIONS.md`
+ADR-026's 2026-08-28 appendix. **Correlation direction also decided**: a `ServiceRequest`-owned
+external order identifier, not an overload of `Specimen`/accession identifiers — the order's own
+identity, independent of laboratory accession configuration.
+
+**This resolves the architecture question. It does not close DH-011.** What this same pass actually
+built, live-verified, and deliberately did not build:
+
+**Built and live-verified:**
+- `openelis-config/patches/order-correlation/ServiceRequestProvider.java.patch` — adds exactly one
+  `@OptionalParam(name = ServiceRequest.SP_IDENTIFIER)` parameter to
+  `ServiceRequestProvider.searchForServiceRequests`, mirroring `PatientProvider`'s existing pattern.
+  Root cause, established from the exact pinned source
+  (`e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23`, tag `3.2.1.11`, matching both the compose pin and the
+  running container's own `build.properties`): the method's entire body is
+  `util.forwardSearchToFhirStore(request)`, which forwards the raw query string to
+  `fhirConfig.getLocalFhirStorePath()` (the same target `FhirPersistanceServiceImpl`'s write path
+  uses) — the declared `@OptionalParam`s exist only so HAPI's REST layer accepts the parameter at
+  all. `identifier` was simply never declared for this one provider. `openelis-config/Dockerfile`
+  builds this patch against the exact pinned commit (new stage,
+  `openelis-order-correlation-build`, mirroring `openmrs-config/Dockerfile`'s
+  `oauth2login-build`/`daherendadmission-build` pattern). **Live proof, disposable container sharing
+  the real stack's DB/keystore volumes (no write, no restart of the real service)**:
+  `ServiceRequest?identifier=` went `400`→`200`/`total:0`; an unrelated unknown parameter stayed
+  `400` on the patched image (scoping control); wrong Basic-auth credentials stayed `401` (auth
+  control unweakened). Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`.
+- `adapter/src/daher_adapter/openelis.py` — the Option-F delivery client. HTTP Basic auth only
+  against the business API (never the standalone store); `identifier_search` with exact
+  `system|value` token matching; `create_patient`/`create_practitioner` with mandatory read-back
+  verification (never trusts the POST's own 2xx — `PatientProvider`'s known false-success defect,
+  "known bug 19," is reproduced and defended against in tests); `service_request_probe` bound
+  directly to `recovery.py`'s `TargetProbe` protocol (0/1/2+/unreachable → ABSENT/FOUND/AMBIGUOUS/
+  AMBIGUOUS, never a false ABSENT); `deliver_service_request` deliberately raises
+  `ServiceRequestDeliveryBlocked` rather than attempting a POST OpenELIS's own accession gate would
+  refuse anyway.
+- `adapter/src/daher_adapter/config.py` — `Settings.openelis_site_code` (optional, `None` until the
+  real value exists) and `Settings.service_request_delivery_ready`. Rejects the known upstream
+  placeholder `DEV01` and any non-numeric value; does **not** enforce a specific digit count for the
+  site code itself, because DH-011B's constant-pool read established only the *overall* generated
+  accession's width (13 digits), not how that splits between site/year/sequence — asserting an
+  unverified split would be inventing facility semantics.
+- 47 new adapter tests (`test_openelis.py` 19, `test_openelis_recovery_binding.py` 4,
+  `test_openelis_activation_gate.py` 5, plus existing-file additions) — all passing; full suite
+  **122/122**, `ruff check` and `ruff format --check` both clean.
+
+**Designed from source, with exact file/line/method anchors, but NOT implemented or built** — the
+identifier-persistence-on-create half. Cannot be built this pass because it cannot be exercised:
+every `ServiceRequest` create is refused before this code runs
+(`requireNonBlank(sampleOrder.getLabNo(), "Generated lab number is invalid")`), and will keep being
+refused until the real numeric site code exists. The design:
+`FhirTransformServiceImpl.buildSampleOrderItemFromServiceRequest` never reads
+`serviceRequest.getIdentifier()` today; it would need to extract the Daher-system identifier and call
+the already-existing `SampleOrderItem.setExternalOrderNumber(...)`.
+`SamplePatientUpdateData.setElectronicOrderIfNeeded` already looks up an existing `ElectronicOrder`
+by external id but never creates one when absent — it would need to, mirroring `TaskWorker
+.insertNewOrder`'s existing pattern (`ElectronicOrderType.FHIR` is already a recognized enum value,
+anticipated but unused on this path). The native entity already exists —
+`clinlims.electronic_order.external_id`, `VARCHAR(60)`, already indexed
+(`e_order_external_id_idx`) — **no schema migration is required to store the value.**
+`FhirTransformServiceImpl.transformToServiceRequest` (outbound) would need to echo that value back
+as a third `ServiceRequest.identifier` so the resource synced to the searchable store actually
+carries it. Full account, including why the DB lacks a uniqueness guarantee today
+(`ElectronicOrderDAOImpl.getElectronicOrdersByExternalId` returns a list; existing callers
+deliberately take the last row, tolerating duplicates) and the recommended fix (a partial unique
+index scoped to `type = 'FHIR'`, not yet added because it cannot be control-tested without a
+creatable order): `openelis-config/patches/order-correlation/PROVENANCE.md`.
+
+**Not done, explicitly out of scope this pass:** the numeric site code (NEEDS LIBAN #7, not
+invented); patient identity mapping's identifier-system decision (DH-011G, human decision, not
+resolved); requester approval beyond the interim "Pilot Test Clinician" (DH-011H, NEEDS LIBAN #6);
+test mapping population (DH-011I, blocked on DH-006 clinical sign-off); the production polling loop
+remains unwired (DH-011E structurally idle, no `POLL`/`ENABLE` variable exists); no commit or push.
+
+### RESOLVED 2026-08-28 (DH-011D2 closure pass) — persistence and uniqueness built, compiled, and
+proven at every boundary that does not require a live `ServiceRequest`
+
+**The paragraph above ("NOT implemented or built") is now out of date for the mechanisms
+themselves — only the live end-to-end trigger (a real `ServiceRequest` create) remains blocked.**
+This follow-on pass built:
+
+- **`ServiceRequestProvider.createServiceRequest`** now extracts and validates the Daher order
+  correlation (exact-one-match on `DaherOrderCorrelation.SYSTEM`, exact system+value comparison, a
+  64-character-hex-digest format check — zero matches, 2+ matches, and malformed values all rejected
+  before any DB work) and persists it into a dedicated `FHIR`-typed `electronic_order` row, linked to
+  the sample via `clinicalOrderId` only (never `referringId`, which would collide with existing
+  `basedOn`/`intent` logic — see PROVENANCE.md for the exact mechanism).
+- **`FhirTransformServiceImpl.transformToServiceRequest`** echoes the persisted correlation back
+  onto the outbound-synced resource, gated on the linked order actually being `FHIR`-typed, so the
+  already-patched search half can find what this half persists.
+- **A new Liquibase changeset** (`liquibase/daher/001-electronic-order-daher-correlation-unique.xml`)
+  adds a genuine PostgreSQL partial unique index — `electronic_order(external_id) WHERE
+  type='FHIR'` — leaving the existing HL7/CSV duplicate tolerance for other rows untouched.
+- **A new shared constants file** (`DaherOrderCorrelation.java`) so the persist and echo sides cannot
+  drift onto different system URIs.
+- **Two new CI static guards** (`.github/workflows/ci.yml`'s `static` job): the existing
+  "no `--` inside an XML comment" guard widened to cover `openelis-config/` (this pass hit that exact
+  bug live, in its own first draft of the new changeset); a new dedicated guard asserting every
+  required component of the patch set exists, is wired together, contains no fuzzy-comparison
+  pattern, and keeps the uniqueness index scoped to `type='FHIR'` — control-tested against two
+  deliberate mutations (stripping the scope, injecting a `.toLowerCase()`/`.contains()` pattern),
+  both caught correctly.
+
+**Live proof, entirely on disposable/isolated infrastructure, real stack never touched:** the full
+patched image (search + persistence + uniqueness) builds and compiles cleanly from the exact pinned
+source. Because this build now includes a real Liquibase migration, further live proof moved off the
+real stack's shared database (which auto-runs Liquibase on boot) onto a fully isolated three-container
+disposable stack (fresh `openelis-db`, `openelis-fhir`, and the patched webapp, private network).
+There: the migration applied with zero errors on a genuinely fresh database (confirmed via `\d
+electronic_order` — the partial unique index exists exactly as designed); the search proof (400→200,
+scoping control, wrong-system-zero-match control) repeated identically; and a **real PostgreSQL
+concurrency race** — two genuinely simultaneous transactions inserting the same `external_id` with
+`type='FHIR'` — produced exactly the required result: one `COMMIT`, one constraint-violation
+rejection, exactly one row persisted for the contested correlation. A parallel control with
+`type='HL7_V2'` confirmed the existing duplicate-tolerant behavior is untouched (both rows accepted).
+Full account, including precisely what this does *not* prove (the full Java service-layer race
+through two real HTTP creates, and live search cardinality against a real `ServiceRequest` — both
+need a creatable order): `openelis-config/patches/order-correlation/PROVENANCE.md`.
+
+**Adapter side**: `test_openelis.py` extended with explicit timeout, 401, and 403 controls (all
+→ AMBIGUOUS, never a false ABSENT) and a duplicate-create-conflict reconciliation test (a 500-status
+create response still resolves correctly via read-back, never a blind retry) — the read-back-only
+verification pattern already in place handled this case without needing new production code, the
+new test just proves it explicitly. **Adapter test count: 122 → 126, all passing**, `ruff check` and
+`ruff format --check` both clean.
+
+**What still cannot be proven without the site code, unchanged**: end-to-end create→persist→search
+against a real `ServiceRequest`; the full Java-layer concurrency race (as opposed to the raw-SQL
+proof above); live 1-match/2+-match cardinality; DH-011J; DH-011L. None of these are engineering
+gaps remaining in this patch — they are the one gate the ticket itself named as acceptable to leave
+open: **LIVE NATIVE SERVICEREQUEST CREATE/PERSIST/READ-BACK PROOF → BLOCKED ON REAL NUMERIC SITE
+CODE.**
+
+**DH-011D STATUS: BUILT / LIVE PARTIALLY VERIFIED.** `BLOCKER-6` unchanged: RESOLVED BY DECISION.
+`DH-011` overall: still NOT COMPLETE.
 
 ---
 
@@ -2923,6 +3064,48 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | 🛑 **Not testable yet** — DH-011B could create no order, so no native transition could be observed. The provider does expose `@Delete`/`@Update`, so the surface exists |
 | **DH-011K** | Crash-point qualification across all five points | ⏸ |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
+
+**Correction appended 2026-08-28 (DH-011/BLOCKER-6 decision-closure pass) — DH-011C/D's "untested on
+`ServiceRequest`" conflates two different questions, and one of them is not untested.** Re-reading
+this file's own DH-011B first-pass section (above, "🛑 The DH-025 correlation cannot bind to
+ServiceRequest on this server") against the DH-011C/D table rows shows they say different things
+about the same resource:
+
+1. **Whether `ServiceRequestProvider` retains a submitted identifier on create** — genuinely
+   **untested**, because no ServiceRequest has ever been created (blocked on the accession gate).
+2. **Whether `ServiceRequest?identifier=…` is a supported search parameter on the business API at
+   all** — **already tested and answered: no.** It returns HTTP 400 on the exact Option F target
+   (business API, HAPI 7.0.2), with controls proving the 400 means "unsupported parameter," not
+   "supported but empty": an unrecognized parameter also returns 400, while the advertised `_id`
+   parameter returns 200 on the same resource type. `Specimen`, `Patient`, `Practitioner` and
+   `Organization` all accept `identifier` (200) on this same server; `ServiceRequest` does not. This
+   was independently re-confirmed as still accurate during this pass (no code touching this behavior
+   has changed since 2026-08-17; git history for `adapter/` and any OpenELIS-related path is empty
+   since that date).
+
+**Consequence for DH-011D's scope.** "Search already works, so this is smaller than first scoped"
+is true for `Patient`/`Practitioner`, where DH-011D genuinely only needs to add persistence. It is
+**not** true for `ServiceRequest`: even a successful persistence patch would not make the identifier
+findable, because the search surface itself rejects the parameter for that resource type. A
+`ServiceRequest`-bound correlation therefore needs either (a) DH-011D to also add search-parameter
+support on `ServiceRequestProvider` — a materially larger patch than "persist an incoming
+identifier" — or (b) the correlation to bind to a different, already identifier-searchable resource.
+`Specimen` is the one candidate already on record (PROJECT_STATE.md's DH-011B first-pass section),
+but a specimen identifier is laboratory accession-numbering configuration, the same class of
+facility-owned decision as the numeric site code itself (NEEDS LIBAN #7) — not something DH-011D can
+resolve as an engineering choice either way.
+
+**Live re-verification, same pass, against the current `daher-health-*` stack (unchanged since
+2026-08-17, confirmed by empty `git log` for `adapter/` and any OpenELIS-related path over that
+window):** `clinlims.electronic_order` = 0, `sample` = 0, `analysis` = 0, `test` (active) = 177,
+`patient` = 1, `provider` = 1 — byte-identical to DH-011B's recorded baseline; no order has ever
+reached OpenELIS. `site_information` still carries `acessionFormat = SITEYEARNUM`, prefix `DEV01`,
+`validateAccessionNumber = true`. One new fact, not previously recorded: the prefix row is annotated
+"Can not be changed if there are samples" — since `sample` is still 0, the real numeric site code can
+be set later with no data migration, once the facility supplies it. The exact `%013d` 13-digit format
+string itself was not re-derived this pass (the running image's JRE has no `javap`); it is carried
+forward from DH-011B's constant-pool read, corroborated again by the unchanged config and the
+unchanged zero-samples behavioral consequence.
 
 #### DH-011E — OpenMRS poller + durable watermark · ✅ BUILT + VERIFIED 2026-08-17 · ⚠️ NOT ACTIVATED
 

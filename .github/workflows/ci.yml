@@ -288,19 +288,24 @@ jobs:
           print("ok — every external image reference is digest-pinned")
           PY
 
-      - name: No "--" inside an XML comment body (openmrs-config)
+      - name: No "--" inside an XML comment body (openmrs-config, openelis-config)
         run: |
           # UI-015D/UI-015E found this twice in one session: a "--" used as a dash inside a
           # <!-- --> comment is invalid XML, and when it lands in an OpenMRS module's
           # moduleApplicationContext.xml or config.xml it breaks Spring context refresh for the
           # ENTIRE running instance, not just the one module (org.xml.sax.SAXParseException:
-          # "The string '--' is not permitted within comments"). Scoped to openmrs-config/ since
-          # that is the only tree whose XML actually loads into a live OpenMRS Spring context.
+          # "The string '--' is not permitted within comments"). DH-011D hit the identical bug a
+          # third time, in a Liquibase changeset under openelis-config/ -- SEVERE liquibase.parser
+          # error, whole OpenELIS Spring context failed to start -- so this guard's scope now
+          # covers both trees whose XML loads into a live application context.
           python - <<'PY'
           import re, subprocess, sys
           from pathlib import Path
 
-          out = subprocess.run(["git", "ls-files", "openmrs-config/**/*.xml"], capture_output=True, text=True).stdout
+          out = subprocess.run(
+              ["git", "ls-files", "openmrs-config/**/*.xml", "openelis-config/**/*.xml"],
+              capture_output=True, text=True,
+          ).stdout
           files = [f for f in out.splitlines() if f]
           bad = []
           for path in files:
@@ -313,7 +318,7 @@ jobs:
 
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
-          print(f"ok — no invalid '--' inside any XML comment across {len(files)} openmrs-config XML files")
+          print(f"ok — no invalid '--' inside any XML comment across {len(files)} files")
           PY
 
       - name: Compose invariants that a regression would silently undo
@@ -1154,6 +1159,157 @@ jobs:
             || { echo "::error::expected exactly 10 passing ProviderRoleDerivationTest cases"; exit 1; }
           grep -qE 'Tests run: 3, Failures: 0, Errors: 0, Skipped: 0.*FirstLoginAuthenticationTest' /tmp/mvn-output.log \
             || { echo "::error::expected exactly 3 passing FirstLoginAuthenticationTest cases"; exit 1; }
+
+      - name: DH-011D order-correlation patch content guards
+        # This job cannot boot the real OpenELIS stack (see this file's header), so it asserts
+        # on committed patch/config source, mirroring the oauth2login guards above. Runtime
+        # proof (build success, live search 400->200, DB-level concurrency) is recorded in
+        # PROJECT_STATE.md and openelis-config/patches/order-correlation/PROVENANCE.md.
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          bad = []
+          base = Path("openelis-config/patches/order-correlation")
+
+          # --- pinned upstream commit/tag, asserted in the Dockerfile itself ---
+          dockerfile = Path("openelis-config/Dockerfile").read_text()
+          if "--branch 3.2.1.11" not in dockerfile:
+              bad.append("Dockerfile: does not clone the pinned 3.2.1.11 tag")
+          if "e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23" not in dockerfile:
+              bad.append("Dockerfile: does not assert the exact pinned commit")
+          for patch_name in (
+              "ServiceRequestProvider.java.patch",
+              "FhirTransformServiceImpl.java.patch",
+              "base-changelog.xml.patch",
+          ):
+              if f"git -C /build apply /patch/{patch_name}" not in dockerfile:
+                  bad.append(f"Dockerfile: does not git apply {patch_name}")
+          for required_copy in (
+              "DaherOrderCorrelation.java",
+              "001-electronic-order-daher-correlation-unique.xml",
+          ):
+              if required_copy not in dockerfile:
+                  bad.append(f"Dockerfile: does not copy {required_copy} into the build context")
+
+          # --- ServiceRequestProvider.java.patch: search parameter + inbound read + selection rules ---
+          sr_patch_path = base / "ServiceRequestProvider.java.patch"
+          if not sr_patch_path.exists():
+              bad.append("ServiceRequestProvider.java.patch is missing")
+              sr_patch = ""
+          else:
+              sr_patch = sr_patch_path.read_text()
+              added = [l for l in sr_patch.splitlines() if l.startswith("+")]
+              added_text = "\n".join(added)
+
+              if "@OptionalParam(name = ServiceRequest.SP_IDENTIFIER)" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: SP_IDENTIFIER search parameter is missing")
+              if "extractDaherOrderIdentifier" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: extractDaherOrderIdentifier is missing")
+              if "final String daherOrderId = extractDaherOrderIdentifier(serviceRequest);" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: createServiceRequest does not call extraction")
+              if "persistDaherOrderCorrelation" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: persistDaherOrderCorrelation is missing")
+              if "sample.setClinicalOrderId(electronicOrderId)" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: does not link the sample via clinicalOrderId")
+              if "electronicOrder.setType(ElectronicOrderType.FHIR)" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: created order is not explicitly typed FHIR")
+
+              # Exact-one-match selection rules -- zero and multiple must both be rejected.
+              if 'if (matches.isEmpty())' not in added_text or "found none" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: zero-match rejection is missing")
+              if "matches.size() > 1" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: multiple-match rejection is missing")
+
+              if "DaherOrderCorrelation.SYSTEM.equals(identifier.getSystem())" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: identifier selection is not an exact system match")
+
+              # Never the accession number, specimen id, patient id, or requester id as the
+              # correlation source -- checked specifically within extractDaherOrderIdentifier's
+              # own body, not the whole file (those tokens legitimately appear elsewhere, e.g.
+              # persistDaherOrderCorrelation's unrelated sample-linking code).
+              extract_start = added_text.find("private String extractDaherOrderIdentifier")
+              extract_end = added_text.find("private void persistDaherOrderCorrelation")
+              if extract_start == -1 or extract_end == -1 or extract_end <= extract_start:
+                  bad.append("ServiceRequestProvider.java.patch: could not isolate extractDaherOrderIdentifier's body")
+              else:
+                  extract_body = added_text[extract_start:extract_end]
+                  for token in ("getAccessionNumber()", "SP_SPECIMEN", "getSubject()", "getRequester()"):
+                      if token in extract_body:
+                          bad.append(f"ServiceRequestProvider.java.patch: extractDaherOrderIdentifier "
+                                     f"references {token!r} -- correlation must come only from "
+                                     f"the Daher-system identifier, never accession/specimen/subject/requester")
+
+              # No fuzzy comparison anywhere in the new logic.
+              for bad_pattern in (".toLowerCase()", ".toUpperCase()", ".contains(", ".startsWith(", ".indexOf("):
+                  if bad_pattern in added_text:
+                      bad.append(f"ServiceRequestProvider.java.patch: unexpected fuzzy-comparison pattern {bad_pattern!r}")
+
+              # Deliberately does NOT set sample.referringId (would collide with the existing
+              # basedOn/intent logic) -- see PROVENANCE.md and the javadoc in the patch itself.
+              if "sample.setReferringId(daherOrderId)" in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: must not set sample.referringId "
+                              "(collides with existing basedOn/intent logic keyed off it)")
+
+          # --- FhirTransformServiceImpl.java.patch: outbound echo, keyed off clinicalOrderId only ---
+          ft_patch_path = base / "FhirTransformServiceImpl.java.patch"
+          if not ft_patch_path.exists():
+              bad.append("FhirTransformServiceImpl.java.patch is missing")
+              ft_patch = ""
+          else:
+              ft_patch = ft_patch_path.read_text()
+              ft_added = "\n".join(l for l in ft_patch.splitlines() if l.startswith("+"))
+              if "DaherOrderCorrelation.SYSTEM" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: does not echo DaherOrderCorrelation.SYSTEM")
+              if "sample.getClinicalOrderId()" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: outbound echo must key off clinicalOrderId")
+              if "sample.getReferringId()" in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: outbound echo must not read referringId")
+              if "ElectronicOrderType.FHIR.equals(linkedOrder.getType())" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: does not verify the linked order is FHIR-typed")
+
+          # --- shared constants file ---
+          shared_path = base / "DaherOrderCorrelation.java"
+          if not shared_path.exists():
+              bad.append("DaherOrderCorrelation.java is missing")
+          else:
+              shared_text = shared_path.read_text()
+              if 'SYSTEM = "urn:daher-health:adapter:source-event"' not in shared_text:
+                  bad.append("DaherOrderCorrelation.java: SYSTEM constant does not match the adapter's own value")
+              if "VALUE_PATTERN" not in shared_text or "0-9a-f" not in shared_text:
+                  bad.append("DaherOrderCorrelation.java: VALUE_PATTERN is missing or not hex-digest-shaped")
+
+          # --- uniqueness migration: scoped partial unique index, not a blanket one ---
+          migration_path = base / "001-electronic-order-daher-correlation-unique.xml"
+          if not migration_path.exists():
+              bad.append("001-electronic-order-daher-correlation-unique.xml is missing")
+          else:
+              migration_text = migration_path.read_text()
+              if "CREATE UNIQUE INDEX" not in migration_text:
+                  bad.append("uniqueness migration: no CREATE UNIQUE INDEX statement")
+              if "WHERE type = 'FHIR'" not in migration_text:
+                  bad.append("uniqueness migration: not scoped to type='FHIR' -- would collide with "
+                              "existing HL7/CSV rows that deliberately tolerate duplicate external_id")
+              if "<rollback>" not in migration_text:
+                  bad.append("uniqueness migration: no rollback block")
+
+          # --- base-changelog.xml.patch actually wires the migration in ---
+          changelog_patch_path = base / "base-changelog.xml.patch"
+          if not changelog_patch_path.exists():
+              bad.append("base-changelog.xml.patch is missing")
+          else:
+              changelog_added = "\n".join(
+                  l for l in changelog_patch_path.read_text().splitlines() if l.startswith("+")
+              )
+              if "liquibase/daher/001-electronic-order-daher-correlation-unique.xml" not in changelog_added:
+                  bad.append("base-changelog.xml.patch: does not include the new migration file")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — DH-011D order-correlation patch set has all required components, "
+                "no forbidden fuzzy-matching patterns, and the uniqueness index stays scoped to FHIR-typed rows")
+          PY
 
   compose:
     name: compose interpolates and parses

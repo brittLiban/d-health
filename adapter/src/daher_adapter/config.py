@@ -10,9 +10,44 @@ from sqlalchemy import URL
 
 _DB_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# DH-011/BLOCKER-6 (Option F): OpenELIS's SITEYEARNUM accession format needs a real numeric
+# facility site code before any ServiceRequest can be created (DH-011B, live-reconfirmed this
+# pass: `site_information` still carries the upstream placeholder). `DEV01` is the shipped
+# upstream default -- refusing it is the one thing this repo can safely check in code, because
+# it is proven from the running config, not guessed. The real value is NEEDS LIBAN #7 and is
+# never invented here.
+_KNOWN_PLACEHOLDER_SITE_CODES = frozenset({"DEV01"})
+
 
 class ConfigurationError(ValueError):
     """Configuration is missing or unsafe."""
+
+
+def _optional_site_code(environment: Mapping[str, str], name: str) -> str | None:
+    """`None` until the real facility value exists -- never a placeholder, never invented.
+
+    Validates only what DH-011B actually proved from the running OpenELIS config
+    (`SITEYEARNUM`, numeric, `DEV01` refused): non-empty, digits only, and not the known
+    upstream placeholder. It does NOT enforce a specific digit count -- the constant-pool read
+    established the *overall* generated accession is 13 digits, not how many of those belong to
+    the site code itself versus the year/sequence portions, and that split was never confirmed
+    from source. Asserting an unverified width here would be exactly the kind of invented
+    facility semantics this ticket forbids.
+    """
+    value = environment.get(name, "").strip()
+    if not value:
+        return None
+    if value in _KNOWN_PLACEHOLDER_SITE_CODES:
+        raise ConfigurationError(
+            f"{name} is still the upstream placeholder {value!r} -- the real facility site "
+            f"code has not been supplied (NEEDS LIBAN #7, PROJECT_STATE.md BLOCKER-6)"
+        )
+    if not value.isdigit():
+        raise ConfigurationError(
+            f"{name} must be numeric -- OpenELIS's SITEYEARNUM accession format refuses a "
+            f"non-numeric site code (DH-011B)"
+        )
+    return value
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -56,6 +91,7 @@ class Settings:
     retry_max_attempts: int
     retry_multiplier_seconds: float
     retry_max_seconds: float
+    openelis_site_code: str | None = None
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -81,6 +117,7 @@ class Settings:
             retry_max_attempts=_positive_int(env, "ADAPTER_RETRY_MAX_ATTEMPTS", 5),
             retry_multiplier_seconds=_positive_float(env, "ADAPTER_RETRY_MULTIPLIER_SECONDS", 1.0),
             retry_max_seconds=_positive_float(env, "ADAPTER_RETRY_MAX_SECONDS", 30.0),
+            openelis_site_code=_optional_site_code(env, "OPENELIS_SITE_CODE"),
         )
 
     @property
@@ -93,3 +130,11 @@ class Settings:
             port=self.db_port,
             database=self.db_name,
         )
+
+    @property
+    def service_request_delivery_ready(self) -> bool:
+        """One of several required activation gates (§16) -- the only one a config value can
+        represent. Patient-identifier policy, requester approval, test mapping, and the
+        DH-011D correlation patch being live-proven are process/documentation gates, not
+        environment values; they are recorded in PROJECT_STATE.md, not asserted here."""
+        return self.openelis_site_code is not None

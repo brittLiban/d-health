@@ -1828,6 +1828,90 @@ should not be built until it is known whether it is needed for the resource that
 not worse, which is precisely why it needed correcting rather than leaving a pessimistic record in
 place.
 
+### ADR-026 — OPTION F SELECTED (2026-08-28, DH-011D ticket) — Liban's decision. **BLOCKER-6:
+architecture question RESOLVED BY DECISION. DH-011 itself remains NOT complete.**
+
+**The decision, verbatim as given.** Select Option F for DH-011/BLOCKER-6. Canonical V1 order path:
+
+```
+OpenMRS ServiceRequest
+  → DH-011E poller (built, idle)
+  → Daher adapter
+  → DH-025 safety/idempotency ledger
+  → OpenELIS embedded BUSINESS FHIR API (/OpenELIS-Global/fhir/*, HAPI 7.0.2)
+  → native OpenELIS laboratory domain state (clinlims.sample/analysis/electronic_order)
+```
+
+Explicitly **not** selected: A (OpenELIS pulls straight from OpenMRS — removes the adapter's audit
+boundary), B (adapter becomes a FHIR server), C (push into the standalone `openelis-fhir` store —
+unverified, likely not a real inbox), D (a third exchange datastore — adds a second system storing
+patient/order data). These remain recorded in `PROJECT_STATE.md`'s BLOCKER-6 table exactly as first
+written; this decision does not retract or rewrite them.
+
+**Correlation direction, also decided:** the canonical OpenMRS-order ↔ OpenELIS-order correlation is
+a **`ServiceRequest`-owned external order identifier** — not an overload of `Specimen`/accession
+identifiers. Reason given: the correlation identifies the *order* itself, must survive independently
+of specimen/accession configuration (which is facility-owned, laboratory-scoped configuration, not
+an engineering surface — see NEEDS LIBAN #7), and must satisfy DH-025's exact 0/1/2+ reconciliation
+contract on the resource that is actually the order, not a downstream artifact of it.
+
+**What this decision resolves, precisely.** BLOCKER-6 was raised as an architecture question — *how
+does an order reach OpenELIS at all* — and that question now has an answer with Liban's sign-off.
+It does **not** mean DH-011 (the ticket that delivers a working order path end to end) is done: the
+delivery implementation, the numeric site code, the patient/practitioner/test mapping decisions, and
+live end-to-end proof all remain outstanding, exactly as enumerated below.
+
+**What this same pass (DH-011D) built, verified live, and did not build** — full technical account
+in `PROJECT_STATE.md`'s DH-011D entry and `openelis-config/patches/order-correlation/PROVENANCE.md`.
+In summary: the `ServiceRequest?identifier=` search-parameter gap is patched, built from the exact
+pinned upstream commit, and live-proven with a genuine before/after/negative-control triad against a
+disposable container sharing the real stack's database (400→200, scoping control still 400, auth
+control still 401). The identifier-*persistence*-on-create half, and the DB-level uniqueness
+question, are designed from source with exact file/line anchors but **not implemented or built** —
+both are gated on the numeric site code existing, because neither can be exercised without a
+creatable `ServiceRequest`, and this repository's evidence discipline (`AGENTS.md`) treats an
+unexercised change to a clinical order-creation path as worse than leaving it undone.
+
+**BLOCKER-6 STATUS: RESOLVED BY DECISION (architecture + correlation direction).** `DH-011` overall
+STATUS: **NOT COMPLETE** — see `PROJECT_STATE.md`'s DH-011 status matrix for what remains and why.
+
+### ADR-026 — correction appended 2026-08-28 (DH-011D2 closure pass): persistence and uniqueness
+are now BUILT, not merely designed
+
+**The paragraph above ("identifier-persistence-on-create half... not implemented or built") is
+superseded, not retracted — the file is append-only for the same reason as always.** A follow-on
+pass in the same session completed both:
+
+- **Persistence**: `ServiceRequestProvider.createServiceRequest` now extracts, validates
+  (exact-one-match, exact system+value comparison, hex-digest format), and persists the Daher order
+  correlation into `clinlims.electronic_order.external_id` (a dedicated `FHIR`-typed row, isolated
+  from the existing human "external order number" accessioning field's different semantics), and
+  `FhirTransformServiceImpl.transformToServiceRequest` echoes it back onto the outbound-synced
+  resource so the already-patched search half can find it.
+- **Uniqueness**: a new Liquibase changeset adds a genuine PostgreSQL partial unique index —
+  `electronic_order(external_id) WHERE type='FHIR'` — scoped so it does not touch the existing
+  HL7/CSV "last one wins" tolerance for any row this patch does not itself create.
+
+**What changed the earlier judgment.** The original reasoning — "an unexercised change to a clinical
+order-creation path is worse than leaving it undone" — was correct for the parts that genuinely
+cannot be exercised without a live `ServiceRequest` create (which stays blocked on NEEDS LIBAN #7).
+What the follow-on pass established is that the persistence and uniqueness *mechanisms* — as opposed
+to their end-to-end trigger — **can** be built and proven at the boundaries that don't require a
+live create: a full pinned-source build and compile; the Liquibase migration applying cleanly on a
+genuinely fresh database with zero errors; a real, two-process PostgreSQL concurrency race against
+the patched schema (one `COMMIT`, one constraint-violation rejection, exactly one row persisted for
+the contested correlation); a scoping control proving HL7-typed duplicate tolerance is untouched. All
+of this ran against fully isolated, disposable infrastructure — never the real shared database, and
+never a fabricated native clinical order. Full account, including exactly what still cannot be
+proven without the site code:
+`openelis-config/patches/order-correlation/PROVENANCE.md`.
+
+**BLOCKER-6 STATUS: unchanged, RESOLVED BY DECISION. `DH-011` overall STATUS: still NOT COMPLETE** —
+what changed is how much of DH-011D is now built-and-proven versus merely designed, not the overall
+completion state of DH-011 itself, which still needs the site code and several human decisions
+untouched by this pass (DH-011G's identifier-system choice, DH-011H's real requester, DH-006's test
+mapping).
+
 ---
 
 ## ADR-027 — Daher UI production identity: the browser holds the real upstream sessions; no BFF in V1

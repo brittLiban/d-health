@@ -1,0 +1,11 @@
+diff --git a/src/main/resources/liquibase/base-changelog.xml b/src/main/resources/liquibase/base-changelog.xml
+index 409ad05cd..3c73944c2 100644
+--- a/src/main/resources/liquibase/base-changelog.xml
++++ b/src/main/resources/liquibase/base-changelog.xml
+@@ -30,4 +30,6 @@
+   <include file="liquibase/qc/007-add-qc-menu-items.xml" />
+   <include file="liquibase/qc/008-add-instrument-fk-constraints.xml" />
+   <include file="liquibase/qc/009-nullable-unit-of-measure.xml" />
++  <!-- DH-011D (Daher Health): order-correlation uniqueness, see liquibase/daher/ -->
++  <include file="liquibase/daher/001-electronic-order-daher-correlation-unique.xml" />
+ </databaseChangeLog>
