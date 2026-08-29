@@ -235,3 +235,463 @@ Everything requiring an actual `POST /ServiceRequest` to succeed through the bus
 None of these are engineering gaps — the code, migration, and tests that can exist without a real
 order all exist and are proven. What's left needs the facility's numeric site code (NEEDS LIBAN #7),
 not more work here.
+
+## DH-011D3 (2026-08-28) — correction, four findings, one new P0 finding, Finding D
+
+**Correction to the section above (§18, required append-only, not a rewrite)**: "What's left needs
+the facility's numeric site code, not more work here" was **incorrect**. An independent review of
+the committed DH-011D implementation found three pre-activation gaps this session closed (Findings
+A/B/C below), and closing them surfaced two further defects this session also fixed (the
+`varchar(60)` truncation bug) or characterized but did **not** fix (the `labNo`/Specimen
+prerequisite, a new P0 finding, see below). BLOCKER-6 stays RESOLVED BY DECISION; Option F is
+unchanged. DH-011D is not more complete than this account supports. DH-011 stays NOT COMPLETE.
+DH-011E stays NOT ACTIVATED.
+
+### Finding A — the native create/correlate sequence was not atomic
+
+Independent review found `ServiceRequestProvider.createServiceRequest` called
+`samplePatientService.persistData(...)` (itself `@Transactional`) and then separately called
+`persistDaherOrderCorrelation(...)`, with no outer transaction — a race or mid-sequence failure
+could commit the native Sample/SampleItem/Analysis rows while the correlation row never landed,
+violating DH-025's safety property.
+
+**Fix attempted and reverted, live**: putting `@Transactional` directly on `createServiceRequest`
+broke HAPI FHIR provider registration entirely. `ServiceRequestProvider` implements
+`IResourceProvider`; `@Transactional` makes Spring wrap it in a JDK dynamic proxy, which exposes
+only that interface's own methods — none of which carry `@Create`/`@Search`/`@Update`/`@Delete`,
+which live on the concrete class. HAPI's `FhirRestfulServer` reflects on the bean instance it
+receives to find those annotations and found none:
+`HAPI-0289: Did not find any annotated RESTful methods on provider class jdk.proxy4.$Proxy1413`,
+and the entire provider silently stopped serving every operation, not just create — confirmed live
+via a fresh isolated boot (both `/api/OpenELIS-Global` and `/OpenELIS-Global` webapps threw
+`ConfigurationException` on `load()`).
+
+**Fix that shipped**: a new, separate, non-`IResourceProvider` Spring `@Component`,
+`DaherOrderCorrelationTransaction`, carries `@Transactional(rollbackFor = Exception.class)` on a
+`persist(..., Runnable persistCorrelation)` method that calls `samplePatientService.persistData`
+then invokes the callback. HAPI never reflects on this bean, so it can be proxied however Spring
+likes without breaking anything. `createServiceRequest` now calls
+`daherOrderTransaction.persist(updateData, ..., () -> persistDaherOrderCorrelation(...))`.
+Rebuilt and re-verified live on a fresh isolated stack: no `HAPI-0289`, no `SEVERE` errors,
+`ServiceRequest?identifier=...` search still functions.
+
+**Not yet done**: the ticket's own §2 asked for a *formal* proof via
+`TransactionSynchronizationManager.isActualTransactionActive()` at five named capture points
+(entry to `createServiceRequest`; before/after `persistData`; before/after the correlation
+write), and §4's rollback control (induce failure after native persistence but before correlation,
+read the DB directly for zero orphan rows). Neither was completed this pass — both require a live
+`createServiceRequest` success path to reach, and that path is blocked; see the new P0 finding
+below. What shipped is the atomicity *mechanism* (a real Spring transaction spanning both writes),
+verified by live boot and by the framework's own `@Transactional(rollbackFor = Exception.class)`
+contract, not yet verified by a live induced-failure read of the database.
+
+### Finding B — the correlation search was not authoritative
+
+Independent review found the DH-011D search patch forwarded to the standalone/secondary HAPI FHIR
+store, and upstream's own `createServiceRequest` wraps `transformPersistOrderEntryFhirObjects(...)`
+in try/catch that logs a warning and continues on failure — a native order can exist while the
+secondary sync silently failed, and `ServiceRequest?identifier=...` would then wrongly return 0,
+which DH-025 (mis)interprets as PROVEN ABSENT.
+
+**Fix**: for the Daher correlation system specifically,
+`ServiceRequestProvider.searchDaherCorrelationNatively` (new) derives existence from native
+OpenELIS state: `electronic_order` (type=FHIR, exact `external_id` match) → linked `Sample` via
+`clinicalOrderId` → `SampleItem` → `Analysis` → `FhirTransformService.transformToServiceRequest`.
+Both `fhirOrders.size() > 1` and `linkedSamples.size() > 1` fail loud
+(`InternalErrorException`, "Data integrity violation") rather than silently picking one or
+reporting zero — the partial unique index (see Finding A of DH-011D2/001-...xml) makes both
+structurally impossible in committed state, so observing either means trusting the database over
+the assumption. The standalone HAPI store is untouched for every other identifier system; this
+patch only ever narrows what gets rerouted to native state, never widens it (`.github/workflows
+/ci.yml`'s static guard did not previously check this file's newest content and was not extended
+this pass — see "Not done" below).
+
+**Live proof, direct-SQL fixtures labeled FHIR SEARCH FIXTURE ONLY / NOT NATIVE ORDER PROOF (§13)**
+— a synthetic `Patient` fixture (created through the real `POST /fhir/Patient` path, `id=2`,
+`fhir_uuid=a474dc53-7a64-4682-960f-cb195d69a740`) plus directly-inserted `electronic_order` /
+`sample` / `sample_item` / `analysis` rows (native business-API creation was not exercised — see
+the new P0 finding below) proved, against the isolated stack:
+- absent correlation value → `total: 0`, zero entries.
+- one order, one test → `total: 1`, one entry.
+- one order, two tests (a panel — see the `total`-semantics correction immediately below) →
+  `total: 1`, two entries, both carrying the same `urn:daher-health:adapter:source-event` value
+  and the same `requisition.value` (the shared accession number).
+- wrong system, same value → routed to the unchanged `forwardSearchToFhirStore` fallback (proven
+  by the log line `FhirUtil.forwardSearchToFhirStore, Error: I/O error ... fhir.openelis.org:
+  Name or service not known` — the isolated 2-container test stack has no secondary FHIR store
+  container, so the fallback itself cannot succeed here; the requirement being proven is that the
+  native Daher path was never entered, which the log confirms).
+
+**Caveat found on review, after the live proof above**: what this proves and what it does not are
+narrower than the bullets above read in isolation. The returned `ServiceRequest` resources carried
+no `id` field (`FhirTransformServiceImpl.transformToServiceRequest` sets
+`serviceRequest.setId(analysis.getFhirUuidAsString())`, and the fixture `analysis` rows' `INSERT`
+statements never populated `fhir_uuid`, leaving it `NULL`). The adapter's own
+`_resource_id(resource)` reads `resource["id"]` and returns `None` for a resource with no id, which
+`identifier_search` treats as `MatchCount.UNREACHABLE` — the probe would report AMBIGUOUS for the
+exact bundles proved live above, not FOUND. So this live proof establishes `Bundle.total`
+semantics, entry cardinality, the correlation-identifier echo, and system-based routing correctly;
+it does **not** establish that the adapter classifies a real result as ONE, because the fixture
+rows never gave the returned resources a readable id. A real, business-API-created `Analysis`
+would have a genuine `fhir_uuid` (set on create, not by this patch), so this is almost certainly a
+fixture artifact rather than a defect — but it was not re-verified with `fhir_uuid` populated, and
+this account does not claim it was.
+
+**`Bundle.total` correction, found via advisor review of the first cut of this fix**: the first
+version of `searchDaherCorrelationNatively` counted constituent `ServiceRequest` entries into
+`total` (one per `Analysis`). A prenatal panel — the normal V1 order — produces one `Analysis` per
+test, so a real order would read back as `total: 2` (or more) even though it is one logical order.
+`Bundle.total` was corrected to count **logical orders** (0 or 1 — the partial unique index
+guarantees at most one FHIR-typed `electronic_order` per correlation value, and this patch now
+also fails loud if more than one `Sample` is ever linked to it), while every constituent
+`ServiceRequest` is still returned as a Bundle entry. The adapter side needed a matching, and
+independently necessary, correction: `daher_adapter.openelis.OpenElisClient.identifier_search`
+previously counted `len(Bundle.entry)`, not `Bundle.total` — verified by reading the method
+directly, not assumed. Left uncorrected on both sides, every multi-test order would read back as
+`MatchCount.MANY` and could never reconcile — the ledger would never complete for any order with
+more than one test on it, which is not an edge case for a prenatal panel. The Python fix is
+deliberately narrow: it does **not** require `total` to be present (Patient, Practitioner, and
+every ServiceRequest query outside the Daher system go through the standalone secondary FHIR
+store, whose `total` presence is unverified) and does not otherwise prefer `total` over counting
+entries; the only place `total` overrides the entry count is collapsing more than one entry to
+`ONE` when `total == 1` explicitly says so. Every other outcome is unchanged from before the
+correction. Both sides are load-bearing together — shipping only the Java half (as first
+attempted) would have left the exact miscount this correction exists to fix.
+
+**Hardening beyond the minimum**: `extractSingleDaherCorrelationValue` previously returned `null`
+(silent fallthrough to the secondary store) for any identifier shape it didn't recognize,
+including a Daher-system token combined with another AND/OR term. Verified against the adapter's
+actual query shape (`identifier_search` always sends the single-token
+`identifier={system}|{value}` form — grepped, not assumed) that this fallthrough is not reachable
+in production today, but hardened it to fail loud (`InvalidRequestException`) instead of falling
+through whenever the Daher system appears in an unrecognized shape, so a future change on either
+side fails closed rather than silently degrading into the exact false-ABSENT this patch exists to
+prevent.
+
+### Finding C — the writer was not implemented
+
+`OpenElisClient.deliver_service_request` previously always raised `ServiceRequestDeliveryBlocked`
+— supplying the site code alone could not have made delivery work even once available, because the
+capability itself did not exist.
+
+**Fix**: `deliver_service_request` now POSTs the prepared `ServiceRequest` payload (injecting the
+Daher correlation identifier, rejecting a caller-supplied conflicting value), then performs
+**unconditional** authoritative native reconciliation via `identifier_search` regardless of the
+POST's own HTTP status — never trusting a 2xx as proof, and never blind-retrying an ambiguous POST.
+Success requires exactly one native match; zero-after-POST, 2+-matches, timeout-after-possible-
+write, and definite-failure-before-write all raise `AmbiguousTargetState` (the same vocabulary
+`RecoveryCoordinator`'s probe already uses), unifying fail-closed behavior between the probe and
+write paths. Activation is a separate, thin gate:
+`deliver_service_request_if_activated(client, settings, ...)` checks
+`Settings.service_request_delivery_ready` before ever calling the real writer — IMPLEMENTED
+CAPABILITY and ACTIVATION PERMISSION are two different things, and nothing in production calls
+either today (DH-011E's poller is unwired), so activation is enforced twice over: by the gate, and
+by the absence of a caller. Ten new scripted-fixture tests in
+`adapter/tests/test_openelis.py` cover the writer protocol (successful POST + reconciliation,
+timeout-then-found, POST-never-lands, zero/2+/401/403 outcomes, duplicate-conflict-reconciles);
+three cover the activation gate.
+
+### New finding, found while proving Finding B live — `electronic_order.external_id` too narrow
+
+Building the fixture chain for Finding B's live proof, a direct insert of a genuine
+64-character correlation value (`DaherOrderCorrelation.VALUE_PATTERN`'s exact shape — a
+SHA-256 hex digest, matching `adapter/src/daher_adapter/recovery.py`'s
+`SOURCE_CORRELATION_SYSTEM` value format) into a fresh isolated database raised
+`value too long for type character varying(60)`. `clinlims.electronic_order.external_id` was
+`varchar(60)`; `persistDaherOrderCorrelation` (`electronicOrder.setExternalId(daherOrderId)`)
+would hit the identical failure on **every** real create — with Finding A's outer transaction in
+place this now rolls back cleanly instead of orphaning native Sample/SampleItem/Analysis state,
+but the correlation itself could never be written at all, silently defeating Option F before it
+ever reached the writer. This was not caught by any prior ticket's live proof because none of
+them inserted a genuine 64-character value; DH-011D2's concurrency proof used raw SQL against the
+same column with shorter test values.
+
+**Fix**: a new Liquibase changeset,
+`003-electronic-order-external-id-widen.xml` (`modifyDataType ... newDataType="varchar(64)"`,
+with rollback), widens the column to exactly 64 characters — matching the pattern this column now
+additionally stores, and not touching existing HL7/CSV external order numbers (all ≤60 characters
+observed, and Postgres does not rewrite existing data on a varchar length increase). The Hibernate
+mapping (`ElectronicOrder.hbm.xml`, `length="60"` → `length="64"`) was updated to match for
+consistency; **this is documentation-consistency only, not load-bearing** — `hbm.xml`'s `length`
+attribute governs Hibernate's own DDL generation, not runtime validation, and Liquibase (not
+Hibernate) owns this deployment's actual schema. The evidence that the column was genuinely too
+narrow, and that the fix genuinely works, is entirely DB-level: the same 64-character insert that
+failed against a fresh isolated DB with only changesets 001-002 applied succeeded after changeset
+003 ran against that **same** database (proving safe upgrade-in-place, not just a fresh-DB
+replay) — `\d electronic_order` showing `character varying(64)` before the retry, and successful
+`INSERT` after.
+
+### New P0 finding, not fixed this pass — `createServiceRequest` cannot create a new order
+
+Attempting a live `POST /fhir/ServiceRequest` (subject referencing the fixture Patient, a valid
+Daher correlation identifier, no `specimen` reference — the only reasonable payload shape for
+DH-025 creating a brand-new order) against the isolated stack returned
+`Generated lab number is invalid` (HTTP 400). This is **not** the accession-format/site-code
+failure §10 anticipated — confirmed by first setting the isolated database's own `site_information`
+row to a synthetic, obviously-non-real numeric value (`90009`, test-scope only, never the real
+stack) and retrying: the failure was identical, ruling out the site code specifically. This
+synthetic value turned out irrelevant to the actual failure — **changeset
+`002-site-code-configuration.xml` has still never been exercised with any real value flowing
+through `LiquibaseConfig`'s own validated path** (the `90009` value was written directly via SQL
+to unblock this one test, not through the Liquibase changeset the real configuration mechanism
+uses). Traced to
+`ServiceRequestProvider.createServiceRequest` line 251 (upstream, **not** part of any DH-011D/D2/D3
+patch — confirmed by grepping every committed patch file for the exact string, no match):
+`requireNonBlank(sampleOrder.getLabNo(), "Generated lab number is invalid")`. `sampleOrder` comes
+from `FhirTransformServiceImpl.buildSampleOrderItemFromServiceRequest`, which only sets
+`orderItem.setLabNo(sample.getAccessionNumber())` when `sample != null` — and `sample` is only
+resolved from an **existing** `Sample` reached via `serviceRequest.specimen`'s reference (or, for
+an update, a matched `Analysis`). For a genuinely new order with no pre-existing specimen, `sample`
+stays `null`, `labNo` is never set, and the create fails before any of DH-011D3's own logic
+(atomicity, correlation persistence) ever runs.
+
+**What this means**: `createServiceRequest` was never designed as a standalone new-order-creation
+endpoint. It decorates/links a `ServiceRequest` to a `Sample` that must already exist — accession
+number generation happens somewhere else in native accessioning, reached (per
+`SpecimenProvider.java`'s own `@Create` method) via `POST /fhir/Specimen` first. This is strictly
+larger than §10's framing ("the writer doesn't exist, and the site code alone can't fix that"): the
+target endpoint cannot create an order **at all**, with or without a site code, without a
+Specimen-first prerequisite step this ticket did not build or test. §2's formal transaction-capture
+proof, §4's rollback control, §5's concurrency control, §8's FHIR-sync-failure control, and §9's
+crash-recovery control all require a live `createServiceRequest` success path and are **all
+blocked by this**, not by the missing site code.
+
+Building or designing a Specimen-first prerequisite flow was **not attempted this pass** — it
+carries clinical-surface implications (specimen collection semantics: what a Specimen represents,
+who/what creates it, what data it carries) squarely inside AGENTS.md's "any gap that obviously
+should be filled a particular way" instinct-guard. This is recorded as `Human Decision Required:
+Yes` in `PROJECT_STATE.md`, not designed or assumed here.
+
+### Finding D — the patch was not part of the deployed service graph, and CI never compiled it
+
+`docker-compose.yml`'s `openelis-webapp` service ran `itechuw/openelis-global-2:3.2.1.11`
+directly — none of DH-011D's patches were part of the normal deployed service graph, and the
+existing CI job for this patch set (`static` job's "DH-011D order-correlation patch content
+guards") only asserts on committed source text, never compiles it.
+
+**Fixed**: `docker-compose.yml`'s `openelis-webapp` now follows the same local-derived-image
+pattern already used for `openmrs-backend` — `image: daher-health/openelis-webapp:3.2.1.11-order-
+correlation` with `build: { context: ./openelis-config }` (Compose builds and tags locally,
+reusing the already-built image unless asked to rebuild). `docker compose config -q` parses
+cleanly and resolves `openelis-webapp` to this build/image pair (verified locally; not deployed
+against the real running stack, per this ticket's explicit instruction). The §12 site-code
+mechanism is now wired into `CATALINA_OPTS` (`-Ddaher.openelis.site.code=${DAHER_OPENELIS_SITE_CODE:-}`,
+defaulting to empty — never inventing a value), and `.env.example` documents the new variable with
+the same NEEDS LIBAN #7 framing as every other real-facility-value placeholder in that file.
+
+A new CI job, `openelis-order-correlation-build`, clones the exact pinned tag, verifies the exact
+commit, initializes the pinned `dataexport` submodule, applies the same committed patch files
+`openelis-config/Dockerfile` consumes (the same `git apply`/`cp` list, not a duplicate), and runs
+upstream's own build recipe through to a produced `target/OpenELIS-Global.war`, inside the same
+pinned Maven/JDK image the Dockerfile itself builds with, with Maven dependency caching keyed on
+the pinned commit. Control-tested locally (this job cannot be executed as real GitHub Actions from
+this session): a throwaway corrupted copy of `ServiceRequestProvider.java.patch` was applied via
+the exact same `git apply` invocation this job runs, against the exact same pinned, pristine clone
+this job would use — `error: corrupt patch at line 20`, exit 128, exactly the failure mode that
+would fail the real CI job. The static guard's own asserted patch/file list was **not** extended
+to cover this session's new files (`LiquibaseConfig.java.patch`, `ElectronicOrder.hbm.xml.patch`,
+`002-`/`003-...xml`, `DaherOrderCorrelationTransaction.java`) — a real but smaller gap than the
+one this section closes, recorded here rather than silently left unmentioned.
+
+**Existing static guards re-run against every file this pass touched**: `ServiceRequestProvider
+.java.patch` was regenerated twice this session (Finding A's transaction fix, then the Finding B
+`total`-semantics correction), and `docker-compose.yml`'s `openelis-webapp` service block was
+rewritten. Every static CI check whose asserted content those changes could plausibly have broken
+was extracted from `.github/workflows/ci.yml` and executed directly against the working tree
+(not merely inferred from reading the workflow): the "Every image is pinned" guard (the new
+`daher-health/openelis-webapp:3.2.1.11-order-correlation` reference matches the same
+already-exempted `daher-health/*` pattern `openmrs-backend` uses), the "Compose invariants" guard,
+and the "DH-011D order-correlation patch content guards" static-content guard (asserts on
+`extractDaherOrderIdentifier`'s exact isolated body and a fuzzy-comparison blacklist against the
+patch's added lines) all print their `ok` line with no `bad` entries. This is not a substitute for
+an actual CI run, but it is stronger than "the YAML parses."
+
+**Secret exposure, unrelated to any patch content but recorded because this document is the
+durable account of this session's work**: verifying `docker compose config` resolves
+`openelis-webapp` to the derived image involved dumping that service's full resolved
+configuration, which printed the real, live `OE_DB_PASSWORD`, `OE_KEYSTORE_PASSWORD`, and
+`OE_TRUSTSTORE_PASSWORD` values from this deployment's `.env` into the session transcript. All
+three should be rotated.
+
+### Test suite state
+
+`adapter`: `ruff check`/`ruff format --check` clean; `pytest` — 142 passed (up from the prior
+count; includes Finding C's ten writer-protocol tests, three activation-gate tests, and three
+`total`-semantics tests added and then corrected this pass after the narrower fix above).
+`openelis-config`: the patched image builds cleanly (`docker build`, exit 0) and boots cleanly on
+a fresh isolated stack with no `HAPI-0289`/`SEVERE` errors.
+
+### What remains — not started or not completed this pass
+
+- §2's formal `TransactionSynchronizationManager.isActualTransactionActive()` proof at the five
+  named capture points — blocked by the new P0 finding above.
+- §4's mandatory rollback control (direct DB read after an induced mid-sequence failure) —
+  blocked by the new P0 finding above. Note: the `varchar(60)` bug (fixed) would itself have been
+  a real, production-code-path failure-after-native-persist injection had it not been fixed first
+  — that opportunity is gone now that the column is correctly widened, but it briefly existed and
+  is recorded here for anyone re-deriving this account.
+- §5's mandatory service-layer concurrency control — blocked by the new P0 finding above. DH-011D2's
+  raw-SQL concurrency proof against the unique index (still valid, see above) is not a substitute.
+- §8's FHIR-sync-failure control and §9's crash-after-native-write control — both require a live
+  `createServiceRequest` success path, blocked by the new P0 finding above.
+- The static guard job's asserted patch/file list was not extended to this session's new files.
+- `DECISIONS.md`, `PROJECT_STATE.md`, `CURRENT_STATE.md` corrections per §18 — not yet applied as
+  of this section being written; see the ticket's own FINAL HANDOFF for current status.
+
+READY TO COMMIT: No. See the FINAL HANDOFF delivered alongside this document for the complete,
+itemized reason.
+
+## DH-011M (2026-08-29) — Option P implemented and live-proven; one pre-existing, unrelated defect found
+
+DH-011D3's own evidence, and the follow-on DH-011M evidence ticket, established that
+`ServiceRequestProvider.createServiceRequest` could not create a new order at all: `labNo` and
+`SampleEditItem.sampleItemId` were derived exclusively from an already-existing `Sample`/
+`SampleItem` resolved via `ServiceRequest.specimen`, and no accession number was ever generated.
+Liban approved **Option P** (2026-08-29): patch the ingestion path itself to generate a real
+accession number and let `SamplePatientUpdateData.createPopulatedSample`'s existing "create new
+sample" branch run, rather than building a parallel persistence engine or an ElectronicOrder-first
+inbox (Option O) or a Specimen-first bootstrap (Option S, already ruled out as structurally
+incomplete).
+
+### What changed, precisely
+
+`ServiceRequestProvider.createServiceRequest` now branches on `firstItem.getSampleItemId()`
+(unchanged derivation, from `FhirTransformServiceImpl.buildSampleEditItemsListFromServiceRequest`):
+
+- **Present** (an existing specimen resolved): entirely unchanged code path -- the exact same
+  `sampleItemService.get(sampleItemId)` call and `requireNonBlank(sampleOrder.getLabNo(), ...)`
+  check as before this ticket.
+- **Absent, and no specimen reference was given at all**: `newOrderAccessionNumber()` calls
+  `AccessionNumberUtil.getMainAccessionNumberGenerator().getNextAvailableAccessionNumber("",
+  true)` -- the identical call `CommonValidationsRestController`'s `SampleEntryGenerateScanProvider`
+  endpoint makes for the human Sample Entry frontend, not a second implementation. `newOrderSampleItem
+  (tests)` builds a **transient** `SampleItem` (never itself persisted -- it exists only to carry
+  `getTypeOfSample()` into the unchanged `SampleUtil.buildSampleXml`, which
+  `SamplePatientUpdateData.initSampleData`'s own `SampleAddService` re-parses into the real,
+  persisted `SampleItem`) carrying only the sample type every requested test needs, resolved via
+  `TypeOfSampleService.getSampleTypeFromTest` (Hibernate `uniqueResult()` -- fails loud on
+  ambiguous lab configuration, never guesses) and rejecting a request whose tests need different
+  sample types rather than picking one. Deliberately sets nothing else: no collection date,
+  collector, quantity, container, source, or received state -- `SampleAddService` already leaves
+  each of those unset (and the resulting `SampleItem` at `SampleStatus.Entered`, not
+  received/collected) when its XML omits the corresponding attribute, which is exactly what
+  happens when the transient `SampleItem` carries only a type.
+- **Absent, but a specimen reference WAS given** (dangling, wrong system, or a race): fails loud
+  (`InvalidRequestException`) rather than falling through to the new-order path. Found and fixed
+  during this ticket's own invalid-input testing: the first cut of Option P could not distinguish
+  "no specimen provided" from "a specimen was referenced and didn't resolve", and would have
+  silently created a duplicate new order for the latter -- a caller with a typo'd or stale
+  reference needs to see an error, not an unrelated second order. Live-proven: a dangling
+  `Specimen/00000000-...` reference now returns `400`, not `201`.
+
+No parallel persistence engine, no second accession algorithm, no direct Sample/SampleItem/Analysis
+INSERT anywhere in this patch -- every native row is still created exclusively by
+`SamplePatientEntryService.persistData`'s existing business-layer path, reached exactly as before.
+
+### Live proof, fully synthetic disposable stack (own generated keystore/DB credentials, `.env`
+never read, real facility never touched)
+
+- **New-order happy path**: `POST /fhir/ServiceRequest` with no `specimen` reference succeeded
+  (`201`), `requisition.value` a real `SITEYEARNUM` accession (`DEV01260000000000001`), exactly
+  one `Sample`/`SampleItem`/`Analysis` row, `Sample.clinical_order_id` correctly linked to the
+  Daher correlation's `electronic_order` row, `SampleItem.status_id` = "The sample has been
+  entered into the system" (20), `Sample.status_id` = "No tests have been run for this order" (1)
+  -- neither reads as collected/received. `SampleItem.collector`/`quantity`/`source_id` all NULL.
+  `SampleItem.collection_date`/`received_date` populated to the create timestamp -- **not
+  Option P's choice**: `buildSampleXml` always sets `receivedDate`/`receivedTime` (unchanged,
+  pre-existing code, identical for the traditional human Sample Entry UI), and
+  `clinlims.sample.received_date` is `NOT NULL` at the schema level, so *some* value is
+  unavoidable for any Sample this engine creates, walk-in or FHIR-originated. The lifecycle
+  signal a lab worker actually reads is the status text, which is correctly "entered", not
+  "received".
+- **Duplicate delivery**: an identical second `POST` for the same correlation was rejected
+  (`400`, the existing fast pre-check) with zero new rows of any kind; the correlation search
+  still resolved to the original single `ServiceRequest`.
+- **Concurrent delivery (race)**: two simultaneous `POST`s for the same never-used correlation --
+  one `201` (real accession, real Sample), one `500`
+  (`ConstraintViolationException` on the partial unique index). Exactly one `electronic_order`
+  row, exactly one more `Sample`/`SampleItem`/`Analysis` row each than before the race -- the
+  loser left zero orphan native rows, proving Finding A's outer-transaction atomicity holds under
+  real concurrency for a brand-new order, not just the raw-SQL proof DH-011D2 recorded. The
+  loser's *reserved accession number* was not attached to any persisted Sample and does not
+  reappear -- confirmed by observing the next successful create receive the number after the
+  gap. This is expected and not a data-integrity problem: `AccessionServiceImpl`'s sequence
+  increment is not part of the same atomic unit as the native row-set (it commits before
+  `daherOrderTransaction.persist` ever starts), so a rolled-back create leaves a gap in the
+  sequence, the same way any sequence-backed generator behaves under rollback -- never a
+  duplicate, never a fabricated fact.
+- **Crash-ambiguity, through the concrete adapter writer, not mocked HTTP**: a disposable script
+  drove the real `daher_adapter.openelis.OpenElisClient` (`deliver_service_request`,
+  `service_request_probe`) against the live stack over real HTTP. Probe before delivery: ABSENT.
+  Real delivery: succeeds, returns a `TargetRecord`. Probe again immediately after (simulating a
+  restart before the ledger was marked complete): FOUND, resolving to the exact same
+  `record_id` -- proving DH-025's `RECONCILED_EXISTING` path would correctly avoid a duplicate
+  write against this concrete writer, not just its unit-mocked double. A second
+  `deliver_service_request` call for the same correlation reconciled to the same existing record
+  rather than raising or duplicating (the POST itself was rejected server-side, but
+  `deliver_service_request` never trusts POST status -- it reconciles by search regardless, per
+  Finding C's existing design, and found the one true record) -- confirmed at the DB level:
+  exactly one `electronic_order` row for that correlation throughout.
+- **UI/workflow representation**: `GET /rest/home-dashboard/ORDERS_IN_PROGRESS` (the real
+  dashboard tile backing `AnalysisStatus.NotStarted`, unrelated to and unmodified by this patch)
+  returned the new orders correctly, showing only `orderDate`/`labNumber`/`testName`/`priority` --
+  no field claims or implies a specimen was collected or received. This is the actual JSON a lab
+  worker's dashboard renders, from a real HTTP call against the running application, not an
+  inference from source alone.
+
+### New finding, NOT fixed -- pre-existing, unrelated to any Daher patch
+
+Adding a second test to an already-existing order (`ServiceRequest.specimen` referencing a real,
+resolvable `SampleItem` -- the "existing-order" branch, entirely untouched by this ticket) throws
+live: `org.hibernate.StaleObjectStateException: Row was updated or deleted by another transaction
+(or unsaved-value mapping was incorrect) : [...Sample#2]`. This is the **first time this exact
+scenario has ever been exercised live** in this project's history -- no prior DH-011 ticket ever
+had a real, resolvable specimen to reference, so this defect was structurally invisible until now.
+
+**Control-tested to determine attribution, not assumed**: the identical fixture (a directly-SQL-
+inserted `Sample`/`SampleItem`/`Analysis`, labeled FHIR SEARCH FIXTURE ONLY / NOT NATIVE ORDER
+PROOF) and the identical follow-up `POST` were run against a **completely pristine, unpatched**
+build of the exact pinned upstream tag/commit -- zero Daher patches applied, built via a fresh
+`git clone` with no `git apply` steps at all. The identical `StaleObjectStateException` on
+`Sample#2` occurred. **This conclusively proves the defect is pre-existing upstream OpenELIS
+3.2.1.11 behavior, entirely unrelated to DH-011D, DH-011D2, DH-011D3, or DH-011M** -- not a
+regression this ticket's Finding A transaction wrapper, or any other Daher patch, introduced.
+
+Per this ticket's own scope discipline ("smallest patch", "one ticket only", and AGENTS.md's
+"a pre-existing, unrelated gap" guidance on second bugs found mid-fix), this was **not fixed**
+here. It does not block Option P's own correctness -- Option P's new-order path never reaches this
+branch at all, proven by the happy-path/duplicate/race evidence above, all of which exercise only
+the new-order branch. It **does** mean "the existing-order edit path behaves exactly as before"
+is true in the narrowest, most literal sense (byte-identical code, byte-identical failure) but was
+never actually a passing regression test -- "before" was already broken, just never provably so
+until this ticket finally had a real specimen to test against. Recorded as a new finding requiring
+its own ticket/decision, not silently left undiscovered and not silently repaired under this one.
+
+### Test infrastructure
+
+All of the above ran against fully synthetic, disposable infrastructure this ticket generated
+itself: a self-signed keystore/truststore (Docker named volumes, `keytool` inside the pinned
+Maven/JDK image), a `common.properties` rendered from the template with those synthetic passwords,
+and the pinned `itechuw/openelis-global-2-database:3.2.1.11` image with freshly-generated random
+`DB_PASSWORD`/`DB_SUPERUSER_PASSWORD`/`POSTGRES_PASSWORD` -- `.env` was never read, no real
+facility credential was ever touched, and the real running `daher-health-*` stack was never
+started, stopped, or connected to. All containers, networks, and volumes were removed after use;
+nothing synthetic persists.
+
+### What remains
+
+- The pre-existing existing-order-edit `StaleObjectStateException` above: a new, separate finding
+  requiring its own ticket and decision on priority -- not designed, not fixed, not assumed away
+  here.
+- Formal negative controls for "bypass accession generation", "second delivery creates a second
+  accession", and "remove the transaction boundary" were not independently re-run this ticket as
+  fresh rebuild-and-break exercises beyond what the evidence above already demonstrates by
+  construction (the pristine-vs-patched comparison **is** the accession-generation control: pristine
+  cannot create a new order at all; the race test **is** the duplicate-accession and transaction-
+  boundary control, live, not synthetic). "Drop correlation persistence" and "fabricate a
+  collection field" were reasoned from code inspection (both are single-line, easily-reverted
+  changes with obvious, already-covered blast radius) rather than independently rebuilt and
+  broken live, given the cost of each full OpenELIS rebuild cycle against the value of re-proving
+  properties this session's evidence already establishes by construction.
+
+READY TO COMMIT: No -- see the ticket's FINAL HANDOFF for the exact, itemized reason.

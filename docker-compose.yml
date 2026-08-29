@@ -573,7 +573,16 @@ services:
   # OpenELIS webapp (Tomcat). Not publicly routed; Caddy reaches it at DH-016.
   # ---------------------------------------------------------------------------
   openelis-webapp:
-    image: itechuw/openelis-global-2:3.2.1.11@sha256:c7c7200141baf4c496121db1a6712f9fcf0866654e6f91e150fa0e4bbfc5ecab
+    # DH-011D3 (§13, independent review): itechuw/openelis-global-2:3.2.1.11 ships unpatched --
+    # the Daher order-correlation patch (BLOCKER-6/ADR-026, Option F) never reached the deployed
+    # service graph through the bare `image:` alone. This follows the same local-derived-image
+    # pattern as openmrs-backend above: `image:` names the tag `docker compose build` produces,
+    # `build:` says how, and Compose uses the already-built local image unless asked to rebuild.
+    # See openelis-config/Dockerfile and openelis-config/patches/order-correlation/PROVENANCE.md
+    # for the exact upstream commit pinned and every patch applied on top of it.
+    image: daher-health/openelis-webapp:3.2.1.11-order-correlation
+    build:
+      context: ./openelis-config
     restart: unless-stopped
     depends_on:
       openelis-db:
@@ -594,6 +603,7 @@ services:
         -Doe.ssl.truststorepath=/etc/openelis-global/truststore
         -Doe.ssl.keystorepassword=${OE_KEYSTORE_PASSWORD:-kspass}
         -Doe.ssl.truststorepassword=${OE_TRUSTSTORE_PASSWORD:-tspass}
+        -Ddaher.openelis.site.code=${DAHER_OPENELIS_SITE_CODE:-}
         -Dorg.itech.login.form=true
         -Dorg.itech.login.saml=${SSO_ENABLED:-false}
         -Dorg.itech.login.saml.loginpage=false

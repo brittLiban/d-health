@@ -25,9 +25,16 @@ only an exact single match is treated as success:
 one resource type whose search behavior could not be proven this pass -- see `service_request_probe`
 for exactly what is and is not verified.
 
-**Live ServiceRequest delivery is deliberately not wired here.** Every `ServiceRequest` create
-is refused server-side (`Generated lab number is invalid`) until the real numeric OpenELIS site
-code is supplied (NEEDS LIBAN #7) -- see `deliver_service_request`.
+**IMPLEMENTED CAPABILITY vs. ACTIVATION PERMISSION (DH-011D3, independent-review finding C) are
+deliberately two different things here.** `deliver_service_request` is the real writer protocol --
+POST, then always an authoritative native reconciliation read-back, never a second POST, fail
+closed on anything short of exactly one match. It runs and is tested with scripted fixtures.
+`deliver_service_request_if_activated` is the separate, thin activation gate: it refuses to call
+the writer at all unless `Settings.service_request_delivery_ready` is true, i.e. a real numeric
+OpenELIS site code is configured (NEEDS LIBAN #7). Nothing in this repository currently calls
+either function in production -- DH-011E's poller is not wired to any of this -- so today the gate
+is enforced by absence of a caller, not by this file alone; the gate exists so that whenever a
+caller is eventually wired, activation and capability cannot be conflated by accident.
 """
 
 from __future__ import annotations
@@ -39,7 +46,9 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 
+from daher_adapter.config import Settings
 from daher_adapter.recovery import (
+    AmbiguousTargetState,
     SourceCorrelation,
     TargetPresence,
     TargetProbeResult,
@@ -134,6 +143,26 @@ class OpenElisClient:
         Control-proven live (DH-011B/PROJECT_STATE.md): a wrong system with the right value
         returns zero, so this is real token matching on this server, not inference from a link
         or a guess about what the server does with the parameter.
+
+        DH-011D3 (Finding B correction, scoped narrowly): counting `Bundle.entry` alone
+        overcounts one specific real case -- OpenELIS's native ServiceRequest search
+        (`ServiceRequestProvider.searchDaherCorrelationNatively`) returns one entry per
+        constituent test on a multi-test order (a prenatal panel, the normal V1 case), since one
+        native `Analysis` produces one `ServiceRequest`. Left uncorrected, every multi-test order
+        would read back as MANY and could never reconcile. `Bundle.total` is FHIR's field for
+        "how many logical results matched" and that provider sets it correctly (0 or 1 -- the
+        DB's partial unique index on the correlation value guarantees at most one).
+
+        This method does NOT require `total` to be present, and does not otherwise trust it over
+        `entry`: Patient, Practitioner, and every ServiceRequest query that does not carry the
+        Daher correlation system all go through the standalone secondary FHIR store via
+        `forwardSearchToFhirStore`, and whether that store always populates `total` has not been
+        verified. A missing-total-means-UNREACHABLE rule would risk silently breaking every one
+        of those identifier searches. The only place `total` overrides the entry count is the
+        one case it exists to fix: more than one entry with `total == 1` collapses to ONE, using
+        the first entry as a representative id. Every other outcome (0 entries, 1 entry, or more
+        than one entry with `total` absent/disagreeing) is exactly what counting entries already
+        gave, and is unchanged by this correction.
         """
         token = f"{system}|{value}"
         url = f"{self._base}/{resource_type}?identifier={quote(token, safe='')}"
@@ -154,11 +183,18 @@ class OpenElisClient:
             return IdentifierMatch(count=MatchCount.UNREACHABLE)
 
         entries = _entries(result.body)
+        total = result.body.get("total")
+        total_says_one_logical_match = (
+            isinstance(total, int) and not isinstance(total, bool) and total == 1
+        )
+
         if len(entries) == 0:
             return IdentifierMatch(count=MatchCount.ZERO)
-        if len(entries) > 1:
+        if len(entries) > 1 and not total_says_one_logical_match:
             return IdentifierMatch(count=MatchCount.MANY)
 
+        # Either exactly one entry, or more than one entry that Bundle.total says is one logical
+        # match (the multi-test-order case) -- either way, the first entry is representative.
         fhir_id = _resource_id(entries[0])
         if fhir_id is None:
             # A matched entry with no readable id cannot be trusted as ONE -- treat it the same
@@ -230,20 +266,100 @@ class OpenElisClient:
     async def deliver_service_request(
         self, correlation: SourceCorrelation, payload: Mapping[str, Any]
     ) -> TargetRecord:
-        """DH-025's `TargetWriter` for ServiceRequest. Not activated.
+        """DH-025's `TargetWriter` for ServiceRequest -- the real protocol (DH-011D3 finding C).
 
-        Deliberately refuses to run rather than attempt a create that OpenELIS's own accession
-        generator will refuse anyway (`SITEYEARNUM` formats a 13-digit numeric accession; the
-        configured prefix is still upstream's placeholder `DEV01`; every ServiceRequest create is
-        rejected before subject or requester is even examined -- DH-011B, reconfirmed live this
-        pass). Raising here rather than issuing a POST that would only ever fail keeps the ledger
-        from recording a real attempt against a target that cannot accept one, and keeps this
-        function's eventual real implementation the only place that ever removes the guard.
+        1. Injects/validates the Daher correlation identifier on the outgoing payload --
+           `_with_daher_identifier` raises rather than silently overwriting if the caller
+           already attached a conflicting one.
+        2. POSTs to the embedded business FHIR endpoint.
+        3. Never trusts the POST's status alone (known bug 19's exact hazard). Whether the POST
+           returned 2xx, an error status, or raised outright, the very next and only thing this
+           method does is one authoritative native reconciliation read via `identifier_search`
+           on the Daher system.
+        4. Returns a `TargetRecord` only on exactly one authoritative match. Every other outcome
+           -- zero matches after a possible write, 2+ matches, the POST itself never landing, or
+           the reconciliation read being unreachable/malformed -- raises `AmbiguousTargetState`
+           (the same DH-025 vocabulary `RecoveryCoordinator` already uses for a probe that cannot
+           prove presence or absence). This method never issues a second POST under any of these
+           outcomes -- "no blind retry" applies to its own internals, not only to its caller.
+
+        This is the capability, not the permission to use it in production -- see
+        `deliver_service_request_if_activated`.
         """
+        outgoing = _with_daher_identifier(payload, correlation)
+
+        try:
+            await self._post(f"{self._base}/{SERVICE_REQUEST}", outgoing)
+        except Exception as error:  # noqa: BLE001 - a POST that never lands is itself ambiguous
+            raise AmbiguousTargetState(
+                f"ServiceRequest POST did not complete: {type(error).__name__}"
+            ) from error
+
+        match = await self.identifier_search(
+            SERVICE_REQUEST, SERVICE_REQUEST_TARGET_SYSTEM, correlation.value
+        )
+        if match.count is MatchCount.ONE and match.fhir_id is not None:
+            return TargetRecord(system=SERVICE_REQUEST, record_id=match.fhir_id)
+        if match.count is MatchCount.ZERO:
+            raise AmbiguousTargetState(
+                "ServiceRequest POST returned but native reconciliation found zero matches for "
+                f"correlation {correlation.value} -- cannot prove whether the write happened"
+            )
+        # MANY or UNREACHABLE
+        raise AmbiguousTargetState(
+            "ServiceRequest POST reconciliation is ambiguous (multiple native matches or the "
+            "target was unreachable) for correlation " + correlation.value
+        )
+
+
+def _with_daher_identifier(
+    payload: Mapping[str, Any], correlation: SourceCorrelation
+) -> Mapping[str, Any]:
+    """Returns a copy of `payload` guaranteed to carry exactly one Daher-system identifier
+    matching `correlation` -- injects it if absent, raises if the caller already attached a
+    conflicting value under the same system rather than silently overwriting it, and
+    normalizes to canonical form if it was already present and correct. Never mutates the
+    caller's `payload`.
+    """
+    existing = payload.get("identifier")
+    others: list[Any] = []
+    if isinstance(existing, Sequence) and not isinstance(existing, str | bytes):
+        for entry in existing:
+            if isinstance(entry, Mapping) and entry.get("system") == SERVICE_REQUEST_TARGET_SYSTEM:
+                if entry.get("value") != correlation.value:
+                    raise ValueError(
+                        "payload already carries a conflicting Daher correlation identifier: "
+                        f"{entry.get('value')!r} != {correlation.value!r}"
+                    )
+                continue  # drop; re-added below in canonical form, never duplicated
+            others.append(entry)
+    daher_identifier = {"system": SERVICE_REQUEST_TARGET_SYSTEM, "value": correlation.value}
+    return {**payload, "identifier": [*others, daher_identifier]}
+
+
+async def deliver_service_request_if_activated(
+    client: OpenElisClient,
+    settings: Settings,
+    correlation: SourceCorrelation,
+    payload: Mapping[str, Any],
+) -> TargetRecord:
+    """The activation gate (DH-011D3 finding C, §11) -- deliberately separate from the writer
+    capability above. Refuses even to attempt delivery unless `settings
+    .service_request_delivery_ready` is true (a real, non-placeholder, numeric OpenELIS site
+    code is configured). This is the one function production code should call to deliver a
+    ServiceRequest; `OpenElisClient.deliver_service_request` itself has no opinion about
+    activation, which is exactly what lets tests exercise its real protocol with scripted
+    fixtures while production stays gated. Today nothing calls this in production either --
+    DH-011E's poller is not wired to any of this -- so the gate is currently enforced by the
+    absence of a caller too; this function exists so that whenever one is wired, activation and
+    capability cannot be conflated by accident.
+    """
+    if not settings.service_request_delivery_ready:
         raise ServiceRequestDeliveryBlocked(
             "ServiceRequest delivery is gated on the real numeric OpenELIS site code "
             "(NEEDS LIBAN #7) -- see PROJECT_STATE.md BLOCKER-6"
         )
+    return await client.deliver_service_request(correlation, payload)
 
 
 def _entries(bundle: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:

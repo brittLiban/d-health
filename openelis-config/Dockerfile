@@ -22,10 +22,17 @@ RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
 
 COPY patches/order-correlation/ServiceRequestProvider.java.patch /patch/ServiceRequestProvider.java.patch
 COPY patches/order-correlation/FhirTransformServiceImpl.java.patch /patch/FhirTransformServiceImpl.java.patch
+COPY patches/order-correlation/LiquibaseConfig.java.patch /patch/LiquibaseConfig.java.patch
 COPY patches/order-correlation/base-changelog.xml.patch /patch/base-changelog.xml.patch
+COPY patches/order-correlation/ElectronicOrder.hbm.xml.patch /patch/ElectronicOrder.hbm.xml.patch
 COPY patches/order-correlation/DaherOrderCorrelation.java /patch/DaherOrderCorrelation.java
+COPY patches/order-correlation/DaherOrderCorrelationTransaction.java /patch/DaherOrderCorrelationTransaction.java
 COPY patches/order-correlation/001-electronic-order-daher-correlation-unique.xml \
      /patch/001-electronic-order-daher-correlation-unique.xml
+COPY patches/order-correlation/002-site-code-configuration.xml \
+     /patch/002-site-code-configuration.xml
+COPY patches/order-correlation/003-electronic-order-external-id-widen.xml \
+     /patch/003-electronic-order-external-id-widen.xml
 
 RUN git clone --branch 3.2.1.11 --depth 1 \
       https://github.com/DIGI-UW/OpenELIS-Global-2.git /build \
@@ -33,13 +40,21 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
     && git -C /build submodule update --init --depth 1 dataexport \
     && git -C /build apply /patch/ServiceRequestProvider.java.patch \
     && git -C /build apply /patch/FhirTransformServiceImpl.java.patch \
+    && git -C /build apply /patch/LiquibaseConfig.java.patch \
     && git -C /build apply /patch/base-changelog.xml.patch \
+    && git -C /build apply /patch/ElectronicOrder.hbm.xml.patch \
     && mkdir -p /build/src/main/java/org/openelisglobal/dataexchange/fhir \
     && cp /patch/DaherOrderCorrelation.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelation.java \
+    && cp /patch/DaherOrderCorrelationTransaction.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelationTransaction.java \
     && mkdir -p /build/src/main/resources/liquibase/daher \
     && cp /patch/001-electronic-order-daher-correlation-unique.xml \
-        /build/src/main/resources/liquibase/daher/001-electronic-order-daher-correlation-unique.xml
+        /build/src/main/resources/liquibase/daher/001-electronic-order-daher-correlation-unique.xml \
+    && cp /patch/002-site-code-configuration.xml \
+        /build/src/main/resources/liquibase/daher/002-site-code-configuration.xml \
+    && cp /patch/003-electronic-order-external-id-widen.xml \
+        /build/src/main/resources/liquibase/daher/003-electronic-order-external-id-widen.xml
 
 ARG DEFAULT_PW="adminADMIN!"
 WORKDIR /build

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from daher_adapter.config import Settings
 from daher_adapter.openelis import (
     HttpResult,
     MatchCount,
@@ -13,16 +14,19 @@ from daher_adapter.openelis import (
     OpenElisProtocolError,
     ServiceRequestDeliveryBlocked,
     VerificationOutcome,
+    deliver_service_request_if_activated,
 )
-from daher_adapter.recovery import SourceCorrelation, TargetPresence
+from daher_adapter.recovery import AmbiguousTargetState, SourceCorrelation, TargetPresence
 
 PATIENT_PAYLOAD = {"resourceType": "Patient"}
 PRACTITIONER_PAYLOAD = {"resourceType": "Practitioner"}
+SERVICE_REQUEST_PAYLOAD = {"resourceType": "ServiceRequest"}
 
 
-def bundle(*resources: Mapping[str, Any]) -> Mapping[str, Any]:
+def bundle(*resources: Mapping[str, Any], total: int | None = None) -> Mapping[str, Any]:
     return {
         "resourceType": "Bundle",
+        "total": len(resources) if total is None else total,
         "entry": [{"resource": r} for r in resources],
     }
 
@@ -79,6 +83,11 @@ def create_patient(transport: ScriptedTransport):
 
 def correlation(value: str = "deadbeef") -> SourceCorrelation:
     return SourceCorrelation(system="urn:daher-health:adapter:source-event", value=value)
+
+
+def deliver(transport: ScriptedTransport, value: str = "deadbeef"):
+    oe_client = client(transport)
+    return run(oe_client.deliver_service_request(correlation(value), SERVICE_REQUEST_PAYLOAD))
 
 
 # --- identifier_search -------------------------------------------------------------
@@ -300,10 +309,68 @@ def test_service_request_probe_one_match_is_found_with_record() -> None:
     assert result.record.record_id == "sr-1"
 
 
-def test_service_request_probe_many_matches_is_ambiguous() -> None:
+def test_service_request_probe_one_order_many_tests_is_found_not_ambiguous() -> None:
+    """DH-011D3 (Finding B correction): a multi-test order (a prenatal panel, the normal V1
+    case) produces one native Analysis, and therefore one ServiceRequest, per test -- so a
+    single logical order can legitimately come back as multiple Bundle entries. The match count
+    must come from Bundle.total (which OpenELIS's native-search patch sets to the logical-order
+    count, 0 or 1), never from counting entries, or every multi-test order would read back as
+    MANY and could never reconcile."""
     transport = ScriptedTransport()
-    two = bundle(resource("ServiceRequest", "sr-1"), resource("ServiceRequest", "sr-2"))
+    one_order_two_tests = bundle(
+        resource("ServiceRequest", "sr-test-1"), resource("ServiceRequest", "sr-test-2"), total=1
+    )
+    transport.queue_get(HttpResult(status=200, body=one_order_two_tests))
+
+    result = run(client(transport).service_request_probe(correlation()))
+
+    assert result.presence is TargetPresence.FOUND
+    assert result.record is not None
+    assert result.record.record_id == "sr-test-1"
+
+
+def test_service_request_probe_many_matches_is_ambiguous() -> None:
+    """Two genuinely distinct logical orders (Bundle.total == 2) -- structurally impossible
+    given the DB's partial unique index on the correlation value, but the probe must still fail
+    closed rather than pick one if it is ever observed."""
+    transport = ScriptedTransport()
+    two = bundle(resource("ServiceRequest", "sr-1"), resource("ServiceRequest", "sr-2"), total=2)
     transport.queue_get(HttpResult(status=200, body=two))
+
+    result = run(client(transport).service_request_probe(correlation()))
+
+    assert result.presence is TargetPresence.AMBIGUOUS
+
+
+def test_service_request_probe_single_entry_missing_total_is_still_found() -> None:
+    """The Finding B correction must not require Bundle.total to be present -- Patient,
+    Practitioner, and every other identifier search this client makes goes through the
+    standalone secondary FHIR store, whose total field is unverified. A single entry with no
+    total is exactly what counting entries already gave: FOUND, not degraded to AMBIGUOUS just
+    because total happens to be absent."""
+    transport = ScriptedTransport()
+    body = {"resourceType": "Bundle", "entry": [{"resource": resource("ServiceRequest", "sr-1")}]}
+    transport.queue_get(HttpResult(status=200, body=body))
+
+    result = run(client(transport).service_request_probe(correlation()))
+
+    assert result.presence is TargetPresence.FOUND
+    assert result.record is not None
+    assert result.record.record_id == "sr-1"
+
+
+def test_service_request_probe_many_entries_missing_total_is_ambiguous() -> None:
+    """Multiple entries with no Bundle.total to collapse them: total is never required, so this
+    falls back to exactly the pre-correction behavior -- MANY, not a guess in either direction."""
+    transport = ScriptedTransport()
+    body = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": resource("ServiceRequest", "sr-1")},
+            {"resource": resource("ServiceRequest", "sr-2")},
+        ],
+    }
+    transport.queue_get(HttpResult(status=200, body=body))
 
     result = run(client(transport).service_request_probe(correlation()))
 
@@ -333,14 +400,186 @@ def test_service_request_probe_against_unpatched_server_is_ambiguous_not_absent(
     assert result.presence is TargetPresence.AMBIGUOUS
 
 
-# --- delivery gate --------------------------------------------------------------
+# --- deliver_service_request: the real writer protocol (DH-011D3 finding C) -----------------
 
 
-def test_deliver_service_request_is_not_activated() -> None:
+def test_deliver_service_request_injects_the_correlation_identifier() -> None:
     transport = ScriptedTransport()
-    payload = {"resourceType": "ServiceRequest"}
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("ServiceRequest", "sr-1"))))
+
+    deliver(transport, "abc123")
+
+    posted_body = transport.posts[0][1]
+    identifiers = posted_body["identifier"]
+    assert {"system": "urn:daher-health:adapter:source-event", "value": "abc123"} in identifiers
+
+
+def test_deliver_service_request_rejects_a_conflicting_caller_supplied_identifier() -> None:
+    transport = ScriptedTransport()
+    conflicting = {
+        "resourceType": "ServiceRequest",
+        "identifier": [{"system": "urn:daher-health:adapter:source-event", "value": "wrong-value"}],
+    }
+
+    with pytest.raises(ValueError, match="conflicting"):
+        run(client(transport).deliver_service_request(correlation("abc123"), conflicting))
+
+    assert len(transport.posts) == 0  # caught before any network call
+
+
+def test_deliver_service_request_success_exactly_one_reconciliation_match() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("ServiceRequest", "sr-1"))))
+
+    result = deliver(transport)
+
+    assert result.system == "ServiceRequest"
+    assert result.record_id == "sr-1"
+    assert len(transport.posts) == 1  # exactly one POST, no retry
+
+
+def test_deliver_service_request_timeout_after_possible_commit_then_found_still_succeeds() -> None:
+    """The POST itself times out -- the write may or may not have landed. Reconciliation still
+    runs and, if it finds the order, that is authoritative regardless of what the POST did."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("ServiceRequest", "sr-1")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("ServiceRequest", "sr-1"))))
+
+    result = deliver(transport)
+
+    assert result.record_id == "sr-1"
+
+
+def test_deliver_service_request_post_never_lands_is_ambiguous_not_a_retry() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(TimeoutError("timed out"))
+
+    with pytest.raises(AmbiguousTargetState):
+        deliver(transport)
+
+    assert len(transport.posts) == 1  # attempted once; the exception is from that one attempt
+    assert len(transport.gets) == 0  # no reconciliation possible with nothing to reconcile against
+
+
+def test_deliver_service_request_zero_after_post_is_ambiguous_never_a_silent_success() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=201, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    with pytest.raises(AmbiguousTargetState, match="zero matches"):
+        deliver(transport)
+
+    assert len(transport.posts) == 1  # no blind retry
+
+
+def test_deliver_service_request_two_matches_after_post_is_ambiguous() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    two = bundle(resource("ServiceRequest", "sr-1"), resource("ServiceRequest", "sr-2"))
+    transport.queue_get(HttpResult(status=200, body=two))
+
+    with pytest.raises(AmbiguousTargetState):
+        deliver(transport)
+
+
+def test_deliver_service_request_401_on_reconciliation_is_ambiguous() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=401, body=None))
+
+    with pytest.raises(AmbiguousTargetState):
+        deliver(transport)
+
+
+def test_deliver_service_request_403_on_post_itself_is_ambiguous_not_a_definite_failure() -> None:
+    """A definite auth failure on the POST still cannot be trusted as "definitely did not
+    write" -- only the reconciliation read decides that."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=403, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    with pytest.raises(AmbiguousTargetState):
+        deliver(transport)
+
+    assert len(transport.posts) == 1
+
+
+def test_deliver_service_request_duplicate_conflict_reconciles_to_the_winner() -> None:
+    """A losing writer's conflict response (the DB-level uniqueness patch rejecting a race) must
+    reconcile to whichever order actually exists, never be treated as this writer's own
+    failure."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=500, body=resource("OperationOutcome")))
+    winner = bundle(resource("ServiceRequest", "winner-sr"))
+    transport.queue_get(HttpResult(status=200, body=winner))
+
+    result = deliver(transport)
+
+    assert result.record_id == "winner-sr"
+    assert len(transport.posts) == 1  # the conflicted attempt, not a second one
+
+
+# --- deliver_service_request_if_activated: activation gate, separate from capability --------
+
+
+def gated_settings(**overrides: str) -> Settings:
+    values = {
+        "TZ": "Africa/Djibouti",
+        "ADAPTER_DB_HOST": "openelis-db",
+        "ADAPTER_DB_PORT": "5432",
+        "ADAPTER_DB_NAME": "adapter",
+        "ADAPTER_DB_USER": "adapter",
+        "ADAPTER_DB_PASSWORD": "not-a-real-secret",
+        "ADAPTER_AUDIT_PATH": "/tmp/audit.jsonl",
+    }
+    values.update(overrides)
+    return Settings.from_env(values)
+
+
+def test_activation_gate_blocks_with_no_site_code() -> None:
+    transport = ScriptedTransport()
+    settings = gated_settings()
 
     with pytest.raises(ServiceRequestDeliveryBlocked):
-        run(client(transport).deliver_service_request(correlation(), payload))
+        run(
+            deliver_service_request_if_activated(
+                client(transport), settings, correlation(), {"resourceType": "ServiceRequest"}
+            )
+        )
 
-    assert len(transport.posts) == 0  # never attempted -- refuses before any network call
+    assert len(transport.posts) == 0  # the gate refuses before the capability ever runs
+
+
+def test_activation_gate_blocks_with_a_configured_site_code() -> None:
+    """Even a fully valid-shaped synthetic site code activates the gate -- this repo's
+    Settings validation already refuses the real placeholder (DEV01); this test only proves
+    the *gate* correctly reads that flag, not that any particular value is real."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("ServiceRequest", "sr-1"))))
+    settings = gated_settings(OPENELIS_SITE_CODE="19")
+
+    result = run(
+        deliver_service_request_if_activated(
+            client(transport), settings, correlation(), {"resourceType": "ServiceRequest"}
+        )
+    )
+
+    assert result.record_id == "sr-1"
+
+
+def test_activation_gate_delegates_to_the_real_capability_when_open() -> None:
+    """The gate does not reimplement the writer -- confirms it is the same code path as calling
+    the client directly, just conditionally reached."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+    settings = gated_settings(OPENELIS_SITE_CODE="19")
+
+    with pytest.raises(AmbiguousTargetState):  # the same zero-after-post outcome, gate or not
+        run(
+            deliver_service_request_if_activated(
+                client(transport), settings, correlation(), {"resourceType": "ServiceRequest"}
+            )
+        )

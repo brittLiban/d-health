@@ -1,8 +1,17 @@
 diff --git a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
-index 53c07a0f0..59cc0218b 100644
+index 53c07a0f0..fbe527321 100644
 --- a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
 +++ b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
-@@ -29,6 +29,7 @@ import org.hibernate.StaleObjectStateException;
+@@ -14,6 +14,8 @@ import ca.uhn.fhir.rest.api.MethodOutcome;
+ import ca.uhn.fhir.rest.param.DateRangeParam;
+ import ca.uhn.fhir.rest.param.ReferenceAndListParam;
+ import ca.uhn.fhir.rest.param.TokenAndListParam;
++import ca.uhn.fhir.rest.param.TokenOrListParam;
++import ca.uhn.fhir.rest.param.TokenParam;
+ import ca.uhn.fhir.rest.server.IResourceProvider;
+ import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+ import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+@@ -29,6 +31,7 @@ import org.hibernate.StaleObjectStateException;
  import org.hl7.fhir.instance.model.api.IBaseResource;
  import org.hl7.fhir.r4.model.Bundle;
  import org.hl7.fhir.r4.model.IdType;
@@ -10,7 +19,7 @@ index 53c07a0f0..59cc0218b 100644
  import org.hl7.fhir.r4.model.Patient;
  import org.hl7.fhir.r4.model.Practitioner;
  import org.hl7.fhir.r4.model.ServiceRequest;
-@@ -42,12 +43,17 @@ import org.openelisglobal.common.services.DisplayListService;
+@@ -42,19 +45,27 @@ import org.openelisglobal.common.services.DisplayListService;
  import org.openelisglobal.common.services.DisplayListService.ListType;
  import org.openelisglobal.common.services.IStatusService;
  import org.openelisglobal.common.services.StatusService.AnalysisStatus;
@@ -20,6 +29,7 @@ index 53c07a0f0..59cc0218b 100644
  import org.openelisglobal.common.util.DateUtil;
  import org.openelisglobal.common.util.validator.GenericValidator;
 +import org.openelisglobal.dataexchange.fhir.DaherOrderCorrelation;
++import org.openelisglobal.dataexchange.fhir.DaherOrderCorrelationTransaction;
  import org.openelisglobal.dataexchange.fhir.FhirUtil;
  import org.openelisglobal.dataexchange.fhir.service.FhirTransformService;
 +import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrder;
@@ -28,7 +38,16 @@ index 53c07a0f0..59cc0218b 100644
  import org.openelisglobal.patient.action.IPatientUpdate.PatientUpdateStatus;
  import org.openelisglobal.patient.action.bean.PatientManagementInfo;
  import org.openelisglobal.patient.service.PatientService;
-@@ -62,6 +68,7 @@ import org.openelisglobal.sample.form.SamplePatientEntryForm;
+ import org.openelisglobal.patient.util.PatientUtil;
+ import org.openelisglobal.patient.validator.ValidatePatientInfo;
++import org.openelisglobal.common.provider.validation.IAccessionNumberGenerator;
+ import org.openelisglobal.sample.action.util.SamplePatientUpdateData;
+ import org.openelisglobal.sample.action.util.SampleUtil;
++import org.openelisglobal.sample.util.AccessionNumberUtil;
+ import org.openelisglobal.sample.bean.SampleEditItem;
+ import org.openelisglobal.sample.bean.SampleOrderItem;
+ import org.openelisglobal.sample.form.SampleEditForm;
+@@ -62,6 +73,7 @@ import org.openelisglobal.sample.form.SamplePatientEntryForm;
  import org.openelisglobal.sample.service.PatientManagementUpdate;
  import org.openelisglobal.sample.service.SampleEditService;
  import org.openelisglobal.sample.service.SamplePatientEntryService;
@@ -36,7 +55,16 @@ index 53c07a0f0..59cc0218b 100644
  import org.openelisglobal.sample.validator.SampleEditFormValidator;
  import org.openelisglobal.sample.valueholder.Sample;
  import org.openelisglobal.samplehuman.service.SampleHumanService;
-@@ -84,6 +91,20 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -72,6 +84,8 @@ import org.openelisglobal.spring.util.SpringContext;
+ import org.openelisglobal.systemuser.service.UserService;
+ import org.openelisglobal.test.service.TestService;
+ import org.openelisglobal.test.valueholder.Test;
++import org.openelisglobal.typeofsample.service.TypeOfSampleService;
++import org.openelisglobal.typeofsample.valueholder.TypeOfSample;
+ import org.springframework.beans.factory.annotation.Autowired;
+ import org.springframework.stereotype.Component;
+ import org.springframework.validation.BindException;
+@@ -84,9 +98,32 @@ public class ServiceRequestProvider implements IResourceProvider {
      @Autowired
      private SamplePatientEntryService samplePatientService;
  
@@ -54,10 +82,41 @@ index 53c07a0f0..59cc0218b 100644
 +    @Autowired
 +    private SampleService sampleService;
 +
++    @Autowired
++    private DaherOrderCorrelationTransaction daherOrderTransaction;
++
      @Autowired
      private AnalysisService analysisService;
  
-@@ -179,6 +200,20 @@ public class ServiceRequestProvider implements IResourceProvider {
++    // DH-011M (Option P): resolves the sample type a genuinely new order (no existing
++    // specimen) needs, from this lab's own already-configured test/sample-type reference
++    // data -- never from a clinical judgment this patch makes itself.
++    @Autowired
++    private TypeOfSampleService typeOfSampleService;
++
+     @Autowired
+     private FhirTransformService fhirTransformService;
+ 
+@@ -164,6 +201,18 @@ public class ServiceRequestProvider implements IResourceProvider {
+     }
+ 
+     @Create
++    // DH-011D3 (independent review, P0 finding A): the outer transaction covering
++    // persistData + persistDaherOrderCorrelation is NOT declared on this method -- an earlier
++    // version of this patch tried exactly that and broke HAPI's own provider registration:
++    // @Transactional makes Spring wrap this bean in a JDK dynamic proxy (it implements
++    // IResourceProvider), and that proxy exposes only the interface's methods -- none of
++    // which carry @Create/@Search/@Update/@Delete, which live on this concrete class. HAPI's
++    // FhirRestfulServer reflects on the bean it receives to find those annotations and found
++    // none: "HAPI-0289: Did not find any annotated RESTful methods", the whole
++    // ServiceRequestProvider silently stops serving anything, confirmed live during this
++    // pass. The outer transaction instead lives on daherOrderTransaction
++    // (DaherOrderCorrelationTransaction, a separate bean HAPI never reflects on) -- see its
++    // call in this method's body and that class's own javadoc for the full account.
+     public MethodOutcome createServiceRequest(@ResourceParam ServiceRequest serviceRequest,
+             HttpServletRequest request) {
+ 
+@@ -179,6 +228,20 @@ public class ServiceRequestProvider implements IResourceProvider {
              requireTrue(serviceRequest.hasSubject(), "ServiceRequest.subject is required");
              requireTrue(serviceRequest.hasCode(), "ServiceRequest.code is required");
  
@@ -78,20 +137,154 @@ index 53c07a0f0..59cc0218b 100644
              final String patientRefId = requireNonBlank(serviceRequest.getSubject().getReferenceElement().getIdPart(),
                      "ServiceRequest.subject reference is invalid");
  
-@@ -274,6 +309,12 @@ public class ServiceRequestProvider implements IResourceProvider {
-             requireNonNull(updateData.getSample(), "Persisted sample is invalid");
-             requireNonNull(updateData.getSample().getId(), "Persisted sample ID is invalid");
+@@ -195,14 +258,6 @@ public class ServiceRequestProvider implements IResourceProvider {
+                     fhirTransformService.buildSampleOrderItemFromServiceRequest(serviceRequest, sysuserId),
+                     "Failed to build SampleOrderItem from ServiceRequest");
  
-+            // DH-011D: persist the Daher order correlation now that a native sample exists to
-+            // link it to. The authoritative uniqueness guarantee is the DB-level partial unique
-+            // index; a race that slips past the fast check above surfaces here as a genuine
-+            // constraint violation, not a silently accepted duplicate.
-+            persistDaherOrderCorrelation(daherOrderId, updateData.getSample(), sysuserId);
+-            final String labNo = requireNonBlank(sampleOrder.getLabNo(), "Generated lab number is invalid");
+-
+-            String receivedDateForDisplay = requireNonBlank(sampleOrder.getReceivedDateForDisplay(),
+-                    "Received date is required");
+-
+-            receivedDateForDisplay += GenericValidator.isBlankOrNull(sampleOrder.getReceivedTime()) ? " 00:00"
+-                    : " " + sampleOrder.getReceivedTime();
+-
+             final List<Test> tests = requireNonEmpty(
+                     fhirTransformService.resolveTestsFromServiceRequest(serviceRequest),
+                     "No tests resolved from ServiceRequest");
+@@ -214,10 +269,48 @@ public class ServiceRequestProvider implements IResourceProvider {
+             final SampleEditItem firstItem = editItems.stream().filter(i -> i != null && i.isAdd()).findFirst()
+                     .orElse(editItems.get(0));
+ 
+-            final String sampleItemId = requireNonNull(firstItem.getSampleItemId(), "SampleItemId is missing");
++            // DH-011M (Option P): firstItem.getSampleItemId() is set only when
++            // buildSampleEditItemsListFromServiceRequest resolved serviceRequest.specimen against an
++            // already-existing SampleItem (see FhirTransformServiceImpl). That branch is entirely
++            // unchanged below.
++            final String sampleItemId = firstItem.getSampleItemId();
++            final SampleItem sampleItem;
++            if (!GenericValidator.isBlankOrNull(sampleItemId)) {
++                sampleItem = requireNonNull(sampleItemService.get(sampleItemId),
++                        "SampleItem not found for ID: " + sampleItemId);
++            } else if (serviceRequest.hasSpecimen() && serviceRequest.getSpecimenFirstRep().hasReference()) {
++                // DH-011M: the caller explicitly referenced a specimen and it did not resolve to an
++                // existing SampleItem -- a dangling reference, a typo, or a race, not "no specimen
++                // exists yet". Never silently fall through to the new-order path here: a caller that
++                // believed it was targeting an existing sample would otherwise get a second, duplicate
++                // one instead of the error it needs to see. "Genuinely new order" is signaled only by
++                // no specimen reference being present at all -- checked explicitly, never inferred from
++                // a failed lookup.
++                throw new InvalidRequestException("ServiceRequest.specimen reference did not resolve to "
++                        + "an existing SampleItem -- refusing to silently create a new order instead");
++            } else {
++                // New order: generate a real accession number through the exact generator the human
++                // Sample Entry workflow uses (AccessionNumberUtil.getMainAccessionNumberGenerator(),
++                // the same call CommonValidationsRestController's SampleEntryGenerateScanProvider
++                // endpoint makes) -- never a second implementation of that algorithm -- then hand a
++                // transient, never-separately-persisted SampleItem carrying only the sample type the
++                // requested tests need to SampleUtil.buildSampleXml unchanged, with no sampleItemId, so
++                // SamplePatientUpdateData.createPopulatedSample's existing "create new sample" branch
++                // (sampleOrder.getSampleId() stays blank in this case, exactly as it always has) runs
++                // exactly as it already does for the traditional Sample Entry UI. See
++                // newOrderAccessionNumber/newOrderSampleItem javadoc for what this deliberately never
++                // sets.
++                sampleOrder.setLabNo(newOrderAccessionNumber());
++                sampleItem = newOrderSampleItem(tests);
++            }
+ 
+-            final SampleItem sampleItem = requireNonNull(sampleItemService.get(sampleItemId),
+-                    "SampleItem not found for ID: " + sampleItemId);
++            final String labNo = requireNonBlank(sampleOrder.getLabNo(), "Generated lab number is invalid");
 +
++            String receivedDateForDisplay = requireNonBlank(sampleOrder.getReceivedDateForDisplay(),
++                    "Received date is required");
++
++            receivedDateForDisplay += GenericValidator.isBlankOrNull(sampleOrder.getReceivedTime()) ? " 00:00"
++                    : " " + sampleOrder.getReceivedTime();
+ 
+             final String sampleXml = requireNonBlank(SampleUtil.buildSampleXml(tests, sampleItem, sampleItemId),
+                     "Failed to build sample XML");
+@@ -269,10 +362,17 @@ public class ServiceRequestProvider implements IResourceProvider {
+                 throw new InvalidRequestException(formatErrors(result));
+             }
+ 
+-            samplePatientService.persistData(updateData, patientUpdate, patientInfo, form, request);
+-
+-            requireNonNull(updateData.getSample(), "Persisted sample is invalid");
+-            requireNonNull(updateData.getSample().getId(), "Persisted sample ID is invalid");
++            // DH-011D3 (finding A): persistData and the correlation write now share one outer
++            // transaction (DaherOrderCorrelationTransaction, see that class's javadoc for why
++            // it is a separate bean rather than @Transactional directly on this method) -- a
++            // failure persisting the correlation, or a race the partial unique index rejects,
++            // rolls the native patient/sample/sample_item/analysis writes back too instead of
++            // leaving an orphaned order with no correlation.
++            daherOrderTransaction.persist(updateData, patientUpdate, patientInfo, form, request, () -> {
++                requireNonNull(updateData.getSample(), "Persisted sample is invalid");
++                requireNonNull(updateData.getSample().getId(), "Persisted sample ID is invalid");
++                persistDaherOrderCorrelation(daherOrderId, updateData.getSample(), sysuserId);
++            });
+ 
              final SampleHuman lookup = new SampleHuman();
              lookup.setSampleId(updateData.getSample().getId());
+@@ -313,6 +413,57 @@ public class ServiceRequestProvider implements IResourceProvider {
+         }
+     }
  
-@@ -534,6 +575,14 @@ public class ServiceRequestProvider implements IResourceProvider {
++    /**
++     * DH-011M (Option P): the exact generator the human Sample Entry workflow uses --
++     * {@code AccessionNumberUtil.getMainAccessionNumberGenerator()} resolves to whatever format this
++     * lab is actually configured with (SITEYEARNUM in every environment observed), the same call
++     * {@code CommonValidationsRestController}'s {@code SampleEntryGenerateScanProvider} endpoint
++     * makes for the frontend before a human submits a new sample. {@code reserve=true} and an empty
++     * program code match that endpoint's own default call exactly -- this is not a second
++     * implementation of the accession algorithm, only a second caller of the same one.
++     */
++    private String newOrderAccessionNumber() {
++        IAccessionNumberGenerator generator = requireNonNull(AccessionNumberUtil.getMainAccessionNumberGenerator(),
++                "No accession number generator is configured");
++        return requireNonBlank(generator.getNextAvailableAccessionNumber("", true),
++                "Unable to generate a new accession number");
++    }
++
++    /**
++     * DH-011M (Option P): a transient {@code SampleItem} -- never saved directly; it exists only to
++     * carry {@code getTypeOfSample()} into {@code SampleUtil.buildSampleXml}, which
++     * {@code SamplePatientUpdateData.initSampleData}'s own {@code SampleAddService} re-parses into
++     * the real, persisted {@code SampleItem} -- carrying only the sample type every requested test
++     * needs. Deliberately sets nothing else: no collection date, collector, quantity, container,
++     * source, or received state. Those are physical-collection facts nothing in this ServiceRequest
++     * supplied, and {@code SampleAddService} already leaves each of them unset (and the resulting
++     * SampleItem at {@code SampleStatus.Entered}, not received/collected) when its XML omits the
++     * corresponding attribute -- exactly what {@code buildSampleXml} does when given a SampleItem
++     * with only a type set. The sample type itself comes from this lab's own already-configured
++     * test/sample-type reference data ({@code TypeOfSampleService.getSampleTypeFromTest}, which
++     * itself fails loud -- {@code NonUniqueResultException} -- if a test is ambiguously configured
++     * with more than one type), never invented here. A ServiceRequest whose requested tests need
++     * different sample types is rejected rather than arbitrarily choosing one.
++     */
++    private SampleItem newOrderSampleItem(List<Test> tests) {
++        TypeOfSample typeOfSample = null;
++        for (Test test : tests) {
++            TypeOfSample resolved = requireNonNull(typeOfSampleService.getSampleTypeFromTest(test),
++                    "No sample type is configured for test " + test.getId() + " -- cannot determine the "
++                            + "specimen type for a new order without inventing one");
++            if (typeOfSample == null) {
++                typeOfSample = resolved;
++            } else if (!typeOfSample.getId().equals(resolved.getId())) {
++                throw new InvalidRequestException("Requested tests require different sample types ("
++                        + typeOfSample.getId() + ", " + resolved.getId()
++                        + ") -- cannot represent them as a single new SampleItem");
++            }
++        }
++        SampleItem item = new SampleItem();
++        item.setTypeOfSample(typeOfSample);
++        return item;
++    }
++
+     @Update
+     public MethodOutcome updateServiceRequest(@IdParam IdType theId, @ResourceParam ServiceRequest serviceRequest,
+             HttpServletRequest request) {
+@@ -534,6 +685,14 @@ public class ServiceRequestProvider implements IResourceProvider {
  
              @OptionalParam(name = ServiceRequest.SP_CODE) TokenAndListParam code,
  
@@ -106,10 +299,192 @@ index 53c07a0f0..59cc0218b 100644
              @OptionalParam(name = ServiceRequest.SP_REQUESTER, chainWhitelist = { "", Practitioner.SP_IDENTIFIER,
                      Practitioner.SP_GIVEN, Practitioner.SP_FAMILY,
                      Practitioner.SP_NAME }, targetTypes = Practitioner.class) ReferenceAndListParam participantReference,
-@@ -580,6 +629,80 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -557,6 +716,30 @@ public class ServiceRequestProvider implements IResourceProvider {
+ 
+         String method = "search";
+ 
++        // DH-011D3 (independent review, P0 finding B): an `identifier` search on the Daher
++        // correlation system must be answered from native OpenELIS state, never from the
++        // secondary standalone HAPI store. createServiceRequest already tolerates
++        // transformPersistOrderEntryFhirObjects failing (logs a warning, continues) --
++        // so a native order can genuinely exist with the export to that secondary store
++        // never having happened. DH-025 treats a `total: 0` response as PROVEN ABSENT and
++        // would retry-create against an order that already exists. Only the Daher system is
++        // rerouted; every other identifier search (accession, analysis_uuid, facility, ...)
++        // keeps using forwardSearchToFhirStore exactly as before -- unchanged behavior for
++        // everything this patch does not own.
++        String daherCorrelationValue = extractSingleDaherCorrelationValue(identifier);
++        if (daherCorrelationValue != null) {
++            try {
++                return searchDaherCorrelationNatively(daherCorrelationValue);
++            } catch (InternalErrorException | InvalidRequestException e) {
++                throw e;
++            } catch (Exception e) {
++                LogEvent.logError(this.getClass().getSimpleName(), method,
++                        "Error resolving native Daher order correlation: " + safeMessage(e));
++                throw new InternalErrorException(
++                        "Unexpected server error resolving native Daher order correlation", e);
++            }
++        }
++
+         try {
+             Bundle resultBundle = util.forwardSearchToFhirStore(request);
+ 
+@@ -580,6 +763,231 @@ public class ServiceRequestProvider implements IResourceProvider {
          }
      }
  
++    /**
++     * DH-011D3: recognizes exactly the shape DH-025 actually sends --
++     * {@code identifier=urn:daher-health:adapter:source-event|<value>}, one system, one value,
++     * no OR/AND combinations -- and returns {@code null} only when the Daher system is absent
++     * entirely, so the caller falls through to the unchanged {@code forwardSearchToFhirStore}
++     * path for every query this patch has no opinion about.
++     *
++     * <p>If the Daher system appears anywhere in a shape this method does not recognize
++     * (combined with another AND term, combined with another system via OR, a blank value),
++     * it fails loud instead of returning {@code null}. Falling through in that case would send
++     * a Daher-system query to the secondary FHIR store, whose sync is best-effort by Finding
++     * B's own premise (a native order can exist while the sync silently failed) -- exactly the
++     * false-ABSENT this patch exists to prevent. DH-025's own query shape (verified against
++     * {@code adapter/src/daher_adapter/openelis.py}'s {@code identifier_search}) always sends
++     * the single-token form, so this path is not expected to be reachable in production; it
++     * exists so a change on either side fails closed instead of silently degrading.
++     */
++    private String extractSingleDaherCorrelationValue(TokenAndListParam identifier) {
++        if (identifier == null) {
++            return null;
++        }
++        boolean daherSystemPresent = identifier.getValuesAsQueryTokens().stream().filter(Objects::nonNull)
++                .flatMap(or -> or.getValuesAsQueryTokens().stream()).filter(Objects::nonNull)
++                .anyMatch(t -> DaherOrderCorrelation.SYSTEM.equals(t.getSystem()));
++        if (!daherSystemPresent) {
++            return null;
++        }
++        if (identifier.size() != 1) {
++            throw new InvalidRequestException("ServiceRequest.identifier combines the "
++                    + DaherOrderCorrelation.SYSTEM + " system with another AND-combined "
++                    + "identifier parameter -- this cannot be resolved unambiguously against "
++                    + "native state");
++        }
++        TokenOrListParam orParam = identifier.getValuesAsQueryTokens().get(0);
++        if (orParam == null || orParam.size() != 1) {
++            throw new InvalidRequestException("ServiceRequest.identifier combines the "
++                    + DaherOrderCorrelation.SYSTEM + " system with another OR-combined token "
++                    + "-- this cannot be resolved unambiguously against native state");
++        }
++        TokenParam token = orParam.getValuesAsQueryTokens().get(0);
++        String value = token == null ? null : token.getValue();
++        if (GenericValidator.isBlankOrNull(value)) {
++            throw new InvalidRequestException(
++                    "ServiceRequest.identifier carries the " + DaherOrderCorrelation.SYSTEM
++                            + " system with a blank value");
++        }
++        return value;
++    }
++
++    /**
++     * DH-011D3: the authoritative native lookup Finding B requires. Never touches the
++     * secondary HAPI store. Zero matches on a genuinely absent correlation, exactly one
++     * FHIR-typed {@code electronic_order} row per the partial unique index this patch's
++     * migration adds -- an internal inconsistency (a correlation row with no linked sample, or
++     * more than one Sample linked to the same correlation, either of which the outer
++     * transaction in {@code createServiceRequest} should make impossible in committed state)
++     * fails loudly rather than silently reporting zero or fabricating a count.
++     *
++     * <p><b>{@code Bundle.total} counts logical orders (0 or 1 -- the partial unique index
++     * guarantees at most one), not constituent {@code ServiceRequest} resources.</b> One order
++     * commonly carries more than one test (a prenatal panel, for example), which produces one
++     * {@code Analysis} per test and therefore one {@code ServiceRequest} bundle entry per test.
++     * DH-025's probe treats exactly-one-native-match as success; if {@code total} counted
++     * entries instead, every multi-test order would read back as ambiguous and the ledger could
++     * never complete -- the opposite of what a correlation search this deep exists to prove.
++     * Every constituent {@code ServiceRequest} is still returned as a Bundle entry for callers
++     * that want them; only the count DH-025 keys off is collapsed to the logical-order level.
++     */
++    private Bundle searchDaherCorrelationNatively(String correlationValue) {
++        Bundle bundle = new Bundle();
++        bundle.setType(Bundle.BundleType.SEARCHSET);
++        bundle.setEntry(new ArrayList<>());
++
++        List<ElectronicOrder> candidates = electronicOrderService.getElectronicOrdersByExternalId(correlationValue);
++        List<ElectronicOrder> fhirOrders = candidates.stream()
++                .filter(o -> o != null && ElectronicOrderType.FHIR.equals(o.getType()))
++                .collect(Collectors.toList());
++
++        if (fhirOrders.isEmpty()) {
++            bundle.setTotal(0);
++            return bundle;
++        }
++        if (fhirOrders.size() > 1) {
++            // The partial unique index (electronic_order(external_id) WHERE type='FHIR')
++            // makes this structurally impossible in committed state. If it is ever observed,
++            // trust the database over the assumption and fail loudly rather than silently
++            // picking one -- exactly the "never fabricate a result" discipline this whole
++            // method exists to enforce.
++            throw new InternalErrorException(
++                    "Data integrity violation: multiple FHIR-typed electronic_order rows share "
++                            + "external_id " + correlationValue + " -- the uniqueness index should "
++                            + "make this impossible");
++        }
++
++        ElectronicOrder order = fhirOrders.get(0);
++        List<Sample> linkedSamples = sampleService.getAllMatching("clinicalOrderId", order.getId());
++        if (linkedSamples == null || linkedSamples.isEmpty()) {
++            // A correlation exists but nothing is linked to it. With Finding A's outer
++            // transaction in place, this should not be reachable in committed state --
++            // treat it the same as the size>1 case above: a real inconsistency, not a
++            // reason to report zero and let DH-025 retry into it.
++            throw new InternalErrorException(
++                    "Data integrity violation: electronic_order " + order.getId()
++                            + " (correlation " + correlationValue + ") has no linked sample");
++        }
++        if (linkedSamples.size() > 1) {
++            // Nothing in createServiceRequest ever links more than one Sample to the same
++            // correlation -- persistDaherOrderCorrelation links exactly the Sample it just
++            // created. If more than one is observed, trust the database over the assumption,
++            // the same discipline as the fhirOrders.size() > 1 check above.
++            throw new InternalErrorException(
++                    "Data integrity violation: electronic_order " + order.getId()
++                            + " (correlation " + correlationValue + ") has " + linkedSamples.size()
++                            + " linked samples -- expected exactly one");
++        }
++        // Exactly one logical order past this point: one FHIR-typed electronic_order, one
++        // linked Sample. total reflects that -- see the javadoc above for why this is not a
++        // count of the ServiceRequest entries added below.
++        bundle.setTotal(1);
++
++        for (Sample sample : linkedSamples) {
++            if (sample == null || sample.getId() == null) {
++                continue;
++            }
++            List<SampleItem> items = sampleItemService.getSampleItemsBySampleId(sample.getId());
++            if (items == null) {
++                continue;
++            }
++            for (SampleItem item : items) {
++                if (item == null) {
++                    continue;
++                }
++                List<Analysis> analyses = analysisService.getAnalysesBySampleItem(item);
++                if (analyses == null) {
++                    continue;
++                }
++                for (Analysis analysis : analyses) {
++                    if (analysis == null || analysis.getId() == null) {
++                        continue;
++                    }
++                    ServiceRequest resource = fhirTransformService.transformToServiceRequest(analysis.getId());
++                    if (resource == null) {
++                        continue;
++                    }
++                    bundle.addEntry().setResource(resource);
++                }
++            }
++        }
++        return bundle;
++    }
++
 +    /**
 +     * DH-011D: extracts the exactly-one Daher order-correlation identifier from an inbound
 +     * ServiceRequest. Fails closed -- an order DH-025 cannot deterministically reconcile must

@@ -100,6 +100,56 @@ patient-identifier system decision (DH-011G), real requester approval (DH-011H, 
 test mapping (DH-011I, DH-006). The production polling loop remains unwired — this pass did not
 touch that, deliberately.
 
+**CORRECTION appended 2026-08-28 (DH-011D3, append-only — the two paragraphs above are superseded,
+not retracted).** "What remains unprovable, and only because it needs a real `ServiceRequest`" was
+wrong on the "only" — an independent review of the committed DH-011D implementation found three
+pre-activation safety gaps (transaction atomicity across the native create and correlation write —
+fixed, but only after `@Transactional` on the HAPI provider method itself broke provider
+registration entirely, `HAPI-0289`; the correlation search reading the possibly-stale secondary
+FHIR store instead of native OpenELIS state — fixed, along with a `Bundle.total` miscount on both
+the OpenELIS and adapter sides that would have permanently blocked reconciliation for any order
+with more than one test; the delivery writer not existing at all — now implemented, activation
+still gated separately) and one further defect this pass fixed
+(`electronic_order.external_id` was `varchar(60)`, too narrow for the 64-character correlation
+value — every real write would have failed). It also found, but explicitly did not fix, that
+**`ServiceRequestProvider.createServiceRequest` cannot create a new order at all** — it only
+decorates a `ServiceRequest` against an *already-existing* `Sample`, reached via a `specimen`
+reference; accession-number generation never runs otherwise. Proven not to be the site code: a
+request with no site code configured and an identical request with a synthetic test-only numeric
+site code both failed identically. This is `Human Decision Required: Yes` (Specimen-as-prerequisite
+has clinical-surface implications), not an engineering task, and it — not the site code alone —
+blocks every control requiring a live `createServiceRequest` success (formal transaction proof,
+induced-failure rollback, service-layer concurrency, FHIR-sync-failure, crash-recovery). Full
+account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011D3 section.
+
+**CORRECTION appended 2026-08-29 (DH-011M, append-only — the paragraph above is superseded, not
+retracted).** Liban approved Option P (2026-08-29): patch the ingestion path to generate a real
+accession number via the same generator the human Sample Entry workflow already uses, and let
+`SamplePatientUpdateData.createPopulatedSample`'s existing "create new sample" branch run. **Built
+and live-proven**, fully synthetic disposable stack, `.env` never read, real facility never
+touched: new-order happy path (`POST /fhir/ServiceRequest` with no specimen reference → `201`,
+real `SITEYEARNUM` accession, one Sample/SampleItem/Analysis, correlation preserved, discoverable
+by the real adapter writer/probe, no fabricated collection facts — `collector`/`quantity`/
+`source_id` stay NULL, status reads "entered", never "received"); duplicate delivery (rejected,
+zero extra rows); a genuine DB-level concurrent-delivery race (one winner, the loser leaves zero
+orphan native rows — Finding A's atomicity holds under real concurrency for a brand-new order, not
+just DH-011D2's raw-SQL proof); crash-ambiguity through the concrete `OpenElisClient` writer
+against live infrastructure, not a mocked double; and the real `/rest/home-dashboard/
+ORDERS_IN_PROGRESS` endpoint (unmodified, pre-existing) showing the new orders with no
+collected/received claim. A duplicate-order safety gap was found and fixed during this ticket's
+own testing: a *dangling* specimen reference (present but unresolvable) was indistinguishable from
+*no* reference and would have silently created a second order for a caller with a typo'd
+reference — now fails loud instead. **New finding, not fixed here**: adding a second test to an
+*already-existing* order throws `StaleObjectStateException` live. Control-tested against a
+completely pristine, unpatched build of the exact same pinned upstream tag/commit — the identical
+error reproduced — **conclusively proving this is a pre-existing upstream defect, unrelated to any
+Daher patch including DH-011M itself**, not a regression. Out of scope to fix in this ticket;
+needs its own ticket and decision. The numeric site code (NEEDS LIBAN #7) is confirmed **not**
+the reason new orders couldn't be created — that was proven live this pass — but the real
+facility's accession prefix is still the upstream placeholder `DEV01` in every environment tested
+and still needs the real value. Full account: `openelis-config/patches/order-correlation/
+PROVENANCE.md`'s DH-011M section.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now

@@ -1,15 +1,15 @@
-"""DH-011/BLOCKER-6 §10-11: `OpenElisClient` wired as `recovery.py`'s real `TargetProbe`/
-`TargetWriter`, not a generic fake. `test_recovery.py` already proves `RecoveryCoordinator`'s
-crash-point behavior is target-agnostic (5 crash points around the write, all fail-closed on
-ambiguity); what this file proves is that binding the actual OpenELIS client preserves that
-contract rather than silently reinterpreting it.
+"""DH-011/BLOCKER-6 §10-11, extended DH-011D3 finding C: `OpenElisClient` wired as
+`recovery.py`'s real `TargetProbe`/`TargetWriter`, not a generic fake. `test_recovery.py`
+already proves `RecoveryCoordinator`'s crash-point behavior is target-agnostic (5 crash points
+around the write, all fail-closed on ambiguity); what this file proves is that binding the
+actual OpenELIS client preserves that contract rather than silently reinterpreting it.
 
-`deliver_service_request` is deliberately unimplemented (§9) -- live ServiceRequest delivery
-stays blocked until the real numeric site code exists. So the one crash point this file cannot
-exercise end to end is "target accepted the write, adapter crashed before recording it" for a
-real OpenELIS write -- see `test_reconciliation_after_found_completes_without_a_second_write`
-for the part of that path that *is* provable today (found-on-probe never calls the writer), and
-`test_write_target_refuses_rather_than_attempting_a_doomed_post` for why the rest is not faked.
+`deliver_service_request` is now a real writer (DH-011D3 finding C) -- POST, then always an
+authoritative native reconciliation read, never a blind retry. What still cannot be exercised
+here is a live OpenELIS target actually accepting a real write (`ServiceRequest` creation stays
+refused server-side until the real numeric site code exists) -- every test below scripts the
+target's responses rather than hitting a real server, which is a deliberate, disclosed
+boundary, not a gap in the writer's own logic.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pytest
 from test_openelis import ScriptedTransport, bundle, resource
 
 from daher_adapter.ledger import MessageIdentity
-from daher_adapter.openelis import HttpResult, OpenElisClient, ServiceRequestDeliveryBlocked
+from daher_adapter.openelis import HttpResult, OpenElisClient
 from daher_adapter.recovery import (
     AmbiguousTargetState,
     RecoveryAction,
@@ -125,21 +125,53 @@ def test_reconciliation_after_ambiguous_probe_never_completes_or_writes() -> Non
     assert len(transport.posts) == 0
 
 
-def test_write_target_refuses_rather_than_attempting_a_doomed_post() -> None:
-    """Crash-before-write's other half: zero matches proven, so DH-025 would normally call
-    `write_target`. Bound to the real client, that write refuses outright instead of attempting
-    a POST that OpenELIS's own accession gate would refuse anyway -- see `openelis.py`'s
-    `deliver_service_request` docstring for why raising is preferred over a doomed network call.
-    """
-    absent = HttpResult(status=200, body=bundle())
-    client, _transport = openelis(get_response=absent)
+def test_write_target_writes_and_reconciles_when_the_probe_proved_absence() -> None:
+    """Crash-before-write's other half: zero matches proven, so DH-025 calls `write_target`.
+    Bound to the real client (DH-011D3 finding C), that POSTs and then performs its own
+    authoritative reconciliation read before the coordinator ever marks anything completed."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))  # probe: proven absent
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("ServiceRequest", "sr-new"))))
+    base = "https://oe.openelis.org:8443/OpenELIS-Global/fhir"
+    client = OpenElisClient(base, transport.get, transport.post)
     ledger = FakeLedger(state="processing")
     coordinator = RecoveryCoordinator(ledger=ledger)
 
     async def write_target(correlation):
-        return await client.deliver_service_request(correlation, {})
+        return await client.deliver_service_request(correlation, {"resourceType": "ServiceRequest"})
 
-    with pytest.raises(ServiceRequestDeliveryBlocked):
+    result = run(
+        coordinator.reconcile(
+            identity(),
+            fence=FakeFence(),
+            probe_target=client.service_request_probe,
+            write_target=write_target,
+        )
+    )
+
+    assert result.action is RecoveryAction.RETRIED_AFTER_PROVEN_ABSENCE
+    assert result.target.record_id == "sr-new"
+    assert ledger.completed_with == ("ServiceRequest", "sr-new")
+    assert len(transport.posts) == 1  # exactly one write attempt
+
+
+def test_write_target_ambiguous_reconciliation_never_completes_the_ledger() -> None:
+    """If the write's own reconciliation cannot prove exactly one match, the whole recovery
+    must stop -- the coordinator never sees a fabricated success."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))  # probe: proven absent
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle()))  # reconciliation: zero, ambiguous
+    base = "https://oe.openelis.org:8443/OpenELIS-Global/fhir"
+    client = OpenElisClient(base, transport.get, transport.post)
+    ledger = FakeLedger(state="processing")
+    coordinator = RecoveryCoordinator(ledger=ledger)
+
+    async def write_target(correlation):
+        return await client.deliver_service_request(correlation, {"resourceType": "ServiceRequest"})
+
+    with pytest.raises(AmbiguousTargetState):
         run(
             coordinator.reconcile(
                 identity(),
@@ -150,6 +182,7 @@ def test_write_target_refuses_rather_than_attempting_a_doomed_post() -> None:
         )
 
     assert ledger.completed_with is None
+    assert len(transport.posts) == 1  # no blind retry after the ambiguous reconciliation
 
 
 def test_source_correlation_used_by_the_real_client_matches_ledgers_own_derivation() -> None:

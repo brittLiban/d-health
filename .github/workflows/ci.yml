@@ -1215,6 +1215,98 @@ jobs:
                 "no forbidden fuzzy-matching patterns, and the uniqueness index stays scoped to FHIR-typed rows")
           PY
 
+  openelis-order-correlation-build:
+    # DH-011D3 (§14, independent review). The static guard above proves the committed patches'
+    # *text* has the right shape -- it never compiles a single line of the patched Java or the
+    # new Liquibase changesets. This job is the behavioral companion, mirroring
+    # oauth2login-provider-tests below: it fetches the exact pinned OpenELIS-Global-2 source,
+    # verifies the commit, initializes the pinned dataexport submodule, applies the SAME
+    # committed patch files openelis-config/Dockerfile consumes (not a test-only duplicate --
+    # the file list below is exactly the Dockerfile's COPY + git apply list), installs the new
+    # source and migration files, and runs upstream's own build recipe through to a produced
+    # WAR. There is no dedicated JUnit suite for this patch (unlike oauth2login's
+    # ProviderRoleDerivationTest/FirstLoginAuthenticationTest) -- successful compilation of the
+    # patched reactor, matching what Dockerfile actually ships, is what §14 requires.
+    #
+    # Runs inside the exact pinned Maven/JDK image the Dockerfile itself builds with.
+    name: openelis order-correlation patch — compiles
+    runs-on: ubuntu-latest
+    container:
+      image: maven:3-eclipse-temurin-21@sha256:8f6ac126f7810bb5549c4cd122d2bf0e9cda5bdeb0838aa928f09e779fd8bef8
+    env:
+      # Same pin openelis-config/Dockerfile and PROVENANCE.md record. Not read from those files
+      # at run time on purpose -- see oauth2login-provider-tests' identical rationale below.
+      OPENELIS_PINNED_TAG: 3.2.1.11
+      OPENELIS_PINNED_COMMIT: e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23
+      OPENELIS_SRC: /tmp/openelis-src
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: /root/.m2/repository
+          key: m2-openelis-${{ env.OPENELIS_PINNED_COMMIT }}
+
+      - name: Fetch exact pinned OpenELIS-Global-2 source and verify the commit
+        run: |
+          git clone --branch "$OPENELIS_PINNED_TAG" --depth 1 \
+            https://github.com/DIGI-UW/OpenELIS-Global-2.git "$OPENELIS_SRC"
+          actual="$(git -C "$OPENELIS_SRC" rev-parse HEAD)"
+          if [ "$actual" != "$OPENELIS_PINNED_COMMIT" ]; then
+            echo "::error::OpenELIS-Global-2 tag $OPENELIS_PINNED_TAG resolved to $actual, expected $OPENELIS_PINNED_COMMIT -- the upstream tag moved or was force-pushed"
+            exit 1
+          fi
+          git -C "$OPENELIS_SRC" submodule update --init --depth 1 dataexport
+
+      - name: Apply the production patches (the same files openelis-config/Dockerfile consumes)
+        run: |
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ServiceRequestProvider.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/FhirTransformServiceImpl.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/LiquibaseConfig.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/base-changelog.xml.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ElectronicOrder.hbm.xml.patch"
+
+          mkdir -p "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherOrderCorrelation.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelation.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherOrderCorrelationTransaction.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelationTransaction.java"
+
+          mkdir -p "$OPENELIS_SRC/src/main/resources/liquibase/daher"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/001-electronic-order-daher-correlation-unique.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/001-electronic-order-daher-correlation-unique.xml"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/002-site-code-configuration.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/002-site-code-configuration.xml"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/003-electronic-order-external-id-widen.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/003-electronic-order-external-id-widen.xml"
+
+      - name: Compile the patched reactor through to a produced WAR
+        # Mirrors openelis-config/Dockerfile's own build recipe (its BuildKit cache mounts
+        # become the actions/cache step above; every mvn invocation and flag is identical).
+        working-directory: /tmp/openelis-src
+        run: |
+          ./install/createDefaultPassword.sh -c -p adminADMIN!
+
+          cd dataexport/dataexport-core
+          mvn -B dependency:go-offline
+          mvn -B clean install -DskipTests
+          cd ../
+          mvn -B dependency:go-offline
+          mvn -B clean install -DskipTests
+          mkdir -p /tmp/openelis-src/dataexport-m2/org
+          cp -r /root/.m2/repository/org/itech /tmp/openelis-src/dataexport-m2/org/
+
+          cd /tmp/openelis-src
+          mvn -B dependency:go-offline
+          mvn -B clean install -Dmaven.test.skip=true -DskipITs=true -Dspotless.check.skip=true
+          test -s /tmp/openelis-src/target/OpenELIS-Global.war \
+            || { echo "::error::patched reactor did not produce target/OpenELIS-Global.war"; exit 1; }
+          echo "ok — patched OpenELIS-Global-2 reactor compiled and produced OpenELIS-Global.war"
+
   oauth2login-provider-tests:
     # DH-008G-CI / Bug #25. The static guards above prove the committed patches'
     # *text* has the right shape (method exists, exact-match constant, fails

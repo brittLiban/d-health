@@ -1,0 +1,61 @@
+diff --git a/src/main/java/org/openelisglobal/liquibase/LiquibaseConfig.java b/src/main/java/org/openelisglobal/liquibase/LiquibaseConfig.java
+index f7fb671c6..e36648049 100644
+--- a/src/main/java/org/openelisglobal/liquibase/LiquibaseConfig.java
++++ b/src/main/java/org/openelisglobal/liquibase/LiquibaseConfig.java
+@@ -1,5 +1,8 @@
+ package org.openelisglobal.liquibase;
+ 
++import java.util.HashMap;
++import java.util.Map;
++import java.util.regex.Pattern;
+ import javax.sql.DataSource;
+ import liquibase.integration.spring.SpringLiquibase;
+ import org.springframework.beans.factory.annotation.Autowired;
+@@ -16,12 +19,47 @@ public class LiquibaseConfig {
+     @Value("${spring.liquibase.contexts:default}")
+     private String contexts;
+ 
++    // DH-011D3 (independent review, §12): the reproducible configuration mechanism for the
++    // real facility OpenELIS site code -- see liquibase/daher/002-site-code-configuration.xml,
++    // which this parameter feeds. Deliberately never given a real value here: this is the
++    // MECHANISM, not the value. Blank (the default, matching every deployment today) leaves the
++    // existing accession prefix untouched. A non-blank, non-numeric value fails startup loudly
++    // rather than being silently ignored -- SITEYEARNUM requires a numeric site code (DH-011B),
++    // and a malformed value reaching the changeset would otherwise look like a no-op.
++    @Value("${daher.openelis.site.code:}")
++    private String daherSiteCode;
++
++    private static final Pattern NUMERIC_SITE_CODE = Pattern.compile("^[0-9]+$");
++    private static final String KNOWN_PLACEHOLDER = "DEV01";
++
+     @Bean("liquibase")
+     public SpringLiquibase liquibase() {
+         SpringLiquibase liquibase = new SpringLiquibase();
+         liquibase.setChangeLog("classpath:liquibase/base-changelog.xml");
+         liquibase.setDataSource(dataSource);
+         liquibase.setContexts(contexts);
++        liquibase.setChangeLogParameters(buildChangeLogParameters());
+         return liquibase;
+     }
++
++    private Map<String, String> buildChangeLogParameters() {
++        String validated = "";
++        String trimmed = daherSiteCode == null ? "" : daherSiteCode.trim();
++        if (!trimmed.isEmpty()) {
++            if (KNOWN_PLACEHOLDER.equals(trimmed)) {
++                throw new IllegalStateException("daher.openelis.site.code is still the upstream "
++                        + "placeholder 'DEV01' -- supply the real facility value or leave this "
++                        + "property unset (NEEDS LIBAN #7)");
++            }
++            if (!NUMERIC_SITE_CODE.matcher(trimmed).matches()) {
++                throw new IllegalStateException("daher.openelis.site.code must be numeric -- "
++                        + "SITEYEARNUM requires a numeric site code (DH-011B) -- refusing to "
++                        + "start with a malformed value rather than silently ignoring it");
++            }
++            validated = trimmed;
++        }
++        Map<String, String> params = new HashMap<>();
++        params.put("daherOpenelisSiteCode", validated);
++        return params;
++    }
+ }

@@ -1,0 +1,17 @@
+diff --git a/src/main/resources/hibernate/hbm/ElectronicOrder.hbm.xml b/src/main/resources/hibernate/hbm/ElectronicOrder.hbm.xml
+index 47c37fbca..e2285bc0e 100644
+--- a/src/main/resources/hibernate/hbm/ElectronicOrder.hbm.xml
++++ b/src/main/resources/hibernate/hbm/ElectronicOrder.hbm.xml
+@@ -21,7 +21,11 @@
+             <column name="ORDER_TIMESTAMP" length="7" not-null="true" />
+         </property>
+         <property name="externalId" type="java.lang.String">
+-            <column name="EXTERNAL_ID" length="60" not-null="true" />
++            <!-- DH-011D3: widened from 60 to 64; DaherOrderCorrelation.VALUE_PATTERN is a
++                 64-character lowercase hex SHA-256 digest and would not otherwise fit; see
++                 liquibase/daher/003-electronic-order-external-id-widen.xml for the matching
++                 schema change. -->
++            <column name="EXTERNAL_ID" length="64" not-null="true" />
+         </property>
+         <many-to-one name="patient"
+             class="org.openelisglobal.patient.valueholder.Patient" fetch="select"

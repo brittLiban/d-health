@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011D3 (independent review, §12): the reproducible configuration mechanism for the real
+    facility OpenELIS numeric site code. NOT the value itself: that remains NEEDS LIBAN #7,
+    never invented anywhere in this repository.
+
+    ${daherOpenelisSiteCode} is populated by LiquibaseConfig.buildChangeLogParameters() from the
+    daher.openelis.site.code property (environment-overridable via Spring's standard relaxed
+    binding). It is empty in every deployment today, and Java-side validation already rejects a
+    non-blank, non-numeric, or still-placeholder value at startup before this changeset ever
+    runs; so by the time this file executes, the value is either genuinely empty or genuinely
+    a real numeric site code.
+
+    Applies to the SAME row DH-011B originally characterized live: clinlims.site_information,
+    name = 'Accession number prefix' (id 106 in the deployment this was authored against),
+    domain 'siteIdentity', the same row a human could otherwise set by hand through
+    Admin > General Configuration > Site Information. This changeset exists so a fresh
+    deployment reaches the same state reproducibly, the same way every other Daher-owned
+    Liquibase changeset in this directory replaces a manual admin-UI step with a version-
+    controlled one, not because the admin UI path is wrong, but because "someone clicked it
+    once" is not a reproducible deployment.
+
+    Fails safely: the precondition below MARKS THIS CHANGESET RAN (not applied, not an error)
+    whenever the parameter is empty: the overwhelmingly common case until NEEDS LIBAN #7 is
+    answered. No value is invented, and no accession semantics are touched, when the site code
+    is still unknown.
+  -->
+  <changeSet id="daher-011d3-002-site-code-configuration" author="daher-health">
+    <preConditions onFail="MARK_RAN"
+        onFailMessage="daher.openelis.site.code not supplied -- leaving the existing accession prefix untouched (NEEDS LIBAN #7)">
+      <sqlCheck expectedResult="0">SELECT CASE WHEN '${daherOpenelisSiteCode}' = '' THEN 1 ELSE 0 END</sqlCheck>
+    </preConditions>
+    <update schemaName="clinlims" tableName="site_information">
+      <column name="value" value="${daherOpenelisSiteCode}" />
+      <column name="lastupdated" valueComputed="now()" />
+      <where>name = 'Accession number prefix'</where>
+    </update>
+  </changeSet>
+</databaseChangeLog>

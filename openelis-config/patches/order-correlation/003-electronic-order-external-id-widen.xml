@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011D3 (new finding, surfaced live while proving Finding B's native search): before this
+    changeset, clinlims.electronic_order.external_id was varchar(60). DaherOrderCorrelation
+    .VALUE_PATTERN (adapter/src/daher_adapter/recovery.py's SOURCE_CORRELATION_SYSTEM value
+    format: hashlib.sha256(...).hexdigest(), exactly 64 lowercase hex characters) can never fit
+    in 60 characters. Confirmed live: a direct insert of a genuine 64-character correlation
+    value into a fresh isolated DB raised "value too long for type character varying(60)".
+    persistDaherOrderCorrelation (ServiceRequestProvider.java.patch) would hit the identical
+    failure on every real create; with Finding A's outer transaction in place this now rolls
+    back cleanly instead of orphaning native Sample/SampleItem/Analysis state, but the
+    correlation itself could never be written at all, silently defeating the entire Option F
+    correlation design before it ever reached the writer.
+
+    Widening to exactly 64 matches the pattern this column is now additionally used to store.
+    Existing rows (HL7/CSV external order numbers, all <=60 characters in every environment
+    observed) are untouched by a widen: increasing a varchar length in Postgres does not rewrite
+    existing data and does not require rebuilding electronic_order_daher_correlation_uk or
+    e_order_external_id_idx, both of which are ordinary btree indexes with no length dependency.
+  -->
+  <changeSet id="daher-011d3-003-electronic-order-external-id-widen" author="daher-health">
+    <modifyDataType tableName="electronic_order" columnName="external_id" newDataType="varchar(64)" />
+    <rollback>
+      <modifyDataType tableName="electronic_order" columnName="external_id" newDataType="varchar(60)" />
+    </rollback>
+  </changeSet>
+</databaseChangeLog>

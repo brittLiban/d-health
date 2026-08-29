@@ -1912,6 +1912,111 @@ completion state of DH-011 itself, which still needs the site code and several h
 untouched by this pass (DH-011G's identifier-system choice, DH-011H's real requester, DH-006's test
 mapping).
 
+### ADR-026 — correction appended 2026-08-28 (DH-011D3 closure pass): three pre-activation gaps
+closed, one new P0 finding, still NOT COMPLETE
+
+**Every statement above that DH-011D's remaining gap is "the site code" is superseded, not
+retracted — append-only, same as always.** An independent review of the committed DH-011D
+implementation, requested in the same session as DH-011D2's closure, found three pre-activation
+safety gaps the DH-011D2 pass had not closed. This pass closed all three, closed a fourth defect
+the fix work surfaced, and found — but did not fix, because fixing it is a design decision, not an
+engineering one — a fifth that is larger than anything ADR-026 has recorded so far.
+
+**Closed**: (1) the native create and the correlation write were two separate database
+transactions, not one — a mid-sequence failure or a race could commit native Sample/Analysis rows
+with no correlation. Fixed with a real outer Spring transaction, in a separate bean (`@Transactional`
+directly on the HAPI provider method broke provider registration entirely — `HAPI-0289` — a
+constraint this ADR did not previously know about). (2) the correlation search read the possibly-
+stale secondary FHIR store, which upstream's own order-creation logs-and-continues on export
+failure — a native order could exist while the search reported zero. Fixed by deriving existence
+from native OpenELIS state directly, plus a `Bundle.total` correction (both the OpenELIS and adapter
+sides needed it) so a real multi-test order does not permanently misread as ambiguous. (3) the
+delivery writer that would eventually POST a `ServiceRequest` did not exist — supplying the site
+code alone could never have made delivery work. Now implemented, with activation kept on its own
+gate, unchanged from ADR-026's "the site code is one input, not a green light" framing.
+
+**Also found and fixed**: `clinlims.electronic_order.external_id` was `varchar(60)`; the
+correlation value this whole design depends on is a 64-character SHA-256 hex digest. Every real
+correlation write would have failed silently defeating Option F before the writer was ever reached.
+Widened via a Liquibase migration, proven by a genuine value failing before the fix and succeeding
+after it against the same database.
+
+**Found, not fixed — `Human Decision Required: Yes`, recorded in `PROJECT_STATE.md`.**
+`ServiceRequestProvider.createServiceRequest` (pre-existing upstream code, confirmed by grepping
+every committed DH-011D/D2/D3 patch for the failing line — no match) cannot create a new order at
+all. It requires an already-existing `Sample`, reached through a `specimen` reference on the
+inbound `ServiceRequest`; accession-number generation never runs for a request with no such
+reference. A live `POST /fhir/ServiceRequest` with no site code configured, and the identical
+request with a synthetic test-only numeric site code configured, both failed identically
+(`Generated lab number is invalid`) — ruling out the site code as the cause. The endpoint appears
+to expect a Specimen-creation step first (`SpecimenProvider` has its own `@Create`), but designing
+or building that prerequisite was **not attempted**: it decides what a Specimen represents and who
+creates it in this system, which is exactly the kind of gap ADR-026's own history has repeatedly
+treated as a decision for Liban, not an assumption to make while closing a ticket.
+
+**Consequence.** Every control this ticket's own review asked for that requires a live
+`createServiceRequest` success — the formal transaction-capture proof, the induced-failure
+rollback control, the service-layer concurrency control, the FHIR-sync-failure control, the
+crash-recovery control — is blocked by this finding, not by NEEDS LIBAN #7. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011D3 section.
+
+**BLOCKER-6 STATUS: unchanged, RESOLVED BY DECISION (this finding does not reopen Option F or the
+correlation-identity decision — it is a downstream implementation gap in the endpoint Option F
+already selected, not a reason to reconsider which endpoint). `DH-011` overall STATUS: still NOT
+COMPLETE. `DH-011E`: still NOT ACTIVATED.**
+
+### ADR-026 — BLOCKER-11 resolved by decision 2026-08-29 (DH-011M): Option P, built and live-proven
+
+**BLOCKER-11** (raised by the DH-011D3 evidence pass above) asked which native OpenELIS lifecycle
+correctly turns a new external order into pre-analytic state when no Sample/SampleItem/Specimen
+exists yet. The evidence ticket that answered it found: Specimen-first (Option S) cannot bootstrap
+a Sample at all (`SpecimenProvider.createSpecimen` requires an *already-existing* Sample, found by
+accession number); the native `TaskWorker`/`DBOrderPersister` pipeline (Option O/R) is a complete,
+coherent, already-existing external-order model, but is pull-based (OpenELIS polls a remote FHIR
+server it trusts) and defers real Sample/SampleItem/Analysis creation to a later human accessioning
+step, which would require redefining what DH-025 considers a successful write; and Option P --
+patching `ServiceRequestProvider` itself to generate a real accession number and let
+`SamplePatientUpdateData.createPopulatedSample`'s already-existing "create new sample" branch run
+-- needs no change to DH-025's contract at all and reuses the exact accession generator the human
+Sample Entry workflow already trusts.
+
+**Liban's decision, 2026-08-29: Option P.** Do not build Option O, Option R, or Specimen-first.
+Do not redesign DH-025.
+
+**Built and live-proven** (full account: `openelis-config/patches/order-correlation/
+PROVENANCE.md`'s DH-011M section) against fully synthetic, disposable infrastructure -- `.env`
+never read, the real facility stack never touched. A new order with no specimen reference now
+succeeds end to end: a genuine `SITEYEARNUM` accession number, exactly one Sample/SampleItem/
+Analysis, the Daher correlation preserved and discoverable by the real adapter writer and probe
+(not a mocked double), no fabricated specimen-collection fact (`collector`/`quantity`/`source_id`
+stay unset; the lifecycle status reads "entered", never "received" or "collected", confirmed both
+at the database and through the real dashboard endpoint a lab worker's UI actually renders from).
+Duplicate delivery and a genuine concurrent-delivery database race were both proven safe live: the
+race's loser leaves zero orphan native rows, extending Finding A's atomicity proof from DH-011D2's
+raw-SQL demonstration to a real concurrent create through the business API. One safety gap was
+found and closed during this ticket's own testing: a *dangling* specimen reference (present but
+unresolvable, as opposed to no reference at all) was indistinguishable from a genuinely new order
+and would have silently created a duplicate -- now fails loud instead.
+
+**One further finding, deliberately not fixed here.** Adding a second test to an already-existing
+order (a real, resolvable specimen reference -- the branch Option P leaves entirely untouched)
+throws a live `StaleObjectStateException`. Rather than assume this was caused by DH-011D3's
+transaction-atomicity wrapper, it was control-tested: the identical scenario was reproduced against
+a completely pristine build of the exact same pinned upstream tag and commit, with zero Daher
+patches of any kind applied. The identical exception occurred. This is conclusive: the defect is
+pre-existing in upstream OpenELIS 3.2.1.11 itself, not introduced by any Daher patch, and DH-011M's
+own new-order path never reaches the branch where it lives. Fixing a pre-existing, unrelated defect
+in an already-shipped code surface is out of this ticket's scope by its own instructions ("smallest
+patch", "one ticket only") and AGENTS.md's guidance on a fix that exposes a second, unrelated bug --
+recorded here as a new finding requiring its own ticket, not silently repaired and not silently
+left undocumented.
+
+**BLOCKER-11 STATUS: RESOLVED BY DECISION.** BLOCKER-6 stays RESOLVED BY DECISION, Option F
+unchanged. `DH-011` overall STATUS: still NOT COMPLETE -- new-order creation is now built and
+live-proven, but the pre-existing existing-order-edit defect, the real numeric site code (NEEDS
+LIBAN #7, for the facility's actual accession prefix, no longer for order creation itself),
+DH-011G/H/I's human decisions, and DH-011J/K/L all remain open. `DH-011E`: still NOT ACTIVATED.
+
 ---
 
 ## ADR-027 — Daher UI production identity: the browser holds the real upstream sessions; no BFF in V1
