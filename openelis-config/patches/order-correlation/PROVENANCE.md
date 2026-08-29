@@ -947,3 +947,151 @@ Ruff clean); this ticket did not re-measure them because it made no change that 
 READY TO COMMIT: No production code was changed. The only committable artifact from this ticket is
 this documentation update plus the two `PROJECT_STATE.md` blocker entries -- see the ticket's FINAL
 HANDOFF.
+
+## DH-011O (2026-08-29) -- both DH-011N decisions approved; additive semantics implementation-
+## ready; correlation storage hits a structural blocker, characterized, not resolved -- no code
+## changed, no disposable infrastructure built
+
+Liban approved DH-011N's two blocking decisions: (1) existing-order updates are additive only --
+add the requested test, never implicitly touch, cancel, or replace existing analyses; (2) each
+added test is its own independent DH-025 source event, with its own stable correlation,
+independently deduplicated and recoverable, on a stable accession. This ticket set out to
+implement the existing-order branch against those decisions. It resolved decision (1) down to an
+implementation-ready design from source alone. Decision (2) hit a structural blocker in the current
+correlation model that this ticket characterizes rather than resolves by inference -- writing code
+past it would mean choosing a schema/model-extension shape Liban has not seen, on a clinical
+database, which is squarely the "gap that obviously should be filled a particular way" AGENTS.md
+reserves for a human. No disposable infrastructure was built this pass; both findings below came
+from static analysis of the pinned upstream source (already cloned locally from DH-011N) and this
+repository's own adapter code, at zero Docker cost.
+
+### Decision (1), additive semantics: no synthesized state needed, source-proven
+
+`SampleEditServiceImpl.createRemoveList` and `createSampleItemUpdateList` (native "add a test"
+business logic, unchanged upstream code) both iterate exclusively over the `existingTests` array
+the caller submits, and act on an item only when it carries an explicit flag (`isCanceled()`,
+`isSampleItemChanged()`) set to true. Neither method, nor anything else in `editSample`, ever
+compares the submitted `existingTests` against what is currently in the database -- an existing
+test simply *absent* from the submitted array is never loaded, never visited by any loop, and
+therefore cannot be cancelled, modified, or replaced by omission. This means a pure "add one test"
+call can omit `existingTests` entirely: nothing needs to be read back from OpenELIS and
+faithfully carried forward to avoid corrupting it, because the native code path never inspects
+current state for anything not named in the request. DH-011N's earlier live test (successful
+add via `POST /rest/SampleEdit` with `existingTests` carried forward verbatim) is consistent with
+this but did not distinguish "carrying forward is required" from "carrying forward happens to be
+harmless" -- this ticket closed that gap from source, confirming the latter. Decision (1) is
+therefore implementation-ready as designed, once decision (2)'s storage question is resolved.
+
+### Decision (2), per-added-test correlation: structural blocker, two designs characterized
+
+**The blocker, precisely.** `Sample.hbm.xml` maps `clinicalOrderId` as a single scalar column, not
+a collection. `ServiceRequestProvider.searchDaherCorrelationNatively` (DH-011D3) is the sole
+authoritative native lookup DH-025 relies on, and it resolves every correlation through exactly
+that column: `electronicOrderService.getElectronicOrdersByExternalId(correlationValue)` →
+`sampleService.getAllMatching("clinicalOrderId", order.getId())`, requiring **exactly one** linked
+`Sample` -- zero throws `InternalErrorException` ("no linked sample"), more than one throws the
+same for "expected exactly one". Both branches are deliberate fail-closed integrity checks per
+that method's own javadoc, not incidental gaps. Consequence: a second `electronic_order` row
+created for an added test's own correlation would be structurally unlinkable without breaking
+something. Leave `Sample.clinical_order_id` pointed at the original order and the new row's own
+probe finds an `electronic_order` with zero linked samples -- the "no linked sample" integrity
+throw, every time. Repoint `clinical_order_id` at the new row instead and the *original* order's
+probe now finds zero linked samples the same way -- the fix would silently break DH-025's ability
+to reconcile the very event (Option P's new-order creation) this repository has already built and
+live-proven twice (DH-011M, DH-011N). There is no way to satisfy decision (2) by reusing the
+existing `electronic_order`/`Sample.clinical_order_id` mechanism at all; it needs a genuine
+model extension.
+
+**Two designs evaluated, neither implemented:**
+
+- **(A) A new column directly on `clinlims.analysis`** -- e.g. `daher_correlation_id varchar(64)`,
+  nullable, with a partial unique index `WHERE daher_correlation_id IS NOT NULL` (mirroring
+  `electronic_order_daher_correlation_uk`'s own `WHERE type = 'FHIR'` pattern). Requires: a new
+  Liquibase changeset; a new `Analysis.hbm.xml.patch` adding the mapped property; **and a new
+  patch to upstream `Analysis.java` itself**, adding the field and its accessor. `Analysis.java` is
+  a core clinical valueholder no Daher patch has touched in this repository's history -- this
+  option meaningfully grows both the committed patch surface and the upgrade/rebase burden this
+  ticket elsewhere asks to keep small, for a value that is pure transport metadata, not a clinical
+  fact about the analysis itself.
+- **(B, recommended) A new standalone correlation table**, e.g.
+  `daher_analysis_correlation(id, analysis_id → analysis.id, correlation_value varchar(64) unique,
+  created_at)`, mapped by a new Hibernate/JPA entity class -- structurally the same pattern
+  already established for order-level correlation (`DaherOrderCorrelation.java`,
+  `DaherOrderCorrelationTransaction.java`: new files, not patches to existing upstream classes).
+  Requires a new Liquibase changeset and a new mapping/entity file; **zero patches to any existing
+  upstream `.java` or `.hbm.xml` file**. This also matches `hibernate.cfg.xml`'s own stated
+  direction -- its comments on the Sample Storage Management and ASTM Analyzer Mapping sections
+  explicitly say newer additions are "annotation-based mappings (JPA)... per Constitution IV"
+  rather than further `.hbm.xml` patching, so a JPA-annotated entity registered in
+  `persistence.xml` (rather than a fifth `.hbm.xml.patch`) would follow this codebase's own
+  already-stated preference, not introduce a new pattern.
+
+**Checked against the adapter before proposing either, so the design isn't chosen blind to its
+consumer:** `adapter/src/daher_adapter/openelis.py`'s `identifier_search` treats a FHIR bundle
+with exactly one `entry` as `MatchCount.ONE` regardless of what `Bundle.total` says -- the
+`total`-based collapse rule only fires when `len(entries) > 1`. A new Analysis-scoped native
+search branch that returns exactly one entry for an added-test correlation therefore needs **no
+adapter-side code change** for the base (one-match) case under either design A or B -- this is a
+pure OpenELIS-side addition as far as DH-025's existing contract is concerned, for that case.
+
+**Two things an eventual implementation must still state explicitly, whichever design is chosen,**
+not leave to whichever lookup happens to run first: (i) what happens if a correlation value is
+somehow found in *both* namespaces at once (`electronic_order.external_id` and the new added-test
+store) -- almost certainly the same fail-closed ambiguity discipline `searchDaherCorrelationNatively`
+already applies to its own "more than one" cases, but this has never been stated for a
+cross-namespace collision and must be, not assumed by omission; (ii) whether the new branch's
+`Bundle.total` should read `1` for consistency with the existing "one logical order" convention,
+even though the adapter's own single-entry shortcut does not strictly require it.
+
+**Two cheap alternatives considered and rejected in writing, not merely dismissed:**
+deduplicating an added test by "does this accession already have an Analysis for this test code"
+is clinical-state deduplication across potentially distinct source events, which the ticket's own
+Same-test-semantics section explicitly forbids inventing (Event B and a later, distinct clinician-
+originated Event C requesting the identical test are not automatically the same event). Keeping
+the added-test-to-correlation mapping only in the adapter's own Postgres database (never written to
+OpenELIS at all) fails the ticket's own requirement that the *target* be authoritative and
+searchable across the crash-after-target-commit-but-before-ledger-completion window DH-025's
+recovery contract must close -- an adapter-only record cannot answer "did this exact event already
+succeed" from the target's own state, which is the entire point of DH-025's probe-before-deliver
+design.
+
+### Concurrency, flagged for whichever ticket implements the fix, not designed in here
+
+A pure add (no `existingTests` submitted, matching decision (1)'s finding above) never sets
+`SampleEditServiceImpl.editSample`'s internal `sampleChanged` flag, so it never issues a `Sample`
+`UPDATE` at all -- the mutation is confined to a new `Analysis` insert (plus, under design B, a new
+correlation-table insert). Two concurrent additions to the same accession may therefore never
+contend on any shared versioned row in the first place. Per this ticket's own instruction not to
+design a serialization boundary ahead of evidence: the eventual implementation should run the
+concurrent-different-additions test (required test H) unmodified first, and add
+`LockMode.PESSIMISTIC_WRITE` (or an equivalent narrow lock) only if it demonstrably fails --
+never disable or weaken `@Version`.
+
+### What was deliberately not done, and why
+
+- **ADR-031 was not written.** Liban's two decisions are approved and real, but their
+  implementation depends on which correlation-storage design he picks -- writing the ADR now,
+  before that answer, would mean appending a correction to a decision record authored an hour
+  earlier, on an append-only file. It will be written once the storage design is chosen.
+- **No disposable infrastructure was built.** Both this ticket's findings (the structural
+  correlation blocker, and decision (1)'s no-synthesis-needed proof) came from reading the pinned
+  upstream source (already cloned locally from DH-011N, commit `e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23`,
+  unchanged) and this repository's own adapter code. Building a container to re-confirm either
+  would have cost a full build/boot cycle to re-demonstrate what the source already settles
+  precisely.
+- **No code was written for either design.** Per this ticket's own Phase 1 instruction ("if using
+  the native edit service necessarily requires synthesizing clinical state... STOP and report the
+  exact problem") and AGENTS.md's "never invent policy" rule -- decision (2)'s storage shape is a
+  gap with more than one reasonable, materially different answer, and this ticket has no basis to
+  choose one for Liban.
+- **The required verification matrix (A-K), negative controls, and DH-025/ADR-031 documentation
+  were not attempted.** All depend on a concrete implementation that does not yet exist.
+
+### Real-facility boundary and cleanup
+
+Real facility never started, stopped, or connected to. No synthetic containers, volumes, networks,
+or images were created this pass -- there is nothing to tear down.
+
+READY TO COMMIT: No production code was changed. The only committable artifact from this ticket is
+this documentation update plus the one `PROJECT_STATE.md` blocker entry -- see the ticket's FINAL
+HANDOFF.

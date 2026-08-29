@@ -173,6 +173,26 @@ independent question of whether DH-025's ledger models "add a test" as its own s
 recorded in `PROJECT_STATE.md`. No production code changed. Full account:
 `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011N section.
 
+**CORRECTION appended 2026-08-29 (DH-011O, append-only — the paragraph above is superseded, not
+retracted).** Liban approved both DH-011N decisions: additive semantics (add the requested test,
+never implicitly touch existing analyses) and per-added-test correlation (each added test is its
+own independent DH-025 source event). DH-011O source-proved the additive-semantics side needs no
+synthesized state at all — `SampleEditServiceImpl`'s existing-test handling only ever acts on items
+explicitly present and flagged in the submitted form; an item simply omitted is never touched by
+any code path, so a pure add-a-test call can omit `existingTests` entirely. That decision is
+implementation-ready. The correlation side hit a **structural blocker**: `Sample.clinical_order_id`
+is a single scalar column and `searchDaherCorrelationNatively`'s native lookup both requires and
+fail-closed-enforces exactly one Sample per correlation — a second `electronic_order` row for an
+added test's own correlation cannot be linked without either leaving its own probe unresolvable or
+breaking the *original* order's probe the same way. Satisfying the correlation decision needs a
+genuine schema/model extension, and which shape it takes — a new column plus a first-ever patch to
+upstream `Analysis.java` (design A), versus a new standalone correlation table needing no upstream
+Java/`.hbm.xml` patches at all (design B, recommended) — is a decision with real, differently-costly
+alternatives that DH-011O has no basis to choose alone. **Human Decision Required: Yes**, recorded
+in `PROJECT_STATE.md`'s DH-011O entry. No code written for either design; no disposable
+infrastructure was built (both findings came from source alone); real facility untouched. Full
+account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011O section.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now
