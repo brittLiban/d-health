@@ -2017,6 +2017,24 @@ live-proven, but the pre-existing existing-order-edit defect, the real numeric s
 LIBAN #7, for the facility's actual accession prefix, no longer for order creation itself),
 DH-011G/H/I's human decisions, and DH-011J/K/L all remain open. `DH-011E`: still NOT ACTIVATED.
 
+**Correction appended 2026-08-29 (DH-011N).** The paragraph above's claim that the existing-order
+`StaleObjectStateException` was "conclusively" proven pre-existing-upstream by control-testing
+against pristine OpenELIS was **correct in conclusion but overstated in evidentiary basis**: both
+runs used a directly-SQL-inserted `Sample`/`SampleItem`/`Analysis` fixture (labeled at the time
+"FHIR SEARCH FIXTURE ONLY / NOT NATIVE ORDER PROOF"), and a hand-written INSERT is itself a common
+artificial cause of exactly this exception. DH-011N closed that gap: reproduced the identical
+failure live, three times, against a genuinely native, Hibernate-managed `Sample` created through
+Option P's own path -- the defect is real, not a fixture artifact -- and root-caused it to
+detached-entity reuse across session boundaries (no ambient transaction spans
+`ServiceRequestProvider.createServiceRequest` until `daherOrderTransaction.persist(...)` opens
+partway through the method, per DH-011D3's own finding A). This does not change BLOCKER-11's
+RESOLVED status or Option P's own correctness -- Option P's new-order path never reaches the
+affected branch, re-confirmed live by DH-011N. It only strengthens the evidentiary basis for the
+"pre-existing, not a DH-011M regression" claim, which now rests on a genuine reproduction rather
+than an unproven fixture. The fix itself remains unbuilt, blocked on two Human Decisions recorded
+in `PROJECT_STATE.md`'s DH-011N entries. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011N section.
+
 ---
 
 ## ADR-027 — Daher UI production identity: the browser holds the real upstream sessions; no BFF in V1

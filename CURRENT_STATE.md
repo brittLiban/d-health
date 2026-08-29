@@ -150,6 +150,29 @@ facility's accession prefix is still the upstream placeholder `DEV01` in every e
 and still needs the real value. Full account: `openelis-config/patches/order-correlation/
 PROVENANCE.md`'s DH-011M section.
 
+**CORRECTION appended 2026-08-29 (DH-011N, append-only — the paragraph above is superseded, not
+retracted).** The "conclusively proving" language above rested on a directly-SQL-inserted fixture,
+which DH-011M's own text already flagged as "NOT NATIVE ORDER PROOF" — a hand-written INSERT is
+itself a common artificial cause of `StaleObjectStateException`, so the conclusion was correct but
+under-proven. DH-011N reproduced the identical failure **live, three times, against a genuinely
+native, Hibernate-managed `Sample`** (created through Option P's own path, not SQL) — the defect is
+confirmed real. Root cause, proven by elimination and a live DB trace: **detached-entity reuse
+across session boundaries**, not a genuine version/precision conflict (a hand-replay of Hibernate's
+exact failing SQL via psql matched `UPDATE 1`) and not Hibernate JDBC batching (both
+`batch_versioned_data=false` and `batch_size=0` tested live, both still failed identically).
+`ServiceRequestProvider.createServiceRequest` resolves the existing `SampleItem`/`Sample` twice
+*before* its only transactional boundary (`daherOrderTransaction.persist(...)`) opens — a live
+trace showed **seven** separate `SELECT`s of the same `Sample` row in one request, which a single
+Hibernate session's cache would never produce. The native "add a test" UI path
+(`SampleEditService.editSample`) succeeds on the identical fixture because it is `@Transactional`
+end-to-end and only re-saves `Sample` when something actually changed — live-proven, not inferred.
+**Still not fixed**: routing the FHIR path through `SampleEditService` requires synthesizing its
+replace-shaped form (`existingTests` with cancel/remove flags) from an add-shaped `ServiceRequest`,
+an assumption never stated as a decision — `Human Decision Required: Yes`, alongside a second,
+independent question of whether DH-025's ledger models "add a test" as its own source event. Both
+recorded in `PROJECT_STATE.md`. No production code changed. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011N section.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now

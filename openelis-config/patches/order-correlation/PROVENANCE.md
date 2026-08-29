@@ -695,3 +695,255 @@ nothing synthetic persists.
   properties this session's evidence already establishes by construction.
 
 READY TO COMMIT: No -- see the ticket's FINAL HANDOFF for the exact, itemized reason.
+
+## DH-011N (2026-08-29) -- existing-order StaleObjectStateException: premise corrected, root
+## cause proven live, fix blocked on two human decisions -- no code changed
+
+DH-011M recorded a "new finding, not fixed here": adding a second test to an already-existing
+order throws `org.hibernate.StaleObjectStateException` on `Sample`, control-tested against a
+pristine, unpatched build of the same pinned upstream tag/commit and reported as conclusively a
+pre-existing upstream defect unrelated to any Daher patch. This ticket set out to reproduce that
+defect rigorously, find its root cause, and fix it. It reproduced the defect and found the root
+cause. It does not fix it -- two genuine human decisions block the fix, recorded below and in
+`PROJECT_STATE.md`.
+
+### Premise correction: DH-011M's own reproduction fixture was not native-order proof
+
+DH-011M's own text already flagged this ("labeled FHIR SEARCH FIXTURE ONLY / NOT NATIVE ORDER
+PROOF") but its narrative conclusion overstated what that fixture proved. A directly-SQL-inserted
+`Sample`/`SampleItem`/`Analysis` row is the single most common *artificial* cause of exactly this
+exception (a hand-written `INSERT` can easily leave the Hibernate `optimistic-lock="version"`
+timestamp column, `LASTUPDATED`, in a state that never round-trips through a real load/update
+cycle). Both pristine and patched builds throwing identically on that fixture is consistent with
+"real upstream defect" **and** with "the fixture itself is malformed" -- the control held the
+wrong variable constant. This ticket's job was to close that gap before trusting the conclusion,
+not to re-assert it.
+
+### Phase 1: live reproduction against a genuinely native Sample -- defect confirmed real
+
+Built one fully synthetic, disposable stack from the exact committed `openelis-config/Dockerfile`
+and patch set (own generated Postgres/keystore/truststore credentials via `openssl rand`/`keytool`,
+`.env` never read, real facility stack never started, stopped, or connected to): `itechuw/openelis
+-global-2-database:3.2.1.11` (pinned digest, unchanged from docker-compose.yml) plus the patched
+webapp built from `git clone --branch 3.2.1.11 --depth 1` asserted against commit
+`e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23` with every patch in this directory applied -- the same
+recipe `openelis-config/Dockerfile` and CI's `openelis-order-correlation-build` job already use, not
+a separately-invented build. `daher.openelis.site.code` was left unset (not `DEV01`) to satisfy this
+ticket's own `LiquibaseConfig` fail-closed boot guard, which correctly refused to start with the
+literal placeholder -- confirms that guard behaves as designed.
+
+1. Created a genuinely new order the same way a real clinician's client would: `POST
+   /fhir/ServiceRequest`, no specimen, LOINC `736-9` (Lymphocytes %, Whole Blood), against a
+   FHIR-created native Patient. Succeeded exactly as DH-011M's own evidence describes: `201`, a
+   real `SITEYEARNUM` accession (`DEV01260000000000001`), exactly one native `Sample`/`SampleItem`/
+   `Analysis` row (`clinlims.sample` id 2, `clinlims.sample_item` id 2, `clinlims.analysis` id 2,
+   `test_id`=27), correlation preserved in `electronic_order` id 2. This is required test #10
+   (existing new-order Option P regression) and it passes: Option P's own behavior is unaffected by
+   anything in this ticket.
+2. Added a second test (LOINC `5905-5`, Monocytes %, same Whole Blood type) to that same order via
+   `POST /fhir/ServiceRequest` referencing the real, resolvable `Specimen/<sample_item fhir_uuid>`
+   -- the "existing-order" branch, byte-identical code to before DH-011D/DH-011M (see "What
+   changed, precisely" above: this branch is untouched by Option P). Result: `500`,
+   `org.hibernate.StaleObjectStateException: ... [org.openelisglobal.sample.valueholder.Sample#2]`,
+   reproduced identically three times against three fresh, never-before-used Daher correlations.
+   **This is the first time this exact scenario has been exercised against a genuinely
+   Hibernate-native, non-fixture Sample** -- the fixture-vs-real gap flagged above is closed: the
+   defect is real, not a fixture artifact.
+3. Atomicity verified directly against the database after the failure (not inferred from
+   `@Transactional`): `clinlims.sample`, `clinlims.sample_item`, `clinlims.analysis`, and
+   `clinlims.electronic_order` were byte-identical to the pre-attempt baseline -- same single
+   `Analysis` row (`test_id`=27 only), same single `electronic_order` row (the *original*
+   correlation only; the second POST's fresh correlation was never persisted), same
+   `Sample.lastupdated`. The outer transaction rolled back cleanly.
+
+### Phase 2/3: root cause, proven live by elimination and by contrast with the native path
+
+Three specific hypotheses were tested and ruled out, in order, before the real mechanism was
+identified:
+
+1. **DB trigger touching `SAMPLE.LASTUPDATED` from a child-table write.** Source search of the
+   pinned upstream tree for `CREATE TRIGGER` found exactly two triggers in the whole codebase
+   (`electronic_signature_immutability_check`, `trigger_update_normalized_description`), neither
+   touching `sample`/`sample_item`/`analysis`. Ruled out from source, no live test needed.
+2. **Hibernate JDBC batching misreporting a successful UPDATE's row count.**
+   `hibernate.cfg.xml` sets `hibernate.jdbc.batch_size=50` and, notably,
+   `hibernate.jdbc.batch_versioned_data=true` -- the exact combination historically associated with
+   PgJDBC batched-execution row-count bugs (`Statement.SUCCESS_NO_INFO` misread as a version
+   conflict). Tested live by hot-patching the deployed WAR's exploded
+   `WEB-INF/classes/hibernate/hibernate.cfg.xml` (Tomcat's default `unpackWARs`, no rebuild needed)
+   to `batch_versioned_data=false`, restarting, and reproducing: **identical failure.** Then to
+   `batch_size=0` (batching fully disabled), restarted, reproduced again: **identical failure.**
+   Batching is conclusively not the cause.
+3. **A genuine version/precision mismatch (the bound `LASTUPDATED` value not matching what's
+   actually stored).** Captured the exact failing SQL via `log_statement=mod` on the disposable
+   Postgres: `UPDATE clinlims.SAMPLE SET LASTUPDATED=$1, referring_id=$2 WHERE ID=$3 AND
+   LASTUPDATED=$4` with `$4` = the correct, current baseline value (confirmed via `select id,
+   lastupdated, extract(epoch from lastupdated)::numeric(20,9) from clinlims.sample where id=2` --
+   no hidden sub-millisecond digits). Replayed that **exact statement, verbatim, by hand via psql**
+   against the live disposable database: `UPDATE 1`. The predicate Hibernate constructed was
+   objectively correct and would have matched the row. Hibernate's own exception text carries two
+   alternatives -- "Row was updated or deleted by another transaction (**or unsaved-value mapping
+   was incorrect**)" -- and the second clause, not the first, is what this proves.
+
+With those three eliminated, the DB-level trace itself carries the mechanism: the request issued
+**seven** separate `SELECT ... FROM clinlims.SAMPLE WHERE ID=2` round-trips over its lifetime
+(captured with `batch_size=0`, so this is not a batching artifact), each a full database round-trip
+-- not a single Hibernate session reusing its own first-level cache, which would return the
+already-loaded instance for a repeated `Session.get()` on the same ID without touching the
+database at all. Multiple independent round-trips for the identical primary key mean multiple
+independent Hibernate sessions loaded and released `Sample#2` over the course of one HTTP request.
+This is exactly what DH-011D3's own finding A javadoc on `DaherOrderCorrelationTransaction` already
+documents structurally: no ambient transaction spans `ServiceRequestProvider.createServiceRequest`
+until `daherOrderTransaction.persist(...)` is explicitly entered partway through the method.
+Concretely, in the existing-order branch:
+
+- **Load #1**, before the transactional boundary: `FhirTransformServiceImpl
+  .buildSampleOrderItemFromServiceRequest` resolves `ServiceRequest.specimen` via
+  `getItemByFhirId(specimenUUID, sampleItemService)`, which eagerly loads `SampleItem.sample`
+  (`SampleItem.hbm.xml`: `lazy="false"`) -- in its own short-lived session/transaction, closed by
+  the time this call returns.
+- **Load #2**, also before the transactional boundary: `ServiceRequestProvider
+  .createServiceRequest` itself calls `sampleItemService.get(sampleItemId)` again -- another
+  independent, closed session.
+- **Load #3**, the first load actually *inside* `daherOrderTransaction.persist(...)`:
+  `SamplePatientUpdateData.createPopulatedSample`'s "Load existing sample for update" branch,
+  `SampleService.get(sampleOrder.getSampleId())` -- this is the instance that later gets
+  `.setReferringId(...)` and is the target of the one `UPDATE` attempt.
+
+`Session.get()` returning a cached instance for a repeated ID within one session is standard
+Hibernate behavior; getting genuinely different SQL round-trips for the same ID, as observed,
+requires genuinely different sessions. A `Sample` instance loaded and released before the
+transactional boundary opens, then referenced or re-resolved once inside it, is a detached-entity
+handoff across session boundaries -- ticket outcome **B** ("stale entity reuse... loaded in two
+sessions... detached then merged"), not a genuine concurrent-modification race (nothing else was
+writing to this row) and not a version/precision bug (eliminated above).
+
+### The native path proves outcome C is the right *shape* of fix, live, not by inspection
+
+The human "add a test to an existing accession" workflow uses a structurally different business
+service, `SampleEditServiceImpl.editSample` (reached via `POST /rest/SampleEdit`,
+`SampleEditRestController`), which is itself `@Transactional` -- unlike `ServiceRequestProvider
+.createServiceRequest`, its single method boundary is consistent for the whole operation, so
+whatever `Sample` instance it loads stays valid for every use inside it. It also does not
+unconditionally re-save `Sample`: `sampleService.update(updatedSample)` runs only `if
+(sampleChanged)`, a deliberate guard against exactly the kind of no-op Sample-level write the FHIR
+path performs unconditionally on every existing-order request (`sample.setReferringId(...)`,
+`sample.setReceivedTimestamp(...)`, etc., regardless of whether anything actually needs to change).
+
+Live-proven, not asserted: fetched the real `SampleEditForm` for accession
+`DEV01260000000000001` via `GET /rest/SampleEdit?accessionNumber=...`, flipped `add=true` on the
+`possibleTests` entry for test 29 (Monocytes %, Whole Blood -- deliberately a *different* legitimate
+test than the FHIR-path attempt, same accession), and `POST`ed the whole form back to `/rest
+/SampleEdit`: `200`. Database confirmed: exactly one new `Analysis` row (id 5, `test_id`=29,
+`sampitem_id`=2 -- the *same* SampleItem), the original `Analysis` (id 2, `test_id`=27)
+byte-identical, `clinlims.sample_item.lastupdated` **unchanged** (`sampleItemChanged` stayed false
+too), and -- critically -- `clinlims.sample.lastupdated` **unchanged** from before the request,
+confirming `sampleChanged` correctly stayed false and no Sample-level UPDATE was even attempted.
+The identical logical operation (add one more test to an existing accession) that throws through
+the FHIR path succeeds cleanly through the native path, on the same fixture, in the same
+environment, moments apart.
+
+**This does not mean the fix is "route to `SampleEditService`" alone.** `SampleEditService.editSample`
+only avoids the defect because its own `@Transactional` boundary keeps one session alive for its
+whole operation. If `ServiceRequestProvider`'s fix calls `editSample` but hands it a `Sample`
+instance obtained from Load #1 or Load #2 above -- both outside `daherOrderTransaction`'s boundary
+-- the detached-entity handoff reproduces through a new door. The `Sample` (or `null`, letting
+`editSample`'s own `sampleService.getSampleByAccessionNumber` fetch run inside its own
+transaction) must be resolved *inside* whatever transactional boundary wraps the call, not before
+it. This is a concrete, required negative control for whichever ticket eventually implements the
+fix: hand the fixed path a pre-transaction-loaded `Sample` and confirm a test goes red.
+
+### Why this ticket does not implement the fix
+
+Two questions block writing `ServiceRequestProvider`'s existing-order branch against
+`SampleEditService`, and both have clinical/scope surface AGENTS.md reserves for a human, not an
+agent's inference:
+
+1. **Add-vs-replace semantics.** `SampleEditForm` is replace-shaped: it carries `existingTests`
+   with per-item `canceled`/`removeSample` flags that `SampleEditServiceImpl` acts on directly
+   (`createRemoveList`, `createCancelSampleList`). A `ServiceRequest` create carries only the one
+   test being added -- it says nothing about the tests already on the order. Building the form
+   server-side therefore requires *synthesizing* the existing-tests half from current DB state
+   (all `canceled=false`, `removeSample=false`) on the assumption that a FHIR create with an
+   existing specimen reference always means "add this test, touch nothing else" and never means
+   anything closer to a full-state replace. That assumption has never been stated as a decision
+   anywhere in this repository's history and is exactly AGENTS.md's flagged failure mode: "a gap
+   that obviously should be filled a particular way."
+2. **Whether DH-025 models "adding a test to an existing order" as its own source event.** This
+   ticket's live test consumed one fresh Daher correlation per added-test `ServiceRequest`, purely
+   because `ServiceRequestProvider`'s existing uniqueness check (`extractDaherOrderIdentifier` /
+   `getElectronicOrdersByExternalId`) demands a not-yet-used correlation on every create. Whether
+   the adapter's ledger actually intends "add a test" to carry its own correlation record (and, if
+   so, what DH-025 reconciliation for that event looks like), versus something else entirely, is
+   an adapter-contract question this ticket has no basis to decide.
+
+Both are recorded as blockers in `PROJECT_STATE.md`, `Human Decision Required: Yes`, per this
+ticket's own Phase 4 outcome E and AGENTS.md's "never invent policy" rule. No fix was written; no
+`ServiceRequestProvider`, `SampleEditService`, or any other production file was modified by this
+ticket.
+
+### What was deliberately not done, and why
+
+- **No pristine-upstream arm was built.** DH-011M's own patch diff already proves the failing
+  branch (`sampleItemId` present -- "entirely unchanged code path") is byte-identical to upstream;
+  a second container would only re-demonstrate what the trace and the diff already establish, at
+  the cost of another full build/boot cycle, and would not distinguish anything the batching/
+  precision/trigger eliminations above didn't already settle more precisely than a second
+  black-box repro could.
+- **No JVM-level debugger or Hibernate DEBUG session-tracing was attached.** The seven-SELECT
+  DB-log trace, cross-referenced against the DH-011D3 finding A javadoc and the source-level load
+  sites, is sufficient to establish the causal mechanism (detached entity across session
+  boundaries) without needing to instrument the JVM directly -- and doing so would have required a
+  rebuild this investigation did not need for any of its other conclusions.
+- **Required tests #3-#9** (duplicate/concurrent add-test requests, crash-before/after-write,
+  invalid existing Sample, dangling Specimen regression) were not built. They test the *fix*, and
+  there is no fix yet to test against; building them now would mean guessing the add-vs-replace
+  semantics decision above in order to construct fixtures, which is exactly the inference this
+  ticket is refusing to make.
+
+### Test infrastructure and real-facility boundary
+
+Identical posture to DH-011M: one fully synthetic, disposable stack (own `openssl rand`-generated
+Postgres passwords and `keytool`-generated keystore/truststore, `.env` never read), built from the
+exact committed Dockerfile/patch files, no separately-invented build recipe. Unlike DH-021/UI-005's
+note that this sandbox's Docker daemon denies `stop`/`kill`/`restart`, teardown was verified working
+here (a throwaway probe container stopped and removed cleanly before any real work began) and was
+exercised for real at the end: `docker compose down -v` removed all three containers, all four named
+volumes (`dh011n-patched_ca`, `dh011n-patched_db-data`, `dh011n-patched_keystore`,
+`dh011n-patched_properties`), and the dedicated network; the patched test image
+(`dh011n-patched-openelis:test`) was removed with `docker rmi`. Nothing synthetic persists. The real
+`daher-health-*` stack was never started, stopped, or connected to.
+
+Two elimination experiments (`hibernate.jdbc.batch_versioned_data=false`, then
+`hibernate.jdbc.batch_size=0`) were applied by hot-patching the *deployed, exploded* WAR directory
+inside the disposable container (`WEB-INF/classes/hibernate/hibernate.cfg.xml`) and restarting that
+one container -- never the committed `hibernate.cfg.xml` inside this repository's patch set, and
+never any file the real facility's image is built from. The disposable container carrying those
+temporary edits was torn down along with the rest of the stack; no artifact of that hot-patch
+persists anywhere.
+
+### Findings noted, not fixed (out of this ticket's scope)
+
+- **`daher.openelis.site.code=DEV01` boot guard confirmed working as designed.** `LiquibaseConfig`
+  correctly refuses to start when this property is explicitly set to the literal upstream
+  placeholder, per its own DH-011M-era design. Any future disposable stack must leave this property
+  **unset** entirely (not set it to a placeholder value) to boot -- worth documenting since it is
+  easy to trip by copying `docker-compose.yml`'s production `CATALINA_OPTS` verbatim.
+- **`POST /fhir/Patient` returned `201` with an empty body for a Patient create that actually
+  failed server-side** (a `ConstraintViolationException` on `Person.firstName` -- the supplied
+  synthetic name contained digits, which OpenELIS's name-format validator correctly rejects). The
+  webapp logged the real exception and persisted zero rows, but the HTTP response claimed success.
+  This is a false-green API response, structurally the same class of bug this repository has
+  already hardened against elsewhere (the OpenMRS/OpenELIS healthcheck false-greens at DH-002/
+  DH-021) -- but it is unrelated to DH-011N's scope (existing-order test-add) and was not
+  investigated further or fixed here. Worth its own ticket.
+
+### Test suite state
+
+Adapter and static-guard CI were not re-run by this ticket -- no adapter or patch-file source was
+changed. `pytest`/`ruff` counts are unchanged from DH-011M's last reported state (142 passing,
+Ruff clean); this ticket did not re-measure them because it made no change that could affect them.
+
+READY TO COMMIT: No production code was changed. The only committable artifact from this ticket is
+this documentation update plus the two `PROJECT_STATE.md` blocker entries -- see the ticket's FINAL
+HANDOFF.
