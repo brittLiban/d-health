@@ -1,16 +1,26 @@
 diff --git a/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java b/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
-index b65773221..19328f750 100644
+index b657732..51a695d 100644
 --- a/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
 +++ b/src/main/java/org/openelisglobal/dataexchange/fhir/service/FhirTransformServiceImpl.java
-@@ -93,6 +93,7 @@ import org.openelisglobal.dataexchange.fhir.exception.FhirLocalPersistingExcepti
+@@ -93,6 +93,8 @@ import org.openelisglobal.dataexchange.fhir.exception.FhirLocalPersistingExcepti
  import org.openelisglobal.dataexchange.fhir.exception.FhirPersistanceException;
  import org.openelisglobal.dataexchange.fhir.exception.FhirTransformationException;
  import org.openelisglobal.dataexchange.fhir.service.FhirPersistanceServiceImpl.FhirOperations;
++import org.openelisglobal.dataexchange.fhir.DaherAnalysisCorrelation;
 +import org.openelisglobal.dataexchange.fhir.DaherOrderCorrelation;
  import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrder;
  import org.openelisglobal.dataexchange.order.valueholder.ElectronicOrderType;
  import org.openelisglobal.dataexchange.service.order.ElectronicOrderService;
-@@ -1052,6 +1053,21 @@ public class FhirTransformServiceImpl implements FhirTransformService {
+@@ -163,6 +165,8 @@ public class FhirTransformServiceImpl implements FhirTransformService {
+     @Autowired
+     private ElectronicOrderService electronicOrderService;
+     @Autowired
++    private DaherAnalysisCorrelationService daherAnalysisCorrelationService;
++    @Autowired
+     private PatientService patientService;
+     @Autowired
+     private TypeOfSampleService typeOfSampleService;
+@@ -1052,6 +1056,49 @@ public class FhirTransformServiceImpl implements FhirTransformService {
          if (facilityId != null) {
              serviceRequest.addIdentifier(facilityId);
          }
@@ -20,13 +30,41 @@ index b65773221..19328f750 100644
 +        // logic a few lines below already owns for a different purpose (see
 +        // ServiceRequestProvider.persistDaherOrderCorrelation's javadoc for why conflating the
 +        // two would misclassify every first-time Daher order as "based on" a prior one).
-+        String clinicalOrderId = sample.getClinicalOrderId();
-+        if (!GenericValidator.isBlankOrNull(clinicalOrderId)) {
-+            ElectronicOrder linkedOrder = electronicOrderService.get(clinicalOrderId);
-+            if (linkedOrder != null && ElectronicOrderType.FHIR.equals(linkedOrder.getType())
-+                    && !GenericValidator.isBlankOrNull(linkedOrder.getExternalId())) {
-+                serviceRequest.addIdentifier(
-+                        this.createIdentifier(DaherOrderCorrelation.SYSTEM, linkedOrder.getExternalId()));
++        //
++        // DH-011P2: an Analysis that has its own added-test correlation (design B,
++        // daher_analysis_correlation) must emit THAT correlation, not the sample's initial-order
++        // one -- DH-011P's original implementation always fell through to clinicalOrderId here
++        // regardless of which Analysis was being transformed, so an added test's own response
++        // echoed the wrong event's identifier (recorded as a known gap, closed here). An Analysis
++        // with no added-test correlation at all falls through unchanged to the pre-existing
++        // clinicalOrderId-based initial-order behavior below.
++        //
++        // DH-011P3: analysis_id is now unique at the database (see
++        // 005-daher-analysis-correlation-unique-analysis.xml and DaherAnalysisCorrelation's own
++        // javadoc) -- one Analysis can carry at most one Daher added-test correlation under
++        // normal operation, so this must never find more than one row here. If it somehow does
++        // (pre-existing data from before that constraint was added, or any other corruption this
++        // transform has no basis to interpret), fail closed rather than emit several source-event
++        // identifiers on one resource or silently prefer one -- exactly the discipline
++        // searchDaherCorrelationNatively already applies to its own cross-namespace collision.
++        List<DaherAnalysisCorrelation> addedTestCorrelations = daherAnalysisCorrelationService
++                .getByAnalysisId(Long.valueOf(analysis.getId()));
++        if (addedTestCorrelations.size() > 1) {
++            throw new InternalErrorException("Data integrity violation: Analysis " + analysis.getId()
++                    + " has " + addedTestCorrelations.size() + " added-test correlations -- refusing to "
++                    + "represent more than one source-event identifier for a single resource");
++        } else if (addedTestCorrelations.size() == 1) {
++            serviceRequest.addIdentifier(this.createIdentifier(DaherOrderCorrelation.SYSTEM,
++                    addedTestCorrelations.get(0).getCorrelationValue()));
++        } else {
++            String clinicalOrderId = sample.getClinicalOrderId();
++            if (!GenericValidator.isBlankOrNull(clinicalOrderId)) {
++                ElectronicOrder linkedOrder = electronicOrderService.get(clinicalOrderId);
++                if (linkedOrder != null && ElectronicOrderType.FHIR.equals(linkedOrder.getType())
++                        && !GenericValidator.isBlankOrNull(linkedOrder.getExternalId())) {
++                    serviceRequest.addIdentifier(
++                            this.createIdentifier(DaherOrderCorrelation.SYSTEM, linkedOrder.getExternalId()));
++                }
 +            }
 +        }
          serviceRequest.setRequisition(this.createIdentifier(fhirConfig.getOeFhirSystem() + "/samp_labNo",

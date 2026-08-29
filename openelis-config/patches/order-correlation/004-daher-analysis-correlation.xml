@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011P (Design B, LIBAN DECISION: SELECT DESIGN B, patches/order-correlation/PROVENANCE.md):
+    a standalone table for the per-added-test DH-025 correlation. Deliberately not a column on
+    clinlims.analysis and not a second row shape on electronic_order - both DH-011O blockers
+    this closes are that those two mechanisms are scalar-per-object and cannot represent
+    independent, repeatable "add a test to an existing accession" events without breaking the
+    original order's own correlation semantics.
+
+    Columns beyond the ticket's stated minimum (id, analysis_id, correlation_value, created_at):
+    last_updated is required by org.openelisglobal.common.valueholder.BaseObject, which every
+    entity reachable through this codebase's shared BaseDAO/BaseObjectService infrastructure
+    extends and which unconditionally maps a @Version column named last_updated. This table is
+    insert-only (no UPDATE ever issued against it), so optimistic-lock conflicts on it are not
+    expected in practice, but the column must exist for the entity to load through that shared
+    infrastructure at all.
+
+    Constraints:
+      - analysis_id: NOT NULL, FK to clinlims.analysis(id), no ON DELETE action specified (the
+        default, NO ACTION) - OpenELIS never hard-deletes an Analysis (status is set to
+        Canceled instead), and this migration must not silently lose correlation/audit evidence
+        by cascading a delete that upstream itself does not perform.
+      - correlation_value: NOT NULL, exactly 64 lowercase hex characters (see
+        DaherOrderCorrelation.VALUE_PATTERN for the Java-side twin of this constraint), UNIQUE.
+      - analysis_id is NOT unique in this changeset. It was left non-unique here for a real,
+        source-verified reason (SampleEditServiceImpl.newOrExistingCanceledAnalysis revives a
+        cancelled Analysis on a matching re-add rather than inserting a new one, so one Analysis
+        could otherwise legitimately be the target of two add-events across its lifecycle). Liban
+        reviewed that tradeoff (DH-011P3) and chose the strict one-Analysis-one-correlation
+        invariant instead, accepting that a Daher re-add after native cancellation now fails
+        loudly rather than reviving. See 005-daher-analysis-correlation-unique-analysis.xml,
+        which supersedes this decision and adds the unique constraint - do not treat this
+        changeset's index as the final word on analysis_id uniqueness.
+
+    Fails safely, not destructively: if this table or its objects already exist under a name
+    this migration collides with, CREATE fails and Liquibase does not mark the changeset applied.
+    No existing data is read, rewritten, or backfilled - there is no historical "add a test"
+    event to reconstruct a correlation for, and this migration does not attempt to invent one.
+  -->
+  <changeSet id="daher-011p-004-daher-analysis-correlation" author="daher-health">
+    <sql>
+      CREATE SEQUENCE daher_analysis_correlation_seq;
+
+      CREATE TABLE daher_analysis_correlation (
+        id BIGINT PRIMARY KEY DEFAULT nextval('daher_analysis_correlation_seq'),
+        analysis_id NUMERIC(10,0) NOT NULL
+          REFERENCES clinlims.analysis (id),
+        correlation_value VARCHAR(64) NOT NULL
+          CONSTRAINT daher_analysis_correlation_value_format
+          CHECK (correlation_value ~ '^[0-9a-f]{64}$'),
+        created_at TIMESTAMP NOT NULL DEFAULT now(),
+        last_updated TIMESTAMP NOT NULL DEFAULT now()
+      );
+
+      ALTER SEQUENCE daher_analysis_correlation_seq OWNED BY daher_analysis_correlation.id;
+
+      CREATE UNIQUE INDEX daher_analysis_correlation_value_uk
+        ON daher_analysis_correlation (correlation_value);
+
+      CREATE INDEX daher_analysis_correlation_analysis_idx
+        ON daher_analysis_correlation (analysis_id);
+    </sql>
+    <rollback>
+      <sql>
+        DROP TABLE IF EXISTS daher_analysis_correlation;
+        DROP SEQUENCE IF EXISTS daher_analysis_correlation_seq;
+      </sql>
+    </rollback>
+  </changeSet>
+</databaseChangeLog>

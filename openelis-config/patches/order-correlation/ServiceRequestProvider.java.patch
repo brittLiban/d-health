@@ -1,5 +1,5 @@
 diff --git a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
-index 53c07a0f0..fbe527321 100644
+index 53c07a0..2b9ff10 100644
 --- a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
 +++ b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
 @@ -14,6 +14,8 @@ import ca.uhn.fhir.rest.api.MethodOutcome;
@@ -64,7 +64,7 @@ index 53c07a0f0..fbe527321 100644
  import org.springframework.beans.factory.annotation.Autowired;
  import org.springframework.stereotype.Component;
  import org.springframework.validation.BindException;
-@@ -84,9 +98,32 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -84,9 +98,43 @@ public class ServiceRequestProvider implements IResourceProvider {
      @Autowired
      private SamplePatientEntryService samplePatientService;
  
@@ -85,6 +85,17 @@ index 53c07a0f0..fbe527321 100644
 +    @Autowired
 +    private DaherOrderCorrelationTransaction daherOrderTransaction;
 +
++    // DH-011P (Design B): the "add a test to an existing accession" analog of
++    // daherOrderTransaction above -- see DaherAddedTestTransaction's javadoc for why it is a
++    // separate bean, and PROVENANCE.md's DH-011P section for why this is a standalone
++    // correlation table rather than a second use of ElectronicOrder/Sample.clinicalOrderId.
++    @Autowired
++    private org.openelisglobal.dataexchange.fhir.DaherAddedTestTransaction daherAddedTestTransaction;
++
++    // DH-011P (Design B): the second correlation namespace searchDaherCorrelationNatively reads.
++    @Autowired
++    private org.openelisglobal.dataexchange.fhir.service.DaherAnalysisCorrelationService daherAnalysisCorrelationService;
++
      @Autowired
      private AnalysisService analysisService;
  
@@ -97,7 +108,7 @@ index 53c07a0f0..fbe527321 100644
      @Autowired
      private FhirTransformService fhirTransformService;
  
-@@ -164,6 +201,18 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -164,6 +212,18 @@ public class ServiceRequestProvider implements IResourceProvider {
      }
  
      @Create
@@ -116,7 +127,7 @@ index 53c07a0f0..fbe527321 100644
      public MethodOutcome createServiceRequest(@ResourceParam ServiceRequest serviceRequest,
              HttpServletRequest request) {
  
-@@ -179,6 +228,20 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -179,6 +239,20 @@ public class ServiceRequestProvider implements IResourceProvider {
              requireTrue(serviceRequest.hasSubject(), "ServiceRequest.subject is required");
              requireTrue(serviceRequest.hasCode(), "ServiceRequest.code is required");
  
@@ -137,7 +148,7 @@ index 53c07a0f0..fbe527321 100644
              final String patientRefId = requireNonBlank(serviceRequest.getSubject().getReferenceElement().getIdPart(),
                      "ServiceRequest.subject reference is invalid");
  
-@@ -195,14 +258,6 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -195,14 +269,6 @@ public class ServiceRequestProvider implements IResourceProvider {
                      fhirTransformService.buildSampleOrderItemFromServiceRequest(serviceRequest, sysuserId),
                      "Failed to build SampleOrderItem from ServiceRequest");
  
@@ -152,7 +163,7 @@ index 53c07a0f0..fbe527321 100644
              final List<Test> tests = requireNonEmpty(
                      fhirTransformService.resolveTestsFromServiceRequest(serviceRequest),
                      "No tests resolved from ServiceRequest");
-@@ -214,10 +269,48 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -214,10 +280,60 @@ public class ServiceRequestProvider implements IResourceProvider {
              final SampleEditItem firstItem = editItems.stream().filter(i -> i != null && i.isAdd()).findFirst()
                      .orElse(editItems.get(0));
  
@@ -166,6 +177,18 @@ index 53c07a0f0..fbe527321 100644
 +            if (!GenericValidator.isBlankOrNull(sampleItemId)) {
 +                sampleItem = requireNonNull(sampleItemService.get(sampleItemId),
 +                        "SampleItem not found for ID: " + sampleItemId);
++
++                // DH-011P (Design B, LIBAN DECISION: SELECT DESIGN B): this is an "add a test to
++                // an existing accession" event, not a new order -- the pre-DH-011M code this
++                // branch used to fall through to (SamplePatientUpdateData.createPopulatedSample's
++                // "load existing sample for update" branch) is exactly DH-011N's reproduced
++                // StaleObjectStateException. Route through the native transactional edit path
++                // (SampleEditServiceImpl.editSample) instead, and return here -- everything below
++                // this branch (labNo/sampleXml/SamplePatientEntryForm/SamplePatientUpdateData/
++                // daherOrderTransaction.persist) is new-order-shaped and must not run for this
++                // case.
++                return createAddedTestServiceRequest(request, daherOrderId, sysuserId, sampleItem, firstItem,
++                        sampleOrder);
 +            } else if (serviceRequest.hasSpecimen() && serviceRequest.getSpecimenFirstRep().hasReference()) {
 +                // DH-011M: the caller explicitly referenced a specimen and it did not resolve to an
 +                // existing SampleItem -- a dangling reference, a typo, or a race, not "no specimen
@@ -204,7 +227,7 @@ index 53c07a0f0..fbe527321 100644
  
              final String sampleXml = requireNonBlank(SampleUtil.buildSampleXml(tests, sampleItem, sampleItemId),
                      "Failed to build sample XML");
-@@ -269,10 +362,17 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -269,10 +385,17 @@ public class ServiceRequestProvider implements IResourceProvider {
                  throw new InvalidRequestException(formatErrors(result));
              }
  
@@ -226,10 +249,110 @@ index 53c07a0f0..fbe527321 100644
  
              final SampleHuman lookup = new SampleHuman();
              lookup.setSampleId(updateData.getSample().getId());
-@@ -313,6 +413,57 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -313,6 +436,157 @@ public class ServiceRequestProvider implements IResourceProvider {
          }
      }
  
++    /**
++     * DH-011P (Design B, LIBAN DECISION: SELECT DESIGN B): "add a test to an existing accession"
++     * -- {@code createServiceRequest}'s existing-specimen branch, split out because it returns
++     * directly rather than falling through to the new-order machinery below it.
++     *
++     * <p>Form-building mirrors {@code updateServiceRequest}'s proven pattern (same
++     * {@code SampleEditForm} fields, same validator) with one deliberate difference: DH-011O's
++     * source-proof (see {@code SampleEditServiceImpl.createRemoveList}/
++     * {@code createSampleItemUpdateList}, PROVENANCE.md) established that an item simply absent
++     * from {@code existingTests} is never visited by any cancel/update loop, so
++     * {@code existingTests} is left empty rather than reconstructed from the sample's current
++     * test list -- a pure add needs no synthesis of current clinical state. {@code possibleTests}
++     * carries exactly the one item {@code buildSampleEditItemsListFromServiceRequest} already
++     * derived (that method's cancel-on-test-mismatch branch only triggers when the incoming
++     * {@code ServiceRequest} carries an existing resource id, which a POST body never does).
++     */
++    private MethodOutcome createAddedTestServiceRequest(HttpServletRequest request, String daherOrderId,
++            String sysuserId, SampleItem sampleItem, SampleEditItem firstItem, SampleOrderItem sampleOrder) {
++
++        final Sample existingSample = requireNonNull(sampleItem.getSample(), "SampleItem has no Sample");
++
++        final SampleEditForm form = new SampleEditForm();
++        form.setAccessionNumber(requireNonBlank(existingSample.getAccessionNumber(), "Accession number is missing"));
++        form.setCurrentDate(DateUtil.getCurrentDateAsText());
++        form.setIsEditable(true);
++        form.setSearchFinished(true);
++        form.setNoSampleFound(false);
++        form.setSampleOrderItems(sampleOrder);
++        form.setExistingTests(new ArrayList<>());
++        form.setPossibleTests(List.of(firstItem));
++
++        // DH-011P: deliberately NOT SampleUtil.buildSampleXml/a populated sampleXML here. That
++        // XML drives SampleEditServiceImpl's separate createAddSampleList/SampleAddService path,
++        // which unconditionally inserts a brand-new SampleItem plus a new Analysis for every
++        // <sample> element it contains -- regardless of whether sampleItemId names an existing
++        // item. Live-confirmed during DH-011P: setting it here (mirroring updateServiceRequest's
++        // own pattern) doubled the Analysis count for a single add-test event. This add goes
++        // through form.getPossibleTests() -> createAddAanlysisList exclusively, which correctly
++        // reuses the existing SampleItem via sampleEditItem.getSampleItemId() and never creates
++        // a new one. An empty <samples/> document makes SampleAddService.createSampleTestCollection
++        // iterate zero <sample> elements, so createAddSampleList contributes nothing.
++        //
++        // (updateServiceRequest, unpatched pristine code, has this identical construction --
++        // sampleXml built from `sampleItem`, an existing SampleItem, whenever possibleTests is
++        // non-empty -- and is not reachable via the Daher adapter's POST-only transport. Recorded
++        // as a separate out-of-scope finding in PROVENANCE.md, not fixed here.)
++        form.setSampleXML("<samples></samples>");
++
++        final List<SampleItem> sampleItems = sampleItemService.getSampleItemsBySampleId(existingSample.getId());
++        int maxSortOrder = 0;
++        if (sampleItems != null && !sampleItems.isEmpty()) {
++            maxSortOrder = sampleItems.stream().filter(Objects::nonNull).map(SampleItem::getSortOrder)
++                    .filter(Objects::nonNull).mapToInt(v -> {
++                        try {
++                            return Integer.parseInt(v);
++                        } catch (NumberFormatException e) {
++                            return 0;
++                        }
++                    }).max().orElse(0);
++        }
++        form.setMaxAccessionNumber(existingSample.getAccessionNumber() + "-" + maxSortOrder);
++
++        form.setSampleTypes(requireNonNull(userService.getUserSampleTypes(sysuserId, Constants.ROLE_RECEPTION),
++                "Sample types not found"));
++        form.setTestSectionList(DisplayListService.getInstance().getList(ListType.TEST_SECTION_ACTIVE));
++        form.setRejectReasonList(DisplayListService.getInstance().getList(ListType.REJECTION_REASONS));
++
++        final Errors result = new BindException(form, "form");
++        formValidator.validate(form, result);
++        if (result.hasErrors()) {
++            throw new InvalidRequestException(formatErrors(result));
++        }
++
++        final org.openelisglobal.dataexchange.fhir.DaherAddedTestTransaction.Result addTestResult;
++        try {
++            addTestResult = daherAddedTestTransaction.addTest(daherOrderId, form, request, sysuserId);
++        } catch (LIMSRuntimeException e) {
++            if (e.getCause() instanceof StaleObjectStateException) {
++                throw new InvalidRequestException(
++                        "Optimistic locking failed - resource was modified by another user");
++            }
++            LogEvent.logDebug(e);
++            throw new InternalErrorException("Error adding test to sample: " + safeMessage(e), e);
++        }
++
++        final ServiceRequest createdServiceRequest = requireNonNull(
++                fhirTransformService.transformToServiceRequest(addTestResult.getAnalysisId()),
++                "Failed to transform added-test Analysis to ServiceRequest");
++
++        final MethodOutcome outcome = new MethodOutcome();
++        // DH-011P: an idempotent replay (addTestResult.isCreated() == false) writes nothing and
++        // must not report 201 for a no-op -- the same false-green class as the Patient-create
++        // bug PROVENANCE.md already records. The adapter's deliver_service_request never trusts
++        // POST status regardless (it always re-probes by correlation), so this does not change
++        // correctness -- only the honesty of what this response claims.
++        outcome.setCreated(addTestResult.isCreated());
++        outcome.setResource(createdServiceRequest);
++        return outcome;
++    }
++
 +    /**
 +     * DH-011M (Option P): the exact generator the human Sample Entry workflow uses --
 +     * {@code AccessionNumberUtil.getMainAccessionNumberGenerator()} resolves to whatever format this
@@ -284,7 +407,28 @@ index 53c07a0f0..fbe527321 100644
      @Update
      public MethodOutcome updateServiceRequest(@IdParam IdType theId, @ResourceParam ServiceRequest serviceRequest,
              HttpServletRequest request) {
-@@ -534,6 +685,14 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -430,8 +704,10 @@ public class ServiceRequestProvider implements IResourceProvider {
+                 updatedSample = sampleUtil.updateAccessionNumberInSample(form, sysUserId);
+             }
+ 
++            final List<String> updatedAnalysisIds;
+             try {
+-                sampleEditService.editSample(form, request, updatedSample, sampleChanged, sysUserId);
++                updatedAnalysisIds = sampleEditService.editSample(form, request, updatedSample, sampleChanged,
++                        sysUserId);
+ 
+             } catch (LIMSRuntimeException e) {
+                 if (e.getCause() instanceof StaleObjectStateException) {
+@@ -443,7 +719,7 @@ public class ServiceRequestProvider implements IResourceProvider {
+             }
+ 
+             try {
+-                fhirTransformService.transformAnalysisByIds(sampleEditService.getUpdatedAnalysisList());
++                fhirTransformService.transformAnalysisByIds(updatedAnalysisIds);
+             } catch (Exception fhirEx) {
+                 LogEvent.logWarn(this.getClass().getSimpleName(), method,
+                         "FHIR sync failed during delete (non-blocking): " + safeMessage(fhirEx));
+@@ -534,6 +810,14 @@ public class ServiceRequestProvider implements IResourceProvider {
  
              @OptionalParam(name = ServiceRequest.SP_CODE) TokenAndListParam code,
  
@@ -299,7 +443,7 @@ index 53c07a0f0..fbe527321 100644
              @OptionalParam(name = ServiceRequest.SP_REQUESTER, chainWhitelist = { "", Practitioner.SP_IDENTIFIER,
                      Practitioner.SP_GIVEN, Practitioner.SP_FAMILY,
                      Practitioner.SP_NAME }, targetTypes = Practitioner.class) ReferenceAndListParam participantReference,
-@@ -557,6 +716,30 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -557,6 +841,30 @@ public class ServiceRequestProvider implements IResourceProvider {
  
          String method = "search";
  
@@ -330,7 +474,7 @@ index 53c07a0f0..fbe527321 100644
          try {
              Bundle resultBundle = util.forwardSearchToFhirStore(request);
  
-@@ -580,6 +763,231 @@ public class ServiceRequestProvider implements IResourceProvider {
+@@ -580,6 +888,302 @@ public class ServiceRequestProvider implements IResourceProvider {
          }
      }
  
@@ -403,29 +547,57 @@ index 53c07a0f0..fbe527321 100644
 +     * that want them; only the count DH-025 keys off is collapsed to the logical-order level.
 +     */
 +    private Bundle searchDaherCorrelationNatively(String correlationValue) {
-+        Bundle bundle = new Bundle();
-+        bundle.setType(Bundle.BundleType.SEARCHSET);
-+        bundle.setEntry(new ArrayList<>());
-+
 +        List<ElectronicOrder> candidates = electronicOrderService.getElectronicOrdersByExternalId(correlationValue);
 +        List<ElectronicOrder> fhirOrders = candidates.stream()
 +                .filter(o -> o != null && ElectronicOrderType.FHIR.equals(o.getType()))
 +                .collect(Collectors.toList());
-+
-+        if (fhirOrders.isEmpty()) {
-+            bundle.setTotal(0);
-+            return bundle;
-+        }
 +        if (fhirOrders.size() > 1) {
-+            // The partial unique index (electronic_order(external_id) WHERE type='FHIR')
-+            // makes this structurally impossible in committed state. If it is ever observed,
-+            // trust the database over the assumption and fail loudly rather than silently
-+            // picking one -- exactly the "never fabricate a result" discipline this whole
-+            // method exists to enforce.
++            // The partial unique index (electronic_order(external_id) WHERE type='FHIR') makes
++            // this structurally impossible in committed state. If it is ever observed, trust
++            // the database over the assumption and fail loudly rather than silently picking one
++            // -- exactly the "never fabricate a result" discipline this whole method enforces.
 +            throw new InternalErrorException(
 +                    "Data integrity violation: multiple FHIR-typed electronic_order rows share "
 +                            + "external_id " + correlationValue + " -- the uniqueness index should "
 +                            + "make this impossible");
++        }
++
++        List<org.openelisglobal.dataexchange.fhir.DaherAnalysisCorrelation> addedTestMatches = daherAnalysisCorrelationService
++                .getByCorrelationValue(correlationValue);
++        if (addedTestMatches.size() > 1) {
++            // UNIQUE(correlation_value) should make this structurally impossible in committed
++            // state -- same "trust the database over the assumption" discipline as every other
++            // fail-loud check in this method.
++            throw new InternalErrorException("Data integrity violation: multiple daher_analysis_correlation "
++                    + "rows share correlation_value " + correlationValue);
++        }
++
++        boolean initialOrderNamespaceMatch = !fhirOrders.isEmpty();
++        boolean addedTestNamespaceMatch = !addedTestMatches.isEmpty();
++
++        if (initialOrderNamespaceMatch && addedTestNamespaceMatch) {
++            // DH-011P Section 9, rule D: the same correlation value exists in both namespaces.
++            // These are two structurally independent tables with no shared uniqueness
++            // constraint between them, so nothing at the database level prevents this -- it can
++            // only be a corrupted/colliding input, never a legitimate state. Never resolve by
++            // priority ("initial order wins"): fail closed and let an operator investigate.
++            throw new InternalErrorException("Data integrity violation: correlation " + correlationValue
++                    + " matches both the initial-order namespace (electronic_order.external_id) and the "
++                    + "added-test namespace (daher_analysis_correlation.correlation_value) -- refusing to "
++                    + "silently pick one");
++        }
++
++        if (addedTestNamespaceMatch) {
++            return searchAddedTestNamespace(addedTestMatches.get(0), correlationValue);
++        }
++
++        Bundle bundle = new Bundle();
++        bundle.setType(Bundle.BundleType.SEARCHSET);
++        bundle.setEntry(new ArrayList<>());
++
++        if (fhirOrders.isEmpty()) {
++            bundle.setTotal(0);
++            return bundle;
 +        }
 +
 +        ElectronicOrder order = fhirOrders.get(0);
@@ -482,6 +654,49 @@ index 53c07a0f0..fbe527321 100644
 +                }
 +            }
 +        }
++        return bundle;
++    }
++
++    /**
++     * DH-011P Section 9/10, rule C: the added-test namespace's authoritative match. Unlike the
++     * initial-order namespace above, {@code Bundle.total} here is the entry count (always 0 or
++     * 1) rather than a distinct "logical order" count -- one {@code daher_analysis_correlation}
++     * row identifies exactly one {@code Analysis}/event, not every analysis on the accession.
++     *
++     * <p><b>What FOUND means here.</b> {@code analysis_id} is not unique on this table (see
++     * {@code DaherAnalysisCorrelation}'s javadoc): {@code newOrExistingCanceledAnalysis} can
++     * revive a cancelled {@code Analysis} on a later, distinct add-event, so two different
++     * correlations can legitimately point at the same {@code Analysis} across its lifecycle. A
++     * match here proves only "this correlation's add-event targeted this Analysis" -- not that
++     * the Analysis is currently active, uncancelled, or was not itself later retargeted by a
++     * different event. Callers that need the Analysis's current clinical status must read it
++     * from the transformed resource, not infer it from this method returning non-empty.
++     */
++    private Bundle searchAddedTestNamespace(org.openelisglobal.dataexchange.fhir.DaherAnalysisCorrelation correlation,
++            String correlationValue) {
++        Bundle bundle = new Bundle();
++        bundle.setType(Bundle.BundleType.SEARCHSET);
++        bundle.setEntry(new ArrayList<>());
++
++        String analysisId = String.valueOf(correlation.getAnalysisId());
++        Analysis analysis = analysisService.get(analysisId);
++        if (analysis == null || analysis.getId() == null) {
++            // The FK constraint (daher_analysis_correlation.analysis_id -> clinlims.analysis.id,
++            // no ON DELETE cascade) and the fact that OpenELIS never hard-deletes an Analysis
++            // make this unreachable in committed state -- fail loud rather than report zero.
++            throw new InternalErrorException("Data integrity violation: daher_analysis_correlation "
++                    + correlation.getId() + " (correlation " + correlationValue + ") references analysis "
++                    + analysisId + ", which does not exist");
++        }
++
++        ServiceRequest resource = fhirTransformService.transformToServiceRequest(analysisId);
++        if (resource == null) {
++            throw new InternalErrorException(
++                    "Failed to transform analysis " + analysisId + " (correlation " + correlationValue
++                            + ") to ServiceRequest");
++        }
++        bundle.addEntry().setResource(resource);
++        bundle.setTotal(1);
 +        return bundle;
 +    }
 +

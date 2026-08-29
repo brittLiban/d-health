@@ -1,0 +1,26 @@
+diff --git a/src/main/java/org/openelisglobal/sample/service/SampleEditService.java b/src/main/java/org/openelisglobal/sample/service/SampleEditService.java
+index 1232d60..79ad92b 100644
+--- a/src/main/java/org/openelisglobal/sample/service/SampleEditService.java
++++ b/src/main/java/org/openelisglobal/sample/service/SampleEditService.java
+@@ -7,8 +7,17 @@ import org.openelisglobal.sample.valueholder.Sample;
+ 
+ public interface SampleEditService {
+ 
+-    void editSample(SampleEditForm form, HttpServletRequest request, Sample updatedSample, boolean sampleChanged,
+-            String sysUserId);
+-
+-    List<String> getUpdatedAnalysisList();
++    /**
++     * DH-011P: returns the ids of every {@code Analysis} row {@code editSample} inserted or
++     * updated (inserted for a genuinely new add, updated for a revived cancelled-Analysis
++     * re-add -- see {@code newOrExistingCanceledAnalysis}), as a value the caller's own thread
++     * receives directly rather than a shared instance field ({@code SampleEditServiceImpl} is a
++     * singleton {@code @Service} bean; a field read after this call returns would race any other
++     * concurrent caller's own {@code editSample} invocation, including the human Modify Order UI
++     * going through the same bean). Every existing caller previously called this as a
++     * void-returning method and separately read {@code getUpdatedAnalysisList()}; both patterns
++     * are gone.
++     */
++    List<String> editSample(SampleEditForm form, HttpServletRequest request, Sample updatedSample,
++            boolean sampleChanged, String sysUserId);
+ }

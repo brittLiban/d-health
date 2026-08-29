@@ -1,0 +1,14 @@
+diff --git a/src/main/resources/persistence/persistence.xml b/src/main/resources/persistence/persistence.xml
+index 96954eb..8bcdac8 100644
+--- a/src/main/resources/persistence/persistence.xml
++++ b/src/main/resources/persistence/persistence.xml
+@@ -144,6 +144,9 @@
+         <class>org.openelisglobal.labelpreset.valueholder.TestLabelPresetLink</class>
+         <class>org.openelisglobal.labelpreset.valueholder.OrderLabelRequest</class>
+ 
++        <!-- Daher per-added-test correlation (DH-011P, Design B) -->
++        <class>org.openelisglobal.dataexchange.fhir.DaherAnalysisCorrelation</class>
++
+         <properties>
+             <property name="hibernate.cfg_xml_file"
+                 value="classpath:hibernate/hibernate.cfg.xml" />

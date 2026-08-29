@@ -1,0 +1,38 @@
+diff --git a/src/main/java/org/openelisglobal/sample/service/SampleEditServiceImpl.java b/src/main/java/org/openelisglobal/sample/service/SampleEditServiceImpl.java
+index d3bdacb..2425298 100644
+--- a/src/main/java/org/openelisglobal/sample/service/SampleEditServiceImpl.java
++++ b/src/main/java/org/openelisglobal/sample/service/SampleEditServiceImpl.java
+@@ -116,12 +116,10 @@ public class SampleEditServiceImpl implements SampleEditService {
+     NoteService noteService;
+     @Autowired
+     private SampleStorageService sampleStorageService;
+-    private List<String> analysisList = new ArrayList<>();
+-
+     @Transactional
+     @Override
+-    public void editSample(SampleEditForm form, HttpServletRequest request, Sample updatedSample, boolean sampleChanged,
+-            String sysUserId) {
++    public List<String> editSample(SampleEditForm form, HttpServletRequest request, Sample updatedSample,
++            boolean sampleChanged, String sysUserId) {
+ 
+         List<SampleEditItem> existingTests = form.getExistingTests() != null ? form.getExistingTests()
+                 : new ArrayList<>();
+@@ -375,7 +373,7 @@ public class SampleEditServiceImpl implements SampleEditService {
+         request.getSession().setAttribute("lastAccessionNumber", updatedSample.getAccessionNumber());
+         request.getSession().setAttribute("lastPatientId", patient.getId());
+ 
+-        analysisList = analysisIds;
++        return analysisIds;
+     }
+ 
+     private void addExternalResultsToDeleteList(Analysis analysis, Patient patient, Sample updatedSample,
+@@ -628,9 +626,4 @@ public class SampleEditServiceImpl implements SampleEditService {
+                     storagePositionCoordinate, "Auto-assigned on order creation");
+         }
+     }
+-
+-    @Override
+-    public List<String> getUpdatedAnalysisList() {
+-        return analysisList;
+-    }
+ }

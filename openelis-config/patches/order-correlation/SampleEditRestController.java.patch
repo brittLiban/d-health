@@ -1,0 +1,25 @@
+diff --git a/src/main/java/org/openelisglobal/sample/controller/rest/SampleEditRestController.java b/src/main/java/org/openelisglobal/sample/controller/rest/SampleEditRestController.java
+index c5e7135..3f5d3ee 100644
+--- a/src/main/java/org/openelisglobal/sample/controller/rest/SampleEditRestController.java
++++ b/src/main/java/org/openelisglobal/sample/controller/rest/SampleEditRestController.java
+@@ -235,8 +235,10 @@ public class SampleEditRestController extends BaseSampleEntryController {
+             updatedSample = sampleUtil.updateAccessionNumberInSample(form, ControllerUtills.getSysUserId(request));
+         }
+ 
++        java.util.List<String> updatedAnalysisIds;
+         try {
+-            sampleEditService.editSample(form, request, updatedSample, sampleChanged, getSysUserId(request));
++            updatedAnalysisIds = sampleEditService.editSample(form, request, updatedSample, sampleChanged,
++                    getSysUserId(request));
+         } catch (LIMSRuntimeException e) {
+             // Surface the actual reason (e.g. "Position B12 is already occupied") instead
+             // of letting it fall through to the global advice's "Check server logs".
+@@ -247,7 +249,7 @@ public class SampleEditRestController extends BaseSampleEntryController {
+         }
+ 
+         try {
+-            fhirTransformService.transformAnalysisByIds(sampleEditService.getUpdatedAnalysisList());
++            fhirTransformService.transformAnalysisByIds(updatedAnalysisIds);
+         } catch (Exception e) {
+             LogEvent.logError(e);
+         }

@@ -193,6 +193,83 @@ in `PROJECT_STATE.md`'s DH-011O entry. No code written for either design; no dis
 infrastructure was built (both findings came from source alone); real facility untouched. Full
 account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011O section.
 
+**CORRECTION appended 2026-08-29 (DH-011P, append-only — the paragraph above is superseded, not
+retracted).** Liban selected design B (ADR-031): a standalone `daher_analysis_correlation` table,
+zero patches to any existing upstream `Analysis.java`/`.hbm.xml` file. Built and live-verified this
+pass: adding a second test to an existing accession now succeeds end to end — the original Analysis
+is left unchanged, exactly one new Analysis and one new correlation row are created, no duplicate
+specimen, zero `StaleObjectStateException`. This closes the core DH-011N regression this ticket
+chain exists to fix. A dual-namespace search extension fails closed if a correlation value is ever
+found in both the initial-order and added-test namespaces at once, live-confirmed (500, explicit
+diagnostic). Concurrent identical events are resolved safely by the DB's own `UNIQUE
+(correlation_value)` constraint alone, no added locking; concurrent different events on the same
+accession do not contend at all, also without added locking — both live-confirmed, matching
+DH-011O's own concurrency note. `SampleEditService.editSample`'s return type was widened from
+`void` (a shared singleton-bean field, a live concurrency hazard) to `List<String>`, the one place
+this ticket's changes reach outside the add-test path itself. One real bug was found and fixed by
+live testing (a populated `sampleXml` caused a second, spurious Analysis per add-test event); one
+gap is recorded but not fixed (the add-test response echoes the *original* order's correlation, not
+the add-test event's own, in its `source-event` identifier — safe today because the adapter never
+trusts this field, but a genuine representation gap on the response body). **True crash-recovery
+(the adapter's own `RecoveryCoordinator` reconciling a target write it received no response for) is
+NOT demonstrated** — the adapter was not started this pass; this remains open. Fully synthetic
+disposable infrastructure throughout, torn down and verified clean; real facility never touched.
+**Not committed or pushed — pending Liban's review.** DH-011 overall remains NOT COMPLETE:
+DH-011G/H/I/J/K/L are all still open, unaffected by this ticket. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011P section; decision record:
+`DECISIONS.md`'s ADR-031.
+
+**CORRECTION appended 2026-08-29 (DH-011P2, append-only — the paragraph above is superseded, not
+retracted).** An independent review declined to approve DH-011P for commit, naming three gaps; all
+three are now closed with live evidence. The representation gap the paragraph above recorded as "not
+fixed" **is fixed**: `FhirTransformServiceImpl`'s shared transform now looks up an Analysis's own
+added-test correlation before falling back to the initial-order one, live-verified on a 3-test
+accession where each added test now correctly carries its own correlation value, not the original
+order's. **True crash-recovery, previously NOT demonstrated, is now demonstrated**: since no
+production entrypoint assembles `OpenElisClient` + `RecoveryCoordinator` + `LedgerRepository` into a
+running delivery loop (DH-011E's poller remains unwired — confirmed by reading `app.py`/
+`order_poller.py`), a test-only integration harness (`adapter/tests/integration/
+test_dh011p2_crash_recovery.py`, gated behind live-infra env vars, never runs in CI) drives the real,
+unmodified production classes through the exact crash sequence: a controlled fault fires after a
+genuine OpenELIS commit and before ledger completion; a fresh coordinator/ledger pair (simulating
+restart) reconciles to the existing write with zero second writes. A second scenario proves the same
+for a lost-response/timeout shape. `updateServiceRequest`'s reachability (DH-011P said "unreachable
+via the adapter's transport") is narrowed precisely: unreachable via the adapter's *code* (no
+PUT-capable method exists), but reachable by the same credential class the adapter would use
+(live-confirmed) — marked UNSAFE / NOT SUPPORTED FOR DAHER V1 and contained by a new CI guard, not a
+blocker, since no normal Daher flow can construct the request. A full patch-surface caller review
+found a third `editSample` caller (`SampleEditController`, the classic MVC UI) never previously named,
+confirmed behaviorally unaffected. **Not committed or pushed — pending Liban's review.** DH-011
+overall remains NOT COMPLETE: DH-011G/H/I/J/K/L are all still open, unaffected by this ticket. Full
+account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011P2 section; decision
+record: `DECISIONS.md`'s ADR-031 closure pass.
+
+**CORRECTION appended 2026-08-29 (DH-011P3, append-only — the paragraph above is superseded, not
+retracted; this is the final review item before commit).** The paragraph above records DH-011P2's
+own deliberate tolerance of an Analysis carrying more than one added-test correlation (kept so a
+natively-cancelled-then-revived test could legitimately retarget the same Analysis under a second
+correlation). **That tolerance is revoked, not extended.** Liban reviewed the tradeoff directly:
+`UNIQUE(analysis_id)` is now enforced at the database (a new, sequential migration, not an edit to
+the already-applied 004), and `FhirTransformServiceImpl`'s transform fails closed
+(`InternalErrorException`) rather than emit more than one identifier if it ever finds more than one
+correlation for an Analysis — a state the new constraint should make unreachable in normal
+operation. Consequence, stated plainly: a test cancelled natively and later re-added via a
+genuinely distinct Daher event now fails loudly rather than reviving; native, non-Daher use of the
+Modify Order UI is entirely unaffected. Live-verified, one disposable stack: fresh-DB migration
+succeeds; migration re-run against an existing DB with non-duplicate data succeeds; migration
+re-run against an existing DB with a genuine duplicate `analysis_id` fails via Postgres's own atomic
+`CREATE UNIQUE INDEX` — Liquibase rolled back the whole changeset (including the earlier index
+drop), zero data touched, zero data destroyed. A direct concurrent race between two different
+correlation values claiming the same Analysis was also run: one wins, one gets a real
+`UniqueViolation` under genuine contention, exactly one row survives — no silent multi-owner
+Analysis. The DH-011P2 real-adapter crash-recovery integration test was re-run unmodified against
+the rebuilt image with no regression; the cross-namespace collision control is confirmed a separate,
+unaffected mechanism. **READY TO COMMIT: Yes** — this was the last review item; DH-011P/P2/P3
+commit and push together as one implementation. DH-011 overall remains NOT COMPLETE:
+DH-011G/H/I/J/K/L are all still open, unaffected by this ticket. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011P3 section; decision record:
+`DECISIONS.md`'s ADR-031 final closure.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now

@@ -1095,3 +1095,739 @@ or images were created this pass -- there is nothing to tear down.
 READY TO COMMIT: No production code was changed. The only committable artifact from this ticket is
 this documentation update plus the one `PROJECT_STATE.md` blocker entry -- see the ticket's FINAL
 HANDOFF.
+
+## DH-011P (2026-08-29) -- Design B selected and implemented: standalone `daher_analysis_correlation`
+## table, atomic add-test transaction, dual-namespace fail-closed search -- live-verified end to end
+## on fully synthetic disposable infrastructure; not committed pending Liban's review
+
+Liban selected **Design B** (a standalone correlation table, zero patches to any existing upstream
+`Analysis.java`/`.hbm.xml` file) over design A, closing DH-011O's structural blocker. This ticket
+implemented it end to end and live-verified 8 of 9 required matrix items plus one additional
+happy-path probe against fully synthetic disposable infrastructure -- own `openssl rand`-generated
+Postgres passwords and keystore/truststore, `.env` never read, real facility never started, stopped,
+or connected to.
+
+### What was built
+
+- **`daher_analysis_correlation` table** (`liquibase/daher/004-daher-analysis-correlation.xml`):
+  `id`, `analysis_id NUMERIC(10,0) NOT NULL REFERENCES clinlims.analysis(id)`, `correlation_value
+  VARCHAR(64) NOT NULL` with a format CHECK (`^[0-9a-f]{64}$`) and a **unique** index, `created_at`,
+  `last_updated`. Deliberately **no** `UNIQUE(analysis_id)` -- a canceled analysis revived under a
+  later, distinct correlation can legitimately retarget the same `analysis_id` across its lifecycle;
+  only `correlation_value` carries the authoritative one-event-one-row guarantee.
+- **`DaherAnalysisCorrelation`** (new JPA `@Entity`, registered in `persistence.xml`) plus a thin
+  DAO/service pair following the existing `UomTypeMap`/`UnitOfMeasureService` pattern exactly --
+  matching `hibernate.cfg.xml`'s own stated preference for annotation-based (JPA) additions over
+  further `.hbm.xml` patching, per Constitution IV, the same reasoning DH-011O recorded for choosing
+  design B in the first place.
+- **`DaherAddedTestTransaction`** (new `@Component`, mirroring `DaherOrderCorrelationTransaction`'s
+  own reason for being a separate transactional wrapper bean rather than `@Transactional` directly on
+  `ServiceRequestProvider` -- a transactional proxy on that class breaks HAPI's reflection-based
+  `@Create`/`@Update`/`@Search` method discovery, `HAPI-0289`, live-confirmed at DH-011D3). One
+  `@Transactional(rollbackFor = Exception.class)` method, `addTest`, covers `SampleEditService
+  .editSample`'s native write and the correlation-row insert in a single transaction, proven active
+  via `TransactionSynchronizationManager.isActualTransactionActive()` (throws if not). A fast,
+  non-authoritative pre-check against `daher_analysis_correlation` makes a replay a no-op; the
+  authoritative guarantee against a true race is the DB-level `UNIQUE(correlation_value)` constraint,
+  deliberately **not** pre-emptively serialized with a pessimistic lock (see Concurrency below).
+  Returns a `Result{analysisId, created}` rather than a bare id specifically so a replay can report
+  `created=false` -- a replay that silently claimed 201 would be the same false-green class as the
+  pre-existing `Patient`-create bug this file already records (DH-011N section); self-caught before
+  live testing, not found by it.
+- **`SampleEditService.editSample`'s return type widened from `void` to `List<String>`.** The prior
+  shape returned the updated analysis ids through a shared singleton-bean instance field
+  (`getUpdatedAnalysisList()`), a live concurrency hazard for any two overlapping calls on the same
+  `@Service` bean -- eliminated, not merely worked around, by making the method return its result
+  directly. `SampleEditServiceImpl` and `SampleEditRestController` (the pre-existing REST caller of
+  `editSample`) were both updated to the new signature; this is the one place this ticket's changes
+  reach outside the add-test path itself, and is called out explicitly because DH-011O's design-B
+  writeup assumed the new work would be purely additive -- it was not, and a reviewer should see this
+  named rather than find it in a file list.
+- **`ServiceRequestProvider.createServiceRequest`'s existing-specimen branch** now routes to a new
+  `createAddedTestServiceRequest`, which builds a `SampleEditForm` with `existingTests` left empty
+  (source-proven safe at DH-011O; nothing omitted from that array is ever visited by any
+  cancel/update loop) and `possibleTests` carrying exactly the one requested test, then calls
+  `daherAddedTestTransaction.addTest`. A `StaleObjectStateException` cause is mapped to a 400
+  (`InvalidRequestException`), matching this file's existing convention for a native optimistic-lock
+  conflict surfaced to the FHIR caller.
+- **`searchDaherCorrelationNatively` extended to a dual-namespace lookup**: queries both
+  `electronic_order.external_id` (the existing initial-order namespace) and
+  `daher_analysis_correlation.correlation_value` (the new added-test namespace). If a correlation
+  value somehow matches **both** namespaces at once, this throws `InternalErrorException` rather than
+  silently preferring either one -- DH-011O flagged this exact cross-namespace case as needing an
+  explicit answer, not an assumption; live-verified below. The added-test namespace's own `Bundle`
+  sets `total=1` for consistency with the initial-order namespace's "one logical order" convention,
+  per DH-011O's second flagged open question.
+
+### The one real implementation bug found by live testing, not by review
+
+`createAddedTestServiceRequest` initially set `form.setSampleXML(SampleUtil.buildSampleXml(...))`,
+mirroring the pre-existing `updateServiceRequest`'s own pattern. Live-tested (item 3 below), this
+produced HTTP 500, `"Unexpected analysis count (2) for add-test event"` -- `editSample` created
+**two** `Analysis` rows for one add-test call, not one. Root cause, found by reading
+`SampleAddService.createSampleTestCollection()` in full: a populated `sampleXml` drives a **separate**
+code path (`createAddSampleList`) that unconditionally parses every `<sample>` XML element and
+inserts a brand-new `SampleItem` + `Analysis`, with **no branch at all** that reuses an existing
+`SampleItem` even when the XML's `sampleItemId` attribute names one -- that reuse logic lives only in
+the sibling `possibleTests` → `createAddAanlysisList` path. Fix: set `form.setSampleXML("<samples>
+</samples>")` (an empty document) so `createAddSampleList` parses zero elements and contributes
+nothing; the add flows exclusively through `possibleTests`, which correctly reuses the existing
+`SampleItem`. **`updateServiceRequest` (pristine, unpatched upstream code) has this identical latent
+defect** -- it builds `sampleXml` from an existing `SampleItem` the same way, whenever
+`possibleTests` is non-empty -- **but is unreachable via the Daher adapter**, confirmed by reading
+`adapter/src/daher_adapter/openelis.py`'s `deliver_service_request`: it only ever issues `POST`,
+never `PUT`. Recorded here as an out-of-scope finding, not fixed, per this ticket's own "smallest
+patch" instruction; worth its own ticket if `updateServiceRequest` is ever wired to a caller.
+
+### A second, self-caught XML defect found only by a live boot
+
+The migration's original explanatory `<!-- -->` comment used `" -- "` as a prose separator, which is
+invalid inside an XML comment per spec (a literal `--` may not appear between `<!--` and `-->`).
+Liquibase's own XML parser rejected it at boot (`SetupException: The string "--" is not permitted
+within comments`, line 10 column 72) -- a class of bug no static patch-text guard can catch, only a
+live boot proves it. Fixed by replacing every `" -- "` with `" - "` in the comment block, verified
+well-formed via `xml.dom.minidom.parse`, and re-confirmed live: `daher-011p-004-daher-analysis-
+correlation` migration now runs successfully (19ms) and the CI static guard still passes unchanged.
+
+### Live verification matrix, all against one disposable stack (own generated credentials,
+### `dh011p-patched-openelis:test`, pinned upstream `3.2.1.11` / `e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23`)
+
+1. **Boot + schema.** Webapp and DB both healthy; `\d daher_analysis_correlation` confirmed table, FK
+   to `clinlims.analysis`, the unique index on `correlation_value`, the non-unique index on
+   `analysis_id`, and the format CHECK constraint, exactly as designed. **PASS**
+2. **New order (DH-011M/Option P non-regression).** A fresh `ServiceRequest` POST with no existing
+   specimen reference created one Sample/SampleItem/Analysis with a real generated accession, exactly
+   as DH-011M proved before this ticket touched anything. **PASS**
+3. **Add a second test to an existing accession -- the core DH-011N regression this ticket exists to
+   fix.** POST referencing the first order's real `Specimen` → `201`. DB read after: the original
+   Analysis (WBC, id=2) unchanged, including its own `lastupdated` timestamp; exactly one new
+   `Analysis` (RBC, id=3) and one new `daher_analysis_correlation` row (`correlation_value` = `corr2`,
+   `f2b4902a...`) exist; `sample_item` count for the accession unchanged at 1 -- no spurious duplicate
+   specimen; zero `StaleObjectStateException` anywhere in the logs. **PASS**, fully confirmed with
+   before/after DB state, not inferred from HTTP status alone.
+4. **Dangling specimen reference (DH-011M's fail-loud guard, non-regression).** A `ServiceRequest`
+   referencing a `Specimen` id that does not resolve to a real `SampleItem` → `400`,
+   `"ServiceRequest.specimen reference did not resolve to an existing SampleItem -- refusing to
+   silently create a new order instead"`, zero new samples. **PASS**
+5. **Replay / idempotency.** The identical item-3 request replayed with the same correlation
+   (`corr2`) → `200` (not `201` -- `addTestResult.isCreated() == false` correctly reported), zero new
+   DB rows of any kind. **PASS**
+6. **Concurrent identical event, deliberately without added locking** (per this ticket's own
+   instruction not to pre-emptively serialize the accession ahead of evidence). Two simultaneous
+   deliveries of the same correlation (`corr3`) against the same accession: one `201` winner, one
+   `500` loser (`ConstraintViolationException` on `UNIQUE(correlation_value)`); DB read after showed
+   **exactly one** new `Analysis` and **exactly one** new correlation row -- the loser's own spurious
+   `Analysis` insert was rolled back with the rest of its transaction, zero orphans. This is also the
+   live evidence for item 9's rollback requirement below -- see that item. **PASS**
+7. **Concurrent different events, deliberately without added locking.** Two simultaneous deliveries
+   of two distinct, valid add-test correlations against the same accession: both `201`, both
+   Analyses created, zero `StaleObjectStateException` anywhere in either container's logs -- a pure
+   add never sets `editSample`'s `sampleChanged` flag (DH-011O's own concurrency note), so the two
+   never contend on any shared versioned `Sample` row, confirmed rather than assumed. **PASS**
+8. **Cross-namespace collision, fail-closed (DH-011O's first flagged open question).** A synthetic
+   64-hex value was directly SQL-inserted into **both** `electronic_order.external_id` (type=`FHIR`)
+   and `daher_analysis_correlation.correlation_value` (pointed at the item-3 Analysis). The
+   authoritative search (`GET /fhir/ServiceRequest?identifier=urn:daher-health:adapter:source-
+   event|<value>`) returned `500`: `"Data integrity violation: correlation ... matches both the
+   initial-order namespace (electronic_order.external_id) and the added-test namespace
+   (daher_analysis_correlation.correlation_value) -- refusing to silently pick one."` Neither
+   namespace was silently preferred. **PASS**
+9. **Rollback / crash-recovery, split into its two halves.** The rollback half -- a failure between
+   the native `Analysis` write and the correlation-row commit leaving zero partial state -- is
+   **PASS, proven** as a natural byproduct of item 6: the loser's `Analysis` insert (created inside
+   the same `@Transactional addTest` call, before its own correlation insert hit the unique-
+   constraint violation) was fully rolled back with it; no separate synthetic failure injection was
+   performed because item 6 already exercises the exact failure point this half asks about. The
+   **crash-recovery half is NOT DEMONSTRATED** -- that requires the Daher adapter's own
+   `RecoveryCoordinator` marking an event `RECONCILED_EXISTING` after a probe against a target write
+   the adapter itself never received a response for, and the adapter was not started this pass. This
+   is reported as a real gap, not inferred from the rollback proof; it is a remaining verification
+   item for whichever ticket next puts the adapter in the loop against this build.
+10. **Happy-path probe on the added-test namespace (DH-011O's second flagged open question, the
+    complement of item 8).** `GET /fhir/ServiceRequest?identifier=urn:daher-health:adapter:source-
+    event|corr2` (the item-3 correlation, no collision fixture involved) → `200`, `Bundle.total: 1`,
+    exactly one `entry`, correctly the RBC `ServiceRequest` item 3 created. **PASS**
+
+### A representation gap found while running item 10, recorded rather than fixed
+
+The `ServiceRequest` body returned by both the original item-3 `201` response and the item-10 search
+carries `identifier[system=urn:daher-health:adapter:source-event].value = corr1` -- the **original
+order's** correlation (`a757304f...`), not `corr2` (`f2b4902a...`), the correlation of the actual
+add-test event that produced this resource. Root cause: `createAddedTestServiceRequest` builds its
+response via `fhirTransformService.transformToServiceRequest(analysisId)`, the same pre-existing,
+unpatched transform every other path uses, which derives this identifier from the Sample's linked
+`electronic_order.external_id` -- and design B deliberately does not create a new `electronic_order`
+row for an added test (that was DH-011O's entire point: reusing that mechanism for a per-test
+correlation is what's structurally broken), so the only `electronic_order.external_id` linked to that
+Sample is still the original order's. The **search itself is correct** -- item 10 resolved by `corr2`
+through the `daher_analysis_correlation` table, not by trusting this field -- only the *echoed
+identifier on the returned resource body* names the wrong correlation. This is safe for the one
+consumer that exists: the adapter's `deliver_service_request` already knows which correlation it
+sent and always re-probes by that value rather than reading it back out of the response body (DH-025
+finding C). It is recorded here as a known representation gap, not silently accepted as "acceptable
+by design" -- whether a future consumer could ever be misled by it is Liban's call, not this ticket's
+to close by inference.
+
+### Concurrency: no locking added, exactly as DH-011O flagged and this ticket's own instruction required
+
+Items 6 and 7 together are the live evidence DH-011O asked the eventual implementation to gather
+before considering any lock: the identical-event race is safely resolved by `UNIQUE
+(correlation_value)` alone (item 6), and two distinct concurrent additions to the same accession do
+not contend on any shared versioned row at all (item 7) because a pure add never triggers `Sample`'s
+own `@Version` update path. No `LockMode.PESSIMISTIC_WRITE` or equivalent was added; none of this
+evidence demonstrates a need for one.
+
+### CI
+
+The "DH-011D order-correlation patch content guards" job (static guard) was extended with checks for
+the new migration's table/FK/unique-index/rollback content and the explicit absence of
+`UNIQUE(analysis_id)`; a check that `DaherAnalysisCorrelation.java` exists and is correctly
+`@Entity`-mapped; a check that no `Analysis.java.patch`/`Analysis.hbm.xml.patch` exists (enforcing
+design B's own boundary -- this ticket must never grow into design A by accretion); a check that
+`SampleEditServiceImpl.java.patch` returns `List<String>` rather than assigning to the removed
+`analysisList` field; and checks that `ServiceRequestProvider.java.patch` queries the added-test
+namespace, contains the explicit cross-namespace collision-check string, routes through
+`daherAddedTestTransaction.addTest(`, and contains no fuzzy-matching pattern. Both new negative-
+control guards (the forbidden `Analysis.java.patch` file, the forbidden `UNIQUE(analysis_id)`
+constraint) were control-tested by injecting each violation into a scratch copy and confirming the
+guard script fails with the expected message for both -- not merely written and assumed correct.
+
+The "openelis order-correlation patch -- compiles" behavioral job's "Apply the production patches"
+step was extended to apply all four new patches and copy all new files, mirroring the Dockerfile
+build stage exactly. **One pre-existing, unrelated bug found and fixed while reproducing this job
+locally**: its "Install git" step never installed `apache2-utils`, so
+`install/createDefaultPassword.sh` (which the job's build step calls) retries in an unbounded loop --
+reproduced locally as an 80,000+-line log of the identical repeated error before the missing
+dependency was identified. Fixed by adding `apache2-utils` to that step (renamed "Install git and
+htpasswd") with a comment noting this predates DH-011P and was found empirically, not by static
+review.
+
+### Build evidence
+
+Both a standalone Maven build (`/home/libanbritt/dh011p-build/run-build.sh`, a cold `.m2` volume) and
+the actual production `Dockerfile` (a warm BuildKit cache) were built to `BUILD SUCCESS` /
+`target/OpenELIS-Global.war` present, independently -- the standalone build gives a compile signal
+isolated from container plumbing; the Dockerfile build is what the real image is actually built from.
+Neither is redundant with the other.
+
+### Test infrastructure and real-facility boundary
+
+Identical posture to DH-011M/N/O: one fully synthetic, disposable stack, own generated Postgres
+passwords and keystore/truststore, `.env` never read, real facility never started, stopped, or
+connected to. Full teardown performed and verified at the end of this ticket: `docker compose down
+-v` removed all three containers (`dh011p-patched-webapp-1`, `dh011p-patched-db-1`,
+`dh011p-patched-certs-1`), all four named volumes (`dh011p-patched_ca`, `dh011p-patched_db-data`,
+`dh011p-patched_keystore`, `dh011p-patched_properties`), and the dedicated network; `docker rmi
+dh011p-patched-openelis:test` and the standalone build's `m2-dh011p-cache` volume were removed;
+`docker ps -a`/`docker volume ls` confirmed nothing named `dh011p*` remains. One unrelated,
+pre-existing container (`daher-health-openelis-certs-1`, created six days before this ticket started)
+shares the `daher-health/certgen:0.1.0` image and was deliberately left untouched -- not part of this
+ticket's disposable infrastructure and not this ticket's to remove.
+
+### What was deliberately not done, and why
+
+- **Crash-recovery (item 9's second half) was not demonstrated.** It requires the adapter's own
+  `RecoveryCoordinator` in the loop, which this pass never started. Reported as NOT DEMONSTRATED,
+  not inferred from the rollback proof that item 6 does provide.
+- **The echoed-correlation representation gap was not fixed.** Changing what
+  `fhirTransformService.transformToServiceRequest` echoes touches a pre-existing, shared transform
+  used by every FHIR-facing path in this codebase, not something scoped to design B's own new files
+  -- exactly the kind of change this ticket's "smallest patch, one ticket only" instruction reserves
+  for its own ticket, after Liban has seen it named here.
+- **`updateServiceRequest`'s identical `sampleXml` defect was not fixed**, for the same
+  adapter-unreachable reasoning DH-011M/N already established for other findings in this file.
+
+### Test suite state
+
+No adapter or Python source was changed by this ticket; adapter test counts are unchanged from their
+last-reported state. No frontend code was touched.
+
+READY TO COMMIT: pending Liban's review of this handoff. Production code changes are complete and
+live-verified per the matrix above; nothing has been committed or pushed. **DH-011 overall remains
+NOT COMPLETE** -- DH-011G (patient identity), DH-011H (real requester, NEEDS LIBAN #6), DH-011I (test
+mapping, DH-006), DH-011J (cancellation), DH-011K (crash points beyond DH-025's generic tests), and
+DH-011L (demonstration) are all still open, unaffected by this ticket.
+
+## DH-011P2 (2026-08-29) -- independent review declined DH-011P's commit; three closure gaps
+## closed with live evidence: added-test correlation representation fixed, true DH-025
+## crash-recovery demonstrated with the real adapter, updateServiceRequest reachability
+## resolved to a contained, non-blocking finding -- still not committed pending Liban's review
+
+An independent review of DH-011P's own handoff declined to approve it for commit, citing three
+specific gaps: (1) the local worktree's relationship to `origin/master` was unverified; (2) true
+DH-025 crash-after-target-commit recovery was reported NOT DEMONSTRATED; (3) the added-test
+response's echoed identifier was recorded as a known gap, not fixed. This ticket closes all three,
+live, against a fresh disposable stack rebuilt from the corrected patch set.
+
+### Gap 1 -- repository state, verified rather than assumed
+
+`git rev-parse HEAD` and `git rev-parse origin/master` were run directly rather than trusting the
+prior handoff's stated base. They already matched exactly (`797eb7c97cba569589ab5dd47bb5d3a9b81bc790`,
+`git rev-list --left-right --count HEAD...origin/master` → `0 0`) -- DH-011P's own working tree sat
+cleanly on current master the whole time; the prior handoff's stated HEAD (`8f2ed6d`) was simply
+stale, carried forward from an early-session snapshot rather than re-checked at handoff time. No
+rebase, stash, or merge was needed or performed. All 15 DH-011P files (8 modified, 7 untracked) were
+confirmed still present and `git diff --check` still showed only the same pre-existing benign
+diff-context-blank-line pattern already present in 4 other committed `.patch` files in this repo.
+
+### Gap 2 -- the representation fix (§5)
+
+Root cause, precisely: `FhirTransformServiceImpl`'s shared `transformToServiceRequest(Analysis)`
+method -- the single implementation every FHIR-facing path funnels through -- built the
+`urn:daher-health:adapter:source-event` identifier exclusively from `sample.getClinicalOrderId()`'s
+linked `electronic_order.external_id`, with no awareness that design B's `daher_analysis_correlation`
+table exists at all. An added test's Analysis has no row in `electronic_order` of its own (design B's
+entire point), so this code always fell through to the *sample's* electronic_order -- the *original*
+order's correlation -- regardless of which Analysis was actually being transformed.
+
+**Fix**, in `FhirTransformServiceImpl.java.patch` (an existing DH-011D patch, extended, not a new
+file): before the existing `clinicalOrderId` fallback, look up
+`daherAnalysisCorrelationService.getByAnalysisId(Long.valueOf(analysis.getId()))`. If that Analysis
+has one or more added-test correlations, emit *every one* of them as its own repeated
+`source-event` identifier (`ServiceRequest.identifier` is already 0..*) and skip the
+`clinicalOrderId` fallback entirely. If it has none, fall through unchanged to the pre-existing
+initial-order behavior -- the regression boundary DH-011N/O/P already established.
+
+**The "emit all, not one" choice, not left to lookup order.** `daher_analysis_correlation` has no
+`UNIQUE(analysis_id)` by design (a canceled-then-revived Analysis can legitimately carry a
+correlation from before cancellation and a second from its revival -- `DaherAnalysisCorrelation`'s
+own javadoc). Live-confirmed this is not hypothetical: an accidental test fixture during this
+ticket's own §14 setup (a botched first attempt at the collision fixture, see below) put two
+different correlation rows on the same Analysis and the search response correctly returned both as
+separate identifiers on the one resource -- unplanned, but real, corroborating evidence that this
+representation is right, not merely defensible.
+
+**Live-verified, three orders on one accession** (a fresh WBC order + two independent add-test
+events, RBC and HGB, each its own correlation):
+
+| Search by | Bundle | Each entry's OWN echoed `source-event` identifier |
+|---|---|---|
+| corr1 (initial order) | `total:1`, 3 entries (WBC+RBC+HGB, all on the accession) | WBC→corr1 (unchanged), RBC→corr2, HGB→corr3 |
+| corr2 (RBC's own event) | `total:1`, 1 entry | RBC→corr2 |
+| corr3 (HGB's own event) | `total:1`, 1 entry | HGB→corr3 |
+
+Before this fix, all three entries in the corr1 search would have echoed corr1 -- the search-by-
+correlation namespace was already correct (DH-011P proved that), only the *echoed identifier on the
+returned resource* was wrong. Confirmed via both the live HTTP response bodies and the authoritative
+`daher_analysis_correlation` table read (exactly 2 rows: RBC→corr2, HGB→corr3, none for WBC, matching
+design). **Gap 2: CLOSED**, not merely documented.
+
+### Gap 3 -- true DH-025 crash recovery, demonstrated with the real adapter (§7-11)
+
+**No production entrypoint assembles `OpenElisClient` + `RecoveryCoordinator` +
+`LedgerRepository` into a running delivery loop yet** -- confirmed by reading `app.py` (a
+health-check-only FastAPI app) and `order_poller.py` (`OrderPoller` takes a `RecoveryCoordinator`
+as a constructor dependency but nothing in this repository ever instantiates one; DH-011E's poller
+remains, as PROJECT_STATE.md already says, "not activated"). This ticket therefore built a
+test-only *integration harness* -- not a change to `src/daher_adapter/` -- that drives the real,
+unmodified production classes through the exact sequence a real crash would produce, against a real
+disposable Postgres (the real `alembic upgrade head` migrations, `0001_safety_ledger` and
+`0002_watermarks`, applied for real) and the real disposable OpenELIS webapp built from this
+ticket's own patch set.
+
+Committed as `adapter/tests/integration/test_dh011p2_crash_recovery.py` -- manual/opt-in only,
+gated behind `DH011P2_LIVE_*` environment variables so the default `pytest -q` run (and CI, which
+has no live stack) skips it: confirmed live, `pytest -q` on the unmodified adapter tree reports
+**142 passed, 2 skipped** (the two new gated tests), an exact, re-verified match to DH-011P's own
+last-reported adapter test count -- not assumed unchanged, checked.
+
+**§7-9-10, crash-after-target-commit-before-ledger-completion:**
+1. `ledger.claim(identity)` (real `LedgerRepository`, real Postgres) -- state → `processing`.
+2. `RecoveryCoordinator.reconcile`'s `write_target` callable calls the real
+   `deliver_service_request_if_activated` (POST + authoritative native reconciliation read, the
+   real production writer), which returns a genuine `TargetRecord` -- OpenELIS has truly committed
+   a new `Analysis` and `daher_analysis_correlation` row. The callable then raises a
+   `SimulatedCrash` -- the one test-only fault, placed exactly after a proven real commit and
+   before `reconcile`'s own `ledger.mark_completed` call, per this ticket's §9 instruction.
+3. DB read after: `analysis` count +1, `daher_analysis_correlation` count +1 from the pre-state,
+   `ledger.get_state(identity)` still `"processing"` -- the genuine ambiguous window.
+4. "Restart": a **fresh** `RecoveryCoordinator` bound to a **fresh** `LedgerRepository`/session
+   factory/SQLAlchemy engine (no Python object or in-memory state reused) calls `reconcile` again
+   for the same identity. Its `write_target` raises `AssertionError` if ever invoked.
+5. Result: `RecoveryAction.RECONCILED_EXISTING`, the writer was called **zero** times, DB counts
+   **unchanged** from step 3 (no new Analysis, no new correlation row), `ledger.get_state`
+   transitions to `"completed"`.
+
+**§11, timeout/response-loss after a real commit** -- one real correction made while writing this
+scenario, recorded rather than silently worked around: `deliver_service_request`'s own internal
+reconciliation only runs when the `post` callable *returns* (even with an HTTP error status); if
+the callable itself *raises* (a genuine transport-level exception -- the actual shape of a TCP
+timeout/connection loss), the method raises `AmbiguousTargetState` immediately, without attempting
+its own reconciliation read. This is real, already-tested behavior
+(`test_openelis_recovery_binding.py`'s ambiguous-probe sibling case), not a defect introduced or
+found here. The "no second mutation" guarantee for this exact failure mode therefore comes from
+`RecoveryCoordinator.reconcile`'s own probe-before-write discipline on the *next* attempt -- proven
+end to end: a `post` callable that performs a real POST (server really commits) then raises
+`TimeoutError` to the caller → `AmbiguousTargetState` propagates, ledger stays `"processing"`, DB
+shows the real write (+1 Analysis, +1 correlation) despite the "failed" first attempt; a second,
+real (non-lossy) `reconcile` call finds `FOUND` via `service_request_probe`, calls the writer
+**zero** times, completes the ledger. Final count after both attempts: still exactly **one** new
+Analysis and **one** new correlation row total -- no double write, no blind retry POST.
+
+Six independent runs of these two scenarios (two ad hoc, four via the tracked pytest file, run
+twice to confirm the lint-cleanup pass changed nothing behavioral) all left the adapter's own
+`processed_messages` ledger in state `completed` for every identity, zero stuck in `processing`,
+zero dead-lettered. **Gap 3: DEMONSTRATED**, with the real `OpenElisClient`, `RecoveryCoordinator`,
+and `LedgerRepository` -- not a unit fake, not scripted HTTP, not a direct DB insert, not
+`service_request_probe` called alone.
+
+### §4 -- full patch-surface review, the one third caller DH-011P never named
+
+Grepped the entire pinned upstream tree, including the `dataexport` submodule, for every call site
+of `SampleEditService`/`editSample`/`getUpdatedAnalysisList`. Exactly three exist, not two:
+`SampleEditRestController` (already reviewed and patched by DH-011P), `ServiceRequestProvider`
+(already reviewed and patched by DH-011P), and **`SampleEditController`** -- the classic,
+non-REST Spring MVC controller behind the human "Sample Edit" browser workflow, never previously
+named in this file. It calls `editSample` as a bare statement (`sampleEditService.editSample(...);`,
+return value discarded) and never calls the removed `getUpdatedAnalysisList()` getter anywhere.
+Java permits discarding a non-void return value used as a statement expression, so widening
+`editSample`'s return type from `void` to `List<String>` is behaviorally silent here -- confirmed
+both by this source-level review and empirically: the full Maven reactor (which compiles this file
+unconditionally, patched or not) reached `BUILD SUCCESS` repeatedly across this and the DH-011P
+session with no changes needed to `SampleEditController.java`. No patch to it exists or is needed.
+
+**Per-patch review, the requested WHY/BEFORE/AFTER/GENERAL-BEHAVIOR/DAHER-ONLY-ALTERNATIVE/
+UPGRADE-COST table**, for the four upstream files DH-011P's own handoff named as needing this:
+
+| File | Why required | Before | After | General OpenELIS behavior changes? | Daher-only path possible instead? | Upgrade/rebase cost |
+|---|---|---|---|---|---|---|
+| `SampleEditService.java` | `editSample`'s only way to report which `Analysis` id(s) it wrote, race-safely | `void`; caller read a separate `getUpdatedAnalysisList()` getter afterward | Returns `List<String>` directly | Yes, but only the method's return type -- every real caller either uses the new value (the two REST/FHIR paths) or silently discards it (`SampleEditController`, confirmed above) | No -- `editSample` is upstream's own single native "add/edit a test" implementation; forking it into a Daher-only copy would duplicate its ~250 lines of transactional business logic and immediately diverge from upstream bugfixes | Low -- a one-line interface signature; a future upstream release changing this method's own signature would conflict obviously at `git apply` time, not silently |
+| `SampleEditServiceImpl.java` | Same reason; this is where the shared singleton-bean field actually lived | `private List<String> analysisList` instance field on a singleton `@Service` bean -- a live race between any two concurrent `editSample` callers, including two different human users | Field removed entirely; the local `analysisIds` list is returned directly, never stored on `this` | No behavioral change for a single caller; **removes** a latent concurrency hazard for concurrent callers (never observed failing in this repo's own testing, but structurally present before this patch) | No, same reasoning as above | Low -- a field deletion and one `return` statement |
+| `SampleEditRestController.java` | The only pre-existing caller that read `getUpdatedAnalysisList()` | `sampleEditService.editSample(...)` (return discarded); separately called `sampleEditService.getUpdatedAnalysisList()` | Captures `editSample`'s return value into a local variable, passes that to `fhirTransformService.transformAnalysisByIds(...)` | No -- identical values flow to the identical downstream call, only the plumbing changed | No -- this is the REST endpoint's own pre-existing FHIR-sync call, not something Daher owns | Low -- a two-line change at one call site |
+| `persistence.xml` | Registers the new `DaherAnalysisCorrelation` JPA entity so Hibernate maps it at all | Entity list did not include it | One `<class>` line added, in the same block as the other Daher/label-preset annotation-based entities | No -- purely additive registration | No -- JPA entity registration is a single, global, upstream-owned file; there is no Daher-only equivalent | Low -- one line, in a clearly-delimited list; a merge conflict here is trivially resolved by re-adding the line |
+
+None of the four changes upstream's own general-purpose behavior for any caller not already
+reviewed above. All are low upgrade-rebase cost by the same measure DH-011M/N/O/P have used
+throughout: a future upstream release changing these exact lines produces an obvious `git apply`
+conflict, never a silent behavior change.
+
+### §15 -- `updateServiceRequest` (PUT) reachability, resolved to contained, not a blocker
+
+**Live-tested against the disposable stack, the exact question this ticket's §15 poses**: an
+authenticated `PUT /fhir/ServiceRequest/1` using the same HTTP Basic credential class
+(`admin:adminADMIN!`) the Daher integration would use returned `400`
+(`"ServiceRequest.code.coding is required"`) -- past authentication, past HAPI's method routing,
+failing only on payload validation. An unauthenticated PUT to the same URL returned `302` to the
+login page (denied, as expected). **This confirms `updateServiceRequest` is reachable by the same
+credential class**, resolving DH-011M/N's own open question about it.
+
+**But not by "the same credentials AND normal Daher flow," §15's actual compound STOP condition.**
+`adapter/src/daher_adapter/openelis.py`'s `OpenElisClient` defines no PUT-capable method at all --
+`identifier_search` and `_create_and_verify` both only ever call `self._get`/`self._post`; there is
+no `update_service_request` or equivalent anywhere in this repository's adapter or Java patch code.
+Nothing in the normal Daher flow can construct a PUT request; it is reachable only by a deliberate,
+out-of-band manual call using valid credentials -- not something the adapter's own code path could
+"accidentally" invoke. **Resolution: UNSAFE / NOT SUPPORTED FOR DAHER V1, contained, not a
+blocker.** Two actions taken, both required by §15's own non-STOP branch:
+
+1. This finding is now recorded explicitly (this section, plus `PROJECT_STATE.md`) as its own
+   named, out-of-scope item -- distinct from DH-011P's earlier note that `updateServiceRequest` is
+   merely "unreachable via the adapter's transport" (true but incomplete: it is unreachable via the
+   adapter's *code*, reachable via its *credentials*).
+2. A permanent CI static guard (the extended "DH-011D order-correlation patch content guards" job,
+   see §18 below) asserts `openelis.py` defines no PUT-capable method for `ServiceRequest` delivery
+   -- control-tested by injecting a `"PUT"` string reference into a scratch copy and confirming the
+   guard fails with the expected message.
+
+This is NOT the `updateServiceRequest` `sampleXml` double-Analysis defect DH-011P already recorded
+(that is a separate, still-unfixed latent bug in the SAME unreachable method); this section is about
+*reachability*, that one is about *correctness if ever reached*. Both point at the same method,
+both concur it must not be called, for two independent reasons.
+
+### §16 -- JPA/persistence verification, all items live-confirmed
+
+- **Fresh boot**: the rebuilt image (with the representation fix) booted clean from an empty
+  volume; `\d daher_analysis_correlation` matched the design exactly (unchanged from DH-011P).
+- **Existing-volume migration idempotence**: `docker restart` against the *same*, already-migrated
+  volume -- `databasechangelog` still showed exactly one `daher-011p-004-...` row (not duplicated),
+  all data survived (`analysis`/`daher_analysis_correlation` counts unchanged across the restart),
+  Liquibase's own log showed every changeset correctly skipped or continued past precondition,
+  never re-applied.
+- **Entity registration / DAO CRUD**: proven structurally by every create/search operation in this
+  ticket's live matrix, all of which flow through the JPA-mapped `DaherAnalysisCorrelation`
+  entity and its DAO.
+- **FK enforcement**: a direct SQL insert of a correlation row with `analysis_id = 999999` (no such
+  Analysis) was rejected: `violates foreign key constraint "daher_analysis_correlation_analysis_id_fkey"`.
+- **Unique correlation**: re-confirmed via the concurrent-same-event regression (§12 below) --
+  `ConstraintViolationException` on the loser, exactly as DH-011P first proved.
+- **No `UNIQUE(analysis_id)`, confirmed both by schema read and empirically**: the accidental §14
+  setup mistake (below) put two live correlation rows on the same `analysis_id` without the DB
+  raising any constraint violation -- direct, unplanned proof the design intentionally allows it.
+- **Rollback, no orphan correlation row**: re-confirmed via §12 -- the loser's `Analysis` insert and
+  its own correlation-row insert were both rolled back together; DB counts after showed only the
+  winner's single new row of each.
+- **No correlation row pointing to a nonexistent Analysis**: the FK constraint above is the
+  authoritative guarantee; nothing in this codebase can construct one that violates it.
+
+### §12-14 -- concurrency and collision regressions, re-run against the rebuilt image
+
+All three re-run clean against the image containing the representation fix, confirming it changed
+nothing about atomicity or the fail-closed collision check:
+
+- **§12, concurrent identical event, no added locking**: one `201` winner, one `500` loser
+  (`ConstraintViolationException`), DB before/after: `analysis` +1, `daher_analysis_correlation` +1,
+  `sample_item` unchanged -- the loser's spurious Analysis insert rolled back with it, zero orphans.
+- **§13, concurrent different events, no added locking**: both `201`, DB `analysis` +2,
+  `daher_analysis_correlation` +2, `sample_item` unchanged, **zero**
+  `StaleObjectStateException` anywhere in the full container log.
+- **§14, cross-namespace collision**: a genuinely correct fixture this time (a first attempt failed
+  on a `NOT NULL` constraint on `electronic_order.data`, silently producing the §16 "no
+  `UNIQUE(analysis_id)`" evidence above instead -- corrected and re-run properly). The same 64-hex
+  value inserted into both `electronic_order.external_id` (type=`FHIR`) and
+  `daher_analysis_correlation.correlation_value` (pointed at a different Analysis) -- the search
+  returned `500` with the exact same fail-closed diagnostic DH-011P first proved, unchanged by the
+  representation fix. Fixture rows cleaned up immediately after.
+
+### CI (§18)
+
+The "DH-011D order-correlation patch content guards" job was extended: the Dockerfile
+patch-application check now covers all 9 patches (DH-011P's own guard checked only 5; the other 4
+-- `LiquibaseConfig.java.patch`, `ElectronicOrder.hbm.xml.patch`, `SampleEditService.java.patch`,
+`SampleEditRestController.java.patch` -- existed and were applied by the Dockerfile but were never
+asserted); a new reciprocal check globs every `.patch` file in the directory and fails if any is not
+consumed by the Dockerfile (catches a future patch being added and silently never applied, not just
+the reverse); `FhirTransformServiceImpl.java.patch` now asserts both halves of the representation
+fix (the added-test lookup present, the initial-order fallback preserved); and the new §15 guard
+asserts `openelis.py` never gains a PUT-capable method. **All new/extended guards control-tested**
+by injecting each specific violation into a scratch copy and confirming the exact expected failure
+message -- not merely written and assumed correct. The "openelis order-correlation patch --
+compiles" job's patch-apply step already covered `FhirTransformServiceImpl.java.patch` (an existing
+DH-011D-era patch whose *content* changed, not a new file) and needed no changes.
+
+**One genuine compile-verification gap found and closed while doing §17's review**: DH-011P's own
+Docker build always used `-Dmaven.test.skip=true`, so the pinned upstream's own pre-existing
+`ServiceRequestProviderTest.java` (a JUnit/Mockito test of `ServiceRequestProvider.readServiceRequest`,
+unrelated to any Daher patch but living in the same class) was never actually compiled against
+the patched `ServiceRequestProvider.java` by any build this repository has run. Run explicitly this
+pass (`mvn test -Dtest=ServiceRequestProviderTest`, requiring the `dataexport` aggregator module to
+also be `mvn install`-ed locally first, not just `dataexport-core` -- a build-plumbing gap in the
+prior local reproduction, not in the Dockerfile, which already does both): **3 tests, 0 failures, 0
+errors** against the fully patched build. §17's "compile all callers, run available relevant tests"
+requirement is met with a real result, not an assumption from `BUILD SUCCESS` on a test-skipped
+build.
+
+### Adapter verification (§19)
+
+`ruff check .`: all checks passed. `ruff format --check .`: 34 files already formatted (33 before
+this ticket, +1: the new integration test file). `pytest -q`: **142 passed, 2 skipped** -- the exact
+same passing count DH-011P's handoff reported, re-verified directly rather than assumed unchanged;
+the 2 skips are the new gated crash-recovery integration tests, correctly inert without
+`DH011P2_LIVE_*` env vars (confirmed by running the default suite both with and without them set).
+
+### Real facility and cleanup
+
+Real facility never started, stopped, or connected to throughout this ticket. Fully synthetic
+disposable infrastructure: own `openssl rand`-generated Postgres/keystore/truststore credentials,
+`.env` never read. Full teardown performed and verified at the end: `docker compose down -v`
+removed all three containers, all four named volumes, and the dedicated network; `docker rmi` removed
+the disposable image; the standalone Maven build's own `m2-dh011p2-cache` volume was also removed;
+`docker images`/`docker volume ls`/`docker ps -a` filtered on `dh011p2` all confirmed empty
+afterward. The one pre-existing, unrelated container sharing the `daher-health/certgen:0.1.0` image
+(created six days before this ticket, `daher-health-openelis-certs-1`) was again deliberately left
+untouched.
+
+### What was deliberately not done, and why
+
+- **`updateServiceRequest`'s own latent `sampleXml` double-Analysis defect was not fixed.** §15
+  resolved its *reachability* question (contained, not called by any Daher path); the defect itself,
+  should the method ever be wired to a caller, remains DH-011P's own recorded out-of-scope finding.
+- **The Patient FHIR false-green (`POST /Patient` returning 201 whether or not the create actually
+  persisted) was hit again during this ticket's own fixture setup** (a digit-containing synthetic
+  given name was silently rejected server-side while still returning `201`) -- not investigated or
+  fixed here, consistent with every prior ticket's treatment of this pre-existing, separately
+  tracked finding. Worked around by reading the real `clinlims.patient`/`person` rows back directly,
+  the same discipline this repository's own `OpenElisClient._create_and_verify` already applies in
+  production code.
+- **DH-011E's poller/production delivery loop was not built or activated.** The crash-recovery
+  harness is explicitly a test-only proof assembly, not a step toward wiring DH-011E; that remains
+  a separate, undecided-scope activation gate.
+
+READY TO COMMIT: production code changes (the representation fix), CI guard extensions, and the new
+tracked integration test are complete and live-verified per every item above; all three gaps the
+independent review named are closed with evidence, not narrowed by argument. Nothing has been
+committed or pushed. **DH-011 overall remains NOT COMPLETE** -- DH-011G/H/I/J/K/L are all still
+open and unaffected by this ticket.
+
+## DH-011P3 (2026-08-29) -- final review item before commit: one added-test DH-025 event now
+## binds to at most one Analysis, enforced at the database, not merely tolerated by design.
+## DH-011P2's own multiple-correlations-per-Analysis accommodation is REVOKED, not extended
+
+**Liban reviewed the tradeoff DH-011P2 recorded (`analysis_id` deliberately non-unique, to
+tolerate `SampleEditServiceImpl.newOrExistingCanceledAnalysis` reviving a cancelled Analysis under
+a second correlation) and chose the strict invariant instead, after this ticket surfaced the
+tradeoff explicitly: enforce `UNIQUE(analysis_id)`, accept that a Daher re-add after a test was
+cancelled natively on the same accession now fails loudly rather than reviving.** This is a
+genuine reversal, not a refinement -- DH-011P2's "an Analysis carrying more than one added-test
+correlation" accommodation (including its own representation-layer support for emitting several
+identifiers) is deliberately removed by this ticket, and this section says so plainly rather than
+leaving DH-011P2's prose to stand uncorrected.
+
+### The invariant
+
+One added-test DH-025 source event ↔ one Analysis ↔ one `daher_analysis_correlation` row.
+Enforced in both directions:
+
+- `UNIQUE(correlation_value)` (unchanged, migration 004): one correlation cannot claim two
+  Analyses.
+- `UNIQUE(analysis_id)` (new, migration
+  `005-daher-analysis-correlation-unique-analysis.xml`): one Analysis cannot be claimed by two
+  correlations.
+
+### Migration 005, not an edit to 004
+
+A new, sequential migration -- `005-daher-analysis-correlation-unique-analysis.xml` -- drops
+004's non-unique `daher_analysis_correlation_analysis_idx` and replaces it with a unique index,
+`daher_analysis_correlation_analysis_uk`. 004 itself is left unchanged except for a comment
+correction pointing at 005 as the superseding decision (Liquibase treats an already-applied
+changeset's content as fixed; editing 004 in place would only mask drift on a database that had
+already run the old version, and any real deployment would need a follow-on migration regardless).
+
+**Fails safely by construction, not by custom logic.** `CREATE UNIQUE INDEX` is atomic and
+self-validating in Postgres -- no duplicate-detection SQL was written, because none was needed, and
+none could itself risk deleting/merging/rewriting a row. Live-verified, three cases, one disposable
+stack rebuilt from the corrected patch set:
+
+1. **Fresh DB**: both 004 and 005 ran cleanly together; `\d daher_analysis_correlation` showed
+   `daher_analysis_correlation_analysis_uk UNIQUE, btree (analysis_id)` exactly as designed.
+2. **Existing DB, no duplicate `analysis_id` mappings**: 005 re-run alone (004 already applied,
+   its own row intact) against two genuine, non-duplicate correlation rows -- succeeded, unique
+   index created, both existing rows untouched, `databasechangelog` recorded exactly one new row.
+3. **Existing DB, WITH a duplicate `analysis_id` mapping** (two correlation rows both pointing at
+   the same Analysis, inserted directly to simulate corruption/legacy state): 005 failed with
+   Postgres's own real error --
+   `could not create unique index "daher_analysis_correlation_analysis_uk", Detail: Key
+   (analysis_id)=(2) is duplicated` -- and Liquibase's transactional wrapping rolled back **both**
+   statements in the changeset, including the earlier `DROP INDEX`: `\d` afterward showed the
+   *original* non-unique index still present, all three rows (the duplicate pair included)
+   completely untouched, and `daher-011p3-005-...` correctly absent from `databasechangelog`. No
+   row was deleted, merged, rewritten, or silently kept as "the" surviving correlation -- exactly
+   the fail-safe behavior this ticket required, achieved by Postgres's own atomicity rather than
+   bespoke migration logic that could itself have gotten this wrong.
+
+### Application-level fail-closed, not just a DB backstop (§4)
+
+`FhirTransformServiceImpl`'s shared transform (`transformToServiceRequest(Analysis)`) previously
+(DH-011P2) emitted *every* added-test correlation an Analysis carried, as separate repeated
+identifiers -- correct under DH-011P2's own tolerated-multiplicity design, wrong under this one.
+Changed: `getByAnalysisId` returning more than one row now throws `InternalErrorException`
+("Data integrity violation: Analysis N has M added-test correlations -- refusing to represent more
+than one source-event identifier for a single resource") rather than looping over the results.
+Exactly one row emits that one identifier; zero rows falls through unchanged to the pre-existing
+initial-order behavior. This should be unreachable under normal operation now that the DB
+constraint exists -- the check exists for exactly the corruption/legacy-data case the DB constraint
+cannot retroactively fix, matching the discipline `searchDaherCorrelationNatively`'s own
+cross-namespace collision check already established. Never chooses first, newest, or lexical
+order; never normalizes what it cannot interpret.
+
+### Live verification matrix, one disposable stack, three tests on one accession (WBC initial,
+### RBC added as event A, HGB added as event B)
+
+- **§5, representation**: search by the initial order's correlation returns all 3 tests
+  (`total:1`, 3 entries); each entry's own echoed identifier is now its OWN correlation exactly
+  once (WBC→corr1, RBC→corr2, HGB→corr3) -- no Analysis returns two identifiers, none did before
+  either (DH-011P2's fix already prevented the *wrong* value; this ticket additionally guarantees
+  never more than one *right* value). Searching by corr2/corr3 individually each return exactly
+  that one test, unchanged from DH-011P2.
+- **§6, same-event replay**: delivering event A's exact correlation a second time -> `200` (not
+  `201`), `analysis`/`daher_analysis_correlation` counts unchanged (3/2 before and after) -- one
+  Analysis, one correlation row, no second attach.
+- **§7, distinct events**: event A (RBC) and event B (HGB) each created their own Analysis and
+  correlation row, confirmed via direct DB read (`analysis_id=3`->RBC/corr2,
+  `analysis_id=4`->HGB/corr3). A direct attempt to insert a third correlation targeting the SAME
+  `analysis_id=3` (RBC's own Analysis) was rejected: `duplicate key value violates unique
+  constraint "daher_analysis_correlation_analysis_uk", Key (analysis_id)=(3) already exists`.
+- **§8, concurrency, two races**:
+  - Same-event race (identical correlation, two simultaneous POSTs, no added locking): one `201`,
+    one `500` (`ConstraintViolationException` on `correlation_value`, unchanged from DH-011P/P2),
+    `analysis`/`correlation` counts +1/+1 -- unaffected by the new constraint, which this race
+    never reaches (it fails on the pre-existing `correlation_value` uniqueness first, since the
+    correlation values are identical).
+  - **New**: two *different* correlation values racing to claim the *same* `analysis_id`
+    (a direct concurrent-insert test against an Analysis with no existing correlation, since the
+    normal add-test path always inserts the correlation atomically with the Analysis and cannot be
+    made to leave one uncorrelated to race against): one thread succeeded, the other failed with
+    Postgres's own `UniqueViolation` on `daher_analysis_correlation_analysis_uk` under genuine
+    concurrent contention (not merely sequential), and exactly one correlation row exists for that
+    Analysis afterward. No silent multi-owner Analysis, proven under a real race, not only
+    reasoned about from the constraint's existence.
+- **§9, crash-recovery regression**: the DH-011P2 tracked integration test
+  (`adapter/tests/integration/test_dh011p2_crash_recovery.py`) re-run unmodified against this
+  ticket's rebuilt image and a fresh disposable adapter Postgres -- both scenarios pass unchanged:
+  target Analysis + correlation committed for real, ledger left `processing` by the controlled
+  fault, a fresh `RecoveryCoordinator`/`LedgerRepository` pair reconciles to the existing write
+  with **zero** writer calls, zero new Analysis, zero new correlation row, ledger -> `completed`.
+- **§10, cross-namespace collision, unaffected**: the same synthetic-value-in-both-namespaces
+  control (`electronic_order.external_id` and `daher_analysis_correlation.correlation_value`
+  sharing one value, pointed at a *different*, otherwise-uncorrelated Analysis so the new
+  `UNIQUE(analysis_id)` constraint is never at issue) -- re-run against the rebuilt image, same
+  exact fail-closed `500` diagnostic as DH-011P/P2, confirming this is a genuinely separate
+  mechanism from the new analysis_id uniqueness constraint, neither weakening the other.
+
+### CI (§11 guards)
+
+The static guard job was extended: the Dockerfile artifact-presence and patch-application checks
+now cover migration 005; `base-changelog.xml.patch` must include its `<include>`; 005's own content
+must contain the exact `CREATE UNIQUE INDEX daher_analysis_correlation_analysis_uk` statement on
+`(analysis_id)` and a `<rollback>` block, and must contain no `DELETE`/`TRUNCATE`/`UPDATE`-shaped
+statement (a migration that fails safely must never itself be the thing that deletes/merges/rewrites
+data); `DaherAnalysisCorrelation.java`'s JPA `@Table` must declare the matching unique constraint;
+`FhirTransformServiceImpl.java.patch` must contain the `size() > 1` fail-closed check and must NOT
+contain the old per-correlation loop pattern. **All new guards control-tested** by injecting the
+specific violation into a scratch copy and confirming the exact expected failure -- including one
+real false-negative caught and fixed during this pass: an early version of the 005-content check
+matched the phrase "CREATE UNIQUE INDEX" appearing in the migration's own *prose comment*, not just
+its actual SQL, so a scratch copy with the real constraint silently removed still passed; fixed to
+require the exact statement text, re-verified to correctly fail against that same scratch copy.
+
+### Tests and build
+
+Adapter: unchanged by this ticket (no `src/daher_adapter/` or test file touched). Re-verified
+directly rather than assumed: `ruff check` all clear, `ruff format --check` 34 files formatted
+(unchanged count from DH-011P2), `pytest -q` **142 passed, 2 skipped** (the DH-011P2 integration
+tests, still correctly gated) -- an exact match, and those same 2 tests independently re-run live
+against this ticket's own image in the §9 regression above.
+
+OpenELIS: the pinned upstream's own pre-existing `ServiceRequestProviderTest` run against the fully
+patched build (all 9 patches + 6 standalone files + 5 migrations, including this ticket's new
+005 and the updated `FhirTransformServiceImpl.java.patch`) -- **3 tests, 0 failures, 0 errors**,
+unchanged from DH-011P2. Both a standalone Maven reactor build
+(`mvn clean install -Dmaven.test.skip=true`, `target/OpenELIS-Global.war` confirmed present) and
+the actual production Dockerfile build reached `BUILD SUCCESS` independently. **One build-plumbing
+gap found and fixed while setting up the standalone reactor build this pass**: the `dataexport` git
+submodule was not checked out in the fresh pristine clone used for this ticket's own test setup (a
+setup omission in this pass's own scratch environment, not a defect in the Dockerfile, which already
+runs `git submodule update --init` as part of its own build stage and was never affected) --
+`git submodule update --init --depth 1 dataexport` fixed it; recorded here since it cost real
+time to diagnose and the next person reproducing this locally would hit the identical error.
+
+### Real facility and cleanup
+
+Real facility never started, stopped, or connected to. Fully synthetic disposable infrastructure
+throughout (own generated Postgres/keystore/truststore credentials, `.env` never read). Full
+teardown performed and verified: `docker compose down -v` removed all three containers, all four
+named volumes, and the network; `docker rmi` removed the disposable image; the standalone build's
+own `m2-dh011p3-cache` volume was also removed; `docker images`/`docker volume ls`/`docker ps -a`
+filtered on `dh011p3` all confirmed empty afterward.
+
+### What this ticket revoked, stated plainly (not left for a diff to discover)
+
+- **DH-011P2's `DaherAnalysisCorrelation.java` javadoc, `004`'s migration comment, and
+  `FhirTransformServiceImpl`'s "emit all" representation logic all described and supported
+  multiple added-test correlations per Analysis as a deliberate, tolerated design choice. That
+  choice is reversed by this ticket, not merely superseded silently** -- 004's comment, the
+  entity's javadoc, and the transform's own comment block were all updated in place (this is
+  pre-commit, uncommitted code, not a published record) to state the reversal and point at this
+  section and migration 005, rather than leaving stale "deliberately not unique" prose standing
+  next to a schema that now enforces uniqueness.
+- **Consequence, stated once more precisely**: a test cancelled natively on an accession and later
+  re-added via a genuinely distinct Daher/DH-025 event will fail loudly (a unique-constraint
+  violation surfaced through the same `InternalErrorException` path any other
+  `DaherAddedTestTransaction.addTest` failure takes), not revive silently. Native, non-Daher use of
+  the Modify Order UI is entirely unaffected -- this table is never consulted outside the Daher FHIR
+  add-test transaction. Restoring revival support, if ever wanted, is future work, explicitly not
+  a side effect of any future revert of migration 005.
+
+READY TO COMMIT: Yes, per this ticket's own gate -- every required item above passed with live
+evidence, not narrowed by argument. DH-011P/P2/P3 as one implementation are ready for the commit
+and push this ticket's own §13 specifies. **DH-011 overall remains NOT COMPLETE** -- DH-011G/H/I/
+J/K/L are all still open and unaffected by this ticket.

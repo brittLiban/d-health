@@ -1,8 +1,8 @@
 diff --git a/src/main/resources/liquibase/base-changelog.xml b/src/main/resources/liquibase/base-changelog.xml
-index 409ad05cd..5812291ab 100644
+index 409ad05..83a43b1 100644
 --- a/src/main/resources/liquibase/base-changelog.xml
 +++ b/src/main/resources/liquibase/base-changelog.xml
-@@ -30,4 +30,11 @@
+@@ -30,4 +30,15 @@
    <include file="liquibase/qc/007-add-qc-menu-items.xml" />
    <include file="liquibase/qc/008-add-instrument-fk-constraints.xml" />
    <include file="liquibase/qc/009-nullable-unit-of-measure.xml" />
@@ -13,4 +13,8 @@ index 409ad05cd..5812291ab 100644
 +  <!-- DH-011D3 (Daher Health): widen electronic_order.external_id for the 64-char correlation
 +       value, see liquibase/daher/ -->
 +  <include file="liquibase/daher/003-electronic-order-external-id-widen.xml" />
++  <!-- DH-011P (Daher Health, Design B): per-added-test correlation table, see liquibase/daher/ -->
++  <include file="liquibase/daher/004-daher-analysis-correlation.xml" />
++  <!-- DH-011P3 (Daher Health): enforce one Analysis <-> one added-test correlation, see liquibase/daher/ -->
++  <include file="liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml" />
  </databaseChangeLog>

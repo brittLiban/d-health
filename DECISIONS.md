@@ -3846,3 +3846,120 @@ platform characteristic, not this module. **ADR-030 moves to `ACCEPTED / IMPLEME
 Liban's own review to confirm, not this pass's to declare launched — "pilot-ready", never
 "launched" or "in production" (AGENTS.md's own standing rule), and nothing here has touched a real
 patient, real staff account, or the real facility.
+
+## ADR-031 — SELECTED / BUILT + LIVE-VERIFIED, NOT COMMITTED (2026-08-29, DH-011P): Design B — a
+## standalone `daher_analysis_correlation` table for per-added-test DH-025 correlation
+
+**Date raised:** 2026-08-29 (DH-011O characterized the blocker and two candidate designs; this
+ticket is the same day's follow-on). **Status:** Liban selected **Design B** — recorded verbatim in
+the ticket text as "LIBAN DECISION: SELECT DESIGN B." Implemented and live-verified end to end this
+same pass; **not yet committed or pushed**, pending Liban's review of the full handoff (this ticket's
+own standing instruction: "Do NOT commit or push until the full ticket passes... Then STOP").
+
+**The decision, restated precisely.** DH-011O established that `Sample.clinical_order_id`, a single
+scalar column, is pivoted through by `searchDaherCorrelationNatively`'s existing native lookup in a
+way that fails closed on either zero or more than one linked `Sample` — reusing the existing
+`electronic_order`/`clinical_order_id` mechanism for a second, per-added-test correlation on the same
+accession cannot be made to work without breaking one of the two orders' own probes. Two designs were
+evaluated: **(A)** a new nullable column directly on `clinlims.analysis`, requiring a first-ever patch
+to upstream `Analysis.java` itself; **(B)** a new standalone correlation table
+(`daher_analysis_correlation`), mapped by a new JPA entity, requiring zero patches to any existing
+upstream `.java` or `.hbm.xml` file. Liban selected B.
+
+**Why B, as DH-011O's own writeup argued and this pass's implementation confirmed in practice.**
+`Analysis.java` is a core clinical valueholder no Daher patch had touched in this repository's
+history before this decision; a column-plus-accessor patch to it would have grown both the committed
+patch surface and the upgrade/rebase burden every other DH-011 ticket has deliberately kept small.
+Design B instead follows the same shape already established for order-level correlation
+(`DaherOrderCorrelation.java`/`DaherOrderCorrelationTransaction.java`: new files, not patches to
+existing upstream classes) and matches `hibernate.cfg.xml`'s own stated preference for
+annotation-based JPA mappings over further `.hbm.xml` patching. Built this pass: a table with a
+**unique** constraint on `correlation_value` only (deliberately **not** on `analysis_id` — a
+canceled-then-revived analysis can legitimately carry more than one correlation across its
+lifecycle, a real clinical possibility this design leaves open rather than closes by an
+over-tight constraint); a JPA entity/DAO/service triple; a `@Component`-wrapped
+`@Transactional` orchestration class (`DaherAddedTestTransaction`) covering the native
+`SampleEditService.editSample` write and the correlation insert in one transaction; and a
+dual-namespace extension to `searchDaherCorrelationNatively` that fails closed
+(`InternalErrorException`) if a correlation value is ever found in both the
+`electronic_order.external_id` and `daher_analysis_correlation.correlation_value` namespaces at
+once — DH-011O's first flagged open question, now answered and live-proven, not merely stated.
+DH-011O's second flagged question (whether the new namespace's `Bundle.total` should read `1`) is
+answered the same way: it does, for consistency with the existing namespace's convention.
+
+**What this decision did not settle, and correctly left to implementation, not to itself.** Whether
+`SampleEditService.editSample`'s return type needed to change (it did — from `void`, via a shared
+singleton-bean instance field, to `List<String>`, eliminating a live concurrency hazard, not just
+routing around it) was an implementation detail DH-011O's design comparison could not have
+anticipated from source reading alone; it surfaced only once design B's transactional orchestration
+was actually built and needed a race-safe way to learn which `Analysis` id `editSample` had just
+written. Full implementation account, the one real bug found by live testing (a second, spurious
+`Analysis` per add-test event, root-caused to `SampleAddService`'s parallel sample-XML-driven
+creation path and fixed by submitting an empty `<samples/>` document), the full 10-item live
+verification matrix, and a known representation gap (the added-test response echoes the *original*
+order's correlation, not the add-test event's own, in its `source-event` identifier — safe for the
+one real consumer, the adapter, which never trusts this field, but recorded rather than silently
+accepted): `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011P section.
+
+**ADR-031 status: SELECTED and BUILT, live-verified against fully synthetic disposable
+infrastructure, real facility never touched. Not `ACCEPTED / IMPLEMENTED`** in the sense ADR-030
+uses that phrase — that status is reserved for Liban's own review of a passing handoff, which this
+ADR is recording the evidence for, not asserting on his behalf. Nothing has been committed or
+pushed. DH-011 overall remains NOT COMPLETE: DH-011G/H/I/J/K/L are all still open and unaffected by
+this decision.
+
+**Closure pass (DH-011P2, 2026-08-29) — the design itself is unchanged; three verification gaps an
+independent review found in DH-011P's own handoff are now closed with evidence.** ADR-031 selected
+design B; it did not change here. What changed: (1) the added-test response's echoed correlation
+identifier — recorded above as a known gap, "Liban's call whether it matters" — is fixed, not left
+open. `FhirTransformServiceImpl`'s shared transform now looks up
+`daher_analysis_correlation.getByAnalysisId` before falling back to the initial-order identifier; an
+Analysis with more than one added-test correlation (the canceled-then-revived case this ADR's own
+unique-constraint reasoning above already anticipated) emits all of them as repeated identifiers,
+live-confirmed via an actual accidental collision during this pass's own test setup, not merely
+reasoned about. (2) True DH-025 crash-after-target-commit recovery — this ADR's text above states
+design B's transactional seam and rollback proof but is explicit that crash-recovery *through the
+adapter* was never attempted — is now demonstrated with a test-only integration harness assembling
+the real `OpenElisClient`, `RecoveryCoordinator`, and `LedgerRepository` (no production entrypoint
+for this exists yet; DH-011E's poller remains unwired) against a real disposable Postgres and OpenELIS
+stack: a controlled fault after a genuine target commit and before ledger completion, then a fresh
+coordinator/ledger pair correctly reconciles to the existing write with zero second writes. Committed
+as `adapter/tests/integration/test_dh011p2_crash_recovery.py`, gated behind live-infra env vars so it
+never runs in CI. (3) `updateServiceRequest` (PUT) reachability, left as "unreachable via the
+adapter's transport" by DH-011P, is now stated precisely: reachable by the same HTTP Basic credential
+class the Daher integration would use (live-confirmed — authenticated, routed, fails only on payload
+validation), but not by any code path the adapter's own `OpenElisClient` can construct (it defines no
+PUT-capable method at all) — contained by a new CI static guard, not merely documented. Full account
+of all three, plus a §4 patch-surface review this pass performed (a third `editSample` caller,
+`SampleEditController`, found and confirmed behaviorally unaffected — Java discards its unused return
+value) and the corrected DH-011P2 verification matrix: PROVENANCE.md's DH-011P2 section. Still not
+committed or pushed; DH-011 overall still NOT COMPLETE.
+
+**Final closure pass (DH-011P3, 2026-08-29) — DH-011P2's own tolerated-multiplicity design is
+REVOKED, not extended.** DH-011P2 above records, as a deliberate, reviewed choice: `analysis_id`
+left non-unique so a cancelled-then-revived Analysis could legitimately carry two added-test
+correlations across its lifecycle, with the representation layer emitting all of them as repeated
+identifiers. This ticket surfaced that tradeoff to Liban directly — enforcing strict one-Analysis
+-one-correlation uniqueness would make a Daher re-add after native cancellation fail permanently,
+since `editSample`'s revival path retargets the same Analysis id under a new correlation. Liban
+chose the strict invariant over the accommodation: **`UNIQUE(analysis_id)`, added via a new
+migration (`005-daher-analysis-correlation-unique-analysis.xml`, not an edit to the already-applied
+004), enforced at the database and backstopped in the FHIR transform (which now fails closed —
+`InternalErrorException` — rather than emit multiple identifiers if it ever finds more than one row,
+a state the DB constraint should make unreachable in normal operation).** Live-verified, one
+disposable stack: fresh-DB migration succeeds; migration re-run against an existing DB with
+non-duplicate data succeeds; migration re-run against an existing DB with a genuine duplicate
+`analysis_id` fails via Postgres's own atomic `CREATE UNIQUE INDEX` — Liquibase's transactional
+wrapping rolled back the whole changeset including the earlier `DROP INDEX`, zero rows touched,
+zero data destroyed, the changelog correctly shows the migration never applied. A direct concurrent
+race — two different correlation values simultaneously attempting to claim the same Analysis — was
+also run: one succeeded, one failed with a real `UniqueViolation` under genuine contention, exactly
+one correlation row survived. The DH-011P2 real-adapter crash-recovery integration test was
+re-run unmodified against this ticket's rebuilt image with no regression. The cross-namespace
+collision control (a separate mechanism from this new constraint) was re-confirmed unaffected.
+Full account, including the exact application-level fail-closed check and its own control-tested CI
+guard (one real false-negative caught mid-pass — an early guard matched the phrase "CREATE UNIQUE
+INDEX" in the migration's prose comment rather than its actual SQL, fixed and re-verified):
+PROVENANCE.md's DH-011P3 section. **READY TO COMMIT: Yes**, per this ticket's own gate — this is
+the final review item before the DH-011P/P2/P3 implementation commits and pushes. DH-011 overall
+remains NOT COMPLETE: DH-011G/H/I/J/K/L are all still open and unaffected by this decision.

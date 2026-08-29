@@ -25,14 +25,28 @@ COPY patches/order-correlation/FhirTransformServiceImpl.java.patch /patch/FhirTr
 COPY patches/order-correlation/LiquibaseConfig.java.patch /patch/LiquibaseConfig.java.patch
 COPY patches/order-correlation/base-changelog.xml.patch /patch/base-changelog.xml.patch
 COPY patches/order-correlation/ElectronicOrder.hbm.xml.patch /patch/ElectronicOrder.hbm.xml.patch
+COPY patches/order-correlation/SampleEditService.java.patch /patch/SampleEditService.java.patch
+COPY patches/order-correlation/SampleEditServiceImpl.java.patch /patch/SampleEditServiceImpl.java.patch
+COPY patches/order-correlation/SampleEditRestController.java.patch /patch/SampleEditRestController.java.patch
+COPY patches/order-correlation/persistence.xml.patch /patch/persistence.xml.patch
 COPY patches/order-correlation/DaherOrderCorrelation.java /patch/DaherOrderCorrelation.java
 COPY patches/order-correlation/DaherOrderCorrelationTransaction.java /patch/DaherOrderCorrelationTransaction.java
+COPY patches/order-correlation/DaherAnalysisCorrelation.java /patch/DaherAnalysisCorrelation.java
+COPY patches/order-correlation/DaherAddedTestTransaction.java /patch/DaherAddedTestTransaction.java
+COPY patches/order-correlation/DaherAnalysisCorrelationDAO.java /patch/DaherAnalysisCorrelationDAO.java
+COPY patches/order-correlation/DaherAnalysisCorrelationDAOImpl.java /patch/DaherAnalysisCorrelationDAOImpl.java
+COPY patches/order-correlation/DaherAnalysisCorrelationService.java /patch/DaherAnalysisCorrelationService.java
+COPY patches/order-correlation/DaherAnalysisCorrelationServiceImpl.java /patch/DaherAnalysisCorrelationServiceImpl.java
 COPY patches/order-correlation/001-electronic-order-daher-correlation-unique.xml \
      /patch/001-electronic-order-daher-correlation-unique.xml
 COPY patches/order-correlation/002-site-code-configuration.xml \
      /patch/002-site-code-configuration.xml
 COPY patches/order-correlation/003-electronic-order-external-id-widen.xml \
      /patch/003-electronic-order-external-id-widen.xml
+COPY patches/order-correlation/004-daher-analysis-correlation.xml \
+     /patch/004-daher-analysis-correlation.xml
+COPY patches/order-correlation/005-daher-analysis-correlation-unique-analysis.xml \
+     /patch/005-daher-analysis-correlation-unique-analysis.xml
 
 RUN git clone --branch 3.2.1.11 --depth 1 \
       https://github.com/DIGI-UW/OpenELIS-Global-2.git /build \
@@ -43,18 +57,40 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
     && git -C /build apply /patch/LiquibaseConfig.java.patch \
     && git -C /build apply /patch/base-changelog.xml.patch \
     && git -C /build apply /patch/ElectronicOrder.hbm.xml.patch \
-    && mkdir -p /build/src/main/java/org/openelisglobal/dataexchange/fhir \
+    && git -C /build apply /patch/SampleEditService.java.patch \
+    && git -C /build apply /patch/SampleEditServiceImpl.java.patch \
+    && git -C /build apply /patch/SampleEditRestController.java.patch \
+    && git -C /build apply /patch/persistence.xml.patch \
+    && mkdir -p /build/src/main/java/org/openelisglobal/dataexchange/fhir/dao \
+    && mkdir -p /build/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl \
+    && mkdir -p /build/src/main/java/org/openelisglobal/dataexchange/fhir/service \
     && cp /patch/DaherOrderCorrelation.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelation.java \
     && cp /patch/DaherOrderCorrelationTransaction.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelationTransaction.java \
+    && cp /patch/DaherAnalysisCorrelation.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAnalysisCorrelation.java \
+    && cp /patch/DaherAddedTestTransaction.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAddedTestTransaction.java \
+    && cp /patch/DaherAnalysisCorrelationDAO.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherAnalysisCorrelationDAO.java \
+    && cp /patch/DaherAnalysisCorrelationDAOImpl.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl/DaherAnalysisCorrelationDAOImpl.java \
+    && cp /patch/DaherAnalysisCorrelationService.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationService.java \
+    && cp /patch/DaherAnalysisCorrelationServiceImpl.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationServiceImpl.java \
     && mkdir -p /build/src/main/resources/liquibase/daher \
     && cp /patch/001-electronic-order-daher-correlation-unique.xml \
         /build/src/main/resources/liquibase/daher/001-electronic-order-daher-correlation-unique.xml \
     && cp /patch/002-site-code-configuration.xml \
         /build/src/main/resources/liquibase/daher/002-site-code-configuration.xml \
     && cp /patch/003-electronic-order-external-id-widen.xml \
-        /build/src/main/resources/liquibase/daher/003-electronic-order-external-id-widen.xml
+        /build/src/main/resources/liquibase/daher/003-electronic-order-external-id-widen.xml \
+    && cp /patch/004-daher-analysis-correlation.xml \
+        /build/src/main/resources/liquibase/daher/004-daher-analysis-correlation.xml \
+    && cp /patch/005-daher-analysis-correlation-unique-analysis.xml \
+        /build/src/main/resources/liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml
 
 ARG DEFAULT_PW="adminADMIN!"
 WORKDIR /build

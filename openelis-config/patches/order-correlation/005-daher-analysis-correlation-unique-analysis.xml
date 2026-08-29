@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011P3: supersedes 004's own explicit "analysis_id is NOT unique" decision. Migration 004's
+    comment recorded a real, source-verified reason for that choice -
+    SampleEditServiceImpl.newOrExistingCanceledAnalysis revives a cancelled Analysis on a matching
+    re-add rather than inserting a new one, so a test cancelled natively and later re-added as a
+    genuinely distinct DH-025 event legitimately retargets the same analysis_id under a second
+    correlation. Liban reviewed that tradeoff and chose the strict invariant instead: one Daher
+    added-test correlation per Analysis, enforced at the database, full stop. Consequence,
+    stated plainly rather than left implicit: from this migration forward, re-adding a test via
+    Daher after it was cancelled on the same accession fails loudly (a unique-constraint
+    violation surfaced as an error, the same InternalErrorException path any other
+    DaherAddedTestTransaction.addTest failure takes) rather than succeeding via revival. Native,
+    non-Daher use of the Modify Order UI is entirely unaffected - this table, and therefore this
+    constraint, is never consulted by any code path outside the Daher FHIR add-test transaction.
+    Restoring revival support, if ever wanted, is future work, not a silent side effect of
+    reverting this migration.
+
+    Why a new migration rather than editing 004 in place: 004 already ran against disposable
+    infrastructure this pass, and Liquibase's own model treats an applied changeset's content as
+    fixed - editing it after the fact only masks drift on a database that already ran the old
+    version. A sequential follow-on migration is what a real deployment would need regardless.
+
+    Fails safely on an existing database with duplicate analysis_id mappings: CREATE UNIQUE INDEX
+    is atomic and self-validating - if any analysis_id already appears in more than one row (the
+    only way that could exist before this migration is the revival case 004's own comment
+    described, or a manually-inserted corruption fixture like DH-011P2's own accidental one), the
+    statement itself fails with a real Postgres uniqueness violation and Liquibase does not mark
+    the changeset applied. No row is deleted, merged, rewritten, or silently kept - a human must
+    resolve the duplicate before this migration can proceed on that database, precisely because
+    which correlation is "the" surviving one is not this migration's decision to make.
+  -->
+  <changeSet id="daher-011p3-005-daher-analysis-correlation-unique-analysis" author="daher-health">
+    <sql>
+      DROP INDEX daher_analysis_correlation_analysis_idx;
+
+      CREATE UNIQUE INDEX daher_analysis_correlation_analysis_uk
+        ON daher_analysis_correlation (analysis_id);
+    </sql>
+    <rollback>
+      <sql>
+        DROP INDEX daher_analysis_correlation_analysis_uk;
+
+        CREATE INDEX daher_analysis_correlation_analysis_idx
+          ON daher_analysis_correlation (analysis_id);
+      </sql>
+    </rollback>
+  </changeSet>
+</databaseChangeLog>

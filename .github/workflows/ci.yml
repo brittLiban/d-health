@@ -1086,13 +1086,30 @@ jobs:
           for patch_name in (
               "ServiceRequestProvider.java.patch",
               "FhirTransformServiceImpl.java.patch",
+              "LiquibaseConfig.java.patch",
               "base-changelog.xml.patch",
+              "ElectronicOrder.hbm.xml.patch",
+              "SampleEditService.java.patch",
+              "SampleEditServiceImpl.java.patch",
+              "SampleEditRestController.java.patch",
+              "persistence.xml.patch",
           ):
               if f"git -C /build apply /patch/{patch_name}" not in dockerfile:
                   bad.append(f"Dockerfile: does not git apply {patch_name}")
+          # DH-011P2 §18: every .patch file this directory ships must actually be consumed by
+          # the Dockerfile -- catches a patch being added here and silently never applied,
+          # not just the reverse (a patch the Dockerfile expects but the directory lacks).
+          for patch_file in sorted(base.glob("*.patch")):
+              if f"git -C /build apply /patch/{patch_file.name}" not in dockerfile:
+                  bad.append(f"Dockerfile: {patch_file.name} exists in the patch directory but is "
+                              "never applied -- every shipped patch must be consumed")
           for required_copy in (
               "DaherOrderCorrelation.java",
               "001-electronic-order-daher-correlation-unique.xml",
+              "DaherAnalysisCorrelation.java",
+              "DaherAddedTestTransaction.java",
+              "004-daher-analysis-correlation.xml",
+              "005-daher-analysis-correlation-unique-analysis.xml",
           ):
               if required_copy not in dockerfile:
                   bad.append(f"Dockerfile: does not copy {required_copy} into the build context")
@@ -1173,6 +1190,31 @@ jobs:
               if "ElectronicOrderType.FHIR.equals(linkedOrder.getType())" not in ft_added:
                   bad.append("FhirTransformServiceImpl.java.patch: does not verify the linked order is FHIR-typed")
 
+              # DH-011P2 §5: an added-test Analysis must echo its OWN correlation, not the
+              # sample's initial-order one -- the representation gap DH-011P recorded and this
+              # ticket closes. Both halves must be present: the added-test-namespace lookup
+              # AND the original-order fallback it must not silently replace.
+              if "daherAnalysisCorrelationService" not in ft_added or "getByAnalysisId" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: does not look up the added-test "
+                              "namespace (daherAnalysisCorrelationService.getByAnalysisId) before "
+                              "falling back to the initial-order clinicalOrderId identifier")
+              if "addedTestCorrelations.size() == 1" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: an Analysis with no added-test "
+                              "correlation must still fall through to the pre-existing "
+                              "clinicalOrderId-based initial-order behavior, not lose it")
+
+              # DH-011P3 §4: analysis_id is now unique at the DB, so this must never legitimately
+              # find more than one row -- but the transform must not normalize corruption if it
+              # somehow does. Must fail closed, never emit multiple source-event identifiers for
+              # one Analysis, never silently pick first/newest/lexical.
+              if "addedTestCorrelations.size() > 1" not in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: does not fail closed when an "
+                              "Analysis has more than one added-test correlation (DH-011P3 §4)")
+              if "for (DaherAnalysisCorrelation correlation : addedTestCorrelations)" in ft_added:
+                  bad.append("FhirTransformServiceImpl.java.patch: still loops over multiple "
+                              "added-test correlations -- DH-011P3 §4 requires failing closed, "
+                              "never emitting several source-event identifiers for one Analysis")
+
           # --- shared constants file ---
           shared_path = base / "DaherOrderCorrelation.java"
           if not shared_path.exists():
@@ -1208,11 +1250,131 @@ jobs:
               )
               if "liquibase/daher/001-electronic-order-daher-correlation-unique.xml" not in changelog_added:
                   bad.append("base-changelog.xml.patch: does not include the new migration file")
+              if "liquibase/daher/004-daher-analysis-correlation.xml" not in changelog_added:
+                  bad.append("base-changelog.xml.patch: does not include the DH-011P added-test correlation migration")
+              if "liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml" not in changelog_added:
+                  bad.append("base-changelog.xml.patch: does not include the DH-011P3 analysis_id uniqueness migration")
+
+          # --- DH-011P (Design B): per-added-test correlation table + entity ---
+          added_test_migration_path = base / "004-daher-analysis-correlation.xml"
+          if not added_test_migration_path.exists():
+              bad.append("004-daher-analysis-correlation.xml is missing")
+          else:
+              atm_text = added_test_migration_path.read_text()
+              if "CREATE TABLE daher_analysis_correlation" not in atm_text:
+                  bad.append("004-daher-analysis-correlation.xml: no CREATE TABLE daher_analysis_correlation")
+              if "REFERENCES clinlims.analysis (id)" not in atm_text:
+                  bad.append("004-daher-analysis-correlation.xml: analysis_id has no FK to clinlims.analysis")
+              if "daher_analysis_correlation_value_uk" not in atm_text or "CREATE UNIQUE INDEX" not in atm_text:
+                  bad.append("004-daher-analysis-correlation.xml: no UNIQUE index on correlation_value")
+              if "<rollback>" not in atm_text:
+                  bad.append("004-daher-analysis-correlation.xml: no rollback block")
+              # 004 itself still does not enforce UNIQUE(analysis_id) -- that constraint is added
+              # by the separate, later migration 005 (DH-011P3), not by editing 004 in place. This
+              # check only asserts 004's own historical content is unchanged; it does NOT mean
+              # analysis_id is unenforced overall -- see the 005 checks below.
+              if "UNIQUE (analysis_id)" in atm_text or "UNIQUE(analysis_id)" in atm_text:
+                  bad.append("004-daher-analysis-correlation.xml: must not enforce UNIQUE(analysis_id) "
+                              "directly -- that belongs in 005, a separate migration, per Liquibase's "
+                              "own already-applied-changeset discipline")
+
+          # --- DH-011P3: analysis_id uniqueness, enforced by a separate migration ---
+          unique_analysis_migration_path = base / "005-daher-analysis-correlation-unique-analysis.xml"
+          if not unique_analysis_migration_path.exists():
+              bad.append("005-daher-analysis-correlation-unique-analysis.xml is missing")
+          else:
+              uam_text = unique_analysis_migration_path.read_text()
+              # The exact statement, not just the two tokens present anywhere -- a prose comment
+              # mentioning "CREATE UNIQUE INDEX" must not satisfy this check (control-tested).
+              if "CREATE UNIQUE INDEX daher_analysis_correlation_analysis_uk" not in uam_text:
+                  bad.append("005-daher-analysis-correlation-unique-analysis.xml: no UNIQUE index on analysis_id")
+              if "ON daher_analysis_correlation (analysis_id)" not in uam_text:
+                  bad.append("005-daher-analysis-correlation-unique-analysis.xml: unique index is not on analysis_id")
+              if "<rollback>" not in uam_text:
+                  bad.append("005-daher-analysis-correlation-unique-analysis.xml: no rollback block")
+              # Fails safely via Postgres's own atomic CREATE UNIQUE INDEX, not custom
+              # duplicate-detection SQL that could itself delete/merge/rewrite rows.
+              for destructive in ("DELETE FROM", "DELETE\n", "TRUNCATE", "UPDATE daher_analysis_correlation"):
+                  if destructive in uam_text:
+                      bad.append("005-daher-analysis-correlation-unique-analysis.xml: contains a "
+                                  f"{destructive!r}-shaped statement -- this migration must fail safely on "
+                                  "existing duplicates, never delete/merge/rewrite rows automatically")
+
+          entity_path = base / "DaherAnalysisCorrelation.java"
+          if not entity_path.exists():
+              bad.append("DaherAnalysisCorrelation.java is missing")
+          else:
+              entity_text = entity_path.read_text()
+              if "@Entity" not in entity_text or '@Table(name = "daher_analysis_correlation"' not in entity_text:
+                  bad.append("DaherAnalysisCorrelation.java: not mapped as a JPA @Entity on the right table")
+              if "daher_analysis_correlation_analysis_uk" not in entity_text:
+                  bad.append("DaherAnalysisCorrelation.java: JPA @Table does not declare the analysis_id "
+                              "unique constraint (DH-011P3) -- entity mapping must match the DB schema")
+
+          # --- no patch to the core Analysis mapping -- Design B is a standalone table only ---
+          for forbidden in ("Analysis.java.patch", "Analysis.hbm.xml.patch"):
+              if (base / forbidden).exists():
+                  bad.append(f"{forbidden} exists -- DH-011P Design B forbids patching Analysis.java/"
+                              "Analysis.hbm.xml directly; the correlation must live in a standalone table")
+
+          # --- SampleEditServiceImpl.java.patch: shared-field race removed, not worked around ---
+          seis_patch_path = base / "SampleEditServiceImpl.java.patch"
+          if not seis_patch_path.exists():
+              bad.append("SampleEditServiceImpl.java.patch is missing")
+          else:
+              seis_added = "\n".join(
+                  l for l in seis_patch_path.read_text().splitlines() if l.startswith("+")
+              )
+              if "public List<String> editSample(" not in seis_added:
+                  bad.append("SampleEditServiceImpl.java.patch: editSample does not return List<String>")
+              if "analysisList = analysisIds" in seis_added:
+                  bad.append("SampleEditServiceImpl.java.patch: still assigns to the shared analysisList "
+                              "field -- the singleton-bean race this patch exists to remove")
+
+          # --- ServiceRequestProvider.java.patch: dual-namespace lookup + transactional add path ---
+          if sr_patch_path.exists():
+              if "daherAnalysisCorrelationService" not in added_text or "getByCorrelationValue" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: searchDaherCorrelationNatively does not "
+                              "query the added-test namespace")
+              if "initialOrderNamespaceMatch && addedTestNamespaceMatch" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: no explicit cross-namespace collision check")
+              if "daherAddedTestTransaction.addTest(" not in added_text:
+                  bad.append("ServiceRequestProvider.java.patch: existing-specimen branch does not route "
+                              "through the transactional DaherAddedTestTransaction seam")
+              # No fuzzy matching in the new dual-namespace logic either (same discipline as the
+              # existing extractDaherOrderIdentifier check above).
+              for bad_pattern in (".toLowerCase()", ".toUpperCase()", ".contains(", ".startsWith(", ".indexOf("):
+                  if bad_pattern in added_text:
+                      bad.append(f"ServiceRequestProvider.java.patch: unexpected fuzzy-comparison pattern "
+                                  f"{bad_pattern!r}")
+
+          # --- DH-011P2 §15: OpenELIS's own updateServiceRequest (PUT) is reachable by the same
+          # HTTP Basic credentials the Daher adapter would use (live-confirmed against the
+          # disposable stack: authenticated, routed, fails only on payload validation) and has
+          # a known latent duplicate-Analysis defect (PROVENANCE.md). It is NOT called by any
+          # Daher code path today -- OpenElisClient defines no PUT-capable method at all. This
+          # guard keeps that true: a regression here means someone wired a PUT for
+          # ServiceRequest delivery without revisiting the §15 finding first.
+          adapter_openelis_path = Path("adapter/src/daher_adapter/openelis.py")
+          if not adapter_openelis_path.exists():
+              bad.append("adapter/src/daher_adapter/openelis.py is missing")
+          else:
+              adapter_openelis_text = adapter_openelis_path.read_text()
+              if '"PUT"' in adapter_openelis_text or "'PUT'" in adapter_openelis_text:
+                  bad.append("adapter/src/daher_adapter/openelis.py: contains a PUT method reference -- "
+                              "OpenELIS's updateServiceRequest is UNSAFE/NOT SUPPORTED FOR DAHER V1 "
+                              "(DH-011P2 §15); the adapter must remain POST-only for ServiceRequest "
+                              "delivery until that finding is explicitly revisited")
+              if "OpenElisPut" in adapter_openelis_text or "def update_service_request" in adapter_openelis_text:
+                  bad.append("adapter/src/daher_adapter/openelis.py: defines a PUT-shaped delivery "
+                              "method -- see DH-011P2 §15 before adding one")
 
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
-          print("ok — DH-011D order-correlation patch set has all required components, "
-                "no forbidden fuzzy-matching patterns, and the uniqueness index stays scoped to FHIR-typed rows")
+          print("ok — DH-011D/DH-011P/DH-011P2 order-correlation patch set has all required "
+                "components, no forbidden fuzzy-matching patterns, the uniqueness index stays "
+                "scoped to FHIR-typed rows, the added-test transform is correlation-aware, and "
+                "the adapter remains POST-only for ServiceRequest delivery")
           PY
 
   openelis-order-correlation-build:
@@ -1242,8 +1404,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install git
-        run: apt-get update -qq && apt-get install -y -qq git
+      - name: Install git and htpasswd
+        # DH-011P: htpasswd (apache2-utils) is required by install/createDefaultPassword.sh,
+        # which the compile step below runs. Without it, createDefaultPassword.sh retries in an
+        # unbounded loop and this job never terminates -- found empirically while reproducing
+        # this job locally for DH-011P, not caused by DH-011P's own changes (openelis-config
+        # /Dockerfile's own build stage already installs apache2-utils for the same reason; this
+        # job never did). See PROVENANCE.md's DH-011P section.
+        run: apt-get update -qq && apt-get install -y -qq git apache2-utils
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4
@@ -1269,12 +1437,30 @@ jobs:
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/LiquibaseConfig.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/base-changelog.xml.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ElectronicOrder.hbm.xml.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/SampleEditService.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/SampleEditServiceImpl.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/SampleEditRestController.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/persistence.xml.patch"
 
-          mkdir -p "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir"
+          mkdir -p "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/dao"
+          mkdir -p "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl"
+          mkdir -p "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherOrderCorrelation.java" \
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelation.java"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherOrderCorrelationTransaction.java" \
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherOrderCorrelationTransaction.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelation.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAnalysisCorrelation.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAddedTestTransaction.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAddedTestTransaction.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationDAO.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherAnalysisCorrelationDAO.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationDAOImpl.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl/DaherAnalysisCorrelationDAOImpl.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationService.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationService.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationServiceImpl.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationServiceImpl.java"
 
           mkdir -p "$OPENELIS_SRC/src/main/resources/liquibase/daher"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/001-electronic-order-daher-correlation-unique.xml" \
@@ -1283,6 +1469,10 @@ jobs:
             "$OPENELIS_SRC/src/main/resources/liquibase/daher/002-site-code-configuration.xml"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/003-electronic-order-external-id-widen.xml" \
             "$OPENELIS_SRC/src/main/resources/liquibase/daher/003-electronic-order-external-id-widen.xml"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/004-daher-analysis-correlation.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/004-daher-analysis-correlation.xml"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/005-daher-analysis-correlation-unique-analysis.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml"
 
       - name: Compile the patched reactor through to a produced WAR
         # Mirrors openelis-config/Dockerfile's own build recipe (its BuildKit cache mounts
