@@ -2920,3 +2920,21 @@ see PROJECT_STATE.md/CURRENT_STATE.md's DH-011G2 entries for the exact verificat
 scratch proof scripts (outside the repo, under this session's scratchpad) were removed.
 
 READY TO COMMIT: Yes.
+
+### Commit and CI (2026-08-30)
+
+Committed `de70db2da89d7c60eb9c081516d4d7f457cfd9ca` on top of `7085451` (`origin/master` at commit
+time), pushed with no force. CI run
+[33323310292](https://github.com/brittLiban/d-health/actions/runs/33323310292) on this exact SHA:
+all 8 jobs green (`static checks`, `oauth2login — patched identity tests`,
+`ui — lint, typecheck, test, build`, `openelis order-correlation patch — compiles`,
+`compose interpolates and parses`, `seed + form-safety suites`, `provisioning — ruff + pytest`,
+`adapter — ruff + pytest`), confirmed via `gh run view` job-by-job, not the watch exit code alone.
+Two jobs of particular note since local verification couldn't reach them the same way: the compile
+job ran against a cold Maven cache in CI (local verification used a warm BuildKit cache) and passed
+in 2m31s; the static-checks job ran the extended guard against the real pushed checkout (not a
+scratch copy) and passed, including the newly-added `required_copy` entries for the five
+DAO/DAOImpl/Service/ServiceImpl/migration files that a pre-push review found were Dockerfile-copied
+but never actually asserted by that guard -- fixed and control-tested (a deliberate single-line
+Dockerfile removal correctly failed the check; the full removal-then-restore was verified against a
+file backup, not left as an uncommitted diff) before this commit.
