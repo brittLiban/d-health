@@ -2688,3 +2688,16 @@ Full V1 matrix (A-H): all pass, live, DB-inspected. Coordinator-level concurrent
 cancellation: recoverable/idempotent, live, real components.
 
 READY TO COMMIT: Yes.
+
+**COMMITTED AND PUSHED 2026-08-30**: `86f26dfb28ecffae83a3c96adb5a691aaee909a4` on `origin/master`
+(pre-commit HEAD `05b55b292a3672dd75b7d67bbdb14158fee19066`). CI run `33298838019` — all 8 jobs
+green (`compose interpolates and parses`, `adapter — ruff + pytest`, `openelis order-correlation
+patch — compiles`, `oauth2login — patched identity tests`, `provisioning — ruff + pytest`,
+`static checks`, `ui — lint, typecheck, test, build`, `seed + form-safety suites`), verified
+directly via `gh run view`, not assumed. **DH-011J: DONE for V1 added-test cancellation.**
+Specimen-state gating: deferred by decision (option (b)), not implemented. Initial-order
+cancellation: open/unsupported; its cascade semantics remain a separate Human Decision. **DH-011
+overall remains NOT COMPLETE** — DH-011G/H/I/K/L all still open. **DH-011E remains NOT ACTIVATED**
+— no production entrypoint assembles the adapter's delivery/recovery components into a running
+loop; this ticket's own crash-recovery/concurrency proofs used a test-only integration harness
+driving the real classes directly, exactly as DH-011P2 established.

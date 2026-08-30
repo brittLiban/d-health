@@ -314,7 +314,10 @@ a specimen has or hasn't been physically collected, only that Daher cannot obser
 reliably through the path it uses today. No code changed by this decision: the implementation
 DH-011J built and proved was already exactly this contract. Initial-order cancellation remains
 unsupported; its cascade question remains a separate, open Human Decision. Decision record:
-`DECISIONS.md`'s ADR-018 DH-011J FINALIZE resolution.
+`DECISIONS.md`'s ADR-018 DH-011J FINALIZE resolution. **COMMITTED AND PUSHED 2026-08-30**:
+`86f26dfb28ecffae83a3c96adb5a691aaee909a4` on `origin/master`; CI run `33298838019` — all 8 jobs
+green, verified via `gh run view`. **DH-011J is DONE for V1 added-test cancellation.** DH-011
+overall remains NOT COMPLETE. DH-011E remains NOT ACTIVATED.
 
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
