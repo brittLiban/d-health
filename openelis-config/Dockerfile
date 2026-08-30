@@ -21,6 +21,8 @@ RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
         -y --no-install-recommends install git apache2-utils
 
 COPY patches/order-correlation/ServiceRequestProvider.java.patch /patch/ServiceRequestProvider.java.patch
+COPY patches/order-correlation/ServiceRequestProviderCancel.java.patch /patch/ServiceRequestProviderCancel.java.patch
+COPY patches/order-correlation/DaherCancellationTransaction.java /patch/DaherCancellationTransaction.java
 COPY patches/order-correlation/FhirTransformServiceImpl.java.patch /patch/FhirTransformServiceImpl.java.patch
 COPY patches/order-correlation/LiquibaseConfig.java.patch /patch/LiquibaseConfig.java.patch
 COPY patches/order-correlation/base-changelog.xml.patch /patch/base-changelog.xml.patch
@@ -53,6 +55,7 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
     && test "$(git -C /build rev-parse HEAD)" = e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23 \
     && git -C /build submodule update --init --depth 1 dataexport \
     && git -C /build apply /patch/ServiceRequestProvider.java.patch \
+    && git -C /build apply /patch/ServiceRequestProviderCancel.java.patch \
     && git -C /build apply /patch/FhirTransformServiceImpl.java.patch \
     && git -C /build apply /patch/LiquibaseConfig.java.patch \
     && git -C /build apply /patch/base-changelog.xml.patch \
@@ -72,6 +75,8 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAnalysisCorrelation.java \
     && cp /patch/DaherAddedTestTransaction.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAddedTestTransaction.java \
+    && cp /patch/DaherCancellationTransaction.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherCancellationTransaction.java \
     && cp /patch/DaherAnalysisCorrelationDAO.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherAnalysisCorrelationDAO.java \
     && cp /patch/DaherAnalysisCorrelationDAOImpl.java \

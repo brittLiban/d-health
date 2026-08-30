@@ -127,6 +127,23 @@ class ServiceRequestDeliveryBlocked(RuntimeError):
     """Live ServiceRequest delivery is gated until the real numeric OpenELIS site code exists."""
 
 
+class CancellationTargetState(StrEnum):
+    """DH-011J §11's four required cancellation-probe outcomes, narrowed to the two this client
+    can actually distinguish plus the two shared failure modes every DH-025 probe already uses.
+    """
+
+    EXISTS_NOT_CANCELLED = "exists_not_cancelled"
+    EXISTS_CANCELLED = "exists_cancelled"
+    AMBIGUOUS = "ambiguous"
+    UNREACHABLE = "unreachable"
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationProbeResult:
+    state: CancellationTargetState
+    record_id: str | None = None
+
+
 class OpenElisClient:
     """Talks to `/OpenELIS-Global/fhir/*` only. Never the standalone `openelis-fhir` store."""
 
@@ -310,6 +327,103 @@ class OpenElisClient:
             "ServiceRequest POST reconciliation is ambiguous (multiple native matches or the "
             "target was unreachable) for correlation " + correlation.value
         )
+
+    async def cancellation_probe(self, correlation: SourceCorrelation) -> CancellationProbeResult:
+        """DH-011J's cancellation-specific probe -- deliberately not `TargetProbe`/`TargetPresence`
+        (DH-025's FOUND/ABSENT model has no vocabulary for "found but not yet cancelled" versus
+        "found and cancelled", both of which a cancellation caller must be able to tell apart).
+
+        Reads the *existing* correlation search's own `ServiceRequest.status` field -- no new
+        native read endpoint needed. `transformToServiceRequest` already maps a `Canceled`
+        Analysis to FHIR status `"revoked"` (verified live, DH-011J, see PROVENANCE.md); every
+        other native status maps to something other than `"revoked"`. `correlation` here is
+        always the *original* added-test correlation the target was created under (the value
+        already in `daher_analysis_correlation`) -- never a value re-derived from the
+        cancellation event's own identity.
+        """
+        token = f"{SERVICE_REQUEST_TARGET_SYSTEM}|{correlation.value}"
+        url = f"{self._base}/{SERVICE_REQUEST}?identifier={quote(token, safe='')}"
+        try:
+            result = await self._get(url)
+        except Exception as error:  # noqa: BLE001 - any transport failure means UNREACHABLE
+            logger.warning(
+                "openelis_cancellation_probe_unreachable",
+                extra={"error_type": type(error).__name__},
+            )
+            return CancellationProbeResult(state=CancellationTargetState.UNREACHABLE)
+
+        if result.status != 200 or not isinstance(result.body, Mapping):
+            return CancellationProbeResult(state=CancellationTargetState.UNREACHABLE)
+
+        resources = _entries(result.body)
+        total = result.body.get("total")
+        total_says_one = isinstance(total, int) and not isinstance(total, bool) and total == 1
+
+        if len(resources) == 0:
+            # A cancellation target that does not resolve at all is not a state this probe has
+            # vocabulary for (DH-025 requires the target to already exist -- it was created by an
+            # earlier, already-completed add-test event) -- fail closed rather than invent one.
+            return CancellationProbeResult(state=CancellationTargetState.AMBIGUOUS)
+        if len(resources) > 1 and not total_says_one:
+            return CancellationProbeResult(state=CancellationTargetState.AMBIGUOUS)
+
+        resource = resources[0]
+        fhir_id = _resource_id(resource)
+        status = resource.get("status")
+        if fhir_id is None or not isinstance(status, str):
+            return CancellationProbeResult(state=CancellationTargetState.UNREACHABLE)
+
+        if status == "revoked":
+            return CancellationProbeResult(
+                state=CancellationTargetState.EXISTS_CANCELLED, record_id=fhir_id
+            )
+        return CancellationProbeResult(
+            state=CancellationTargetState.EXISTS_NOT_CANCELLED, record_id=fhir_id
+        )
+
+    async def cancel_service_request(
+        self, correlation: SourceCorrelation
+    ) -> CancellationProbeResult:
+        """DH-011J's `TargetWriter` analog for added-test cancellation.
+
+        Calls the native `$cancel` operation
+        (`patches/order-correlation/ServiceRequestProviderCancel.java.patch`), then -- never
+        trusting that call's own HTTP outcome, exactly like
+        `deliver_service_request` -- always reconciles via `cancellation_probe` and returns
+        *that* result, whether the POST returned 200, an error status, or raised outright.
+
+        This discipline is not theoretical here: DH-011J live-proved that a genuine concurrent
+        double-cancellation can make the native side raise `StaleObjectStateException` (HTTP 500)
+        on the losing caller even though the target was, in fact, correctly cancelled by the
+        winner -- the exact same class of race DH-011M already proved and accepted on the create
+        path. A caller that trusted this call's own status would misreport that legitimate
+        outcome as a failure.
+
+        Returns `EXISTS_CANCELLED` (cancellation confirmed) or `EXISTS_NOT_CANCELLED` (the
+        target was reached but is not cancelled -- either the native ADR-018 status gate refused
+        it, or the call never reached the server and nothing changed; this method does not and
+        cannot distinguish those two from outside, and per DH-011J §14 both must be surfaced to
+        an operator rather than silently treated as done). Raises `AmbiguousTargetState` only
+        when reconciliation itself cannot prove either state.
+        """
+        payload = {
+            "resourceType": "Parameters",
+            "parameter": [{"name": "correlation", "valueString": correlation.value}],
+        }
+        try:
+            await self._post(f"{self._base}/{SERVICE_REQUEST}/$cancel", payload)
+        except Exception as error:  # noqa: BLE001 - the POST's own outcome is never trusted anyway
+            logger.info(
+                "openelis_cancel_post_did_not_complete", extra={"error_type": type(error).__name__}
+            )
+
+        result = await self.cancellation_probe(correlation)
+        if result.state in (CancellationTargetState.AMBIGUOUS, CancellationTargetState.UNREACHABLE):
+            raise AmbiguousTargetState(
+                "Cancellation reconciliation could not prove cancelled or not-cancelled for "
+                f"correlation {correlation.value}"
+            )
+        return result
 
 
 def _with_daher_identifier(

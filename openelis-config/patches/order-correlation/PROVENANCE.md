@@ -1831,3 +1831,860 @@ READY TO COMMIT: Yes, per this ticket's own gate -- every required item above pa
 evidence, not narrowed by argument. DH-011P/P2/P3 as one implementation are ready for the commit
 and push this ticket's own §13 specifies. **DH-011 overall remains NOT COMPLETE** -- DH-011G/H/I/
 J/K/L are all still open and unaffected by this ticket.
+
+## DH-011J (2026-08-29) -- crash-safe added-test cancellation implemented and live-proven; a
+## $cancel FHIR operation, ADR-018's status gate enforced where the native primitive has none,
+## full DH-025 crash-recovery/idempotency/concurrency/isolation proof against real disposable
+## infrastructure -- whole-initial-order cancellation deliberately NOT implemented (Human Decision
+## Required, per this ticket's own §7 instruction) -- not committed pending Liban's review
+
+### Scope decision, stated first
+
+This ticket answers DH-011J's eight cancellation-scope questions (§2) separately, per its own
+instruction not to collapse them, then implements only the one its own §8 calls "the cleanest
+target": **cancelling one added-test event.** Whole-initial-order cancellation is characterized but
+deliberately not implemented -- §7 requires stopping and presenting that as a human/product decision
+if it would implicitly affect independently-added tests, and the live evidence below shows it would.
+
+### §2 -- the eight questions, answered separately
+
+1. **Cancel an entire initial order before work begins.** Not implemented. Requires a decision on
+   whether it cascades to independently-added tests (see the finding after question 3, and §7
+   below) -- Human Decision Required, not decided here.
+2. **Cancel one added-test event.** Implemented and live-proven this ticket -- see §8/§12-19 below.
+3. **Cancel one test within a multi-test initial order.** **Structurally identical to question 2
+   for this system's actual create-path behavior, not a separate case** -- a genuine, live finding,
+   not a general claim about OpenELIS: attempting to build an "initial order with two tests
+   already in it" via `POST /fhir/ServiceRequest` showed that only the *first* `ServiceRequest`
+   for a given Specimen takes the no-specimen-reference "new order" branch (an `electronic_order`
+   row, no `daher_analysis_correlation` row for its Analysis). Every subsequent test referencing
+   that same Specimen -- even seconds later -- takes the existing-specimen branch and routes
+   through `DaherAddedTestTransaction.addTest`, getting its own `daher_analysis_correlation` row,
+   indistinguishable in the data model from a test added weeks later. There is no third code path
+   that creates two correlated Analyses in one atomic order-creation event. Confirmed live: a
+   fixture built as "A" (first test, no specimen ref) then "B" (second test, same specimen,
+   created immediately after) left exactly one `daher_analysis_correlation` row, for B's Analysis
+   only -- `id=3, correlation_value=3b3c9c...`. **This is what the create path does today; if a
+   panel/multi-code order ever arrives by some other route, this claim does not automatically
+   hold and would need re-verifying.**
+4. **Cancel after specimen collection.** **Not exercised live -- the answer follows mechanically
+   from the ADR-018 status gate (§14 below), not from direct observation.** This ticket verified
+   `SampleItem.status_id`/`Sample.status_id` at *creation* time (20/"entered", 1/"no tests run" --
+   matching DH-011M's own prior finding) but did not advance a specimen through the native
+   collection workflow and re-read the *Analysis* row afterward. The gate is Analysis-scoped: if
+   collection leaves the Analysis at `NotStarted`, cancellation succeeds; if collection advances it
+   to any other status, cancellation refuses. Which of these collection actually does was not
+   determined this ticket -- stated plainly rather than inferred.
+5. **Cancel after result entry.** Refused -- ADR-018's "already in progress" branch, already
+   covers this (any non-`NotStarted` status refuses). No new Human Decision needed; ADR-018 already
+   settled the policy, this ticket supplied the verified status mapping it asked for.
+6. **Cancel after result validation/finalization.** Refused, **and live-proven specifically**:
+   an Analysis forced to `Finalized` and then targeted for cancellation returned
+   `REFUSED_IN_PROGRESS` with zero mutation. This is the one guard the pristine
+   `ServiceRequestProvider.deleteServiceRequest` primitive **does not have at all** -- it would
+   silently overwrite a Finalized/validated result. DH-011J's `DaherCancellationTransaction` adds
+   the guard; the native method itself was left untouched. No new Human Decision needed here either
+   -- ADR-018 already forecloses "leave it alone, manual handling," and this ticket *enforced* that
+   where the native code did not.
+7. **Repeat the same cancellation.** Idempotent, live-proven twice: once at the native `$cancel`
+   endpoint level (a second call on an already-cancelled target returns `ALREADY_CANCELLED`, the
+   Analysis's `lastupdated` timestamp unchanged from the first call -- no second write), and once
+   at the adapter/ledger level (`test_repeat_cancellation_of_the_same_event_is_idempotent`, a real
+   `DaherCancellationCoordinator` + real Postgres ledger, second `reconcile_cancellation` call for
+   an already-`completed` cancellation event raises `RecoveryStateError` before touching the target
+   at all).
+8. **Cancel an already-cancelled item (via a different route/event).** Idempotent by *target
+   state*, not by event identity -- distinct from question 7. Live-proven: `cancellation_probe`
+   reads `ServiceRequest.status == "revoked"` (see §9/§11 below) and the coordinator's
+   `reconcile_cancellation` returns `CONFIRMED_CANCELLED` without calling the writer at all when
+   the probe already shows cancelled, regardless of which cancellation event asks.
+
+### §3 -- OpenMRS cancellation source contract
+
+Already correctly implemented and live-tested (2026-08-13, `docs/WATERMARK-DESIGN.md` §6, FHIR2
+module 4.2.0, pinned): a native `DISCONTINUE` action creates a *new* `ServiceRequest` with
+`status: "unknown"` and `replaces` pointing at the original, while the original order is mutated in
+place with `meta.lastUpdated` **not** advancing -- an already-documented "invisible mutation"
+hazard the poller must not rely on `_lastUpdated`-only queries to catch. `?status=active` is not a
+supported OpenMRS search parameter (HTTP 400) -- confirmed, not assumed -- so no hidden status
+filter can silently drop a discontinuation. `adapter/src/daher_adapter/source_events.py` already
+implements the correct contract: no status filtering, `replaces` carried verbatim, its own
+`MessageIdentity` per event. Nothing changed here this ticket; this section exists so the answer
+is recorded where DH-011J's own §3 asked for it, not only in a doc from a different ticket.
+
+### §4/§5 -- OpenELIS cancellation code paths and native status vocabulary
+
+**Status vocabulary, live-confirmed** (not from source reading alone): `status_of_sample` has a
+`status_type` discriminator; `ORDER`, `ANALYSIS`, `SAMPLE`, and `EXTERNAL_ORDER` are **separate
+namespaces** with overlapping human-readable names across them (e.g. "Sample Rejected" exists in
+both `ANALYSIS` and `SAMPLE`) -- a cross-namespace id mix-up would be silent and clinical, so every
+check in this ticket resolves ids through `IStatusService.getStatusID(AnalysisStatus.X)`, never a
+literal integer. The full live `ANALYSIS` vocabulary:
+
+| id | name | description |
+|----|------|--------------|
+| 4  | Not Tested | This test has not yet been done |
+| 6  | Finalized | The results of the analysis are final |
+| 7  | Biologist Rejection | The Biologist did not accept this result as valid |
+| 13 | NonConforming | The order is non-conforming |
+| 14 | Test Canceled | Test was requested but then canceled |
+| 15 | Technical Acceptance | The results of the test were accepted by technician as being valid |
+| 16 | Technical Rejected | The results of the test were not accepted by the technicain |
+| 26 | Sample Rejected | The sample has been rejected |
+
+**Cancellation primitive.** The pristine `ServiceRequestProvider.deleteServiceRequest` (`@Delete`,
+keyed on the Analysis's own `fhirUuid`) does exactly one thing: `analysis.setStatusId(Canceled)` +
+`analysisService.update()`, then a best-effort, non-blocking `fhirTransformService
+.transformAnalysisByIds`. Single Analysis row, one transaction, zero side effects on
+`Sample`/`SampleItem`/`Result`/`ElectronicOrder` -- the same underlying mechanism DH-011J reuses.
+Two things it does **not** do, both load-bearing for this ticket: (1) it takes the OpenELIS-internal
+`fhirUuid` as its target identity, never a Daher correlation -- DH-025's whole design principle is
+probe-and-write by correlation, never a remembered target-generated id, so this identity mismatch
+alone would force either a wasteful extra round trip or a genuinely new entrypoint; (2) it has
+**zero guard** against the current status, live-confirmed by cancelling a `Finalized` Analysis
+through it during research (a scratch, disposable-stack-only probe, not the production `$cancel`
+path) -- it succeeded, overwriting a validated result with no complaint. Both gaps are why this
+ticket adds a narrow, Daher-owned `$cancel` operation rather than reusing `deleteServiceRequest`
+directly (see §12-13).
+
+### §6 -- live synthetic cancellation matrix, infrastructure and fixture
+
+Fully synthetic disposable stack, generated fresh for this ticket, `.env` never read, real facility
+never touched: `itechuw/openelis-global-2-database:3.2.1.11` (pinned digest) + a webapp built from
+`openelis-config/Dockerfile` (pinned tag `3.2.1.11` / commit `e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23`,
+all nine DH-011D/P/P2/P3 patches plus this ticket's own two new files) via a standalone compose file
+(own random `openssl rand -hex` credentials, no Keycloak/OpenMRS -- unneeded, since OpenELIS's FHIR
+API authenticates via its own HTTP Basic independent of SSO). A synthetic `Patient` (created via the
+real `POST /fhir/Patient` path -- one false-green rediscovered live: a given name containing digits
+silently fails OpenELIS's name validator while still returning `201`, matching the class of bug
+PROVENANCE.md's DH-011N section already recorded for a different field; worked around with an
+alphabetic name, not investigated further, out of this ticket's scope). Fixture: **A** (initial
+order, PLT, no specimen reference -- `electronic_order`-correlated, no `daher_analysis_correlation`
+row), **B** (added test, HCT, same specimen -- `daher_analysis_correlation` row, sibling, must stay
+untouched), **D** (added test, MCV, same specimen -- the cancellation target). All three landed under
+one `Sample`/accession (`DEV01260000000000001`), all three Analyses at `Not Tested` (id 4) before
+any cancellation attempt -- live-confirmed via `psql`, not inferred from HTTP status.
+
+### §7 -- initial-order cancellation semantics: Human Decision Required, not decided here
+
+Per §7's own explicit instruction, this is presented as a decision, not resolved unilaterally.
+Live evidence bearing on it: an initial order's own first test (A above) has no
+`daher_analysis_correlation` row of its own -- it is identified only by the order-level
+`electronic_order.external_id`/`Sample.clinical_order_id` correlation. DH-011J's `$cancel`
+operation resolves targets exclusively through the added-test correlation table (by design, see
+§12-13) and was live-confirmed to return `404 Not Found` when handed A's own initial-order
+correlation value, leaving A completely untouched (`status_id` still 4 after the attempt). This
+proves the *current* implementation cannot accidentally cancel an initial order, but does not
+answer what *should* happen if a human asks to cancel one: whether it should cancel only the
+initial order's own test, or cascade to every independently-added test under the same Sample (B
+and D above), is a product/clinical-workflow question this ticket does not have standing to answer
+-- **Human Decision Required**, recorded in PROJECT_STATE.md.
+
+### §8 -- added-test cancellation in isolation: live-proven
+
+C's cancellation left A (`Not Tested`, id 4, untouched) and B (`Not Tested`, id 4, untouched)
+completely unaffected -- confirmed at the DB level after the cancellation call, not inferred.
+`Sample.status_id` (1) and every `SampleItem.status_id` under the accession (20) were unchanged
+before and after. No fabricated states: only D's `status_id` moved, from 4 to 14 ("Test Canceled"),
+matching `AnalysisStatus.Canceled` exactly.
+
+### §9 -- no hard deletes
+
+`DaherCancellationTransaction` performs exactly the same status-only mutation the pristine
+`deleteServiceRequest` already performs -- no `DELETE`/`TRUNCATE` statement, no `.remove(`/
+`.delete(` call, anywhere in the cancellation path. The `daher_analysis_correlation` row for a
+cancelled Analysis is never touched or reused -- confirmed live: after D's cancellation, `SELECT *
+FROM daher_analysis_correlation` still showed both B's and D's rows, D's `correlation_value`
+unchanged, still resolving to `analysis_id=4`. A CI guard (§22) now asserts this permanently.
+
+### §10 -- cancellation correlation/identity model: no new table needed
+
+Per §10's own instruction to first prove whether target-identity+target-state is sufficient before
+adding a new table: **it is.** The existing `daher_analysis_correlation` table (DH-011P, Design B)
+already carries exactly the identity a cancellation needs to locate its target -- the same
+correlation value the add-test event stored. No new correlation table was added. What *is* new is
+the cancellation *event's* own ledger identity (a `MessageIdentity` distinct from the original
+add-test event's, carried by `DaherCancellationCoordinator`, never collapsed with the target
+identity -- see §17 for why keeping them separate matters for idempotency).
+
+### §11 -- cancellation target probe: four outcomes, no new native read endpoint
+
+`OpenElisClient.cancellation_probe` (new, `adapter/src/daher_adapter/openelis.py`) implements the
+required four outcomes without any new native read surface -- it reads the *existing* correlation
+search's own `ServiceRequest.status` field. Live-discovered and confirmed: `transformToServiceRequest`
+already maps a `Canceled` Analysis to FHIR status `"revoked"` (pre-existing, unmodified behavior,
+not something this ticket added) -- `GET .../ServiceRequest?identifier=...source-event|<D's
+correlation>` returned `"status":"revoked"` after cancellation, `Bundle.total: 1`, no exception, no
+dropped entry. Outcome mapping: `status == "revoked"` -> `EXISTS_CANCELLED`; any other status ->
+`EXISTS_NOT_CANCELLED`; zero matches, or `>1` without `Bundle.total == 1` -> `AMBIGUOUS` (a
+cancellation target must already exist -- zero matches has no honest vocabulary here, per DH-025's
+existing fail-closed discipline); non-200/unreachable/transport exception -> `UNREACHABLE`. Per the
+ticket's explicit requirement, not-found is never mapped to "successfully cancelled."
+
+### §12-13 -- the cancellation writer: a new $cancel FHIR operation, not PUT, not a reused DELETE
+
+**Why not `deleteServiceRequest` directly**: wrong target identity (fhirUuid, not correlation --
+see §4/§5) and no status guard. **Why not PUT**: forbidden outright by this ticket and by the
+existing DH-011P2 §15 CI guard, which stays unmodified and unweakened. **What was built**: a HAPI
+custom operation, `@Operation(name = "$cancel", idempotent = false)` on the same
+`ServiceRequestProvider` class DH-011D/M/P/P2/P3 already extended, reachable at
+`POST /fhir/ServiceRequest/$cancel` with a `Parameters` body carrying the correlation value. It
+resolves the target via `DaherAnalysisCorrelationService.getByCorrelationValue` (the exact method
+`DaherAddedTestTransaction.addTest` already uses for its own idempotency pre-check -- reused, not
+reinvented), applies the ADR-018 status gate (§14), and performs the identical
+`analysis.setStatusId(Canceled)` + `analysisService.update()` mutation the pristine primitive uses,
+inside `DaherCancellationTransaction`, a separate `@Component` bean (not `@Transactional` on
+`ServiceRequestProvider` itself -- the HAPI-0289 hazard `DaherAddedTestTransaction`'s javadoc
+already documents, avoided the same way here). Single transaction, exact target match via the
+unique correlation value, never edits an unrelated Analysis, never deletes, idempotent, returns
+authoritative post-state (`outcome`/`analysisId`/`status`) in the response body -- every constraint
+§13 lists for a narrow Daher-owned endpoint. Live-proven end to end (§8 above): `curl -X POST
+.../ServiceRequest/\$cancel` with D's correlation returned `200`, `{"outcome":"CANCELLED",
+"analysisId":"4","status":"Canceled"}`, and the DB matched exactly.
+
+### §14 -- state-transition policy: fail-closed allowlist, ADR-018-driven, no new Human Decision
+
+Covered fully in §2 (questions 4-6) and the DECISIONS.md ADR-018 append-only closure this ticket
+adds. Summary: the gate is `currentStatus == AnalysisStatus.NotStarted` (proceed) or
+`currentStatus == AnalysisStatus.Canceled` (idempotent no-op) or anything else
+(`REFUSED_IN_PROGRESS`, no mutation) -- live-proven at `NotStarted` (succeeds), `Canceled`
+(idempotent), `TechnicalAcceptance` (refused), and `Finalized` (refused, the one gap the native
+primitive lacks entirely).
+
+### §15 -- atomicity: verified via the identical proven pattern, not separately failure-injected
+
+**Stated precisely, not overclaimed.** `DaherCancellationTransaction.cancelByCorrelation` carries
+`@Transactional(rollbackFor = Exception.class)` -- byte-identical annotation to
+`DaherAddedTestTransaction.addTest` and `DaherOrderCorrelationTransaction`, both of which DH-011D3
+proved atomic under live, deliberately injected failure (a raised exception between the native
+write and the correlation insert rolling the whole transaction back). This ticket did not
+separately inject a fault at the equivalent seam (an exception after `analysisService.update()`,
+before commit) for the cancellation transaction specifically. What *was* observed live, under a
+real (not manufactured) fault, is reported in §18: three of five genuinely concurrent `$cancel`
+calls hit Hibernate's own `StaleObjectStateException` -- a real mid-transaction failure -- and the
+resulting DB state was correct with no partial mutation. That is evidence the same
+`@Transactional(rollbackFor = Exception.class)` guarantee held under a real fault at a *different*
+seam than the ticket's own failure-injection ask. **§15: verified by identical-pattern precedent
+and by an observed real fault at a related seam, not demonstrated by deliberate injection at the
+exact seam requested.**
+
+### §16 -- idempotency: proven at two levels
+
+Covered in §2 questions 7-8 above. Additionally proven at the ledger/coordinator level with the
+real adapter components (`test_repeat_cancellation_of_the_same_event_is_idempotent`, live, against
+the disposable stack) -- see §17.
+
+### §17 -- crash-after-cancel-commit: proven with the real production adapter components
+
+**No production entrypoint assembles `OpenElisClient` + `DaherCancellationCoordinator` +
+`LedgerRepository` into a running loop** (same state as DH-011P2's crash-recovery proof -- DH-011E's
+poller remains unwired). This ticket built a new, permanent, gated integration test,
+`adapter/tests/integration/test_dh011j_cancellation_crash_recovery.py`, mirroring
+`test_dh011p2_crash_recovery.py`'s exact shape and discipline: real `OpenElisClient`, a new
+`DaherCancellationCoordinator` (deliberately **not** a change to `RecoveryCoordinator.reconcile` or
+its `TargetPresence.FOUND/ABSENT` enums, which have no vocabulary for "found but not cancelled" vs.
+"found and cancelled" -- a parallel small coordinator built from the same `LedgerRepository`/
+`RecoveryFence` components instead, leaving the create-path coordinator, already committed and
+CI-green, untouched), and the real disposable Postgres (`alembic upgrade head`, both existing
+migrations, applied for real). Each test creates its own fresh added-test fixture live rather than
+depending on an operator-supplied correlation, avoiding any cross-run ledger collision.
+
+**Sequence, live-confirmed:** `ledger.claim` (processing) -> the coordinator's `write_target`
+callable calls the real `cancel_service_request` (a genuine `$cancel` commit, DB-confirmed
+`Test Canceled`) -> a `SimulatedCrash` fires, placed exactly after the proven real commit and
+before `reconcile_cancellation`'s own `ledger.mark_completed` -> ledger state still `"processing"`,
+Analysis genuinely cancelled. A **fresh** `LedgerRepository`/`DaherCancellationCoordinator` (no
+in-memory state reused, simulating a restart) reconciles the same cancellation event: the probe
+alone (no write) finds `EXISTS_CANCELLED`, `write_target` is called **zero** times, ledger
+transitions to `"completed"`. `pytest -q` on the unmodified adapter tree with these two new tests
+gated off: **161 passed, 4 skipped** (2 pre-existing DH-011P2 gates + 2 new DH-011J gates); with
+`DH011J_LIVE_*` set against the disposable stack, both new tests pass live. Ruff clean throughout.
+
+One correction recorded, not silently fixed elsewhere: `test_dh011p2_crash_recovery.py`'s own
+docstring says `DH011P2_ADAPTER_DB_PASSWORD=<the disposable stack's OE_POSTGRES_PASSWORD>` --
+this is wrong (the adapter database uses the separate `ADAPTER_DB_PASSWORD` co-tenant credential,
+per `docker-compose.yml`'s own three-distinct-credentials comment) and cost a failed run while
+reproducing this ticket's own live proof. Noted here as a pre-existing inaccuracy in a prior
+ticket's file, not fixed in that file by this ticket (out of scope) -- this ticket's own equivalent
+docstring states the correct variable.
+
+### §18 -- concurrent duplicate cancellation: proven, race shape characterized precisely
+
+Five simultaneous `$cancel` HTTP calls for the same never-cancelled added-test correlation: one
+`200 CANCELLED`, one `200 ALREADY_CANCELLED`, three `500` (`org.hibernate.StaleObjectStateException`
+-- a genuine optimistic-lock conflict inside the transaction, not a defect). **Final DB state:
+exactly one cancellation, `status_id=14`, no corruption, no orphaned correlation, no double write**
+-- confirmed by direct query, not inferred from the HTTP responses. This is the same *shape* of
+race DH-011M already proved and accepted on the create path (one `201`, one `500`
+`ConstraintViolationException`, DB left correct) -- not a new problem, and not treated as one. The
+adapter-side writer (`cancel_service_request`) is built to this exact discipline: it never trusts
+its own POST's HTTP outcome (success or exception) and always reconciles via `cancellation_probe`
+afterward -- unit-proven (`test_cancel_service_request_never_trusts_its_own_post_status`) with a
+scripted POST failure whose follow-up probe still resolves `EXISTS_CANCELLED`, matching the real
+race's actual (correct) outcome.
+
+### §19 -- cancellation isolation: proven live (see §8) and unit-proven
+
+Live evidence is §8 above. The coordinator-level unit tests (`test_cancellation.py`) additionally
+prove the *coordination* layer's isolation discipline: a target already `EXISTS_CANCELLED` is never
+re-written (`write_target` raises `AssertionError` if called, and is not), and an `AMBIGUOUS`/
+`UNREACHABLE` probe never falls through to a write either.
+
+### §20 -- results safety: not clinically characterized, deliberately
+
+No result data was created, read, or reasoned about beyond the `AnalysisStatus` enum name itself
+(never a clinical value). Whether cancelling a test with an entered-but-not-validated result should
+ever be permitted is exactly the class of question ADR-018 and this ticket both defer -- the status
+gate refuses it (any non-`NotStarted` status refuses) without this ticket characterizing what
+"result entry" means clinically. Synthetic data only throughout; no result fields were populated in
+any fixture.
+
+### §21 -- adapter tests added, exact count
+
+19 new unit tests in `adapter/tests/test_cancellation.py` (fence/claim/dead-letter/completed-duplicate
+guards, ambiguous/unreachable-never-writes, already-cancelled-is-idempotent-no-write,
+not-yet-cancelled-is-written-once, refused-is-a-confirmed-terminal-state) plus 9 new unit tests
+appended to `adapter/tests/test_openelis.py` (`cancellation_probe`'s revoked/active/zero/many/
+unreachable/bad-status cases, `cancel_service_request`'s `$cancel`-POST/never-trusts-own-status/
+reports-refusal/raises-on-unprovable-reconciliation cases) plus 2 new live-gated integration tests
+in `adapter/tests/integration/test_dh011j_cancellation_crash_recovery.py` (§17 above). Default
+`pytest -q` (integration tests skipped, matching CI): **161 passed, 4 skipped** (up from DH-011P2/
+P3's last-reported 142 passed, 2 skipped -- 19 + 9 = 28 new tests accounted for, plus the 2 new
+gated skips). Ruff (`select = ["ASYNC", "B", "E", "F", "I", "S", "UP"]`): clean, zero warnings,
+across `adapter/src/` and `adapter/tests/`.
+
+### §22 -- CI static guards extended and control-tested
+
+`.github/workflows/ci.yml`'s "DH-011D order-correlation patch content guards" job (the `static`
+job) and the separate live-compile job ("Apply the production patches" / "Compile the patched
+reactor through to a produced WAR") were both extended for the two new files
+(`ServiceRequestProviderCancel.java.patch`, `DaherCancellationTransaction.java`) -- Dockerfile
+`COPY`/`git apply` list, the reciprocal "every shipped `.patch` is applied" glob check, the
+`required_copy` artifact-presence list, and the live-compile job's own apply/copy steps, matching
+the exact pattern every prior DH-011D/P/P2/P3 addition used.
+
+New content guards, each individually control-tested (scratch copy, inject the violation, confirm
+the guard fails with the expected message, confirm the clean baseline still passes) -- 14 control
+tests in total:
+
+- `ServiceRequestProviderCancel.java.patch` adds the `$cancel` operation (missing -> fails).
+- Never PUT/`@Update`-shaped (checked as an actual annotation-usage line or a quoted HTTP-verb
+  string, not a bare substring -- two real false-positives were found and fixed while building this
+  guard, both worth recording: a first version matched the literal word "PUT" appearing in this
+  patch's own javadoc prose ("...never issues or enables a PUT"), the exact class of false-negative/
+  false-positive DH-011P3 already hit once with `CREATE UNIQUE INDEX`; a second version required
+  `@Update(` with a parenthesis, missing that this codebase's HAPI annotations (`@Delete`,
+  `@Create`) are used bare with no parentheses -- both fixed, both then control-tested clean).
+- Never `@Transactional` on `ServiceRequestProvider` itself (the HAPI-0289 hazard).
+- Always delegates to `DaherCancellationTransaction.cancelByCorrelation`.
+- Never references `electronicOrderService`/`ElectronicOrder` -- the §7 scope boundary, enforced
+  structurally: cancellation can only ever resolve a target through the added-test correlation
+  namespace, never the initial-order one.
+- `DaherCancellationTransaction.java` is `@Transactional(rollbackFor = Exception.class)`.
+- Contains the `AnalysisStatus.NotStarted` allowlist check and the `AnalysisStatus.Canceled`
+  idempotent branch (exact statement text, not a phrase).
+- Never contains a hard-delete-shaped statement (`DELETE FROM`/`.remove(`/`.delete(`/`TRUNCATE` --
+  the last of these, `.delete(`, was missing from an early version of this guard and only caught
+  by its own control test, the same discipline this section itself required).
+- `adapter/src/daher_adapter/openelis.py` defines `cancel_service_request` and it reaches
+  `/$cancel` -- a positive existence check, not only an absence-of-PUT check.
+- The pre-existing DH-011P2 §15 PUT guard was re-run against the file with all of this ticket's
+  additions present and still passes -- confirmed, not assumed unaffected.
+
+`ci.yml` parses as valid YAML after all edits (`yaml.safe_load`, confirmed).
+
+### §23 -- stale-state corrections (already applied earlier this ticket, recorded here for
+completeness)
+
+`PROJECT_STATE.md`'s stale "DH-011J not testable" row was struck through (`~~...~~`, not deleted)
+and replaced with a new in-progress status noting the blocker is superseded. `PROJECT_STATE.md` and
+`CURRENT_STATE.md`'s stale "DH-011P/P2/P3 not committed" claims were corrected append-only with the
+exact verified commit SHA `05b55b292a3672dd75b7d67bbdb14158fee19066` and CI run
+`33257047337` (SUCCESS, all jobs green) -- both already true and verified at the start of this
+ticket's work, not re-verified again here.
+
+### §24 -- scope boundaries respected
+
+DH-011G/H/I/K/L untouched. No prenatal-panel or partograph content touched or invented. No real
+facility file, credential, or running container was read, started, stopped, or connected to at any
+point -- the entire disposable stack used its own generated credentials in a separate Docker Compose
+project (`-p dh011j`), on ports (`15433`, `18445`) distinct from the real stack's, and was fully
+torn down (see below). Whole-initial-order cancellation (question 1) was deliberately not
+implemented, per §7's own instruction.
+
+### Real facility and cleanup
+
+Real facility never touched. Disposable stack (`dh011j` compose project): both containers, both
+custom images (`dh011j/openelis-webapp:3.2.1.11-cancel`, `dh011j/certgen:local`), all four named
+volumes, and the network removed via `docker compose down -v` + `docker rmi`; confirmed empty
+afterward via `docker ps -a`/`docker images`/`docker volume ls` all filtered on `dh011j`. The
+pristine-clone scratch directory used to build the incremental patch diff and the scratch Python
+venv used to run `ruff`/`pytest` locally are both outside the repository (under this session's
+scratch directory) and are not committable artifacts.
+
+### What was deliberately not done, and why
+
+- **Whole-initial-order cancellation** -- Human Decision Required (§7), not implemented.
+- **§4's specimen-collection transition** -- not exercised live; §2 question 4's answer is
+  mechanical (follows from the Analysis-scoped gate), not observed. Worth a short, cheap follow-up:
+  advance a `SampleItem` through native collection and re-read the Analysis status once.
+- **§15's exact failure-injection seam** -- verified by identical-pattern precedent and a related
+  real-fault observation (§18's concurrency race), not by deliberately injecting an exception
+  between the status write and commit for this specific transaction. See §15 above for the precise
+  claim.
+- **A dedicated negative-control rebuild against a pristine (unpatched) image**, of the kind
+  DH-011M used to attribute the `StaleObjectStateException` defect -- not needed here, since this
+  ticket adds a wholly new operation (`$cancel`) rather than modifying existing shared code whose
+  "before" behavior needed a pristine baseline to compare against.
+
+### Test suite state
+
+Adapter: **161 passed, 4 skipped** (default run, live-integration tests gated off), ruff clean.
+Both new live-gated integration tests pass against the disposable stack this ticket built. CI
+static/compile guards extended, individually control-tested (14 control tests), YAML valid.
+
+READY TO COMMIT: No -- this ticket's own instruction is unconditional ("Do NOT commit or push until
+review"), independent of whether the work above is complete. Separately, on completeness: every
+item this ticket's own §25 lists as a precondition for "Yes" is satisfied by live evidence above
+(added-test cancellation implemented and proven at every required seam except the one explicitly
+narrowed in §15/§2q4, both stated precisely rather than overclaimed) -- so if this were a
+commit-authorizing ticket, the honest answer would be Yes with those two narrowed items disclosed,
+not a blanket Yes or a forced No. As instructed, no commit or push was made.
+
+## DH-011J2 (2026-08-29) -- §7's exact rollback fault injection closed and PROVEN; §8-§11
+## regressions re-confirmed on a rebuilt stack; the specimen-collection/receipt gate Liban
+## requested is BLOCKED -- no reliable native signal exists on the path this feature targets,
+## live-confirmed and triple-sourced; decision package provided, no code written for the gate --
+## not committed, added-test cancellation as it stood after DH-011J remains unchanged
+
+### Scope of this ticket
+
+Two independent threads: (1) close DH-011J's own narrowed §15 claim with the exact fault-injection
+seam requested, and re-confirm every other proof against a freshly rebuilt stack; (2) implement
+Liban's new specimen-collection/receipt gate. Thread (1) is fully closed. Thread (2) is **blocked**
+by a genuine data-model fact, not an oversight -- reported as a decision package, per this repo's own
+"never guess a gap that obviously should be filled a particular way" rule, rather than either
+implementing an invented proxy signal or silently declining the whole ticket.
+
+### §1 -- state preserved
+
+`git rev-parse HEAD` = `05b55b292a3672dd75b7d67bbdb14158fee19066`, matching the ticket's own expected
+base exactly. `git diff --check`: clean (no whitespace errors). All DH-011J work (`git status
+--short`) preserved untouched at ticket start: the same 8 modified + 5 new files as DH-011J's own
+final handoff. Nothing committed or pushed at any point this ticket.
+
+### §2 -- existing cancellation contract re-confirmed unchanged
+
+`ServiceRequestProviderCancel.java.patch`, `DaherCancellationTransaction.java`, the adapter's
+`cancellation_probe`/`cancel_service_request`, `DaherCancellationCoordinator`, all tests, CI
+guards, and documentation were re-read in full. Contract confirmed exactly as DH-011J left it:
+`POST /fhir/ServiceRequest/$cancel`, no PUT, no hard delete, exact added-test correlation match,
+`AnalysisStatus.NotStarted` -> eligible, `Canceled` -> idempotent, every other status -> refuse.
+Nothing in this contract was touched by this ticket -- no specimen-gate code was written (see §3-5).
+
+### §3-5 -- specimen collection/receipt: no reliable native signal on this path
+
+**Not approximated from Analysis status or field names -- read from the exact pinned source
+(`3.2.1.11` / `e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23`) and live-confirmed against a freshly
+rebuilt disposable stack.**
+
+**Candidate 1 -- `SampleItem.collection_date`/`received_date`.** Schema-nullable
+(`sample_item.collection_date`/`received_date`, no `NOT NULL`), which looked like real signal.
+But the *only* write path for a Daher-created added test is
+`SampleUtil.buildSampleXml` -> `SampleAddService.java` (lines ~114-130 for collection, ~154/171/194
+for received/collector), and `buildSampleXml` unconditionally emits today's date (and a fixed
+`00:00` time) for every sample it builds, walk-in or FHIR-originated -- the exact same "some value
+is unavoidable" shape DH-011P already found for `Sample.received_date` (schema `NOT NULL` there),
+now confirmed true for the schema-nullable `SampleItem` columns too, on this specific path. **Live
+-confirmed**: a fresh added-test Analysis, queried immediately (same request, zero elapsed real-
+world time), already shows `collection_date = received_date = 2026-08-29 00:00:00+00` -- the
+creation timestamp, not a genuine event marker. There is no observable window where the record
+reads as "not yet collected" versus "collected the instant it was created."
+
+**Candidate 2 -- SAMPLE-namespace status.** The `status_of_sample` vocabulary for `status_type =
+'SAMPLE'` contains exactly three values: `SampleEntered` (20), `SampleCanceled` (19),
+`SampleDisposed`. **No "Received" or "Collected" status exists in this namespace at all.**
+
+**Candidate 3 -- the `sample_type_request` table.** A genuinely separate REQUESTED -> COLLECTED ->
+CANCELLED state machine exists in the pinned source, with its own module
+(`org.openelisglobal.sampletyperequest.*`) wired to a distinct `/order/collect` UI workflow. It is
+**structurally unreachable** from the path in question -- confirmed by exhaustive search:
+`DaherAddedTestTransaction`, `SampleEditService`, and `ServiceRequestProvider` never reference
+`SampleTypeRequestService`/`SampleTypeRequestDAO` anywhere. It belongs to a different, newer
+order-entry front end this deployment's Daher patches never touch.
+
+**Candidate 4 -- `SampleItem.collector`/`quantity`/`source_id`.** DH-011P had already found these
+NULL for the new-order path ("`SampleItem.collector`/`quantity`/`source_id` all NULL"); this
+ticket confirmed the same is true for the added-test path specifically, live. Unlike the date
+fields, these are genuinely never auto-populated by `buildSampleXml`/`SampleAddService` -- they
+looked like the more promising signal (a real human-entered value would mean real collection
+happened). **But they are also unreachable to set afterward**: the only native UI surface that can
+touch an already-created Sample/SampleItem for a Daher-originated order is the Modify Order /
+`SampleEditService.editSample` path -- and `SampleEditItem`/`SampleEditServiceImpl` (source-grepped
+in full) **never reference `collector` in any form**. So these fields are set once, at creation,
+to blank, by the only creation path Daher exercises, and can never be edited to a real value by the
+only edit path Daher/the native UI shares for such a Sample. NULL forever, regardless of what
+happens to the specimen in the real world -- not a "not yet collected" signal, an artifact of which
+code path created the row.
+
+**Conclusion, stated plainly**: for the specific class of Analysis DH-011J's cancellation targets
+(created via `DaherAddedTestTransaction.addTest` -> `SampleEditService.editSample` ->
+`SampleUtil.buildSampleXml`/`SampleAddService`), **no field or status this system's Daher-reachable
+code paths ever write carries genuine, discriminating information about whether the specimen has
+been collected or received.** This was independently confirmed twice: once by source-only research
+(a dedicated fork, citing exact file/line evidence), and once by a live t=0 database read
+immediately after creating a genuine fixture on a fresh disposable stack -- both point to the same
+conclusion, not a single unverified claim.
+
+**Two tempting shortcuts, both explicitly rejected, not silently avoided:**
+- Synthesizing "not collected" by nulling `collection_date`/`received_date` directly via SQL in a
+  test fixture, then declaring the gate proven against that fixture. Rejected: this tests the gate
+  against a state the real create path can never produce -- a green result that would be real but a
+  conclusion that would be false.
+- Using "collection time exactly `00:00:00`" as a not-collected proxy. Rejected: since nothing on
+  this path ever writes any other time, this is arithmetically identical to a constant
+  ("always not collected"), not a signal -- and per this ticket's own explicit instruction not to
+  interpret missing/unknown values as "not collected," using a value that is *always present but
+  never discriminating* the same way would violate the same instruction in substance.
+
+### §6 -- specimen-state matrix: not run
+
+Per the above, CASE A ("not collected/not received/NotStarted -> cancel succeeds") cannot be
+constructed from a genuine create-path fixture -- every fixture this system can actually produce
+already carries the uninformative creation-time defaults. Cases D/E/F (`TechnicalAcceptance`/
+`Finalized`/already-`Canceled`) were re-run regardless, since they exercise the pre-existing
+Analysis-status gate, unaffected by the specimen question -- see §8 below.
+
+### §7 -- exact rollback fault injection: PROVEN, live, deterministic
+
+**Closed, using a technique that touches zero Java code and drives the real, unmodified
+`DaherCancellationTransaction.cancelByCorrelation` through its real transaction boundary.** A
+Postgres `AFTER UPDATE` trigger on `clinlims.analysis`, scoped to fire only for the one target
+Analysis transitioning to `status_id = 14` (Canceled), was installed on the disposable stack:
+
+```sql
+CREATE OR REPLACE FUNCTION dh011j2_test_rollback_fault() RETURNS trigger AS $$
+BEGIN
+  IF NEW.id = <target> AND NEW.status_id = 14 THEN
+    RAISE EXCEPTION 'DH011J2_TEST_ONLY_INJECTED_FAULT: simulated failure after mutation, before commit';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER dh011j2_test_rollback_trigger AFTER UPDATE ON clinlims.analysis
+  FOR EACH ROW EXECUTE FUNCTION dh011j2_test_rollback_fault();
+```
+
+An `AFTER UPDATE` trigger fires *within* the same database transaction, after the row has genuinely
+been mutated but before the client's transaction commits -- exactly the seam requested ("after the
+first native cancellation mutation has occurred, but before the outer cancellation transaction
+commits"). Calling `POST /fhir/ServiceRequest/$cancel` against a fresh, genuine `NotStarted`
+added-test target: `HTTP 500`,
+`"Unexpected server error while cancelling ServiceRequest: org.hibernate.exception
+.GenericJDBCException: could not execute batch"` -- the real UPDATE genuinely executed (proving the
+mutation "occurred"), the trigger fired on it, the exception propagated through
+`analysisService.update()` inside the real `@Transactional(rollbackFor = Exception.class)`
+`cancelByCorrelation`, through `ServiceRequestProvider.cancelServiceRequest`'s catch-all, to a real
+`InternalErrorException` and HTTP 500 -- no Daher code modified to produce this.
+
+**Post-fault DB state, queried directly, not inferred:**
+
+| Row | Before | After the fault |
+|-----|--------|------------------|
+| `Analysis.status_id` | 4 (`NotStarted`) | **4 (`NotStarted`) -- byte-identical, including `lastupdated`** |
+| `SampleItem.status_id` | 20 | 20, unchanged |
+| `Sample.status_id` | 1 | 1, unchanged |
+| `result` row count for this Analysis | 0 | 0, unchanged |
+| `daher_analysis_correlation` row | present, `analysis_id=<target>` | present, unchanged, still resolves |
+
+`Analysis.lastupdated` matching the pre-fault value exactly (not merely "still NotStarted") is the
+detail that proves this was a genuine rollback of an attempted write, not "the write never
+happened" -- a no-op would also leave status/lastupdated unchanged, but only a real UPDATE-then
+-rollback leaves the exact same timestamp Hibernate would otherwise have advanced.
+
+Trigger and function dropped immediately after. Sanity re-confirmed: the same target, with the
+trigger removed, cancels normally (`200 CANCELLED`) on the very next call -- proving the trigger,
+not some other defect, was the sole cause of the fault, and the transaction/target were otherwise
+healthy.
+
+**§15's classification is upgraded, not merely re-asserted: EXACT FAULT-INJECTION ROLLBACK:
+PROVEN**, superseding DH-011J's own more conservative "verified by identical-pattern precedent,
+not demonstrated at this exact seam" -- the exact seam was now demonstrated, live, deterministically,
+through the real production code.
+
+### §8-§11 -- full regression, rebuilt stack
+
+All re-run against a **freshly built** disposable stack (same pinned source/patch set, new random
+credentials, new compose project `dh011j2`, ports 15434/18446 -- distinct from DH-011J's own,
+already-torn-down `dh011j` stack) rather than reusing any prior state:
+
+- **Isolation (§9/§19)**: fixture A (initial order, PLT, `NotStarted`), B (added test, HCT,
+  `NotStarted`), C (added test, RBC -- the rollback-fault target, cancelled during §7's sanity
+  check). After C's cancellation: A and B both still `NotStarted`; `Sample`/`SampleItem` status
+  unchanged (1/20); B's `ServiceRequest` search still returns `status: "active"`; C's still returns
+  `status: "revoked"`, `Bundle.total: 1` for both.
+- **Idempotency (§16)**: repeat `$cancel` on already-cancelled C -> `200 ALREADY_CANCELLED`, no
+  second mutation.
+- **ADR-018 status gate re-confirmed**: B forced to `TechnicalAcceptance` -> `REFUSED_IN_PROGRESS`,
+  zero mutation; B forced to `Finalized` -> `REFUSED_IN_PROGRESS`, zero mutation; B restored to
+  `NotStarted`.
+- **Crash recovery (§17)**: `test_dh011j_cancellation_crash_recovery.py`'s both tests re-run live
+  against the rebuilt stack (fresh `alembic upgrade head` on the new adapter DB) -- both pass
+  unchanged, same real `OpenElisClient`/`DaherCancellationCoordinator`/`LedgerRepository` sequence
+  as DH-011J's own proof.
+- **Concurrency (§18)**: five simultaneous `$cancel` calls on a fresh target -- one `200 CANCELLED`,
+  one `200 ALREADY_CANCELLED`, three `500` (the identical optimistic-lock-conflict family; this run
+  surfaced as `"Batch update returned unexpected row count from update [0]; actual row count: 0;
+  expected: 1"`, Hibernate's raw `StaleStateException` message rather than the wrapped
+  `StaleObjectStateException` text DH-011J's run showed -- same underlying cause, cosmetic
+  difference in which layer's message surfaces first). Final DB state: exactly one cancellation,
+  `status_id=14`, no corruption -- unchanged conclusion.
+
+No locking was added; none of the above required it, matching DH-011O's own concurrency note and
+DH-011J's precedent.
+
+### §12 -- initial-order cancellation remains unsupported, re-confirmed
+
+Unchanged from DH-011J. Not re-tested this pass beyond what §8-§11's fixture already implies (A,
+an initial-order Analysis, was never touched by any `$cancel` call targeting B or C's correlations).
+
+### §13 -- results safety
+
+Unchanged from DH-011J (§20 there). No result data created or reasoned about. `TechnicalAcceptance`/
+`Finalized` refusal re-confirmed live in §8-§11 above. No other result-bearing/in-progress status
+was newly discovered this pass -- the full `ANALYSIS` vocabulary was already enumerated in DH-011J's
+own §4/§5 and is unchanged (8 statuses, verified against `StatusService.AnalysisStatus`'s own enum
+members, not re-read from source again since nothing about the vocabulary itself was in question
+this pass).
+
+### §14 -- tests: not added for the specimen gate (blocked); §7's proof not yet codified as a
+permanent test
+
+The eligible/collected-refusal/received-refusal/unknown-state-refusal test cases §14 lists cannot
+be written honestly against the current data model (§3-5) -- writing them now, even as
+`xfail`/skipped placeholders, would encode a shape of test (SQL-nulled fixtures) this ticket itself
+identified as misleading. **Not added, on purpose, pending the decision package's resolution.**
+§7's rollback proof was performed manually via a live Postgres trigger, not yet captured as a
+permanent, re-runnable adapter/integration test -- doing so would require either a Postgres
+trigger-management step inside the test file (a new pattern not yet established in this codebase's
+test infrastructure) or a different injection mechanism; left as a manual, reproducible-by-recipe
+proof for this pass, the recipe recorded in full above. Adapter test suite unchanged from DH-011J:
+still **161 passed, 4 skipped**, ruff clean -- re-confirmed, not assumed, by a fresh run this pass
+(no adapter source changed since DH-011J).
+
+### §15 -- OpenELIS build/CI: unchanged
+
+No production patch files changed this pass (the specimen gate was not implemented; §7's proof used
+a live-only Postgres trigger, never a shipped artifact). CI guards, compile job, and static checks
+are therefore unchanged from DH-011J's own extension -- not re-run against a new patch set because
+there is no new patch set.
+
+### §16 -- documentation
+
+This section (PROVENANCE.md), `DECISIONS.md`'s ADR-018 DH-011J2 addendum, and `PROJECT_STATE.md`'s
+new decision-package row are all append-only. `CURRENT_STATE.md` updated the same way. §15's
+classification explicitly upgraded to PROVEN, as instructed, since §7 passed.
+
+### Decision package -- specimen-collection/receipt gate
+
+**The question**: given no native signal reliably distinguishes "specimen not collected/received"
+from "specimen just created" on the path Daher's added-test cancellation targets, which of the
+following, before the gate can be implemented:
+
+- **(a) Ship the gate exactly as specified and accept that it always refuses.** Safe, matches the
+  letter of "cannot determine authoritatively -> refuse" precisely, but makes V1 added-test
+  cancellation permanently a no-op in practice -- every real cancellation attempt would be refused,
+  not because the lab already acted on the test, but because the system can never prove it didn't.
+- **(b) Ship added-test cancellation on the Analysis-status gate alone**, exactly as DH-011J already
+  built and proved (`NotStarted` -> eligible, everything else -> refused), with the specimen
+  dimension explicitly deferred as a known, documented gap rather than silently absent. Requires
+  Liban to relax the two-gate decision to one gate for V1.
+- **(c) Build a Daher-owned specimen-state marker** -- a new column or small table the Daher
+  cancellation path itself sets (e.g., at add-test creation time, or via a narrow new endpoint a
+  lab worker's own "mark specimen collected" action would call) and reads at cancellation time.
+  Genuine new scope, its own design decision, not evaluated in detail here beyond noting it exists
+  as an option.
+
+No option is recommended over another beyond what the evidence above supports; this is a product
+question, not an engineering one, per this repo's own repeated instruction not to resolve exactly
+this class of gap unilaterally.
+
+### Real facility and cleanup
+
+Real facility never touched. Disposable stack (`dh011j2` compose project, ports 15434/18446,
+entirely distinct from `dh011j`): both containers, the custom webapp/certgen images, all four named
+volumes, and the network removed via `docker compose down -v` + `docker rmi`; confirmed empty via
+`docker ps -a`/`docker images`/`docker volume ls` filtered on `dh011j2`. The test-only Postgres
+trigger/function used for §7 was dropped before any further testing and does not appear in the
+final image or any committed artifact. Scratch venv and pristine clone (outside the repo) removed.
+One process note, not repeated this pass: DH-011J's own teardown ran `docker builder prune -f`,
+which reclaimed shared BuildKit cache including layers from unrelated builds 30+ hours old -- not
+destructive to persistent data, only rebuild-speed cost, but broader than necessary; this pass used
+only `docker compose down -v` + targeted `docker rmi`, matching DH-011M/P/P2/P3's own precedent.
+
+### What was deliberately not done, and why
+
+- **The specimen-collection/receipt gate itself** -- blocked, decision package above, no code
+  written, no invented proxy signal shipped.
+- **§14's specimen-state test cases** -- not written, for the same reason; writing them now would
+  either encode a misleading fixture shape or wait on a decision not yet made.
+- **§7's proof as a permanent, re-runnable test** -- performed manually this pass (full recipe
+  recorded above), not yet codified into `adapter/tests/integration/` -- a reasonable, cheap
+  follow-up once a trigger-management pattern is decided on, not done here to avoid inventing that
+  pattern under time pressure for a single proof.
+
+### Test suite state
+
+Adapter: **161 passed, 4 skipped** (unchanged from DH-011J -- no adapter source changed this pass),
+ruff clean, re-confirmed fresh. §7's rollback fault-injection: PROVEN, live, deterministic (see
+above). §8-§11 regressions: all re-confirmed on a freshly rebuilt stack, unchanged conclusions.
+
+READY TO COMMIT: No -- the specimen-collection/receipt gate Liban's decision requires cannot be
+implemented against the current data model without either accepting it always refuses (a real
+product consequence) or inventing an unproven signal (explicitly rejected). §7's closure and the
+§8-§11 regression re-confirmation are both complete and would be committable on their own, but
+this ticket's own gate is "all checks below pass" before commit, and the specimen-gate checks (§4,
+§6, most of §14) could not be executed. No production code changed by this ticket; added-test
+cancellation stands exactly as DH-011J left it, unmodified.
+
+## DH-011J FINALIZE (2026-08-30) -- Liban selected option (b): V1 cancellation eligibility is
+## Analysis-status only, specimen-state gating deferred; final coordinator-level concurrency proof
+## added; full V1 matrix (A-H) and OpenELIS focused test re-confirmed on a fresh stack;
+## COMMITTED AND PUSHED
+
+### Decision
+
+Liban selected **option (b)** from DH-011J2's decision package. See `DECISIONS.md`'s ADR-018
+"DH-011J FINALIZE resolution" for the full text. No code changed by this decision -- the
+implementation DH-011J built and proved was already exactly the Analysis-status-only contract:
+`NotStarted` -> cancel permitted, `Canceled` -> idempotent, every other status -> refuse. The
+specimen-collection/receipt investigation (DH-011J2) stands as correct and is not re-litigated;
+it is withdrawn as a V1 requirement, explicitly not a claim that specimens have or have not been
+physically collected -- only that Daher cannot observe that fact through the path it uses today.
+
+### §1-2 -- base and implementation preserved
+
+`git rev-parse HEAD` = `05b55b292a3672dd75b7d67bbdb14158fee19066`, matching expected exactly.
+`ServiceRequestProviderCancel.java.patch`, `DaherCancellationTransaction.java`,
+`OpenElisClient.cancellation_probe`/`cancel_service_request`, `DaherCancellationCoordinator`, all
+tests, CI guards, and documentation re-read and confirmed unchanged from DH-011J/J2. Canonical
+endpoint confirmed: exactly one `$cancel` occurrence (the operation declaration), no PUT/`@Update`
+usage anywhere outside javadoc prose, no call to `deleteServiceRequest`.
+
+### §6 -- final coordinator-level concurrent-duplicate-cancellation proof (new this pass)
+
+DH-011J2's own concurrency evidence was HTTP-level only (curl racing `$cancel` directly). This
+pass adds a permanent, live-gated test exercising the full adapter stack instead:
+`test_concurrent_duplicate_cancellation_via_coordinator_is_recoverable` in
+`adapter/tests/integration/test_dh011j_cancellation_crash_recovery.py`. Two independent
+cancellation events (distinct `MessageIdentity`, as a genuine duplicate delivery would produce --
+not a replay of the same event) race the same real target through two independent
+`DaherCancellationCoordinator` instances (each with its own `LedgerRepository`/session factory),
+concurrently, via `asyncio.gather`.
+
+**Live result**: neither coordinator call raised past `reconcile_cancellation` -- a losing racer's
+`$cancel` POST can 500 (the same optimistic-lock conflict family DH-011J/J2 already characterized),
+but `OpenElisClient.cancel_service_request` never trusts that status and always reconciles via a
+fresh `cancellation_probe` afterward, so the coordinator layer never sees an unrecoverable
+exception. Both racers' `reconcile_cancellation` calls resolved to
+`CancellationOutcome.CONFIRMED_CANCELLED`. Both ledger rows read `"completed"` from a **fresh**
+`LedgerRepository` query afterward (never trusted from the in-memory return values alone). The
+target's authoritative DB status: `Test Canceled`, exactly once.
+
+This outcome is not merely probabilistic: the HTTP request/response cycle for `$cancel` is
+synchronous with the underlying Spring transaction's commit (the response is only sent after
+commit/rollback completes), so by the time *either* racer's own POST call returns -- win or lose --
+whichever transaction actually won has already committed. `cancel_service_request`'s post-POST
+probe therefore always observes the true post-race state, for both racers, not merely "usually."
+
+**Invariant confirmed, matching the ticket's exact requirement**: target final state = Canceled;
+no duplicate clinical mutation; no stuck `processing` ledger rows; no dead-letter solely because
+another actor won the race; the ambiguous/500 loser path reconciles by probing authoritative
+target state. **CONCURRENT DUPLICATE CANCELLATION: RECOVERABLE / IDEMPOTENT.**
+
+### §7 -- full V1 matrix (A-H), re-confirmed on a freshly rebuilt stack
+
+Fresh disposable stack (own credentials, compose project `dh011jfinal`, ports 15435/18447,
+distinct from every prior stack). All eight cases live-confirmed, DB state inspected directly:
+
+| Case | Scenario | Result |
+|------|----------|--------|
+| A | `NotStarted` added test | `200 CANCELLED` |
+| B | Repeat cancel (same target) | `200 ALREADY_CANCELLED`, no second mutation |
+| C | `TechnicalAcceptance` | `200 REFUSED_IN_PROGRESS`, zero mutation |
+| D | `Finalized` | `200 REFUSED_IN_PROGRESS`, zero mutation |
+| E | Initial-order correlation | `404 Not Found`, zero mutation (confirmed: initial order's own Analysis unchanged) |
+| F | Sibling isolation | Full snapshot across 10 Analyses (4 fixture pairs from prior live tests plus this pass's own A/B/C/D): every Analysis's status matches exactly what its own history predicts, nothing bled across rows |
+| G | Crash after commit | `test_crash_after_cancellation_commit_before_ledger_completion` -- PASSED (probe finds cancelled, writer calls = 0, ledger completes) |
+| H | Exact rollback injection | Postgres `AFTER UPDATE` trigger re-run on a fresh target -- `HTTP 500`, post-fault `status_id`/`lastupdated` byte-identical to pre-fault, trigger removed, sanity re-cancel succeeded cleanly afterward |
+
+No fabricated "uncollected specimen" case was constructed -- superseded by the FINALIZE decision.
+
+### §8 -- tests: exact final count
+
+`ruff check`: clean. **`ruff format --check` was run for the first time this ticket family and
+found two files not matching the formatter's own line-wrap preference** (`tests/integration
+/test_dh011j_cancellation_crash_recovery.py`, `tests/test_openelis.py` -- both from lines added in
+this ticket family, near the 100-column boundary). Fixed via `ruff format` (mechanical, no logic
+change); re-verified `ruff check` and the full suite still pass identically afterward. This gap
+(format-check never run in DH-011J/J2) is recorded here rather than silently corrected without
+mention.
+
+`pytest -q` (default, no live env): **161 passed, 5 skipped** -- up from DH-011J2's 161/4 by
+exactly the one new gated integration test added this pass. Ruff clean.
+
+Live (`DH011J_LIVE_*` set, against the fresh stack): all three integration tests pass --
+`test_crash_after_cancellation_commit_before_ledger_completion`,
+`test_repeat_cancellation_of_the_same_event_is_idempotent`,
+`test_concurrent_duplicate_cancellation_via_coordinator_is_recoverable`.
+
+### §9 -- OpenELIS build/test
+
+**Focused test**: the pristine `ServiceRequestProviderTest` run against the fully patched source
+(all 10 patches -- the original 9 plus `ServiceRequestProviderCancel.java.patch` -- applied to a
+fresh pristine clone at the pinned commit, plus all 5 new Daher Java files copied in): **`Tests
+run: 3, Failures: 0, Errors: 0`, `BUILD SUCCESS`** -- exact match to DH-011P3's own last-reported
+result, confirming this ticket's additions did not regress it. (Log-level `ERROR` lines appear in
+the raw Maven output -- these are the test's own deliberate exercise of the "duplicate Analysis"
+error-handling path, not JUnit failures; confirmed via the authoritative surefire summary line,
+not by reading the log lines alone.)
+
+**Full reactor build**: the production `openelis-config/Dockerfile` recipe (all 10 patches, all 5
+new files) was rebuilt from scratch this pass as part of bringing up the verification stack --
+`BUILD SUCCESS`, WAR produced, the full stack booted healthy and served every scenario in §6-§7
+above. No separate rebuild was needed for this section; the same build artifact is the one both
+sections exercised.
+
+### §10 -- CI guards
+
+Re-extracted and re-run against the real committed tree (unchanged since DH-011J2 -- no patch
+content changed by this ticket's decision): all checks pass, same summary message as DH-011J2's
+own last run. No new guard changes needed -- the decision this ticket records changes eligibility
+*documentation*, not the shipped contract, which the guards already enforce byte-for-byte.
+
+### §11 -- final review and secret scan
+
+`git status --short`/`git diff --check`/`git diff --stat` reviewed; every changed/new file is one
+of the 8 modified + 5 new files DH-011J/J2 already accounted for, plus this pass's own additions to
+`DECISIONS.md`/`PROJECT_STATE.md`/`CURRENT_STATE.md`/this file, the `ruff format` fixes, and the
+one new test function. No `.env`, no real credential, no real patient/facility value, no synthetic
+fixture id that should not be committed (every id in the committed test files is either a
+placeholder pattern the test generates fresh at runtime via `secrets.token_hex`, or a
+`urn:daher-health:*`/`admin:adminADMIN!`-shaped synthetic constant already reviewed in prior
+passes) -- confirmed by direct read of every diff hunk, not by pattern-matching alone.
+
+### Real facility and cleanup
+
+Real facility never touched. Disposable stack (`dh011jfinal`, ports 15435/18447) and the two
+throwaway `docker build`-produced test-runner images fully removed; confirmed empty via
+`docker ps -a`/`docker images`/`docker volume ls`/`docker network ls` filtered on `dh011jfinal`
+and `final`. Pristine clone and scratch venv (outside the repo) removed.
+
+### Test suite state
+
+Adapter: **161 passed, 5 skipped**, `ruff check` clean, `ruff format --check` clean (two files
+fixed this pass). OpenELIS: pristine `ServiceRequestProviderTest` 3/3, full reactor `BUILD SUCCESS`.
+Full V1 matrix (A-H): all pass, live, DB-inspected. Coordinator-level concurrent duplicate
+cancellation: recoverable/idempotent, live, real components.
+
+READY TO COMMIT: Yes.

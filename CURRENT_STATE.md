@@ -270,6 +270,52 @@ DH-011G/H/I/J/K/L are all still open, unaffected by this ticket. Full account:
 `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011P3 section; decision record:
 `DECISIONS.md`'s ADR-031 final closure.
 
+**CORRECTION appended 2026-08-29 (DH-011J, append-only — the paragraph above is superseded, not
+retracted).** DH-011P/P2/P3's "not committed" and "READY TO COMMIT: Yes, pending" status above is
+now historical: committed as `05b55b292a3672dd75b7d67bbdb14158fee19066` and pushed to
+`origin/master`; CI run `33257047337` — all 8 jobs green, verified directly via `gh run view`, not
+assumed. DH-011P is DONE. DH-011 overall remains NOT COMPLETE.
+
+**CORRECTION appended 2026-08-29 (DH-011J, append-only).** Added-test cancellation is now
+implemented and live-proven: a new `$cancel` FHIR operation enforces ADR-018's status gate (proceed
+only from `NotStarted`, idempotent from `Canceled`, refuse from every other status) — the one guard
+the pristine native `deleteServiceRequest` primitive lacks entirely, live-confirmed it would
+otherwise silently overwrite a `Finalized`/validated result. Full DH-025 crash-recovery,
+idempotency, concurrency, and isolation proof against real disposable infrastructure and the real
+production adapter components. Whole-initial-order cancellation was deliberately **not**
+implemented — it raises a genuine, still-open Human Decision Required question (does it cascade to
+independently-added tests?), recorded in PROJECT_STATE.md. Adapter tests: 161 passed, 4 skipped (up
+from 142/2), ruff clean. **Not committed or pushed** — this ticket's own instruction, unconditional,
+independent of the work's completeness. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011J section; decision record:
+`DECISIONS.md`'s ADR-018 closure pass.
+
+**CORRECTION appended 2026-08-29 (DH-011J2, append-only).** DH-011J's own narrowed §15 claim
+("verified by identical-pattern precedent, not demonstrated at this exact seam") is now superseded:
+a live, deterministic Postgres-trigger fault injection (zero Java code changed, the real
+`DaherCancellationTransaction` driven unmodified) proved a genuine rollback — post-fault DB state
+byte-identical to pre-fault, including the `lastupdated` timestamp. **§15: EXACT FAULT-INJECTION
+ROLLBACK: PROVEN.** Isolation/idempotency/status-gate/crash-recovery/concurrency all re-confirmed
+unchanged on a freshly rebuilt stack. Separately, Liban's new specimen-collection/receipt
+cancellation gate is **blocked**: no reliable native signal exists on the path added-test
+cancellation targets — every candidate field is either unconditionally populated with a
+non-discriminating creation-time default or permanently unreachable to set by any code path Daher
+exercises, live-confirmed and source-cited twice independently. No gate code was written; no
+invented proxy signal was shipped. Decision package (three options) recorded in PROJECT_STATE.md.
+Added-test cancellation stands exactly as DH-011J left it, unmodified. **Not committed or pushed.**
+Full account: PROVENANCE.md's DH-011J2 section; decision record: DECISIONS.md's ADR-018 DH-011J2
+addendum.
+
+**CORRECTION appended 2026-08-30 (DH-011J FINALIZE, append-only).** Liban resolved the decision
+package above: **option (b)**. V1 added-test cancellation eligibility is **Analysis-status only**
+— `NotStarted` → cancel, `Canceled` → idempotent, every other status → refuse, zero mutation.
+Specimen-collection/receipt gating is **deferred, not implemented** — explicitly not a claim that
+a specimen has or hasn't been physically collected, only that Daher cannot observe that fact
+reliably through the path it uses today. No code changed by this decision: the implementation
+DH-011J built and proved was already exactly this contract. Initial-order cancellation remains
+unsupported; its cascade question remains a separate, open Human Decision. Decision record:
+`DECISIONS.md`'s ADR-018 DH-011J FINALIZE resolution.
+
 **DH-027B closed an orphan in facility creation (2026-08-17):** the host was claimed before the facility record was inserted, so a failed insert left that host permanently marked occupied by a facility that never existed. Compensation is now conditional on the exact facility id — it cannot evict a live facility — and the audit log records `FAILURE` with whether the rollback actually happened. 17 failure-injection tests across both the in-memory and SQLite backends.
 
 **DH-027D made fleet health observed rather than assumed (2026-08-20).** The control plane can now

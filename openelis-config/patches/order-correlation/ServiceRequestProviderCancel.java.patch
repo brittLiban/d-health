@@ -1,0 +1,117 @@
+diff --git a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
+index 2b9ff10..02ee83c 100644
+--- a/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
++++ b/src/main/java/org/openelisglobal/fhir/providers/ServiceRequestProvider.java
+@@ -5,6 +5,8 @@ import ca.uhn.fhir.rest.annotation.Create;
+ import ca.uhn.fhir.rest.annotation.Delete;
+ import ca.uhn.fhir.rest.annotation.IdParam;
+ import ca.uhn.fhir.rest.annotation.IncludeParam;
++import ca.uhn.fhir.rest.annotation.Operation;
++import ca.uhn.fhir.rest.annotation.OperationParam;
+ import ca.uhn.fhir.rest.annotation.OptionalParam;
+ import ca.uhn.fhir.rest.annotation.Read;
+ import ca.uhn.fhir.rest.annotation.ResourceParam;
+@@ -32,10 +34,12 @@ import org.hl7.fhir.instance.model.api.IBaseResource;
+ import org.hl7.fhir.r4.model.Bundle;
+ import org.hl7.fhir.r4.model.IdType;
+ import org.hl7.fhir.r4.model.Identifier;
++import org.hl7.fhir.r4.model.Parameters;
+ import org.hl7.fhir.r4.model.Patient;
+ import org.hl7.fhir.r4.model.Practitioner;
+ import org.hl7.fhir.r4.model.ServiceRequest;
+ import org.hl7.fhir.r4.model.Specimen;
++import org.hl7.fhir.r4.model.StringType;
+ import org.openelisglobal.analysis.service.AnalysisService;
+ import org.openelisglobal.analysis.valueholder.Analysis;
+ import org.openelisglobal.common.constants.Constants;
+@@ -126,6 +130,12 @@ public class ServiceRequestProvider implements IResourceProvider {
+     @Autowired
+     private org.openelisglobal.dataexchange.fhir.service.DaherAnalysisCorrelationService daherAnalysisCorrelationService;
+ 
++    // DH-011J: added-test cancellation, resolved and gated by correlation -- never by the
++    // fhirUuid the pristine deleteServiceRequest keys on. See DaherCancellationTransaction's
++    // javadoc for the ADR-018 status-gate this wraps.
++    @Autowired
++    private org.openelisglobal.dataexchange.fhir.DaherCancellationTransaction daherCancellationTransaction;
++
+     @Autowired
+     private AnalysisService analysisService;
+ 
+@@ -798,6 +808,77 @@ public class ServiceRequestProvider implements IResourceProvider {
+         }
+     }
+ 
++    /**
++     * DH-011J: cancel one added-test event, resolved by the Daher correlation the adapter
++     * actually holds -- not {@code deleteServiceRequest}'s {@code fhirUuid}, which DH-025 never
++     * learns or stores. A custom FHIR operation rather than an overload of {@code @Delete}
++     * because HAPI's {@code @Delete} only supports instance delete by {@code @IdParam}, and
++     * rather than {@code @Update}/PUT because that surface is permanently CI-guarded shut (see
++     * PROVENANCE.md's DH-011P2 §15 finding) -- this method never issues or enables a PUT.
++     *
++     * <p>Deliberately out of scope, per DH-011J §7: cancelling an entire initial order. This
++     * operation only resolves targets through {@code daher_analysis_correlation} -- the
++     * added-test namespace -- so an initial-order correlation (which lives in
++     * {@code electronic_order}, a different table this method never queries) simply will not
++     * resolve, returning {@code not-found} rather than doing anything to the initial order's own
++     * Analysis. That is a deliberate scope boundary, not an oversight: see PROVENANCE.md and
++     * PROJECT_STATE.md for why whole-initial-order cancellation remains Human Decision Required.
++     *
++     * <p>Returns a {@code Parameters} resource carrying the authoritative post-call outcome and
++     * status -- never a bare 200/204 that would let the caller guess what happened. Idempotent by
++     * design: a target already {@code Canceled} returns {@code ALREADY_CANCELLED} without a
++     * second mutation (§16); a target in any other native status is refused, not silently
++     * overwritten (§14, ADR-018).
++     */
++    @Operation(name = "$cancel", idempotent = false)
++    public Parameters cancelServiceRequest(@OperationParam(name = "correlation") String correlationValue,
++            HttpServletRequest request) {
++        final String method = "cancelServiceRequest";
++
++        try {
++            if (correlationValue == null || correlationValue.isBlank()) {
++                throw new InvalidRequestException("Missing required 'correlation' operation parameter");
++            }
++
++            String sysUserId = FhirProviderUtils.getSysUserId(request);
++
++            org.openelisglobal.dataexchange.fhir.DaherCancellationTransaction.Result result = daherCancellationTransaction
++                    .cancelByCorrelation(correlationValue, sysUserId);
++
++            if (result.getOutcome() == org.openelisglobal.dataexchange.fhir.DaherCancellationTransaction.Outcome.NOT_FOUND) {
++                throw new ResourceNotFoundException(
++                        "No added-test correlation found for value: " + correlationValue);
++            }
++
++            if (result.getOutcome() == org.openelisglobal.dataexchange.fhir.DaherCancellationTransaction.Outcome.CANCELLED) {
++                try {
++                    fhirTransformService.transformAnalysisByIds(List.of(String.valueOf(result.getAnalysisId())));
++                } catch (Exception fhirEx) {
++                    LogEvent.logWarn(this.getClass().getSimpleName(), method,
++                            "FHIR sync failed after cancel (non-blocking): " + safeMessage(fhirEx));
++                }
++            }
++
++            Parameters response = new Parameters();
++            response.addParameter().setName("outcome").setValue(new StringType(result.getOutcome().name()));
++            response.addParameter().setName("analysisId")
++                    .setValue(new StringType(String.valueOf(result.getAnalysisId())));
++            response.addParameter().setName("status").setValue(new StringType(result.getStatus().name()));
++            return response;
++
++        } catch (InvalidRequestException | ResourceNotFoundException e) {
++            LogEvent.logError(this.getClass().getSimpleName(), method, "Client error: " + safeMessage(e));
++            throw e;
++        } catch (InternalErrorException e) {
++            LogEvent.logError(this.getClass().getSimpleName(), method, "Internal error: " + safeMessage(e));
++            throw e;
++        } catch (Exception e) {
++            LogEvent.logError(this.getClass().getSimpleName(), method, "Unhandled exception: " + safeMessage(e));
++            throw new InternalErrorException(
++                    "Unexpected server error while cancelling ServiceRequest: " + safeMessage(e), e);
++        }
++    }
++
+     @Search
+     public Bundle searchForServiceRequests(
+             @OptionalParam(name = ServiceRequest.SP_PATIENT, chainWhitelist = { "", Patient.SP_IDENTIFIER,

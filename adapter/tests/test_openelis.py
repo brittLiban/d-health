@@ -8,6 +8,7 @@ import pytest
 
 from daher_adapter.config import Settings
 from daher_adapter.openelis import (
+    CancellationTargetState,
     HttpResult,
     MatchCount,
     OpenElisClient,
@@ -583,3 +584,116 @@ def test_activation_gate_delegates_to_the_real_capability_when_open() -> None:
                 client(transport), settings, correlation(), {"resourceType": "ServiceRequest"}
             )
         )
+
+
+def sr_with_status(fhir_id: str, status: str) -> dict[str, Any]:
+    return {"resourceType": "ServiceRequest", "id": fhir_id, "status": status}
+
+
+def test_cancellation_probe_revoked_status_is_exists_cancelled() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle(sr_with_status("sr-1", "revoked"))))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.EXISTS_CANCELLED
+    assert result.record_id == "sr-1"
+
+
+def test_cancellation_probe_active_status_is_exists_not_cancelled() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle(sr_with_status("sr-1", "active"))))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.EXISTS_NOT_CANCELLED
+    assert result.record_id == "sr-1"
+
+
+def test_cancellation_probe_zero_matches_is_ambiguous_not_a_novel_state() -> None:
+    """A cancellation target must already exist (created by an earlier, already-completed
+    add-test event) -- zero matches has no honest DH-025 vocabulary here and fails closed."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.AMBIGUOUS
+    assert result.record_id is None
+
+
+def test_cancellation_probe_many_matches_is_ambiguous() -> None:
+    transport = ScriptedTransport()
+    two_orders = bundle(sr_with_status("sr-1", "active"), sr_with_status("sr-2", "active"), total=2)
+    transport.queue_get(HttpResult(status=200, body=two_orders))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.AMBIGUOUS
+
+
+def test_cancellation_probe_unreachable_target_is_unreachable() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(ConnectionError("no route"))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.UNREACHABLE
+
+
+def test_cancellation_probe_bad_status_response_is_unreachable() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=500, body=None))
+
+    result = run(client(transport).cancellation_probe(correlation()))
+
+    assert result.state is CancellationTargetState.UNREACHABLE
+
+
+def test_cancel_service_request_posts_dollar_cancel_operation() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body={"resourceType": "Parameters"}))
+    transport.queue_get(HttpResult(status=200, body=bundle(sr_with_status("sr-1", "revoked"))))
+
+    result = run(client(transport).cancel_service_request(correlation()))
+
+    assert result.state is CancellationTargetState.EXISTS_CANCELLED
+    (url, payload) = transport.posts[0]
+    assert url.endswith("/ServiceRequest/$cancel")
+    assert payload["resourceType"] == "Parameters"
+    assert payload["parameter"][0]["valueString"] == correlation().value
+
+
+def test_cancel_service_request_never_trusts_its_own_post_status() -> None:
+    """DH-011J live-proved a genuine concurrent race: the losing caller's $cancel POST can raise
+    a transport-level error (the native side answered 500, StaleObjectStateException) even though
+    the target really was cancelled by the winner. The writer must reconcile via the probe
+    regardless, exactly like `deliver_service_request` never trusts its own POST outcome."""
+    transport = ScriptedTransport()
+    transport.queue_post(RuntimeError("HTTP 500 from a concurrent StaleObjectStateException"))
+    transport.queue_get(HttpResult(status=200, body=bundle(sr_with_status("sr-1", "revoked"))))
+
+    result = run(client(transport).cancel_service_request(correlation()))
+
+    assert result.state is CancellationTargetState.EXISTS_CANCELLED
+
+
+def test_cancel_service_request_reports_native_refusal_as_not_cancelled() -> None:
+    """ADR-018: the native side refused (already in progress) -- confirmed via the same
+    reconciliation read, not a special-cased response-body parse."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body={"resourceType": "Parameters"}))
+    transport.queue_get(HttpResult(status=200, body=bundle(sr_with_status("sr-1", "active"))))
+
+    result = run(client(transport).cancel_service_request(correlation()))
+
+    assert result.state is CancellationTargetState.EXISTS_NOT_CANCELLED
+
+
+def test_cancel_service_request_raises_when_reconciliation_cannot_prove_either_state() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body={"resourceType": "Parameters"}))
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    with pytest.raises(AmbiguousTargetState):
+        run(client(transport).cancel_service_request(correlation()))

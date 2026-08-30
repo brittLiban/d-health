@@ -1085,6 +1085,7 @@ jobs:
               bad.append("Dockerfile: does not assert the exact pinned commit")
           for patch_name in (
               "ServiceRequestProvider.java.patch",
+              "ServiceRequestProviderCancel.java.patch",
               "FhirTransformServiceImpl.java.patch",
               "LiquibaseConfig.java.patch",
               "base-changelog.xml.patch",
@@ -1108,6 +1109,7 @@ jobs:
               "001-electronic-order-daher-correlation-unique.xml",
               "DaherAnalysisCorrelation.java",
               "DaherAddedTestTransaction.java",
+              "DaherCancellationTransaction.java",
               "004-daher-analysis-correlation.xml",
               "005-daher-analysis-correlation-unique-analysis.xml",
           ):
@@ -1348,6 +1350,87 @@ jobs:
                       bad.append(f"ServiceRequestProvider.java.patch: unexpected fuzzy-comparison pattern "
                                   f"{bad_pattern!r}")
 
+          # --- DH-011J §12-13/§22: the $cancel operation and its transactional wrapper bean ---
+          cancel_patch_path = base / "ServiceRequestProviderCancel.java.patch"
+          if not cancel_patch_path.exists():
+              bad.append("ServiceRequestProviderCancel.java.patch is missing")
+              cancel_added = ""
+          else:
+              cancel_patch = cancel_patch_path.read_text()
+              cancel_added = "\n".join(l for l in cancel_patch.splitlines() if l.startswith("+"))
+
+              if '@Operation(name = "$cancel"' not in cancel_added:
+                  bad.append("ServiceRequestProviderCancel.java.patch: does not add the $cancel "
+                              "FHIR operation")
+              # DH-011J §12: cancellation must never be a PUT -- the existing DH-011P2 §15 guard
+              # below checks openelis.py; this checks the native side never grows an @Update/PUT
+              # handler for cancellation either. Checked as an actual annotation-usage line (the
+              # line, stripped of the diff "+" and leading whitespace, is exactly "@Update" or
+              # starts with "@Update(" -- HAPI annotations in this file are used bare, e.g. the
+              # pristine @Delete/@Create above), not a bare substring -- this patch's own javadoc
+              # discusses "{@code @Update}/PUT" in prose, which a naive substring check would
+              # misflag exactly as DH-011P3's "CREATE UNIQUE INDEX" false-negative did in reverse.
+              cancel_code_lines = [
+                  l[1:].strip() for l in cancel_patch.splitlines()
+                  if l.startswith("+") and not l[1:].strip().startswith(("*", "//"))
+              ]
+              if any(l == "@Update" or l.startswith("@Update(") for l in cancel_code_lines) or any(
+                  '"PUT"' in l or "'PUT'" in l for l in cancel_code_lines
+              ):
+                  bad.append("ServiceRequestProviderCancel.java.patch: contains a PUT/@Update "
+                              "reference -- cancellation must be reachable only via the $cancel "
+                              "operation (DH-011J §12), never PUT")
+              if "@Transactional" in cancel_added:
+                  bad.append("ServiceRequestProviderCancel.java.patch: adds @Transactional to "
+                              "ServiceRequestProvider itself -- breaks HAPI's reflection-based "
+                              "provider registration (HAPI-0289, see DaherAddedTestTransaction's "
+                              "javadoc); the transaction boundary belongs on the separate "
+                              "DaherCancellationTransaction bean only")
+              if ("daherCancellationTransaction" not in cancel_added
+                      or "cancelByCorrelation" not in cancel_added):
+                  bad.append("ServiceRequestProviderCancel.java.patch: does not delegate to "
+                              "DaherCancellationTransaction.cancelByCorrelation")
+              # DH-011J §7 scope boundary: cancellation must resolve targets only through the
+              # added-test correlation table, never the initial-order electronic_order namespace
+              # -- whole-initial-order cancellation is Human Decision Required, not implemented.
+              for token in ("electronicOrderService", "ElectronicOrder"):
+                  if token in cancel_added:
+                      bad.append(f"ServiceRequestProviderCancel.java.patch: references {token!r} -- "
+                                  "cancellation must resolve targets only via the added-test "
+                                  "daher_analysis_correlation namespace, never electronic_order "
+                                  "(DH-011J §7: initial-order cancellation is Human Decision "
+                                  "Required, not implemented)")
+
+          cancel_txn_path = base / "DaherCancellationTransaction.java"
+          if not cancel_txn_path.exists():
+              bad.append("DaherCancellationTransaction.java is missing")
+          else:
+              cancel_txn_text = cancel_txn_path.read_text()
+              if "@Transactional(rollbackFor = Exception.class)" not in cancel_txn_text:
+                  bad.append("DaherCancellationTransaction.java: cancelByCorrelation is not "
+                              "@Transactional(rollbackFor = Exception.class)")
+              # ADR-018's policy, mapped to the verified native vocabulary (DH-011J): the ONE
+              # status an automatic cancellation may proceed from is NotStarted ("Not Tested",
+              # live-confirmed as the default status of every newly created Analysis). Any other
+              # status is ADR-018's "already in progress" branch and must be refused, not
+              # overwritten -- this is the exact guard the pristine deleteServiceRequest lacks.
+              if "currentStatus != AnalysisStatus.NotStarted" not in cancel_txn_text:
+                  bad.append("DaherCancellationTransaction.java: missing the ADR-018 status-gate "
+                              "allowlist check (must refuse any status other than NotStarted)")
+              if "currentStatus == AnalysisStatus.Canceled" not in cancel_txn_text:
+                  bad.append("DaherCancellationTransaction.java: missing the idempotent "
+                              "already-Canceled branch (§16)")
+              # No hard deletes anywhere in the cancellation path (DH-011J §9) -- cancellation is
+              # a status-only mutation, exactly like the pristine deleteServiceRequest's own
+              # underlying mechanism.
+              for bad_pattern in (
+                  "DELETE FROM", "delete from", ".remove(", ".delete(", "TRUNCATE"
+              ):
+                  if bad_pattern in cancel_txn_text:
+                      bad.append(f"DaherCancellationTransaction.java: contains {bad_pattern!r} -- "
+                                  "cancellation must never hard-delete an Analysis or correlation "
+                                  "row (DH-011J §9)")
+
           # --- DH-011P2 §15: OpenELIS's own updateServiceRequest (PUT) is reachable by the same
           # HTTP Basic credentials the Daher adapter would use (live-confirmed against the
           # disposable stack: authenticated, routed, fails only on payload validation) and has
@@ -1368,13 +1451,22 @@ jobs:
               if "OpenElisPut" in adapter_openelis_text or "def update_service_request" in adapter_openelis_text:
                   bad.append("adapter/src/daher_adapter/openelis.py: defines a PUT-shaped delivery "
                               "method -- see DH-011P2 §15 before adding one")
+              # DH-011J §12: the cancellation writer must reach the native $cancel operation via
+              # POST, never a PUT-shaped "$update"/instance-PATCH call.
+              if "def cancel_service_request" not in adapter_openelis_text:
+                  bad.append("adapter/src/daher_adapter/openelis.py: cancel_service_request is "
+                              "missing -- DH-011J's adapter-side cancellation writer")
+              elif "/$cancel" not in adapter_openelis_text:
+                  bad.append("adapter/src/daher_adapter/openelis.py: cancel_service_request does "
+                              "not call the native $cancel operation")
 
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
-          print("ok — DH-011D/DH-011P/DH-011P2 order-correlation patch set has all required "
-                "components, no forbidden fuzzy-matching patterns, the uniqueness index stays "
-                "scoped to FHIR-typed rows, the added-test transform is correlation-aware, and "
-                "the adapter remains POST-only for ServiceRequest delivery")
+          print("ok — DH-011D/DH-011P/DH-011P2/DH-011J order-correlation patch set has all "
+                "required components, no forbidden fuzzy-matching patterns, the uniqueness index "
+                "stays scoped to FHIR-typed rows, the added-test transform is correlation-aware, "
+                "added-test cancellation is reachable only via $cancel with the ADR-018 status "
+                "gate enforced, and the adapter remains POST-only throughout")
           PY
 
   openelis-order-correlation-build:
@@ -1433,6 +1525,7 @@ jobs:
       - name: Apply the production patches (the same files openelis-config/Dockerfile consumes)
         run: |
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ServiceRequestProvider.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ServiceRequestProviderCancel.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/FhirTransformServiceImpl.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/LiquibaseConfig.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/base-changelog.xml.patch"
@@ -1453,6 +1546,8 @@ jobs:
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAnalysisCorrelation.java"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAddedTestTransaction.java" \
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherAddedTestTransaction.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherCancellationTransaction.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherCancellationTransaction.java"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationDAO.java" \
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherAnalysisCorrelationDAO.java"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationDAOImpl.java" \

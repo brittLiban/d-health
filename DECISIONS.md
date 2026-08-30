@@ -1265,6 +1265,83 @@ meeting, and this ADR superseded if practice differs.
 - An order that cannot be classified as either state is **ambiguous and must fail closed**,
   operator-visible, exactly as DH-025 treats an ambiguous target.
 
+**DH-011J closure (2026-08-29, append-only — the policy above is unchanged, not re-litigated).**
+The "verified, not assumed" mapping this ADR asked for is now supplied, live, against a disposable
+stack built from the pinned `3.2.1.11` / `e2a6bdf7999fa3754e7cdafbd2a91259c3f0ce23` source:
+
+- **"Not yet accepted or started" = `AnalysisStatus.NotStarted`** ("Not Tested", status id 4) —
+  confirmed live as the default status of every newly created `Analysis`, both the initial order's
+  own first test and every added test, with no native UI action taken. Cancellation from this
+  status alone is permitted.
+- **"Already in progress" = every other native status** — `TechnicalAcceptance`, `TechnicalRejected`,
+  `BiologistRejected`, `Finalized`, `NonConforming_depricated`, `SampleRejected`, and `Canceled`
+  itself. This is an allowlist (one safe starting status), not a blocklist of specific "dangerous"
+  statuses, so a future OpenELIS upgrade adding a new status cannot silently bypass it.
+- Cancellation from `TechnicalAcceptance` and `Finalized` was both **live-attempted and refused**
+  (`REFUSED_IN_PROGRESS`, no mutation) — the second of these is the exact gap the pristine
+  `ServiceRequestProvider.deleteServiceRequest` primitive has **no native guard against at all**
+  (it will happily overwrite a `Finalized`/validated result). DH-011J's implementation adds the
+  guard this ADR's policy requires; the native code was left unmodified.
+- This closes ADR-018's own open implementation item for **added-test cancellation** specifically.
+  Whole-initial-order cancellation was deliberately **not** implemented this ticket (DH-011J §7) —
+  whether cancelling an initial order should cascade to independently-added tests is a distinct,
+  still-open product question, not decided here. See PROVENANCE.md's DH-011J section for the full
+  evidence and DH-011J's own answer to that question.
+
+**DH-011J2 addendum (2026-08-29, append-only).** Liban issued a second, narrower decision on top
+of the above, not a replacement: **for Daher V1, an added-test cancellation additionally requires
+the associated specimen to NOT have been collected or received**, in addition to the existing
+`AnalysisStatus.NotStarted` gate. If specimen collection/receipt state cannot be determined
+authoritatively, the code must **fail closed** (refuse), never interpret a missing/unknown value
+as "not collected."
+
+**Implementation blocked — decision package, not a design choice made unilaterally.** DH-011J2
+found, live and by source citation (full evidence: PROVENANCE.md's DH-011J2 section), that **no
+reliable native signal exists** for this predicate on the specific code path Daher's added-test
+cancellation targets: `SampleItem.collection_date`/`received_date` are unconditionally populated
+with the creation timestamp by `SampleUtil.buildSampleXml`/`SampleAddService` for every added test,
+walk-in or FHIR-originated, live-confirmed at t=0 immediately after creation; the SAMPLE-namespace
+status vocabulary has no "Received"/"Collected" state at all (only `SampleEntered`/`SampleCanceled`/
+`SampleDisposed`); the genuinely separate `sample_type_request` REQUESTED→COLLECTED state machine
+exists but is structurally unreachable from this path; and `SampleItem.collector`/`quantity`/
+`source_id` — never auto-populated by this path, confirmed NULL live — are also never written by
+the only reachable edit surface (`SampleEditItem`/`SampleEditServiceImpl`), so they stay NULL
+regardless of what happens to the specimen in the real world. Applied honestly, per this ADR's own
+"cannot determine authoritatively → refuse" instruction, the gate as specified would refuse every
+added-test cancellation unconditionally — a real product consequence, not an implementation
+detail, and not decided here. Three options recorded in PROJECT_STATE.md, no recommendation
+weighting beyond what the evidence supports. **Human Decision Required: Yes — which option, before
+the specimen-state gate can be implemented.**
+
+**DH-011J FINALIZE resolution (2026-08-30, append-only — supersedes the addendum immediately
+above; the addendum's own investigation and its three-option framing are not retracted, kept as
+the record of why this was decided this way).** **Liban selected option (b).** The specimen
+-collection/receipt addendum above is **withdrawn as a V1 requirement**, not because the underlying
+investigation was wrong — it was correct, and is not re-litigated — but because the exact OpenELIS
+path Daher currently uses provides no authoritative signal to satisfy it, and this repo's own rule
+is not to block a proven, narrower capability on an open product decision (AGENTS.md: don't invent
+a gap-filling answer; also don't let an unrelated open question stall finished, correct work).
+
+**Canonical V1 cancellation-eligibility contract, superseding the two-gate rule stated at the top
+of this ADR's DH-011J2 addendum**: eligibility is based **solely** on the added-test Analysis's own
+workflow state, exactly as DH-011J originally built and proved, before the specimen-gate ticket
+was ever opened:
+
+- `AnalysisStatus.NotStarted` → cancellation permitted.
+- `AnalysisStatus.Canceled` → idempotent success (no second mutation).
+- Every other recognized status (`TechnicalAcceptance`, `Finalized`, `TechnicalRejected`,
+  `BiologistRejected`, `NonConforming_depricated`, `SampleRejected`) → refuse, zero mutation.
+- Any unmapped/unrecognized status → refuse, zero mutation (fail-closed by construction: the
+  allowlist checks for `NotStarted` and `Canceled` specifically, so anything else — known or not
+  — falls through to refusal without needing to be named).
+
+**Stated explicitly, not left implicit**: this is **not** a claim that a physical specimen has or
+has not been collected. It means only that **Daher cannot observe that fact reliably through the
+path it currently uses**, so V1 does not attempt to gate on it. A later ticket may reopen this if a
+genuine signal becomes available (e.g., option (c) from the addendum above — a Daher-owned
+specimen-state marker) — that remains a live, undecided possibility, not foreclosed by this
+resolution.
+
 ---
 
 ## ADR-019 — Demo content is off for the pilot
