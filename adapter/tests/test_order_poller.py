@@ -238,6 +238,34 @@ class TestDuplicatesAndRestart:
         assert WatermarkRepository(db).current(**STREAM).raw == persisted
         assert persisted == NOW
 
+    def test_a_claim_completed_before_the_watermark_ever_advanced_replays_without_probing(self, db):
+        """DH-011K crash point 5's exact unit-level seam: `mark_completed` succeeds but the
+        process never reaches `WatermarkRepository.advance` at all -- constructed here by calling
+        `ledger.claim`/`mark_completed` directly, never through `poll_once`, so no advance call
+        has ever happened for this event. A fresh poller re-polling the same still-stale
+        watermark must count it `already_completed` without probing or delivering, and must then
+        advance safely past it -- distinct from `test_a_second_cycle_over_the_same_window_...`
+        above, which lets the *first* cycle's own `poll_once` perform the advance itself."""
+        ledger = LedgerRepository(db)
+        identity = identity_for("a")
+        ledger.claim(identity)
+        ledger.mark_completed(identity, target_system="test-target", target_record_id="tgt-a")
+        assert WatermarkRepository(db).current(**STREAM) is None, "advance() never ran"
+
+        poller, _, watermarks = build(
+            db,
+            FakeServer([bundle([sr("a", T1)], 1)]),
+            Deliveries(),
+            probe=ambiguous,
+            write=never_written,
+            bootstrap=T0,
+        )
+        outcome = run(poller)
+
+        assert outcome.already_completed == 1
+        assert outcome.halted_reason is None
+        assert watermarks.current(**STREAM).raw == NOW
+
 
 class TestTheWatermarkNeverPassesAnUnknownOutcome:
     def test_a_stale_claim_with_an_ambiguous_target_halts_the_cycle(self, db):

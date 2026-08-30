@@ -2938,3 +2938,261 @@ DAO/DAOImpl/Service/ServiceImpl/migration files that a pre-push review found wer
 but never actually asserted by that guard -- fixed and control-tested (a deliberate single-line
 Dockerfile removal correctly failed the check; the full removal-then-restore was verified against a
 file backup, not left as an uncommitted diff) before this commit.
+
+## DH-011K -- crash-point qualification of the real OpenMRS -> OpenELIS order path
+
+**Zero OpenELIS patches touched.** This section exists in this file because DH-011K's own ticket
+instruction named `PROVENANCE.md` as one of the three append-only documentation targets, alongside
+`PROJECT_STATE.md`/`CURRENT_STATE.md` (which carry the summary rows); this is the full evidence
+account, matching where DH-011G2/DH-011J's own full accounts live.
+
+### §2 -- the canonical five-point question, answered honestly
+
+No file in this repository enumerated five named crash points before this ticket. The search (grep
+across `PROJECT_STATE.md`, `CURRENT_STATE.md`, `DECISIONS.md`, `docs/`, `adapter/tests/`, and `git
+log -S"crash point"`) turned up three real sources, none of which is a five-point list:
+
+1. `docs/WATERMARK-DESIGN.md` §5 (DH-025, 2026-08-13) -- the closest thing to canonical, and it
+   names exactly **three**: (1) before the outbound write -- retry is safe; (2) after the target
+   accepted the write but before `mark_completed` -- blind retry can duplicate; (3) after
+   `mark_completed` -- a safe, expected duplicate.
+2. `adapter/tests/test_openelis_recovery_binding.py`'s module docstring: "`test_recovery.py`
+   already proves `RecoveryCoordinator`'s crash-point behavior is target-agnostic (5 crash points
+   around the write, all fail-closed on ambiguity)". Never enumerated. Read against
+   `test_recovery.py`'s own test names (`test_crash_before_write_retries_only_after_proven_absence`,
+   `test_crash_after_write_reconciles_without_second_write`,
+   `test_ambiguous_probe_fails_closed_and_preserves_processing`,
+   `test_retry_write_failure_preserves_processing`,
+   `test_dead_letter_is_never_recovered_as_a_duplicate`), the "5" most plausibly counts five
+   *coordinator behaviors*, not five *timeline* points -- and none of them is the
+   watermark-advance boundary, which is not `RecoveryCoordinator`'s concern at all.
+3. `PROJECT_STATE.md`'s own DH-011K row: "Crash-point qualification across all five points" --
+   asserts a count, defines nothing.
+
+Per the ticket's own instruction ("If there is no explicit canonical enumeration anywhere, say
+so"), that is the honest answer: **none exists.** The five points this ticket qualifies are its own
+clarification, not a discovery of a pre-existing spec -- derived by reading `order_poller.py`'s
+`_handle`/`_walk` and `recovery.py`'s `reconcile` against the actual code (not assumed from the
+ticket's own A-E sketch, though it turned out to match once verified):
+
+1. Before `LedgerRepository.claim()` -- nothing persisted; a fresh claim on restart is just the
+   normal happy path, not a recovery case.
+2. After `claim()` succeeds (row = `processing`), before the target write is ever attempted --
+   target is genuinely `ABSENT`, `RecoveryCoordinator.reconcile`'s `write_target` branch (action
+   `RETRIED_AFTER_PROVEN_ABSENCE`).
+3. The target write's own POST commits at OpenELIS, but the crash lands before *that same call's*
+   authoritative read-back can run and return -- at restart, target state is `FOUND`, but nothing
+   in the crashed process's own memory (and no ledger row) ever confirmed it.
+4. The write completes end-to-end (POST + read-back both returned a `TargetRecord`) but the crash
+   lands before `LedgerRepository.mark_completed` runs -- externally identical target state to
+   point 3, but the fault seam is different: the process *did* see success and still lost the
+   chance to record it, constructed here via a real `SimulatedCrash`-style raise after a genuine
+   successful delivery (mirroring DH-011J's own proven pattern), not via seeding target state out
+   of band.
+5. `mark_completed` succeeds but the crash lands before `WatermarkRepository.advance` runs --
+   ledger says `completed`, watermark still says otherwise. Not a scenario WATERMARK-DESIGN.md §5
+   names on its own (its three points are entirely ledger/target-centric); this is the one
+   genuinely new point this ticket adds, and it is also the one PROJECT_STATE.md's "Remaining for
+   DH-011" line (2026-08-17, left unedited above per this file's append-only convention) had no way
+   to anticipate, since the watermark's `advance()` call did not exist as a separately-crashable
+   step in anyone's prior accounting.
+
+Points 3 and 4 both recover through the identical code path (`RecoveryCoordinator.reconcile`'s
+`FOUND` branch: a fresh probe, `RECONCILED_EXISTING`, writer never called) -- they were
+deliberately constructed as two separate live tests to prove both real-world fault timings land in
+that same safe place, not because the mechanism itself branches on which one occurred.
+
+### §3 -- the disposable stack
+
+Compose project `dh011k`: `openmrs-db` (MariaDB, `OMRS_DEMO_CONTENT=off` -- boots in ~5 health-check
+attempts, no 49-minute OCL import), `openmrs-backend` built with Daher's real initializer content
+mounted (`locations`, `visittypes`, `encountertypes`, `attributetypes` -- the same volumes the real
+`docker-compose.yml` mounts), `openelis-certs`/`openelis-db`/`openelis-db-hardening`/
+`openelis-admin-password`/`openelis-webapp` following DH-011G2's exact recipe (patched image built
+from this same `openelis-config/Dockerfile`, no standalone `openelis-fhir` store, no Keycloak/SSO).
+One real bug caught while writing the compose file, not a code bug: the `db.openelis.org` network
+alias was attached to the *webapp* service instead of the *db* service, so the webapp's own
+Liquibase datasource resolved `db.openelis.org` to itself and failed with `Connection ... refused`
+-- diagnosed by direct log inspection (`Caused by: java.sql.SQLException: ... Connection to
+db.openelis.org:5432 refused`), fixed by moving the alias to the correct service.
+
+**No demo concept dictionary exists on this stack** (`OMRS_DEMO_CONTENT=off` removes the OCL import
+entirely, not just the demo patients) -- so placing a real Test Order required creating exactly one
+synthetic, non-clinical Test-class OpenMRS concept per test run (a random-suffixed name, since
+OpenMRS enforces unique concept names per locale and the stack persists across manual re-runs).
+Labeled `DH011K Transport Fixture Test` throughout, never claimed as a DH-011I mapping. The
+requester is OpenMRS's own built-in `Unknown Provider` (no other provider record exists on a
+demo-off stack) -- never claimed as the real DH-011H requester identity. The visit type (`Daher
+Maternity Admission`) and encounter type (`Admission`) are real, already-committed Daher production
+reference config (`openmrs-config/initializer/`), reused structurally -- any visit/encounter
+satisfies OpenMRS's order-placement requirement regardless of its clinical name, so this is not a
+clinical-mapping decision.
+
+OpenMRS's FHIR2 module on this server supports only `read`/`search-type` for `ServiceRequest`
+(confirmed against its own live `CapabilityStatement`) -- orders can only be placed through the
+native REST `/ws/rest/v1/order` API, exactly as `docs/UI-001-CLINICAL-UX.md` §13a.3/§13a.5 already
+found. OpenELIS's Person validator rejects names containing digits ("invalid name format, possibly
+illegal character") -- pure-alpha placeholder names were used for every OpenELIS-side Patient
+payload after hitting this live.
+
+### §3 (continued) -- fresh reconfirmation of the OpenMRS UUID = FHIR Patient.id proof
+
+DH-011G2 already proved this exhaustively (restart, twins, uniqueness). This ticket reconfirms it
+fresh on its own stack rather than relying on a citation: a synthetic Patient created via
+`POST /ws/rest/v1/patient` returns `uuid`; `GET /ws/fhir2/R4/Patient/{uuid}` returns the identical
+value as `id`. Live-passing test: `test_openmrs_patient_uuid_is_the_fhir_patient_id`.
+
+### §3 (continued) -- the smallest production-equivalent composition, and why it stays test-only
+
+The harness's `ensure_patient_and_deliver` (test file only, never `adapter/src/`) is exactly the
+shape a real `DeliverOrder` implementation would need: resolve the native OpenELIS Patient via
+DH-011G2's `ensure_openelis_patient` (probe-first, reuse across every order the same patient
+generates), then call `OpenElisClient.deliver_service_request` with DH-025's own source correlation
+attached. Not promoted to `adapter/src/` -- §25 forbids adding a production delivery seam in this
+ticket, and doing so would also require deciding a real requester/test mapping this ticket
+explicitly must not invent.
+
+### §12/§14 -- ambiguous-target and write-failure controls
+
+Both live-proven with the real `RecoveryCoordinator`/`OpenElisClient`: an ambiguous probe leaves the
+claim `processing`, permits zero writes, and a *subsequent* reconcile call (reachability restored)
+re-probes and completes normally. A write that raises before the target ever commits leaves the
+claim `processing`; the next recovery attempt re-probes first (counted directly) before any further
+write is permitted -- no retry policy in this codebase bypasses that probe.
+
+### §13 -- multiple-match / corruption control
+
+Genuinely unreachable through the API, exactly as DH-011G2 found for `daher_patient_identity`:
+`electronic_order_daher_correlation_uk` is a real `UNIQUE (external_id) WHERE type = 'FHIR'` partial
+index on `clinlims.electronic_order`, confirmed live via `pg_indexes.indexdef` against the running
+disposable `clinlims` database. A `pg_indexes` catalog entry reading `CREATE UNIQUE INDEX` is
+authoritative on its own -- Postgres has no mechanism for a UNIQUE index to exist without being
+enforced -- so no literal duplicate-row insert against `electronic_order` was attempted; doing so
+would additionally require satisfying five unrelated NOT NULL/FK columns that have nothing to do
+with what this control checks (the same "genuinely not worth constructing" judgment DH-011G2's own
+2+ cardinality case already recorded).
+
+### §15/§16 -- claim concurrency and the real recovery fence
+
+Claim concurrency: two `ledger.claim()` calls for the identical `MessageIdentity` -- the second
+loses and reports the first's state, confirmed at the DB level (`count(*) = 1` in
+`processed_messages`) rather than trusted from the two return values alone. Recovery fence: the
+real `PostgresRecoveryFence` (genuine `pg_try_advisory_lock`/`pg_advisory_unlock`, not a fake) --
+process A holds it, process B's `__enter__` raises `RecoveryFenceUnavailable`, and after A releases,
+process C acquires it cleanly.
+
+### §17/§18 -- patient-link and correlation regressions
+
+Embedded in every crash-point test rather than proven once in isolation: each test that delivers a
+ServiceRequest also confirms (via `client.patient_identity_probe`/`service_request_probe`) that the
+OpenELIS Patient resolves through `urn:daher-health:openmrs-patient-uuid` -> `daher_patient_identity`
+-> exactly one OpenELIS Patient, and that the ServiceRequest correlation reads back as exactly one
+match after commit, never a fallback and never a second logical match.
+
+### §19/§20 -- narrow add-test and cancellation regressions
+
+Both re-run against this ticket's own disposable stack, using the exact proven DH-011M/P (new
+order + added test) and DH-011J (`$cancel`) paths -- not rebuilt, not reinterpreted. One added
+Analysis reaches `Not Tested`, then `Test Canceled` after a real `$cancel` reconciled through
+`DaherCancellationCoordinator`. Confirms this ticket's own test wiring does not regress either
+subsystem; neither subsystem's own crash-recovery/concurrency proof (already complete in DH-011P2's
+and DH-011J's own sections above) is repeated here.
+
+### §21 -- dead-letter semantics, and a real test-hygiene bug this ticket's own discipline caught
+
+A deterministic, permanently-invalid transport fixture (a plain `RuntimeError` raised inside
+`deliver` before any OpenELIS call is attempted, matching the ticket's own "mapping construction
+failure before any target mutation" example) dead-letters correctly: `ledger` -> `dead_letter`,
+watermark does not pass it, and a second, good event queued immediately after it in the same window
+is never even claimed -- correctly left pending, not silently dropped, not marked anything.
+`RecoveryCoordinator.reconcile` refuses to auto-recover a dead letter (`DeadLetterRecoveryBlocked`),
+confirmed live, not merely by the pre-existing unit test.
+
+**This file's own control-testing discipline caught a real test bug while building this control,
+worth recording in full rather than just fixing quietly.** The first full-suite run dead-lettered
+the *wrong* event -- not this test's own poisoned fixture, but a stale `processing` claim left
+behind by `test_claim_concurrency_absorbs_the_duplicate_into_one_completed_row`, whose own name
+promised "one completed row" but which, as first written, only proved the claim mechanism and never
+actually drove that claim to completion. Because DH-011K's tests share one real watermark stream
+(the same `(ServiceRequest, openmrs_to_openelis)` pair a real deployment would use), any test that
+manually claims an event and does not resolve it to a terminal state permanently pollutes every
+later test's poll window on a from-fresh run -- a discovery about the harness's own shared-state
+shape, not about `order_poller.py`. Fixed by making that test actually deliver and
+`mark_completed` its own claim, matching its own name; re-run confirmed the dead-letter test then
+correctly targets its own fixture. Consequence recorded in this file rather than silently fixed:
+**the dead-letter test in `test_dh011k_crash_matrix.py` can only pass once per fresh watermark
+stream** -- there is no operator-resolution mechanism anywhere in this codebase to un-block a
+dead-lettered claim, so a second manual run against the same long-lived disposable stack will
+correctly re-encounter the first run's own dead letter and halt on it first. This is `test_dh011k_
+crash_matrix.py`'s own module docstring's stated constraint, not a bug: a fresh disposable stack
+(or a manual `TRUNCATE dead_letters, processed_messages, watermarks`) is required between full runs
+of this specific test.
+
+### §22 -- crash harness quality
+
+Every fault is a deterministic, explicit seam: a controlled exception raised at a named point (never
+a random kill timing), or state constructed directly via the real repositories before a "restart."
+Every "restart" instantiates fresh `LedgerRepository`/`WatermarkRepository`/`RecoveryCoordinator`/
+`OrderPoller`/`OpenElisClient` objects bound to the same persisted Postgres/OpenMRS/OpenELIS --
+never in-memory Python state reused and called a restart, matching DH-011J/G2's own precedent
+exactly (`_build_ledger()`-style fresh construction per call).
+
+### §25 -- production wiring finding, in full
+
+`OrderPoller.__init__` takes a single `write_target: TargetWriter` (`Callable[[SourceCorrelation],
+Awaitable[TargetRecord]]`), used only by `_handle`'s stale-claim recovery branch. That signature
+receives *only* the opaque correlation -- a one-way SHA-256 digest of the original event's identity
+tuple (`source_correlation`), from which the original resource id/payload cannot be recovered. Every
+existing scripted test (`test_order_poller.py`'s own `write` fixtures, and this ticket's
+crash-point tests) satisfies this by ignoring the correlation's semantic content and returning a
+canned or pre-known `TargetRecord`, because each test already knows in advance exactly which one
+event is being recovered.
+
+A real production `write_target` for a payload-dependent writer (`OpenElisClient.
+deliver_service_request`, which needs the actual ServiceRequest body) cannot be correctly wired as
+a single fixed callable spanning an `OrderPoller`'s entire lifetime, because it has no way to
+regenerate an arbitrary recovered event's payload from its correlation alone. The only correct
+wiring is a closure bound to the *specific* event currently being recovered -- which `_handle`
+already has in scope (`event`) at its own call site, but does not thread through to
+`self._recovery.reconcile`'s `write_target` argument, since that argument is fixed at
+`OrderPoller.__init__` time, not rebuilt per event.
+
+This is a genuine, previously-undiscovered gap in what BLOCKER-6's eventual real wiring will need --
+not a bug introduced by this ticket (no production code changed), and not fixed here (§25 forbids
+adding a production delivery seam in this ticket). Recorded so whoever wires DH-011E for real next
+does not rediscover it by trial and error: either `OrderPoller`'s recovery path needs to build a
+per-event `write_target` closure internally (using `self._deliver` bound to the current `event`,
+which already carries everything `deliver` needs), or `TargetWriter`'s contract needs to grow the
+event itself.
+
+### Test suite state
+
+Adapter: **176 -> 177** unit tests (`tests/test_order_poller.py`), one new test closing the one §24
+minimum genuinely not already covered (`mark_completed` before `advance`, constructed by calling
+`ledger.claim`/`mark_completed` directly, never through `poll_once`, then re-polling with a fresh
+poller against the still-stale watermark). Every other §24 minimum (processing+FOUND/ABSENT/
+AMBIGUOUS, completed+stale-watermark, dead_letter+stale-watermark) was confirmed already covered by
+existing `test_order_poller.py` tests via direct review of each test's actual assertions, not
+assumed from test names -- no duplicate added merely to raise the count.
+
+New gated live-integration file `test_dh011k_crash_matrix.py`: 15 tests, all passing from a clean
+ledger DB, all skipping cleanly with no `DH011K_LIVE_*` env vars set. Full adapter integration
+suite: 29 tests, all skip cleanly with no live env vars set (14 pre-existing from DH-011P2/J/G2 +
+15 new).
+
+`pip check`, `ruff check src tests migrations`, `ruff format --check src tests migrations`, full
+`pytest -q` (177 passed, 29 skipped) all clean -- exactly CI's own `openelis-order-correlation-build`-
+adjacent `adapter — ruff + pytest` job sequence, run locally first.
+
+### Real facility and cleanup
+
+Real facility never touched at any point. The `dh011k` compose project (containers, the three
+locally-built images, all named volumes, the network) was torn down and independently re-verified
+empty via `docker ps -a`/`docker images`/`docker volume ls`/`docker network ls`, all filtered on
+`dh011k`, before this ticket's own documentation pass. No OpenELIS patch, adapter production module,
+or CI workflow file was touched -- `git status --short` shows exactly two files: one modified
+(`adapter/tests/test_order_poller.py`) and one new (`adapter/tests/integration/
+test_dh011k_crash_matrix.py`).
+
+READY TO COMMIT: see this ticket's own final handoff -- not committed in this pass, per §30's
+explicit instruction.

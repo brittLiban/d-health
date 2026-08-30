@@ -3077,7 +3077,7 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
 | **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off |
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ✅ **DONE for V1 added-test cancellation. COMMITTED AND PUSHED 2026-08-30**: `86f26dfb28ecffae83a3c96adb5a691aaee909a4` on `origin/master`; CI run `33298838019` — all 8 jobs green. A new `$cancel` FHIR operation + `DaherCancellationTransaction` enforce a V1 eligibility contract based **solely on Analysis workflow state** (`NotStarted` → cancel, `Canceled` → idempotent, every other status → refuse) — including the one guard the pristine `deleteServiceRequest` lacks entirely, live-confirmed it would silently overwrite a `Finalized` result. Specimen-collection/receipt gating was investigated, found to have no reliable native signal on the path Daher uses, and is **deferred by decision** (Liban selected option (b)), not implemented — not a claim that specimens haven't been collected, only that the system cannot observe that fact. Full DH-025 crash-recovery/idempotency/concurrency (including a coordinator-level real-component proof)/isolation, plus an exact deterministic rollback fault-injection proof, all live against real disposable infrastructure — see `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011J/DH-011J2/DH-011J FINALIZE sections for the complete evidence. **Whole-initial-order cancellation deliberately NOT implemented** — see the Human Decision Required row below. ~~🛑 Not testable yet — DH-011B could create no order, so no native transition could be observed. The provider does expose `@Delete`/`@Update`, so the surface exists~~ (superseded, not deleted — kept for history) |
-| **DH-011K** | Crash-point qualification across all five points | ⏸ |
+| **DH-011K** | Crash-point qualification across all five points | ✅ **DONE, live-verified 2026-08-30** — no canonical five-point enumeration existed anywhere in the repository before this ticket (clarified here; `docs/WATERMARK-DESIGN.md` §5 named three). All five crash points, plus ambiguous-target/write-failure/dead-letter controls, claim concurrency, and the real `PostgresRecoveryFence`, live-qualified against a real disposable OpenMRS + patched OpenELIS + Postgres stack using the real production classes (`OrderPoller`, `RecoveryCoordinator`, `LedgerRepository`, `WatermarkRepository`, `OpenElisClient`), never a mocked target. Zero production code changed — a pure verification ticket. One new permanent unit test (176 → 177) plus a new 15-test gated live-integration file. A real production-wiring gap was found and documented, not fixed (out of scope): `OrderPoller`'s constructor-fixed `write_target` cannot regenerate a per-event payload from the opaque correlation hash alone, so whoever wires DeliverOrder for real must make the recovery write path event-aware. Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011K section. **Not committed — pending review, per this ticket's own commit gate.** |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
 
 **Correction appended 2026-08-28 (DH-011/BLOCKER-6 decision-closure pass) — DH-011C/D's "untested on
@@ -3548,6 +3548,86 @@ the source identity, linked via a new Daher-owned native OpenELIS table
 live-verified this same ticket family — see the DH-011G2 row above, `DECISIONS.md`'s ADR-032, and
 `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011G2 section for the complete
 account.
+
+#### DH-011K resolution (2026-08-30)
+
+**§2 finding: no canonical five-point enumeration existed anywhere in the repository.**
+`docs/WATERMARK-DESIGN.md` §5 (DH-025, 2026-08-13) — the closest prior source and this file's own
+"Remaining for DH-011" line above (still unedited, per this file's append-only convention) — names
+exactly *three* crash-relevant points around the target write. `test_openelis_recovery_binding.py`'s
+own docstring says "5 crash points around the write" but never enumerates them; read against
+`test_recovery.py`'s actual test names, that phrase describes roughly five *coordinator behaviors*
+(before-write, after-write, ambiguous-probe, write-failure, dead-letter), not five *timeline*
+points, and none of them is the watermark-advance boundary. This ticket's own row above ("across
+all five points") is itself the only place a count of five was asserted, without ever defining
+them. The five points this ticket qualifies are therefore its **own clarification**, derived from
+`order_poller.py`/`recovery.py`'s actual transaction boundaries and verified against the running
+source: (1) before `LedgerRepository.claim()`, (2) after claim, target genuinely absent, (3) target
+write's POST commits but the crash lands before that same call's own read-back returns, (4) the
+write completes end-to-end but the crash lands before `mark_completed`, (5) `mark_completed`
+succeeds but the crash lands before `WatermarkRepository.advance`. Points 3 and 4 recover through
+the identical code path; they are constructed as separate live tests to prove both real-world fault
+timings land in that same safe place. Full derivation and source citations:
+`adapter/tests/integration/test_dh011k_crash_matrix.py`'s own module docstring.
+
+All five points, plus the ambiguous-target control, the write-failure-with-proven-absence control,
+claim concurrency, the real `PostgresRecoveryFence` (genuine PostgreSQL advisory locking, a second
+process refused until the first releases), and narrow add-test/cancellation regressions, were
+live-qualified against a real disposable OpenMRS + patched OpenELIS + Postgres stack, composing the
+real production classes end to end — never `RecoveryCoordinator` unit tests alone, never a mocked
+target. The one case genuinely unconstructable through the API (2+ matches on the DH-011 ServiceRequest
+correlation) was proven unreachable via the same DB-catalog method DH-011G2 already used for its own
+analogous case: `electronic_order_daher_correlation_uk` is a real `UNIQUE ... WHERE type = 'FHIR'`
+index, confirmed live.
+
+**Zero production code changed.** This was a pure verification ticket — no new adapter module, no
+new OpenELIS patch. §25's own production-wiring question was answered honestly rather than worked
+around: `OrderPoller`'s constructor-fixed `write_target` (used only by the stale-claim recovery
+path) receives nothing but the opaque `SourceCorrelation` — a one-way SHA-256 digest with no way to
+recover the original event's payload. Every existing scripted test satisfies this with a canned
+writer that ignores the correlation's content; a real payload-dependent writer (like
+`OpenElisClient.deliver_service_request`, which needs the ServiceRequest body) can only be
+correctly wired as a closure bound to the *specific* event being recovered — which this ticket's
+own test harness does per-test, since each test controls exactly one known event, but which
+`OrderPoller` as currently coded cannot do generically across arbitrary events in one poll cycle.
+This is a real, previously-undiscovered gap in the eventual BLOCKER-6 wiring, not something this
+ticket fixes (§25 forbids adding production wiring here) — recorded so whoever activates DH-011E
+next does not rediscover it by trial and error.
+
+Adapter unit tests 176 → 177 (one new test closing the one genuinely missing §24 item — the exact
+mark_completed-before-watermark-advance seam at the unit level; every other §24 minimum was already
+covered by pre-existing `test_order_poller.py` tests, confirmed by direct review rather than assumed).
+One new gated live-integration file, 15 tests, all passing from a clean ledger; skips cleanly with no
+`DH011K_LIVE_*` env vars set (29 total integration tests now skip cleanly, including DH-011P2/J/G2's
+own 14). Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011K section.
+
+**Not committed.** Per this ticket's own §30 gate, this is a review-pending record, not a commit.
+
+#### DH-011K FINALIZE — independent review classification (2026-08-30)
+
+Independent review: **DH-011K APPROVED FOR COMMIT.** The production-wiring finding above is real
+but does not invalidate the crash-point proof — it is classified as two separate, explicitly
+labeled follow-on gaps, neither implemented or policy-decided in DH-011K itself:
+
+**PRODUCTION RECOVERY WRITER WIRING: OPEN TECHNICAL ACTIVATION BLOCKER.** `OrderPoller._handle`
+has the full `SourceOrderEvent` in scope, but its stale-claim recovery call
+(`RecoveryCoordinator.reconcile(..., write_target=self._write_target)`) only ever gives
+`TargetWriter` the opaque `SourceCorrelation` — never the event. A real payload-dependent writer
+(`OpenElisClient.deliver_service_request`) cannot be wired as one `OrderPoller`-lifetime-fixed
+callable from that alone. Recommended future shape (not implemented here): inside `_handle(event)`,
+build a per-event closure over `event` and `self._deliver` (`async def
+retry_current_event(correlation): return await self._deliver(event)`, with correlation consistency
+validated as needed) and pass that as `write_target`, keeping `RecoveryCoordinator`'s own
+`TargetWriter(SourceCorrelation)` interface transport-neutral and unmodified. A follow-on ticket's
+scope, not DH-011K's or DH-011K FINALIZE's.
+
+**DEAD-LETTER OPERATOR RESOLUTION: OPEN OPERATIONAL ACTIVATION GAP.** `LedgerRepository` supports
+`processing`/`completed`/`dead_letter`; `RecoveryCoordinator` deliberately refuses to auto-recover a
+`dead_letter` row (`DeadLetterRecoveryBlocked`) — correct fail-closed behavior, live-proven in
+DH-011K's own dead-letter control. No operator-resolution transition or path exists anywhere in
+this codebase, so one permanent bad event halts that resource/direction's polling stream until such
+a mechanism is built. A later ticket must define the explicit operator action(s) and audit
+requirements for resolving a dead letter — not decided or invented here.
 
 ### DH-012 · Adapter: result path OpenELIS → OpenMRS · P0 · ⏸ (needs DH-011)
 Record observed `ServiceRequest` / `DiagnosticReport` shapes here → triggers the ADR-004 revisit.
