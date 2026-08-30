@@ -19,15 +19,21 @@ from sqlalchemy.orm import Session, sessionmaker
 from daher_adapter.instants import parse_instant
 from daher_adapter.ledger import LedgerRepository, MessageIdentity
 from daher_adapter.openmrs import OpenMrsOrderSource, OpenMrsProtocolError
-from daher_adapter.order_poller import OrderPoller, PollOutcome
+from daher_adapter.order_poller import (
+    OrderPoller,
+    PollOutcome,
+    RecoveryCorrelationMismatch,
+    _retry_with_validated_correlation,
+)
 from daher_adapter.recovery import (
     RecoveryCoordinator,
     SourceCorrelation,
     TargetPresence,
     TargetProbeResult,
     TargetRecord,
+    source_correlation,
 )
-from daher_adapter.source_events import CohortIncomplete
+from daher_adapter.source_events import CohortIncomplete, event_from_resource
 from daher_adapter.watermark import WatermarkRepository
 
 T0 = "2026-08-11T10:24:00.000+03:00"
@@ -110,11 +116,11 @@ async def ambiguous(_correlation: SourceCorrelation) -> TargetProbeResult:
     return TargetProbeResult(presence=TargetPresence.AMBIGUOUS)
 
 
-async def never_written(_correlation: SourceCorrelation) -> TargetRecord:  # pragma: no cover
-    raise AssertionError("write_target must not be called on this path")
-
-
-def build(sessions, server, deliver, *, probe=None, write=None, bootstrap=T0):
+def build(sessions, server, deliver, *, probe=None, bootstrap=T0):
+    """DH-011E2: there is no separate `write_target` to inject any more -- stale-claim recovery
+    always writes through `deliver`, the same callable a fresh claim uses, built fresh per event
+    inside `OrderPoller._handle`. Tests that need to observe a recovery write read it off
+    `deliver`'s own call record (e.g. `Deliveries.delivered`), not a second fixture."""
     ledger = LedgerRepository(sessions)
     watermarks = WatermarkRepository(sessions)
     watermarks.get_or_bootstrap(**STREAM, server_now=parse_instant(bootstrap))
@@ -126,7 +132,6 @@ def build(sessions, server, deliver, *, probe=None, write=None, bootstrap=T0):
         recovery=RecoveryCoordinator(ledger),
         fence=HeldFence(),
         probe_target=probe or ambiguous,
-        write_target=write or never_written,
     )
     return poller, ledger, watermarks
 
@@ -223,7 +228,6 @@ class TestDuplicatesAndRestart:
             recovery=RecoveryCoordinator(ledger),
             fence=HeldFence(),
             probe_target=ambiguous,
-            write_target=never_written,
         )
         outcome = run(replay)
 
@@ -257,7 +261,6 @@ class TestDuplicatesAndRestart:
             FakeServer([bundle([sr("a", T1)], 1)]),
             Deliveries(),
             probe=ambiguous,
-            write=never_written,
             bootstrap=T0,
         )
         outcome = run(poller)
@@ -323,25 +326,27 @@ class TestTheWatermarkNeverPassesAnUnknownOutcome:
         assert watermarks.current(**STREAM).raw == T0
 
     def test_proven_absence_lets_recovery_retry_exactly_once(self, db):
-        """The only branch DH-025 permits a retry on: the target proved zero matches."""
+        """The only branch DH-025 permits a retry on: the target proved zero matches.
+
+        DH-011E2: the retry now goes through `deliver` -- the same callable a fresh claim uses --
+        built as a per-event closure inside `_handle`, not a separately-injected write fixture.
+        `Deliveries.delivered` is therefore authoritative for both "was the current event's own
+        payload used" and "exactly once", since it records one entry per real call."""
         ledger = LedgerRepository(db)
         ledger.claim(identity_for("stale"))
 
         async def absent(_correlation):
             return TargetProbeResult(presence=TargetPresence.ABSENT)
 
-        written: list[str] = []
-
-        async def write(correlation):
-            written.append(correlation.value)
-            return TargetRecord(system="test-target", record_id="recovered")
-
+        deliver = Deliveries()
         server = FakeServer([bundle([sr("stale", T1)], 1)])
-        poller, _, watermarks = build(db, server, Deliveries(), probe=absent, write=write)
+        poller, _, watermarks = build(db, server, deliver, probe=absent)
         outcome = run(poller)
 
         assert outcome.reconciled == 1
-        assert len(written) == 1, "exactly one retry, never a blind replay"
+        assert deliver.delivered == ["stale"], (
+            "exactly one retry, of the current event, never a blind replay"
+        )
         assert watermarks.current(**STREAM).raw == NOW
 
     def test_an_existing_target_write_completes_without_writing_again(self, db):
@@ -354,12 +359,30 @@ class TestTheWatermarkNeverPassesAnUnknownOutcome:
                 record=TargetRecord(system="test-target", record_id="already-there"),
             )
 
+        deliver = Deliveries()
         server = FakeServer([bundle([sr("stale", T1)], 1)])
-        poller, _, _ = build(db, server, Deliveries(), probe=found, write=never_written)
+        poller, _, _ = build(db, server, deliver, probe=found)
         outcome = run(poller)
 
         assert outcome.reconciled == 1
+        assert deliver.delivered == [], "a FOUND target must never be delivered to again"
         assert ledger.get_state(identity_for("stale")) == "completed"
+
+    def test_an_ambiguous_probe_during_recovery_never_calls_deliver(self, db):
+        """§7's third branch, restated for the new per-event writer: AMBIGUOUS must reach
+        `deliver` zero times, exactly like FOUND and ABSENT are each proven above."""
+        ledger = LedgerRepository(db)
+        ledger.claim(identity_for("stale"))
+
+        deliver = Deliveries()
+        server = FakeServer([bundle([sr("stale", T1)], 1)])
+        poller, _, watermarks = build(db, server, deliver, probe=ambiguous)
+        outcome = run(poller)
+
+        assert outcome.halted_reason == "AmbiguousTargetState"
+        assert deliver.delivered == []
+        assert ledger.get_state(identity_for("stale")) == "processing"
+        assert watermarks.current(**STREAM).raw == T0
 
 
 class TestMalformedServerResponses:
@@ -398,3 +421,79 @@ class TestMalformedServerResponses:
         with pytest.raises(OpenMrsProtocolError):
             run(poller)
         assert watermarks.current(**STREAM).raw == T0
+
+
+class TestDH011E2PerEventRecoveryWriter:
+    """DH-011E2: `_retry_with_validated_correlation`, the function factored out of `_handle` so
+    the correlation-consistency guard is directly testable without going through
+    `RecoveryCoordinator.reconcile`."""
+
+    def test_a_matching_correlation_delivers_the_event_exactly_once(self, db):
+        event = event_from_resource(sr("a", T1), resource_type="ServiceRequest")
+        deliver = Deliveries()
+        correlation = source_correlation(event.identity)
+
+        result = asyncio.run(_retry_with_validated_correlation(event, correlation, deliver))
+
+        assert deliver.delivered == ["a"]
+        assert result.record_id == "tgt-a"
+
+    def test_a_mismatched_correlation_fails_closed_and_never_calls_deliver(self, db):
+        """§9's negative control: `event`'s own correlation is never what is supplied -- a
+        foreign event's (or any other unrelated) correlation must be refused, not silently
+        recomputed and substituted."""
+        event = event_from_resource(sr("a", T1), resource_type="ServiceRequest")
+        other_event = event_from_resource(sr("b", T2), resource_type="ServiceRequest")
+        foreign_correlation = source_correlation(other_event.identity)
+        assert foreign_correlation != source_correlation(event.identity)
+
+        deliver = Deliveries()
+
+        with pytest.raises(RecoveryCorrelationMismatch):
+            asyncio.run(_retry_with_validated_correlation(event, foreign_correlation, deliver))
+
+        assert deliver.delivered == [], "a mismatched correlation must never reach deliver"
+
+    def test_two_stale_claims_recover_with_the_correct_payload_and_correlation_each(self, db):
+        """§10: two events, both `processing`, both target-ABSENT, recovered in the same cycle.
+        Proves no closure-capture bug -- each recovery writer must use *its own* event's payload
+        and correlation, never the other's, even though both closures are built inside the same
+        `_walk` loop."""
+        ledger = LedgerRepository(db)
+        ledger.claim(identity_for("a"))
+        ledger.claim(identity_for("b"))
+
+        correlation_a = source_correlation(identity_for("a"))
+        correlation_b = source_correlation(identity_for("b"))
+        assert correlation_a != correlation_b
+
+        seen_correlations: list[str] = []
+
+        async def absent(_correlation):
+            return TargetProbeResult(presence=TargetPresence.ABSENT)
+
+        class RecordingDeliveries(Deliveries):
+            async def __call__(self, event):
+                # The only way to observe, from inside `deliver`, which correlation
+                # `RecoveryCoordinator` actually validated for *this* call: recompute it from the
+                # event `deliver` itself received and record the pairing.
+                seen_correlations.append(
+                    f"{event.resource_id}:{source_correlation(event.identity).value}"
+                )
+                return await super().__call__(event)
+
+        deliver = RecordingDeliveries()
+        server = FakeServer([bundle([sr("a", T1), sr("b", T2)], 2)])
+        poller, _, watermarks = build(db, server, deliver, probe=absent)
+        outcome = run(poller)
+
+        assert outcome.reconciled == 2
+        assert deliver.delivered == ["a", "b"], (
+            "each event delivered with its own payload, in order"
+        )
+        assert seen_correlations == [f"a:{correlation_a.value}", f"b:{correlation_b.value}"], (
+            "no cross-wiring: each event's own payload paired with its own correlation"
+        )
+        assert ledger.get_state(identity_for("a")) == "completed"
+        assert ledger.get_state(identity_for("b")) == "completed"
+        assert watermarks.current(**STREAM).raw == NOW

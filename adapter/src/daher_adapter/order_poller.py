@@ -1,10 +1,22 @@
 """The OpenMRS order poll cycle (DH-011E).
 
-⚠️ **BUILT, NOT ACTIVATED.** Nothing in the running adapter starts this loop. BLOCKER-6 has not
-decided how an order reaches OpenELIS, so no target exists to deliver to, and the delivery
-callable below has no production implementation. That is deliberate: the poller is complete and
-tested against the accepted design, and it moves no clinical data until a human resolves
-BLOCKER-6.
+⚠️ **BUILT, NOT ACTIVATED.** Nothing in the running adapter starts this loop. BLOCKER-6 itself is
+resolved -- the OpenMRS -> OpenELIS target architecture is selected and proven (Option F) -- but
+the production `DeliverOrder` composition and the real facility mapping inputs (DH-011H/DH-011I)
+are not yet assembled, so the delivery callable below has no production implementation to compose
+against. That is deliberate: the poller is complete and tested against the accepted design, and it
+moves no clinical data until that composition and those mapping inputs exist.
+
+**DH-011E2 (2026-08-30): stale-claim recovery writes are per-event, not poller-lifetime-fixed.**
+DH-011K discovered that a single `write_target` bound once at construction can never carry a
+payload-dependent writer, because `RecoveryCoordinator.reconcile` only ever gives it the opaque
+`SourceCorrelation` -- a one-way digest with no way back to the original event. `_handle` now
+builds a small closure per event, over that *same* `event` object, and reuses `self._deliver` --
+the identical callable a fresh claim uses -- as the actual write. This does not change what a
+concrete `DeliverOrder` implementation has to do (it always did need to attach DH-025's
+correlation), and it does not change `RecoveryCoordinator`'s own transport-neutral contract at
+all; the fix is entirely in how `OrderPoller` composes it. See `_retry_with_validated_correlation`
+below for the correlation-consistency guard this closure carries.
 
 **The one rule everything else serves:** the watermark advances only past work that is durably
 accounted for. A crash re-polls; the ledger absorbs the duplicates. A gap is unrecoverable and
@@ -39,18 +51,52 @@ from daher_adapter.recovery import (
     DeadLetterRecoveryBlocked,
     RecoveryCoordinator,
     RecoveryFence,
+    SourceCorrelation,
     TargetProbe,
     TargetRecord,
-    TargetWriter,
+    source_correlation,
 )
 from daher_adapter.source_events import Cohort, SourceOrderEvent, assemble_cohort
 
 logger = logging.getLogger("daher_adapter.order_poller")
 
-# Deliver one source event onward and return where it landed. **This is the BLOCKER-6 seam.**
+# Deliver one source event onward and return where it landed. **This is the production
+# DeliverOrder composition seam BLOCKER-6's resolution (Option F) still needs wired in.**
 # The poller neither knows nor cares what implements it; it must return the target record it
 # actually created, and it must attach DH-025's correlation to that write.
 DeliverOrder = Callable[[SourceOrderEvent], Awaitable[TargetRecord]]
+
+
+class RecoveryCorrelationMismatch(RuntimeError):
+    """A stale-claim recovery writer received a correlation that does not match the event it
+    would retry. Structurally this should never happen -- `RecoveryCoordinator.reconcile` always
+    derives its correlation from the same `MessageIdentity` `_handle` passes it, so the two are
+    mathematically identical by construction -- but the check exists as a permanent guard against
+    a future refactor (e.g. a closure hoisted out of its per-event scope) silently pairing one
+    event's payload with a different event's correlation. Never silently recomputed and swapped
+    in; the write is refused instead."""
+
+
+async def _retry_with_validated_correlation(
+    event: SourceOrderEvent, correlation: SourceCorrelation, deliver: DeliverOrder
+) -> TargetRecord:
+    """DH-011E2's stale-claim writer body, factored out of `OrderPoller._handle` so it is directly
+    unit-testable without going through the full `RecoveryCoordinator.reconcile` machinery.
+
+    Reuses `deliver` -- the exact same callable a fresh claim uses -- rather than a second,
+    independent delivery path. `deliver` already has to attach DH-025's correlation to whatever
+    it writes (its own contract, unchanged by this function); this only proves the correlation
+    `RecoveryCoordinator` is asking to reconcile is genuinely this event's own before handing the
+    event to it at all.
+    """
+    expected = source_correlation(event.identity)
+    if correlation != expected:
+        raise RecoveryCorrelationMismatch(
+            f"recovery correlation {correlation.value!r} for resource {event.resource_id!r} "
+            f"does not match its own identity's correlation {expected.value!r} -- refusing to "
+            f"deliver a possibly-foreign event's payload"
+        )
+    return await deliver(event)
 
 
 class WatermarkStore(Protocol):
@@ -107,7 +153,6 @@ class OrderPoller:
         recovery: RecoveryCoordinator,
         fence: RecoveryFence,
         probe_target: TargetProbe,
-        write_target: TargetWriter,
         resource_type: str = SERVICE_REQUEST,
         direction: Direction = "openmrs_to_openelis",
     ) -> None:
@@ -118,7 +163,6 @@ class OrderPoller:
         self._recovery = recovery
         self._fence = fence
         self._probe_target = probe_target
-        self._write_target = write_target
         self._resource_type = resource_type
         self._direction = direction
 
@@ -260,10 +304,17 @@ class OrderPoller:
         # this — it may have written to the target already, so a blind retry could duplicate an
         # order. The coordinator completes it if exactly one target write exists, retries only
         # on proven absence, and raises on any ambiguity. A timeout alone never steals a claim.
+        #
+        # DH-011E2: the writer is built here, per event, over this exact `event` object — never
+        # a poller-lifetime-fixed callable — because a real writer needs this event's own payload,
+        # not just the opaque correlation `RecoveryCoordinator` computes from its identity.
+        async def write_recovered_event(correlation: SourceCorrelation) -> TargetRecord:
+            return await _retry_with_validated_correlation(event, correlation, self._deliver)
+
         await self._recovery.reconcile(
             event.identity,
             fence=self._fence,
             probe_target=self._probe_target,
-            write_target=self._write_target,
+            write_target=write_recovered_event,
         )
         return "reconciled"

@@ -492,7 +492,6 @@ def test_baseline_full_cycle_delivers_and_advances() -> None:
         recovery=RecoveryCoordinator(build_ledger()),
         fence=_HeldFence(),
         probe_target=client.service_request_probe,
-        write_target=_fresh_write_must_not_be_called_reason("baseline: nothing to recover"),
     )
     outcome = asyncio.run(poller.poll_once())
 
@@ -542,7 +541,6 @@ def test_crash_point_1_before_claim_no_loss_no_duplicate() -> None:
         recovery=RecoveryCoordinator(build_ledger()),
         fence=_HeldFence(),
         probe_target=client.service_request_probe,
-        write_target=_fresh_write_must_not_be_called_reason("CP1: never claimed, no recovery"),
     )
     outcome = asyncio.run(poller.poll_once())
 
@@ -721,18 +719,17 @@ def test_crash_point_5_completed_before_watermark_advance_replays_safely() -> No
     assert watermark_at_crash.raw == watermark_before.raw, "advance() never ran"
 
     probe_calls = {"n": 0}
-    write_calls = {"n": 0}
 
     async def probe_must_not_be_called(corr: SourceCorrelation) -> TargetProbeResult:
         probe_calls["n"] += 1
         raise AssertionError("a completed claim must not be re-probed")
 
-    async def write_must_not_be_called(corr: SourceCorrelation) -> TargetRecord:
-        write_calls["n"] += 1
-        raise AssertionError("a completed claim must not be written again")
-
     # "Restart/re-poll": a fresh OrderPoller, same stale watermark -- the inclusive window
-    # re-presents the same event.
+    # re-presents the same event. DH-011E2: there is no separate `write_target` slot any more --
+    # a completed claim never reaches `_handle`'s recovery branch at all (it returns
+    # `already_completed` before either the probe or a writer closure is ever built), so there is
+    # nothing left to assert a write-count of zero against; the probe assertion below is what
+    # proves that branch was never entered.
     poller = OrderPoller(
         source=build_source(),
         ledger=build_ledger(),
@@ -743,12 +740,10 @@ def test_crash_point_5_completed_before_watermark_advance_replays_safely() -> No
         recovery=RecoveryCoordinator(build_ledger()),
         fence=_HeldFence(),
         probe_target=probe_must_not_be_called,
-        write_target=write_must_not_be_called,
     )
     outcome = asyncio.run(poller.poll_once())
 
     assert probe_calls["n"] == 0, "§10: no probe on a completed-claim replay"
-    assert write_calls["n"] == 0
     assert outcome.halted_reason is None
     assert outcome.already_completed >= 1
     watermark_after = build_watermarks().current(resource_type=SERVICE_REQUEST, direction=DIRECTION)
@@ -1234,7 +1229,6 @@ def test_dead_letter_halts_and_the_next_event_is_not_silently_skipped() -> None:
         recovery=RecoveryCoordinator(build_ledger()),
         fence=_HeldFence(),
         probe_target=client.service_request_probe,
-        write_target=_fresh_write_must_not_be_called_reason("dead-letter test: no recovery here"),
     )
     outcome = asyncio.run(poller.poll_once())
 

@@ -3077,7 +3077,7 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
 | **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off |
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ✅ **DONE for V1 added-test cancellation. COMMITTED AND PUSHED 2026-08-30**: `86f26dfb28ecffae83a3c96adb5a691aaee909a4` on `origin/master`; CI run `33298838019` — all 8 jobs green. A new `$cancel` FHIR operation + `DaherCancellationTransaction` enforce a V1 eligibility contract based **solely on Analysis workflow state** (`NotStarted` → cancel, `Canceled` → idempotent, every other status → refuse) — including the one guard the pristine `deleteServiceRequest` lacks entirely, live-confirmed it would silently overwrite a `Finalized` result. Specimen-collection/receipt gating was investigated, found to have no reliable native signal on the path Daher uses, and is **deferred by decision** (Liban selected option (b)), not implemented — not a claim that specimens haven't been collected, only that the system cannot observe that fact. Full DH-025 crash-recovery/idempotency/concurrency (including a coordinator-level real-component proof)/isolation, plus an exact deterministic rollback fault-injection proof, all live against real disposable infrastructure — see `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011J/DH-011J2/DH-011J FINALIZE sections for the complete evidence. **Whole-initial-order cancellation deliberately NOT implemented** — see the Human Decision Required row below. ~~🛑 Not testable yet — DH-011B could create no order, so no native transition could be observed. The provider does expose `@Delete`/`@Update`, so the surface exists~~ (superseded, not deleted — kept for history) |
-| **DH-011K** | Crash-point qualification across all five points | ✅ **DONE, live-verified 2026-08-30** — no canonical five-point enumeration existed anywhere in the repository before this ticket (clarified here; `docs/WATERMARK-DESIGN.md` §5 named three). All five crash points, plus ambiguous-target/write-failure/dead-letter controls, claim concurrency, and the real `PostgresRecoveryFence`, live-qualified against a real disposable OpenMRS + patched OpenELIS + Postgres stack using the real production classes (`OrderPoller`, `RecoveryCoordinator`, `LedgerRepository`, `WatermarkRepository`, `OpenElisClient`), never a mocked target. Zero production code changed — a pure verification ticket. One new permanent unit test (176 → 177) plus a new 15-test gated live-integration file. A real production-wiring gap was found and documented, not fixed (out of scope): `OrderPoller`'s constructor-fixed `write_target` cannot regenerate a per-event payload from the opaque correlation hash alone, so whoever wires DeliverOrder for real must make the recovery write path event-aware. Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011K section. **Not committed — pending review, per this ticket's own commit gate.** |
+| **DH-011K** | Crash-point qualification across all five points | ✅ **DONE, live-verified 2026-08-30** — no canonical five-point enumeration existed anywhere in the repository before this ticket (clarified here; `docs/WATERMARK-DESIGN.md` §5 named three). All five crash points, plus ambiguous-target/write-failure/dead-letter controls, claim concurrency, and the real `PostgresRecoveryFence`, live-qualified against a real disposable OpenMRS + patched OpenELIS + Postgres stack using the real production classes (`OrderPoller`, `RecoveryCoordinator`, `LedgerRepository`, `WatermarkRepository`, `OpenElisClient`), never a mocked target. Zero production code changed — a pure verification ticket. One new permanent unit test (176 → 177) plus a new 15-test gated live-integration file. A real production-wiring gap was found and documented, not fixed (out of scope): `OrderPoller`'s constructor-fixed `write_target` cannot regenerate a per-event payload from the opaque correlation hash alone, so whoever wires DeliverOrder for real must make the recovery write path event-aware. Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011K section. Independent review approved commit — committed `0a6dc1a7adab58a4be851838aba6538446e138cf` (2026-08-30), pushed to `origin/master`, CI run [33329195493](https://github.com/brittLiban/d-health/actions/runs/33329195493) all 8 jobs green. The production-wiring finding was classified as a separate follow-on (see DH-011K FINALIZE below); closed by DH-011E2 (see below). |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
 
 **Correction appended 2026-08-28 (DH-011/BLOCKER-6 decision-closure pass) — DH-011C/D's "untested on
@@ -3628,6 +3628,74 @@ DH-011K's own dead-letter control. No operator-resolution transition or path exi
 this codebase, so one permanent bad event halts that resource/direction's polling stream until such
 a mechanism is built. A later ticket must define the explicit operator action(s) and audit
 requirements for resolving a dead letter — not decided or invented here.
+
+#### DH-011E2 FINALIZE — DH-011K test-hygiene fix split into its own commit (2026-08-30)
+
+Independent review of DH-011E2 approved the design but required the pre-existing DH-011K
+dead-letter test flakiness fix (found during DH-011E2's own required live re-run of DH-011K's
+matrix, see below) to be split into its own commit, separate from DH-011E2's production-composition
+change. Committed `eebaa8e30c6741d6044508c5e3617a1ccad4ab57` on top of `0a6dc1a`, pushed to
+`origin/master`, no force. CI run
+[33335104297](https://github.com/brittLiban/d-health/actions/runs/33335104297): all 8 jobs green.
+Test-harness correctness fix only — no production code, DH-011K safety contract, or clinical state
+changed.
+
+**Terminology correction, applying going forward:** BLOCKER-6 is **resolved** — Option F (the
+OpenMRS → OpenELIS target architecture) is selected and proven, not undecided. What remains
+unactivated/unassembled is the production `DeliverOrder` composition and the real facility mapping
+inputs (DH-011H/DH-011I). DH-011E2 (below) closes the stale-claim payload-aware recovery
+composition defect specifically; DH-011E as a whole remains NOT ACTIVATED.
+
+#### DH-011E2 — payload-aware stale-claim recovery, without activating the poller (2026-08-30)
+
+**PRODUCTION RECOVERY WRITER WIRING: CLOSED.** Fixed exactly as DH-011K FINALIZE's own recommended
+shape described it: `OrderPoller._handle(event)` now builds a per-event closure —
+`write_recovered_event(correlation)`, wrapping a new module-level
+`_retry_with_validated_correlation(event, correlation, deliver)` — instead of using a
+constructor-fixed `write_target`. That function validates the correlation `RecoveryCoordinator`
+supplies against `source_correlation(event.identity)` (computed independently, never trusted
+without checking) and raises a new `RecoveryCorrelationMismatch` rather than silently substituting
+one before calling `deliver`, which is `self._deliver` — the *same* callable a fresh claim already
+uses, reused rather than a second, independent delivery path. `OrderPoller.__init__`'s
+`write_target` constructor parameter was removed entirely (nothing in the codebase besides
+`OrderPoller` itself constructed one). `RecoveryCoordinator.reconcile`'s own
+`TargetWriter(SourceCorrelation)` contract is completely unmodified — the fix is entirely in how
+`OrderPoller` composes it, per DH-011K FINALIZE's own instruction to prefer that over touching
+`RecoveryCoordinator`.
+
+Proven both at the unit level (`_retry_with_validated_correlation` called directly with a matching
+correlation delivers once; called with a foreign event's correlation raises
+`RecoveryCorrelationMismatch` and never calls `deliver`; two simultaneous stale claims in one cohort
+each recover with their own event's payload and correlation, no cross-wiring) and live, against a
+real disposable OpenMRS + patched OpenELIS + Postgres stack, through the real composed
+`OrderPoller.poll_once()` — not `RecoveryCoordinator.reconcile` called directly, which is what
+DH-011K's own proof used and which is exactly the composition gap this ticket closes. A stale
+`processing` claim with the target genuinely `ABSENT` recovers with exactly one real accession
+created, through the real per-event writer; a stale claim with the target already `FOUND` (a real
+crash-after-commit scenario) reconciles with zero further deliveries. DH-011G2's native patient
+link and DH-011K's own full five-point matrix were re-run live against the changed
+`OrderPoller` and remain green unchanged (4 unit tests added — one at the DH-011K unit-coverage
+seam, three more here — adapter unit tests 177 → 181; two new live-gated tests). One genuine,
+pre-existing flakiness bug in DH-011K's own dead-letter test was found during this ticket's required
+live re-run (cohort tie-break sorts by `(timestamp, resource_id)`, not creation order, when two
+synthetic orders land in the same whole second — the test assumed creation order). **Unrelated to
+this ticket's own composition fix**, so per independent review it was split into its own separate
+commit rather than landed alongside DH-011E2 — see "DH-011E2 FINALIZE" immediately above for that
+commit's SHA and CI result.
+
+**DEAD-LETTER OPERATOR RESOLUTION: still open, unchanged.** Not touched by this ticket, per its own
+explicit scope limit — `RecoveryCoordinator` still refuses `dead_letter` unconditionally, the
+poller still halts and the watermark still stays behind it, and no reset/retry endpoint exists.
+
+**DH-011E remains BUILT + VERIFIED, NOT ACTIVATED.** No scheduler, no recurring task, no
+`POLL_ENABLED`-style default-on flag, no `app.py` wiring, no Compose behavior change — every test
+this ticket added invokes `poll_once()` exactly once, explicitly, the same as every existing
+DH-011E/DH-011K test. Full account:
+`openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011E2 section.
+
+Independent review approved this design. Committed as `fix(DH-011E2): wire payload-aware order
+recovery`, separately from the DH-011K test-hygiene fix above (see "DH-011E2 FINALIZE" for that
+commit's own SHA/CI) — see this ticket's own final handoff for this commit's exact SHA and CI run.
 
 ### DH-012 · Adapter: result path OpenELIS → OpenMRS · P0 · ⏸ (needs DH-011)
 Record observed `ServiceRequest` / `DiagnosticReport` shapes here → triggers the ADR-004 revisit.

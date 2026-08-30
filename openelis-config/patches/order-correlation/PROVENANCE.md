@@ -3196,3 +3196,229 @@ test_dh011k_crash_matrix.py`).
 
 READY TO COMMIT: see this ticket's own final handoff -- not committed in this pass, per §30's
 explicit instruction.
+
+### DH-011K FINALIZE -- independent review approved, committed (2026-08-30)
+
+Independent review classified the §25 production-wiring finding as a real, separate follow-on
+(labeled `PRODUCTION RECOVERY WRITER WIRING: OPEN TECHNICAL ACTIVATION BLOCKER`) and the
+dead-letter operator gap similarly (`DEAD-LETTER OPERATOR RESOLUTION: OPEN OPERATIONAL ACTIVATION
+GAP`) -- neither invalidates DH-011K's own crash-point proof. Committed
+`0a6dc1a7adab58a4be851838aba6538446e138cf` on top of `72ee834` (`origin/master` at commit time),
+pushed with no force. CI run
+[33329195493](https://github.com/brittLiban/d-health/actions/runs/33329195493): all 8 jobs green,
+confirmed via `gh run view` job-by-job. No test/production code had changed since DH-011K's own
+live qualification (only documentation), so the live Docker matrix was not re-run for this specific
+commit.
+
+### DH-011E2 FINALIZE -- DH-011K test-hygiene fix split into its own commit (2026-08-30)
+
+Independent review of DH-011E2 approved its design but required the pre-existing DH-011K
+dead-letter test flakiness fix (found during DH-011E2's own required live re-run of DH-011K's full
+matrix -- see §19 below) to land as its own commit, separate from DH-011E2's production-composition
+change, since the two are unrelated: one is a test-harness correctness fix (creation-order vs.
+cohort-order assumption), the other is a production `OrderPoller` composition fix. Isolated by
+resetting `test_dh011k_crash_matrix.py` to its committed `0a6dc1a` baseline, applying only the
+ordering-fix hunk, and verifying via `git diff --check`/`git diff` that no `write_target=` removal
+(DH-011E2-related) hunk was staged alongside it. Committed
+`eebaa8e30c6741d6044508c5e3617a1ccad4ab57` on top of `0a6dc1a`, pushed to `origin/master`, no force.
+CI run [33335104297](https://github.com/brittLiban/d-health/actions/runs/33335104297): all 8 jobs
+green.
+
+**Terminology correction, applying from here on:** BLOCKER-6 itself is **resolved** -- the
+OpenMRS -> OpenELIS target architecture (Option F) is selected and proven, not undecided or
+unresolved. What remains unactivated/unassembled is the production `DeliverOrder` composition and
+the real facility mapping inputs (DH-011H/DH-011I). DH-011E2 below closes the stale-claim
+payload-aware recovery *composition* defect specifically; DH-011E as a whole remains NOT ACTIVATED.
+
+## DH-011E2 -- payload-aware stale-claim recovery, without activating the poller
+
+### §2 -- the bug, restated precisely
+
+`OrderPoller._handle(event)` has the full `SourceOrderEvent` in scope. Its stale-claim recovery
+branch, however, called `RecoveryCoordinator.reconcile(event.identity, ..., write_target=self.
+_write_target)`, where `self._write_target` was a single callable bound once at `OrderPoller.
+__init__` time and typed `Callable[[SourceCorrelation], Awaitable[TargetRecord]]` -- receiving
+only the opaque, one-way SHA-256 digest `source_correlation(identity)` produces, never the event
+itself. A real writer needs the event's own payload (patient reference, requested test, requester)
+to construct the actual ServiceRequest; a digest cannot be reversed into one. This was a
+**production composition defect**, not a defect in DH-025's recovery algorithm itself --
+`RecoveryCoordinator.reconcile`'s found/absent/ambiguous branching, fail-closed-on-ambiguity
+behavior, and single-retry-on-proven-absence guarantee were never wrong, and DH-011K's own direct
+`RecoveryCoordinator.reconcile()` calls (bypassing `OrderPoller` entirely) already proved that
+algorithm safe. What DH-011K's own proof could not show, because the composition did not yet exist
+to show it with, is that a *real* writer could be correctly wired through `OrderPoller.poll_once()`
+itself for the stale-claim path.
+
+### §3/§5 -- the fix, and why the smallest available change was correct
+
+`_handle` now builds `write_recovered_event`, a closure over the *current* `event`, before calling
+`self._recovery.reconcile(...)`:
+
+```python
+async def write_recovered_event(correlation: SourceCorrelation) -> TargetRecord:
+    return await _retry_with_validated_correlation(event, correlation, self._deliver)
+```
+
+`_retry_with_validated_correlation` (a new module-level function in `order_poller.py`, factored
+out so it is directly unit-testable without going through `RecoveryCoordinator.reconcile`) does
+exactly two things: validate the supplied correlation against `source_correlation(event.identity)`
+computed independently, and -- only if that matches -- call `self._deliver(event)`, the *identical*
+callable a fresh claim already uses. Option "reuse `self._deliver`, validated" was chosen over
+inventing a second `(event, correlation)`-shaped delivery entrypoint (§5's option A) because
+`DeliverOrder`'s own documented contract already requires attaching DH-025's correlation to
+whatever it writes (`order_poller.py`'s own module docstring, unchanged by this ticket) -- there is
+exactly one correlation constructor in this codebase (`source_correlation`), it is a pure function
+of `identity` alone, and `RecoveryCoordinator.reconcile` computes its own correlation from that
+*same* `identity` `_handle` passes it. The two are mathematically identical by construction; no
+second, independently-derived correlation is generated and merely assumed to match anywhere in this
+change -- the equality is checked at runtime, every call, in `_retry_with_validated_correlation`
+itself.
+
+`OrderPoller.__init__`'s `write_target` constructor parameter was removed entirely rather than left
+unused: nothing else in the codebase ever constructed one (confirmed by grep before removing it),
+and a dead, misleading parameter is worse than a clean signature change on code that has no
+production caller yet. `RecoveryCoordinator`'s own `TargetWriter(SourceCorrelation)` interface was
+not touched at all -- the fix is entirely local to how `OrderPoller` composes it, per this ticket's
+own preference and DH-011K FINALIZE's recommended shape.
+
+### §4 -- correlation consistency, made permanent
+
+A new `RecoveryCorrelationMismatch(RuntimeError)` is raised, not silently absorbed, if a supplied
+correlation ever fails to match the event `_retry_with_validated_correlation` was given. This
+should be structurally unreachable under normal operation (see §3 above) -- the check exists as a
+permanent guard against a *future* refactor (a closure hoisted out of its per-event scope, a
+change to how `RecoveryCoordinator` derives its correlation) silently pairing one event's payload
+with a different event's correlation. Proven directly: `test_a_mismatched_correlation_fails_
+closed_and_never_calls_deliver` constructs two distinct events, supplies event A's correlation
+where event B's own correlation is expected, and confirms `RecoveryCorrelationMismatch` is raised
+and `deliver` is never called.
+
+### §6/§7 -- normal-path and stale-claim behavior preserved
+
+The `claim.claimed` branch in `_handle` (a genuinely new claim) is byte-for-byte unchanged -- still
+`target = await self._deliver(event)` directly, no closure, no extra probe. Stale-claim behavior
+for ABSENT/FOUND/AMBIGUOUS is unchanged in shape (still routed through
+`RecoveryCoordinator.reconcile`, still fail-closed on ambiguity, still exactly-one-write on proven
+absence, still zero writes on FOUND) -- only *which* writer callable is supplied changed, from a
+poller-lifetime-fixed one to a per-event one.
+
+### §8-10 -- unit proof
+
+- `test_a_matching_correlation_delivers_the_event_exactly_once`: direct call to `_retry_with_
+  validated_correlation` with the correct correlation, confirms `deliver` is called with that
+  exact event.
+- `test_a_mismatched_correlation_fails_closed_and_never_calls_deliver`: §9's negative control,
+  described above.
+- `test_two_stale_claims_recover_with_the_correct_payload_and_correlation_each`: §10's isolation
+  proof -- two events, both `processing`, both target-ABSENT, recovered in the same `poll_once()`
+  cycle. A `RecordingDeliveries` subclass records, from *inside* `deliver`, which correlation the
+  event it received actually corresponds to; asserts each event was paired with its own
+  correlation, never the other's, and that no unnecessary global lock or serialization was needed
+  for this (the existing per-event claim/recovery sequencing in `_walk`'s own for-loop was already
+  sufficient).
+- `test_an_ambiguous_probe_during_recovery_never_calls_deliver`: the third branch of §7, completing
+  the FOUND/ABSENT/AMBIGUOUS triad at the unit level for the new writer shape.
+
+All existing `test_order_poller.py` tests that referenced the old `write_target`/`write=` fixture
+were restructured to observe the recovery write through `Deliveries.delivered` instead (the same
+object the normal-path delivery already uses) -- `test_proven_absence_lets_recovery_retry_exactly_
+once` and `test_an_existing_target_write_completes_without_writing_again` in particular.
+
+### §11/§12 -- live proof, real composition
+
+New gated file `test_dh011e2_recovery_writer.py`, mirroring DH-011K's own disposable-stack recipe
+(`OMRS_DEMO_CONTENT=off`, Daher's real initializer content mounted, the same patched OpenELIS
+image, no standalone `openelis-fhir` store, no Keycloak) on a fresh project name (`dh011e2`, its
+own ports) so it never collides with a `dh011k` stack run separately.
+
+`test_stale_claim_absent_recovers_through_the_real_composed_poller`: a real synthetic OpenMRS order
+event, a durable `processing` claim created manually (modelling a crashed prior attempt before any
+write was ever attempted), target confirmed genuinely absent via the real
+`service_request_probe`. A *fresh* `OrderPoller` -- constructed with no `write_target` argument at
+all, since it no longer exists -- runs one `poll_once()` cycle. Result: exactly one real OpenELIS
+accession created, through the real per-event writer this ticket added, DH-011G2's native patient
+link resolves correctly (`patient_identity_probe` returns FOUND), ledger completes, no
+`pat_nationalId` fallback or demographic search anywhere in the path.
+
+`test_stale_claim_found_reconciles_without_a_second_write_through_the_real_composed_poller`: the
+crash-after-commit regression this ticket's own §12 required -- the target is seeded via a real,
+out-of-band `deliver_event` call (modelling "the previous attempt's own write succeeded but the
+process died before recording it"), the claim is left `processing`, and a fresh `OrderPoller` is
+given a `deliver` callable that raises `AssertionError` if ever called. Result: the real probe finds
+`FOUND`, `deliver` is called zero times, the ledger completes, and the OpenELIS target count remains
+exactly one -- proving the ABSENT-path fix did not weaken FOUND reconciliation's own
+never-write-twice guarantee.
+
+Both passed on the first live run.
+
+### §19 -- DH-011K's own live matrix, re-run unaffected
+
+Since `OrderPoller`'s public composition changed materially (a constructor argument removed), the
+full existing `test_dh011k_crash_matrix.py` (all 15 tests, all five crash points plus every
+supporting control) was re-run live against the same `dh011e2` stack, not merely the three boundary
+points this ticket's own instruction named as the required minimum. All 15 passed. One genuine,
+pre-existing bug was found in the process, unrelated to this ticket's own composition fix but
+caught by this ticket's own required re-run discipline: `test_dead_letter_halts_and_the_next_event_
+is_not_silently_skipped` assumed the "bad" event it created first would always sort first in the
+real cohort, but `assemble_cohort`'s own tie-break is `(meta.lastUpdated, resource_id)` -- OpenMRS
+timestamps are whole-second, so two orders created moments apart routinely tie, and which one wins
+the tie-break then depends on server-generated UUID comparison, not creation order. Under an
+unlucky UUID draw the "good" event was processed and delivered *before* the poisoned one was even
+reached, failing the test's own "never even claimed" assertion for a reason that had nothing to do
+with what DH-011E2 was proving. Fixed by determining, after both real events exist, which one the
+real cohort assembly will actually visit first (the identical sort key), and assigning the
+"poisoned" role to that one -- deterministic regardless of UUID luck. Re-run confirmed clean.
+Per independent review, this fix was split into its own separate commit rather than landed
+alongside DH-011E2's composition change -- see "DH-011E2 FINALIZE" above for that commit's SHA and
+CI result.
+
+### §14/§15 -- patient identity and scope discipline
+
+DH-011G2's native patient-identity contract is exercised (not reinvented) by every live test above
+via the same `ensure_openelis_patient`/`deliver_service_request` composition DH-011K's own tests
+already used. DH-011P's added-test recovery and DH-011J's cancellation coordinator were not
+touched, not re-tested beyond what DH-011K's own existing narrow regressions already cover, and no
+new coverage was added for either here -- out of this ticket's own stated scope.
+
+### §16/§17 -- DH-011E stays disabled; no new composition seam added
+
+No scheduler, no `asyncio` recurring task, no while-loop, no `POLL_ENABLED`-style flag, no
+`app.py` change, no Compose service behavior change. Every test -- unit and live -- calls
+`poll_once()` exactly once, explicitly. §17's optional disabled-by-construction factory function
+was considered and not added: every existing and new test already constructs `OrderPoller` directly
+with explicit dependencies, which is itself disabled-by-construction (calling it moves nothing
+until `poll_once()` is invoked), so a wrapping factory would have added a name without adding
+safety.
+
+### Test suite state
+
+Adapter: **177 -> 181** unit tests (`tests/test_order_poller.py`: four net new -- three DH-011E2
+tests plus the FOUND/AMBIGUOUS-during-recovery regression restated for the new writer shape,
+several existing tests restructured rather than removed). New gated live-integration file
+`test_dh011e2_recovery_writer.py`: 2 tests, both passing live. Full adapter integration suite: 31
+tests, all skip cleanly with no live env vars set (29 pre-existing + 2 new).
+
+`pip check`, `ruff check src tests migrations`, `ruff format --check src tests migrations`, full
+`pytest -q` (181 passed, 31 skipped) all clean.
+
+### Real facility and cleanup
+
+Real facility never touched. The `dh011e2` compose project (containers, three locally-built images,
+all named volumes, the network) was torn down and independently re-verified empty via all four
+`docker ps -a`/`docker images`/`docker volume ls`/`docker network ls` filters on `dh011e2` before
+this documentation pass.
+
+After the DH-011K test-hygiene fix was split into its own commit (`eebaa8e`, see "DH-011E2
+FINALIZE" above), the remaining worktree contains only DH-011E2-related changes: one modified
+production module (`adapter/src/daher_adapter/order_poller.py`), three modified documentation files
+(`PROJECT_STATE.md`, `CURRENT_STATE.md`, this file), two modified test files
+(`adapter/tests/test_order_poller.py`, `adapter/tests/integration/test_dh011k_crash_matrix.py` --
+only the `write_target=` removals, the ordering fix having already been committed separately), and
+one new test file (`adapter/tests/integration/test_dh011e2_recovery_writer.py`). Re-verified from a
+fresh virtualenv after the split: `pip check`, `ruff check src tests migrations`, `ruff format
+--check src tests migrations`, `pytest -q` (181 passed, 31 skipped) all clean -- no production or
+test code changed since the live proof above, so the live Docker matrix was not rebuilt solely for
+this commit.
+
+READY TO COMMIT: independent review approved. See this ticket's own final handoff for this commit's
+exact SHA and CI result.
