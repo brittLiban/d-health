@@ -1187,8 +1187,27 @@ def test_cancellation_regression_narrow() -> None:
 
 
 def test_dead_letter_halts_and_the_next_event_is_not_silently_skipped() -> None:
-    bad_event, bad_patient_uuid = synthetic_order_event("DEADLETTERBAD" + secrets.token_hex(3))
-    good_event, good_patient_uuid = synthetic_order_event("DEADLETTERGOOD" + secrets.token_hex(3))
+    event_1, patient_uuid_1 = synthetic_order_event("DEADLETTERONE" + secrets.token_hex(3))
+    event_2, patient_uuid_2 = synthetic_order_event("DEADLETTERTWO" + secrets.token_hex(3))
+    # Cohort order is `(last_updated.sort_key, resource_id)` (`source_events.py`'s own tie-break,
+    # not creation order) -- OpenMRS timestamps are whole-second, so two orders created moments
+    # apart routinely tie, and which one sorts first then depends on server-generated UUID
+    # comparison, not which one this test created first. A first version of this test assumed
+    # creation order == cohort order and was genuinely flaky under that tie (caught live during
+    # DH-011E2's own required re-run of this file: the "good" event was sometimes processed
+    # first and reached `completed`, failing the "never even claimed" assertion below for a
+    # reason that had nothing to do with the fix DH-011E2 was proving). Determining which event
+    # the real cohort will visit first, the same way `assemble_cohort` does, makes this
+    # deterministic regardless of UUID luck.
+    if (event_1.last_updated.sort_key, event_1.resource_id) <= (
+        event_2.last_updated.sort_key,
+        event_2.resource_id,
+    ):
+        bad_event, bad_patient_uuid = event_1, patient_uuid_1
+        good_event, good_patient_uuid = event_2, patient_uuid_2
+    else:
+        bad_event, bad_patient_uuid = event_2, patient_uuid_2
+        good_event, good_patient_uuid = event_1, patient_uuid_1
     ledger = build_ledger()
     watermark_before = build_watermarks().current(
         resource_type=SERVICE_REQUEST, direction=DIRECTION
