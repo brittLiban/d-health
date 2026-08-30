@@ -1,8 +1,8 @@
 diff --git a/src/main/resources/liquibase/base-changelog.xml b/src/main/resources/liquibase/base-changelog.xml
-index 409ad05..83a43b1 100644
+index 409ad05..4c296bd 100644
 --- a/src/main/resources/liquibase/base-changelog.xml
 +++ b/src/main/resources/liquibase/base-changelog.xml
-@@ -30,4 +30,15 @@
+@@ -30,4 +30,18 @@
    <include file="liquibase/qc/007-add-qc-menu-items.xml" />
    <include file="liquibase/qc/008-add-instrument-fk-constraints.xml" />
    <include file="liquibase/qc/009-nullable-unit-of-measure.xml" />
@@ -17,4 +17,7 @@ index 409ad05..83a43b1 100644
 +  <include file="liquibase/daher/004-daher-analysis-correlation.xml" />
 +  <!-- DH-011P3 (Daher Health): enforce one Analysis <-> one added-test correlation, see liquibase/daher/ -->
 +  <include file="liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml" />
++  <!-- DH-011G2 (Daher Health, LIBAN DECISION: SELECT OPTION D): native OpenMRS-UUID <-> OpenELIS
++       Patient linkage table, see liquibase/daher/ -->
++  <include file="liquibase/daher/006-daher-patient-identity.xml" />
  </databaseChangeLog>

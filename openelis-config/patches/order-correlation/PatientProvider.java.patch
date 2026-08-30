@@ -1,0 +1,346 @@
+diff --git a/src/main/java/org/openelisglobal/fhir/providers/PatientProvider.java b/src/main/java/org/openelisglobal/fhir/providers/PatientProvider.java
+index 641a83f..6037efd 100644
+--- a/src/main/java/org/openelisglobal/fhir/providers/PatientProvider.java
++++ b/src/main/java/org/openelisglobal/fhir/providers/PatientProvider.java
+@@ -14,14 +14,18 @@ import ca.uhn.fhir.rest.api.MethodOutcome;
+ import ca.uhn.fhir.rest.param.DateRangeParam;
+ import ca.uhn.fhir.rest.param.StringAndListParam;
+ import ca.uhn.fhir.rest.param.TokenAndListParam;
++import ca.uhn.fhir.rest.param.TokenOrListParam;
++import ca.uhn.fhir.rest.param.TokenParam;
+ import ca.uhn.fhir.rest.server.IResourceProvider;
+ import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+ import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+ import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+ import ca.uhn.fhir.rest.server.exceptions.ResourceVersionConflictException;
+ import jakarta.servlet.http.HttpServletRequest;
++import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.List;
++import java.util.Objects;
+ import java.util.UUID;
+ import org.apache.commons.lang.StringUtils;
+ import org.hibernate.StaleObjectStateException;
+@@ -29,11 +33,16 @@ import org.hl7.fhir.instance.model.api.IBaseResource;
+ import org.hl7.fhir.r4.model.Bundle;
+ import org.hl7.fhir.r4.model.Encounter;
+ import org.hl7.fhir.r4.model.IdType;
++import org.hl7.fhir.r4.model.Identifier;
+ import org.hl7.fhir.r4.model.OperationOutcome;
+ import org.hl7.fhir.r4.model.ServiceRequest;
+ import org.openelisglobal.common.log.LogEvent;
++import org.openelisglobal.dataexchange.fhir.DaherPatientIdentity;
++import org.openelisglobal.dataexchange.fhir.DaherPatientIdentityTransaction;
+ import org.openelisglobal.dataexchange.fhir.FhirUtil;
+ import org.openelisglobal.dataexchange.fhir.exception.FhirPersistanceException;
++import org.openelisglobal.dataexchange.fhir.exception.FhirTransformationException;
++import org.openelisglobal.dataexchange.fhir.service.DaherPatientIdentityService;
+ import org.openelisglobal.dataexchange.fhir.service.FhirPersistanceService;
+ import org.openelisglobal.dataexchange.fhir.service.FhirTransformService;
+ import org.openelisglobal.patient.action.IPatientUpdate.PatientUpdateStatus;
+@@ -83,6 +92,17 @@ public class PatientProvider implements IResourceProvider {
+     @Autowired
+     private PatientContactService patientContactService;
+ 
++    // DH-011G2 (LIBAN DECISION: SELECT OPTION D): the outer transaction covering the native
++    // Patient persist and the daher_patient_identity linkage insert -- see that class's javadoc
++    // for why this must be a separate bean rather than @Transactional directly on createPatient.
++    @Autowired
++    private DaherPatientIdentityTransaction daherPatientIdentityTransaction;
++
++    // DH-011G2: the native lookup this provider's own @Search routes to for the Daher system, and
++    // the source of the identifier this provider echoes back on Patient.identifier (§15).
++    @Autowired
++    private DaherPatientIdentityService daherPatientIdentityService;
++
+     @Override
+     public Class<? extends IBaseResource> getResourceType() {
+         return org.hl7.fhir.r4.model.Patient.class;
+@@ -100,7 +120,9 @@ public class PatientProvider implements IResourceProvider {
+             if (patient == null) {
+                 throw new ResourceNotFoundException("Patient/" + theId.getIdPart());
+             }
+-            return fhirTransformService.transformToFhirPatient(patient.getId());
++            org.hl7.fhir.r4.model.Patient fhirPatient = fhirTransformService.transformToFhirPatient(patient.getId());
++            attachDaherIdentifierIfLinked(patient, fhirPatient);
++            return fhirPatient;
+         } catch (ResourceNotFoundException | InvalidRequestException e) {
+             throw e;
+         } catch (Exception e) {
+@@ -124,6 +146,28 @@ public class PatientProvider implements IResourceProvider {
+                 throw new InvalidRequestException("Patient resource cannot be null");
+             }
+ 
++            // DH-011G2 (LIBAN DECISION: SELECT OPTION D): fail closed before any DB work if the
++            // Daher patient identity is missing, duplicated, or malformed on the incoming
++            // resource -- a Patient this ticket's own identity contract cannot reconcile must
++            // never be accepted silently. This endpoint has no caller in this repository other
++            // than the Daher adapter (confirmed: the legacy Sample Entry UI's patient search/
++            // create goes through SamplePatientEntryRestController, a separate controller that
++            // never delegates here), so making the identifier mandatory is the fail-closed
++            // choice, not a breaking change to a shared endpoint.
++            final String openmrsPatientUuid = extractDaherPatientIdentifier(fhirPatient);
++
++            // Fast, non-authoritative uniqueness check -- a clear error for the common case,
++            // exactly the same division of responsibility ServiceRequestProvider's own
++            // electronicOrderService.getElectronicOrdersByExternalId pre-check uses. The
++            // authoritative guarantee is the DB-level unique index this patch's Liquibase
++            // changeset adds; this check only improves the error message for the non-racing
++            // case.
++            if (!daherPatientIdentityService.getBySystemAndValue(DaherPatientIdentity.SYSTEM, openmrsPatientUuid)
++                    .isEmpty()) {
++                throw new InvalidRequestException(
++                        "Daher patient identity is already in use: " + openmrsPatientUuid);
++            }
++
+             if (fhirPatient.getIdElement() == null || fhirPatient.getIdElement().getIdPart() == null) {
+                 String generatedId = UUID.randomUUID().toString();
+                 fhirPatient.setId(generatedId);
+@@ -167,7 +211,13 @@ public class PatientProvider implements IResourceProvider {
+                 LogEvent.logInfo(this.getClass().getSimpleName(), method, "No patient contact info provided");
+             }
+ 
+-            patientService.persistPatientData(patientInfo, patient, FhirProviderUtils.getSysUserId(request));
++            // DH-011G2 §9: native Patient persist and the Daher linkage insert now share one
++            // outer transaction (DaherPatientIdentityTransaction, see that class's javadoc for
++            // why it is a separate bean rather than @Transactional directly on this method) -- a
++            // failure persisting the linkage, or a race the DB-level unique indexes reject, rolls
++            // the native patient write back too instead of leaving an unlinked Patient.
++            daherPatientIdentityTransaction.persist(patientInfo, patient, FhirProviderUtils.getSysUserId(request),
++                    openmrsPatientUuid);
+             LogEvent.logInfo(this.getClass().getSimpleName(), method, "Patient persisted with ID: " + patient.getId());
+ 
+             try {
+@@ -184,6 +234,7 @@ public class PatientProvider implements IResourceProvider {
+ 
+             org.hl7.fhir.r4.model.Patient savedFhirPatient = fhirTransformService
+                     .transformToFhirPatient(savedPatient.getId());
++            attachDaherIdentifierIfLinked(savedPatient, savedFhirPatient);
+ 
+             IdType id = new IdType("Patient", patient.getId());
+             outcome.setId(id);
+@@ -228,6 +279,32 @@ public class PatientProvider implements IResourceProvider {
+         String methodName = "searchPatientBundle";
+         LogEvent.logDebug(this.getClass().getSimpleName(), methodName, "Searching for Patients (returning Bundle)");
+ 
++        // DH-011G2 §7 (LIBAN DECISION: SELECT OPTION D): an `identifier` search on the Daher
++        // patient-identity system must be answered from native OpenELIS state, never from the
++        // secondary standalone HAPI store. DH-011G's own investigation proved why: native Patient
++        // create and the secondary store's sync are non-atomic (createPatient's
++        // transformPersistPatient call is best-effort, try/caught, log-and-continue), so a native
++        // Patient can genuinely exist while the export to that secondary store never happened.
++        // Treating that as a proven-absent zero would let a caller retry-create into a duplicate
++        // -- exactly the false-ABSENT this routing exists to prevent, mirroring
++        // ServiceRequestProvider's identical DH-011D3 finding for the order correlation. Only the
++        // Daher system is rerouted; every other identifier search (pat_nationalId, pat_guid,
++        // accession, ...) keeps using forwardSearchToFhirStore exactly as before -- unchanged
++        // behavior for everything this patch does not own.
++        String daherPatientUuid = extractSingleDaherPatientIdentifierValue(identifier);
++        if (daherPatientUuid != null) {
++            try {
++                return searchDaherPatientIdentityNatively(daherPatientUuid);
++            } catch (InternalErrorException | InvalidRequestException e) {
++                throw e;
++            } catch (Exception e) {
++                LogEvent.logError(this.getClass().getSimpleName(), methodName,
++                        "Error resolving native Daher patient identity: " + e.getMessage());
++                throw new InternalErrorException(
++                        "Unexpected server error resolving native Daher patient identity", e);
++            }
++        }
++
+         try {
+ 
+             Bundle bundle = util.forwardSearchToFhirStore(request);
+@@ -333,6 +410,12 @@ public class PatientProvider implements IResourceProvider {
+                 throw new InternalErrorException("Failed to transform saved patient back to FHIR");
+             }
+ 
++            // DH-011G2 §17: demographics changing must never change identity, and this method
++            // never touches daher_patient_identity -- the link created at Patient creation time
++            // (if any) stays valid regardless of what this update changes. Echoed here purely for
++            // response consistency with @Read/@Create (§15).
++            attachDaherIdentifierIfLinked(savedPatient, savedFhirPatient);
++
+             MethodOutcome outcome = new MethodOutcome();
+             outcome.setId(new IdType("Patient", savedPatient.getFhirUuidAsString()));
+             outcome.setCreated(false);
+@@ -402,4 +485,177 @@ public class PatientProvider implements IResourceProvider {
+         return matches.isEmpty() ? null : matches.get(0);
+     }
+ 
++    /**
++     * DH-011G2: extracts the exactly-one Daher patient-identity identifier from an inbound
++     * Patient. Mandatory on this endpoint -- see the call site in {@code createPatient} for why.
++     * System and value comparisons are exact: no case folding, no substring, no fuzzy matching.
++     * Identifiers on other systems (pat_nationalId, pat_guid, or anything else a caller attaches)
++     * are ignored entirely and never mistaken for this one -- they retain their own native
++     * OpenELIS meanings and are handled unchanged by
++     * {@code FhirTransformServiceImpl.createOePatientManagementInfo}, which this patch does not
++     * touch.
++     */
++    private String extractDaherPatientIdentifier(org.hl7.fhir.r4.model.Patient fhirPatient) {
++        List<Identifier> matches = new ArrayList<>();
++        if (fhirPatient.hasIdentifier()) {
++            for (Identifier identifier : fhirPatient.getIdentifier()) {
++                if (identifier != null && DaherPatientIdentity.SYSTEM.equals(identifier.getSystem())) {
++                    matches.add(identifier);
++                }
++            }
++        }
++        if (matches.isEmpty()) {
++            throw new InvalidRequestException(
++                    "Patient.identifier must carry exactly one " + DaherPatientIdentity.SYSTEM + " identifier "
++                            + "(the OpenMRS Patient UUID) -- found none");
++        }
++        if (matches.size() > 1) {
++            throw new InvalidRequestException("Patient.identifier must carry exactly one "
++                    + DaherPatientIdentity.SYSTEM + " identifier; found " + matches.size());
++        }
++        String value = matches.get(0).getValue();
++        if (StringUtils.isBlank(value)) {
++            throw new InvalidRequestException(
++                    "The " + DaherPatientIdentity.SYSTEM + " identifier value is blank");
++        }
++        try {
++            // DH-011G2 §3/§16: validates shape only (a real OpenMRS UUID, lowercase per
++            // java.util.UUID's own canonical toString() -- OpenMRS generates its UUIDs the same
++            // way). Never validates that the value actually corresponds to a real OpenMRS
++            // patient -- this provider has no way to contact OpenMRS and does not try to; that
++            // trust boundary is the adapter's, which is the only caller of this endpoint.
++            UUID.fromString(value);
++        } catch (IllegalArgumentException e) {
++            throw new InvalidRequestException("The " + DaherPatientIdentity.SYSTEM
++                    + " identifier value is not a well-formed UUID: " + value);
++        }
++        return value;
++    }
++
++    /**
++     * DH-011G2: recognizes exactly the shape the adapter's identifier_search actually sends --
++     * {@code identifier=urn:daher-health:openmrs-patient-uuid|<uuid>}, one system, one value, no
++     * OR/AND combinations -- and returns {@code null} only when the Daher system is absent
++     * entirely, so the caller falls through to the unchanged {@code forwardSearchToFhirStore}
++     * path for every query this patch has no opinion about (pat_nationalId, pat_guid, name,
++     * birthdate, ...).
++     *
++     * <p>If the Daher system appears anywhere in a shape this method does not recognize (combined
++     * with another AND term, combined with another system via OR, a blank value), it fails loud
++     * instead of returning {@code null} -- falling through in that case would send a Daher-system
++     * query to the secondary FHIR store, whose sync is best-effort by this ticket's own premise
++     * (a native Patient can exist while the sync silently failed), exactly the false-ABSENT this
++     * routing exists to prevent. Mirrors ServiceRequestProvider's identical
++     * extractSingleDaherCorrelationValue (DH-011D3).
++     */
++    private String extractSingleDaherPatientIdentifierValue(TokenAndListParam identifier) {
++        if (identifier == null) {
++            return null;
++        }
++        boolean daherSystemPresent = identifier.getValuesAsQueryTokens().stream().filter(Objects::nonNull)
++                .flatMap(or -> or.getValuesAsQueryTokens().stream()).filter(Objects::nonNull)
++                .anyMatch(t -> DaherPatientIdentity.SYSTEM.equals(t.getSystem()));
++        if (!daherSystemPresent) {
++            return null;
++        }
++        if (identifier.size() != 1) {
++            throw new InvalidRequestException("Patient.identifier combines the " + DaherPatientIdentity.SYSTEM
++                    + " system with another AND-combined identifier parameter -- this cannot be resolved "
++                    + "unambiguously against native state");
++        }
++        TokenOrListParam orParam = identifier.getValuesAsQueryTokens().get(0);
++        if (orParam == null || orParam.size() != 1) {
++            throw new InvalidRequestException("Patient.identifier combines the " + DaherPatientIdentity.SYSTEM
++                    + " system with another OR-combined token -- this cannot be resolved unambiguously "
++                    + "against native state");
++        }
++        TokenParam token = orParam.getValuesAsQueryTokens().get(0);
++        String value = token == null ? null : token.getValue();
++        if (StringUtils.isBlank(value)) {
++            throw new InvalidRequestException(
++                    "Patient.identifier carries the " + DaherPatientIdentity.SYSTEM + " system with a blank "
++                            + "value");
++        }
++        return value;
++    }
++
++    /**
++     * DH-011G2 §7/§8: the authoritative native lookup this endpoint's Daher-system search routes
++     * to. Never touches the secondary HAPI store. Zero matches on a genuinely unlinked UUID,
++     * exactly one Patient per the DB-level unique index this patch's migration adds -- more than
++     * one match is a data integrity violation the unique index should make structurally
++     * impossible in committed state, so it fails loudly rather than silently reporting zero or
++     * picking one (§8: never pick first).
++     *
++     * <p>A linkage row whose {@code patient_id} does not resolve to a real Patient (the FK
++     * constraint should make this impossible) is the same class of failure -- a malformed linkage
++     * -- and fails the same way: loudly, not as a false ZERO.
++     */
++    private Bundle searchDaherPatientIdentityNatively(String openmrsPatientUuid)
++            throws FhirTransformationException {
++        List<DaherPatientIdentity> matches = daherPatientIdentityService
++                .getBySystemAndValue(DaherPatientIdentity.SYSTEM, openmrsPatientUuid);
++        if (matches.size() > 1) {
++            throw new InternalErrorException("Data integrity violation: multiple daher_patient_identity rows "
++                    + "share identifier_value " + openmrsPatientUuid
++                    + " -- the uniqueness index should make this impossible");
++        }
++
++        Bundle bundle = new Bundle();
++        bundle.setType(Bundle.BundleType.SEARCHSET);
++        bundle.setEntry(new ArrayList<>());
++
++        if (matches.isEmpty()) {
++            bundle.setTotal(0);
++            return bundle;
++        }
++
++        DaherPatientIdentity link = matches.get(0);
++        Patient nativePatient = patientService.get(String.valueOf(link.getPatientId()));
++        if (nativePatient == null || nativePatient.getId() == null) {
++            throw new InternalErrorException("Data integrity violation: daher_patient_identity " + link.getId()
++                    + " (identifier_value " + openmrsPatientUuid + ") references patient " + link.getPatientId()
++                    + ", which does not exist");
++        }
++
++        org.hl7.fhir.r4.model.Patient resource = fhirTransformService.transformToFhirPatient(nativePatient.getId());
++        if (resource == null) {
++            throw new InternalErrorException("Failed to transform patient " + nativePatient.getId()
++                    + " (identifier_value " + openmrsPatientUuid + ") to FHIR");
++        }
++        attachDaherIdentifierIfLinked(nativePatient, resource);
++        bundle.addEntry().setResource(resource);
++        bundle.setTotal(1);
++        return bundle;
++    }
++
++    /**
++     * DH-011G2 §15: appends the Daher patient-identity identifier to an outgoing FHIR Patient
++     * resource if -- and only if -- a linkage row exists for the native patient being returned.
++     * A patient with no link (created before this migration, or through some path outside the
++     * Daher adapter) is returned unchanged, never fabricating an identity it does not have.
++     *
++     * <p>If a Patient somehow carries more than one Daher link under the V1 system -- structurally
++     * impossible given {@code daher_patient_identity_patient_system_uk}, but never assumed -- this
++     * fails closed (§15: "fail closed rather than emitting arbitrary identity") rather than
++     * picking one to display.
++     */
++    private void attachDaherIdentifierIfLinked(Patient nativePatient, org.hl7.fhir.r4.model.Patient fhirPatient) {
++        if (nativePatient == null || nativePatient.getId() == null || fhirPatient == null) {
++            return;
++        }
++        List<DaherPatientIdentity> links = daherPatientIdentityService.getByPatientId(Long.valueOf(nativePatient.getId()));
++        if (links.isEmpty()) {
++            return;
++        }
++        if (links.size() > 1) {
++            throw new InternalErrorException("Data integrity violation: patient " + nativePatient.getId()
++                    + " carries " + links.size() + " daher_patient_identity rows under system "
++                    + DaherPatientIdentity.SYSTEM + " -- expected at most one");
++        }
++        DaherPatientIdentity link = links.get(0);
++        fhirPatient.addIdentifier(new Identifier().setSystem(link.getIdentifierSystem())
++                .setValue(link.getIdentifierValue()));
++    }
++
+ }
+\ No newline at end of file

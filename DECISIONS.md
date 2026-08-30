@@ -4040,3 +4040,168 @@ INDEX" in the migration's prose comment rather than its actual SQL, fixed and re
 PROVENANCE.md's DH-011P3 section. **READY TO COMMIT: Yes**, per this ticket's own gate — this is
 the final review item before the DH-011P/P2/P3 implementation commits and pushes. DH-011 overall
 remains NOT COMPLETE: DH-011G/H/I/J/K/L are all still open and unaffected by this decision.
+
+## ADR-032 — SELECTED / BUILT + LIVE-VERIFIED (2026-08-30, DH-011G2): Option D — the OpenMRS
+## Patient UUID as Daher V1's source-system patient identity, linked via a standalone native
+## OpenELIS table
+
+**Date raised:** 2026-08-30 (DH-011G's investigation produced a decision matrix and a technical
+recommendation — Option B; Liban rejected that recommendation and selected Option D instead, in
+the same message that authorized implementation — DH-011G2). **Status:** Implemented and
+live-verified end to end this same pass, against fully synthetic disposable infrastructure.
+
+**The decision, restated precisely.** DH-011G's own investigation proved two structural facts that
+narrow every option: (1) OpenELIS's FHIR Patient ingestion (`FhirTransformServiceImpl
+.createOePatientManagementInfo`) recognizes exactly four hardcoded identifier systems
+(`pat_nationalId`, `pat_subjectNumber`, `pat_stNumber`, `pat_guid`) and silently drops anything
+else; (2) `Patient.id`/`pat_guid`/`pat_uuid` are always server-generated on create — a
+client-supplied value is discarded, live-confirmed both by DH-011G's own investigation and again
+this ticket. DH-011G's technical recommendation was **Option B** — route OpenMRS's own
+idgen-generated patient identifier into OpenELIS's `pat_nationalId` bucket — on the grounds that it
+needed zero OpenELIS patch. **Liban rejected Option B**, for a reason DH-011G's own evidence did not
+weigh: `pat_nationalId` semantically represents a national identifier, and using it as a Daher/
+OpenMRS machine-linkage bucket would conflate two different identities and could conflict with a
+real national identifier a facility enters later. Liban also rejected Option C (a new Daher-owned
+identifier written back into OpenMRS) — the adapter has no OpenMRS write capability today, and a
+new identifier origination/seeding scheme adds a mechanism this ticket's own evidence gave no
+reason to need.
+
+**Option D, selected:** use the existing, already-stable OpenMRS Patient UUID as the *source*
+identity (never re-derived, never re-generated — the same value OpenMRS itself assigned at patient
+creation, proved this ticket to be identical to OpenMRS's own FHIR `Patient.id`, live, on the
+pinned reference-application build), and persist the OpenMRS-UUID ↔ OpenELIS-Patient relationship
+in a **Daher-owned native OpenELIS table** (`daher_patient_identity`), never in any of the four
+existing `pat_*` buckets. The linkage value is explicitly **not** a national identifier, an MRN, a
+civil identity, or a cross-facility patient identity — it is an opaque machine-linkage key, scoped
+to one facility's OpenMRS↔OpenELIS pair (see the facility-scope paragraph below).
+
+**Canonical contract:**
+
+```
+system: urn:daher-health:openmrs-patient-uuid
+value:  the real OpenMRS Patient UUID (server-generated, stable, proved this ticket)
+```
+
+Persisted in `daher_patient_identity` (`patient_id` → `clinlims.patient(id)`, `identifier_system`,
+`identifier_value`, `created_at`), with `UNIQUE(identifier_system, identifier_value)` (one OpenMRS
+UUID can never link to two OpenELIS Patients) and `UNIQUE(patient_id, identifier_system)` (one
+OpenELIS Patient can never carry two OpenMRS UUIDs under this system) — the second constraint was
+the ticket's own "evaluate/enforce" choice, decided **ENFORCE**, because the alternative is exactly
+the mechanism that would let two distinct OpenMRS patients accidentally collapse onto one lab
+identity.
+
+**Why this needed a new OpenELIS patch (`PatientProvider.java.patch`, `006-daher-patient-identity
+.xml`, and five new Java files) where Option B claimed zero.** Accepting that cost was the explicit
+tradeoff Liban's decision made: Option D requires (a) a create-time interception that extracts the
+Daher-system identifier from the incoming FHIR Patient and persists it atomically alongside the
+native Patient row (`DaherPatientIdentityTransaction`, mirroring `DaherOrderCorrelationTransaction`'s
+already-proven pattern and its own documented reason a plain `@Transactional` on `PatientProvider`
+itself would break HAPI's provider registration), and (b) rerouting `@Search`'s handling of this one
+identifier system to native `daher_patient_identity` state instead of the standalone secondary FHIR
+store — closing DH-011G's own split-store hazard for the Daher identity system specifically (see
+below). Every other identifier system (`pat_nationalId`, `pat_guid`, accession, ...) is completely
+unchanged by this patch.
+
+**DH-011G's split-store hazard, closed for this system, not in general.** DH-011G found that
+`PatientProvider.createPatient`'s native persist (`patientService.persistPatientData`) and its sync
+to the standalone `openelis-fhir` store (`fhirTransformService.transformPersistPatient`) are
+non-atomic — the sync is try/caught, log-and-continue — so a native Patient could exist while a
+search against that external store found nothing. This patch's native routing for the Daher system
+means create and search both consult the same authoritative native state (`daher_patient_identity`
++ `clinlims.patient`), so **the answer to "can native Patient creation succeed while the
+authoritative Daher identity search returns zero?" is NO for this system** — live-proven this
+ticket via a real crash-after-commit recovery test (below). The underlying non-atomicity between
+native persist and the standalone store's sync is **still true** for `pat_nationalId`/`pat_guid`/
+etc. — this patch does not touch that, by design (§7 of the ticket: "Other OpenELIS identifier
+systems should retain their existing behavior unless independently justified").
+
+**Facility scope, not re-litigated.** `docs/ARCHITECTURE.md`'s existing ADRs (§3/§14/§16,
+ADR-020/ADR-021) already establish one isolated clinical stack per facility, never a shared
+multi-tenant database — DH-011G's own audit confirmed this and this ticket inherits it unchanged.
+`urn:daher-health:openmrs-patient-uuid` is authoritative **inside one facility's paired
+OpenMRS/OpenELIS deployment only** — it is not, and this ticket does not build, a national or
+cross-facility master patient index. If cross-facility patient continuity is ever needed, the wider
+identity tuple (facility identity + source system + patient UUID) is future work, explicitly not
+attempted here.
+
+**Live-verified, one disposable stack (patched `openelis-webapp` image + Postgres; a separate
+disposable OpenMRS instance for the source-side proof), fully synthetic:**
+
+- **OpenMRS `Patient.uuid` == FHIR `Patient.id`, live, on the pinned reference-application build**
+  (not merely inferred from FHIR2's own translation convention): created a synthetic patient via
+  the core REST API (the same contract UI-012 uses), read it back via `GET /ws/fhir2/R4/Patient/
+  <uuid>` — identical value. Server-generated, stable across a real demographic edit (name/DOB
+  changed, UUID unchanged) and across a real container restart. Three synthetic patients (a mother
+  and two "twins" sharing DOB and family name, no national ID/phone) each received distinct UUIDs —
+  demographics never enter identity assignment.
+- **Cardinality matrix (§8):** ZERO for a never-created UUID; ONE, with the Daher identifier
+  correctly echoed on the response (§15), for a created Patient. 2+ is made structurally impossible
+  by `UNIQUE(identifier_system, identifier_value)` — proven at the DB level (a direct duplicate
+  insert fails with a real constraint violation) rather than through the application, since the
+  application itself cannot construct that state; the adapter-side AMBIGUOUS-on-many branch is
+  covered by its own passing unit test. Database-unreachable was not live-exercised (stopping the
+  disposable DB risked destabilizing the rest of the pass for marginal new evidence) — covered by
+  adapter-side unit tests and the same exception-propagation pattern already proven for
+  `ServiceRequestProvider`'s identical native-search design.
+- **Corruption controls (§14), at the DB level:** a duplicate `identifier_value` under the same
+  system fails (`daher_patient_identity_system_value_uk`); a second `identifier_value` for the same
+  `patient_id` under the same system fails (`daher_patient_identity_patient_system_uk`); a
+  malformed (non-UUID-shaped) `identifier_value` fails the `CHECK` constraint.
+- **Atomicity/rollback (§9):** a create with a name that fails OpenELIS's own (pre-existing, unrelated)
+  Person validator leaves zero trace — no native Patient, no linkage row — confirmed both by DB
+  query and by a subsequent native search returning ZERO. A resubmission of the same OpenMRS UUID
+  with completely different demographics is rejected by the transaction's own pre-check and never
+  creates a second Patient; the adapter's `create_openelis_patient` correctly reconciles the
+  rejected attempt to the one Patient that actually exists (the same "duplicate conflict reconciles
+  to the winner" shape already proven for `deliver_service_request`), never raising past a
+  legitimate SUCCESS.
+- **Crash-after-commit (§11):** a real Patient + linkage commit, a simulated process crash before
+  the ledger's own completion, then a fresh `DaherPatientIdentityCoordinator`/`LedgerRepository`
+  (simulating a restart) reconciling to the already-created Patient with the writer called zero
+  times — proven against the real adapter's `RecoveryCoordinator`-shaped safety components, not a
+  unit fake.
+- **Concurrency (§12/§13):** two independent `OpenElisClient` instances racing
+  `ensure_openelis_patient` for the identical OpenMRS UUID converge on exactly one native Patient
+  (DB uniqueness authoritative); two instances racing two *different* UUIDs produce two fully
+  isolated Patients with no cross-link.
+- **§17 (demographics don't change identity):** a real `PUT` changing name/gender/birthdate leaves
+  the Daher linkage, and the native search resolving to it, unchanged.
+- **§18 (no auto-linking of pre-existing patients):** not live-tested — no code path in this patch
+  performs implicit linking by demographic similarity at all; this is a source-guaranteed absence,
+  not a behavior to demonstrate.
+- **§24, answered:** "Can native Patient creation succeed while the authoritative Daher identity
+  search returns zero?" — **NO**, for the Daher identity system, live-proven by the crash-recovery
+  test above. Still **YES**, unproven either way and out of scope, for every other identifier
+  system OpenELIS's secondary-store sync covers.
+
+**A pre-existing defect this ticket's own new code inherits, not introduces, and does not fix.**
+`PatientProvider.createPatient`'s outer exception handler (pristine, unmodified by this patch) never
+calls `outcome.setCreated(false)` on any exception path, including this patch's own new
+already-in-use pre-check rejection — so a *definite* rejection can still surface as an HTTP 201 with
+a null body. Live-reproduced this ticket for exactly that rejection path. This does not weaken
+data safety: the adapter's `create_openelis_patient` never trusts the POST's status regardless,
+always reconciling via the native read-back this patch's own routing makes authoritative. Fixing
+the general false-201-on-exception shape was judged out of scope (it predates this ticket, affects
+every `PatientProvider` exception path, and the adapter's existing discipline already makes it
+non-load-bearing for correctness) — recorded here so it is not mistaken for something this ADR
+claims to have closed.
+
+**Test counts, adapter (measured, not extrapolated):** 161 → **176** unit tests (15 new:
+`patient_identity_probe`/`create_openelis_patient`/`ensure_openelis_patient` cardinality, injection,
+rejection, and reconciliation cases) + **9** new gated live-integration tests (skipped by default
+and in CI, mirroring `test_dh011j_cancellation_crash_recovery.py`'s own opt-in shape exactly),
+9/9 passing against the disposable stack this pass built. OpenELIS: the patched reactor compiles
+to a produced `OpenELIS-Global.war` (no dedicated JUnit suite added — successful compilation of the
+patched reactor plus this ADR's live behavioral proof is what §14/§23's precedent already treats as
+sufficient for this patch family, matching DH-011D's own compile-only CI companion job). CI static
+guards extended (`.github/workflows/ci.yml`'s existing DH-011D/P/P2/J patch-content-guard script)
+with a DH-011G2 section; control-tested by deliberately breaking each assertion in a scratch copy
+and confirming it failed for the stated reason — one genuine guard bug was found and fixed this way
+(a CI-compiles-every-patch check was reading the whole workflow file, which trivially contains its
+own check text as a Python string literal, so it could never fail; fixed by scoping the read to only
+the compile job's own body).
+
+**Real facility:** never started, stopped, or connected to. Full teardown of every disposable
+resource (Docker containers/volumes/networks/images, the throwaway OpenMRS instance, all scratch
+files) confirmed and independently re-verified before this commit — see PROJECT_STATE.md/
+CURRENT_STATE.md's DH-011G2 entries. **READY TO COMMIT: Yes.**

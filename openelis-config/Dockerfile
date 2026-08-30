@@ -22,6 +22,7 @@ RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
 
 COPY patches/order-correlation/ServiceRequestProvider.java.patch /patch/ServiceRequestProvider.java.patch
 COPY patches/order-correlation/ServiceRequestProviderCancel.java.patch /patch/ServiceRequestProviderCancel.java.patch
+COPY patches/order-correlation/PatientProvider.java.patch /patch/PatientProvider.java.patch
 COPY patches/order-correlation/DaherCancellationTransaction.java /patch/DaherCancellationTransaction.java
 COPY patches/order-correlation/FhirTransformServiceImpl.java.patch /patch/FhirTransformServiceImpl.java.patch
 COPY patches/order-correlation/LiquibaseConfig.java.patch /patch/LiquibaseConfig.java.patch
@@ -39,6 +40,12 @@ COPY patches/order-correlation/DaherAnalysisCorrelationDAO.java /patch/DaherAnal
 COPY patches/order-correlation/DaherAnalysisCorrelationDAOImpl.java /patch/DaherAnalysisCorrelationDAOImpl.java
 COPY patches/order-correlation/DaherAnalysisCorrelationService.java /patch/DaherAnalysisCorrelationService.java
 COPY patches/order-correlation/DaherAnalysisCorrelationServiceImpl.java /patch/DaherAnalysisCorrelationServiceImpl.java
+COPY patches/order-correlation/DaherPatientIdentity.java /patch/DaherPatientIdentity.java
+COPY patches/order-correlation/DaherPatientIdentityTransaction.java /patch/DaherPatientIdentityTransaction.java
+COPY patches/order-correlation/DaherPatientIdentityDAO.java /patch/DaherPatientIdentityDAO.java
+COPY patches/order-correlation/DaherPatientIdentityDAOImpl.java /patch/DaherPatientIdentityDAOImpl.java
+COPY patches/order-correlation/DaherPatientIdentityService.java /patch/DaherPatientIdentityService.java
+COPY patches/order-correlation/DaherPatientIdentityServiceImpl.java /patch/DaherPatientIdentityServiceImpl.java
 COPY patches/order-correlation/001-electronic-order-daher-correlation-unique.xml \
      /patch/001-electronic-order-daher-correlation-unique.xml
 COPY patches/order-correlation/002-site-code-configuration.xml \
@@ -49,6 +56,8 @@ COPY patches/order-correlation/004-daher-analysis-correlation.xml \
      /patch/004-daher-analysis-correlation.xml
 COPY patches/order-correlation/005-daher-analysis-correlation-unique-analysis.xml \
      /patch/005-daher-analysis-correlation-unique-analysis.xml
+COPY patches/order-correlation/006-daher-patient-identity.xml \
+     /patch/006-daher-patient-identity.xml
 
 RUN git clone --branch 3.2.1.11 --depth 1 \
       https://github.com/DIGI-UW/OpenELIS-Global-2.git /build \
@@ -56,6 +65,7 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
     && git -C /build submodule update --init --depth 1 dataexport \
     && git -C /build apply /patch/ServiceRequestProvider.java.patch \
     && git -C /build apply /patch/ServiceRequestProviderCancel.java.patch \
+    && git -C /build apply /patch/PatientProvider.java.patch \
     && git -C /build apply /patch/FhirTransformServiceImpl.java.patch \
     && git -C /build apply /patch/LiquibaseConfig.java.patch \
     && git -C /build apply /patch/base-changelog.xml.patch \
@@ -85,6 +95,18 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationService.java \
     && cp /patch/DaherAnalysisCorrelationServiceImpl.java \
         /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationServiceImpl.java \
+    && cp /patch/DaherPatientIdentity.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherPatientIdentity.java \
+    && cp /patch/DaherPatientIdentityTransaction.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/DaherPatientIdentityTransaction.java \
+    && cp /patch/DaherPatientIdentityDAO.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherPatientIdentityDAO.java \
+    && cp /patch/DaherPatientIdentityDAOImpl.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl/DaherPatientIdentityDAOImpl.java \
+    && cp /patch/DaherPatientIdentityService.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherPatientIdentityService.java \
+    && cp /patch/DaherPatientIdentityServiceImpl.java \
+        /build/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherPatientIdentityServiceImpl.java \
     && mkdir -p /build/src/main/resources/liquibase/daher \
     && cp /patch/001-electronic-order-daher-correlation-unique.xml \
         /build/src/main/resources/liquibase/daher/001-electronic-order-daher-correlation-unique.xml \
@@ -95,7 +117,9 @@ RUN git clone --branch 3.2.1.11 --depth 1 \
     && cp /patch/004-daher-analysis-correlation.xml \
         /build/src/main/resources/liquibase/daher/004-daher-analysis-correlation.xml \
     && cp /patch/005-daher-analysis-correlation-unique-analysis.xml \
-        /build/src/main/resources/liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml
+        /build/src/main/resources/liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml \
+    && cp /patch/006-daher-patient-identity.xml \
+        /build/src/main/resources/liquibase/daher/006-daher-patient-identity.xml
 
 ARG DEFAULT_PW="adminADMIN!"
 WORKDIR /build

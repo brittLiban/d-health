@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.8.xsd">
+
+  <!--
+    DH-011G2 (LIBAN DECISION: SELECT OPTION D, patches/order-correlation/PROVENANCE.md): the
+    Daher-owned native linkage between an OpenMRS Patient UUID (the source-system identity) and an
+    OpenELIS Patient. DH-011G's own investigation (this file's sibling PROVENANCE.md section)
+    proved two things that rule out every alternative: (1) OpenELIS's FHIR Patient ingestion
+    recognizes exactly four hardcoded identifier systems and silently drops anything else, so a
+    generic external identifier cannot be recognized without either abusing one of those four
+    buckets (rejected; see the DECISIONS.md ADR: pat_nationalId etc. keep their own native
+    meanings) or a dedicated table; (2) Patient.id/pat_guid/pat_uuid are always server-generated on
+    create, so the OpenMRS UUID cannot be honored as OpenELIS's own identity either. This table is
+    that dedicated mechanism.
+
+    Deliberately generic on identifier_system/identifier_value (not a scalar "omrs_uuid" column):
+    the V1 Java code (PatientProvider.java.patch) only ever writes and reads exactly one system,
+    DaherPatientIdentity.SYSTEM = 'urn:daher-health:openmrs-patient-uuid', enforced entirely at the
+    application layer, the same division of responsibility DaherOrderCorrelation.SYSTEM already
+    uses for ServiceRequest. Keeping the column generic avoids a second migration if a future,
+    explicitly-decided second source system is ever added; nothing here weakens V1's own single-
+    system contract, which is a Java-level invariant, not a schema one.
+
+    Columns beyond the ticket's stated minimum (id, patient_id, identifier_system,
+    identifier_value, created_at): last_updated is required by
+    org.openelisglobal.common.valueholder.BaseObject, exactly as documented in
+    004-daher-analysis-correlation.xml: every entity reachable through this codebase's shared
+    BaseDAO/BaseObjectService infrastructure extends it and it unconditionally maps a @Version
+    column named last_updated. This table is insert-only in V1 (no UPDATE is ever issued against
+    it; a Patient's demographics can change without touching its identity link, and the link
+    itself is never repointed), so optimistic-lock conflicts on it are not expected in practice,
+    but the column must exist for the entity to load through that shared infrastructure at all.
+
+    Constraints:
+      - patient_id: NOT NULL, FK to clinlims.patient(id) (NUMERIC(10,0), matching Patient.hbm.xml's
+        own id mapping via LIMSStringNumberUserType; see DaherPatientIdentity.java's javadoc for
+        why the Java side maps this as Long, not the DB-adjacent String type). No ON DELETE action
+        specified (the default, NO ACTION): OpenELIS's own PatientProvider.delete does not hard-
+        delete the native Patient row (it only syncs an inactive flag to the secondary FHIR store),
+        so this migration must not silently lose linkage/audit evidence by cascading a delete that
+        upstream itself does not perform.
+      - identifier_value: NOT NULL, lowercase-hex-with-hyphens UUID format (matching the exact
+        lowercase form java.util.UUID.randomUUID().toString() and OpenMRS's own UUID generation
+        produce): a defense-in-depth check, mirroring 004's own correlation_value format
+        constraint, so a malformed value fails at insert time (a real Postgres constraint
+        violation, surfaced loudly) rather than being silently accepted and later read back as an
+        opaque, unvalidated string.
+      - UNIQUE(identifier_system, identifier_value) (DH-011G2 §14, first case): the same OpenMRS
+        UUID can never be linked to two different OpenELIS Patients, enforced at the database,
+        not merely by the adapter's own search-before-create discipline, which DH-011G's live
+        duplicate-Patient proof already showed OpenELIS will not do for you on its own.
+      - UNIQUE(patient_id, identifier_system) (DH-011G2 §5/§14, second case; LIBAN DECISION:
+        ENFORCE): one OpenELIS Patient can never carry two different OpenMRS UUIDs under the Daher
+        system. Chosen deliberately, not left as the ticket's own "evaluate" default, because the
+        alternative (allowing it) is exactly the mechanism that would let two distinct OpenMRS
+        patients accidentally collapse onto one lab identity, the single failure mode this whole
+        ticket exists to close. Together with the first constraint, this makes (patient_id,
+        identifier_value) a true one-to-one mapping for V1's one identifier_system.
+
+    Fails safely, not destructively: if this table or its objects already exist under a name this
+    migration collides with, CREATE fails and Liquibase does not mark the changeset applied. No
+    existing clinlims.patient row is read, rewritten, or backfilled: there is no historical
+    OpenMRS-UUID linkage to reconstruct for a patient created before this migration, and this
+    migration does not attempt to invent one (see DH-011G2 §18 for why auto-linking existing,
+    unlinked patients by demographic similarity is explicitly out of scope).
+  -->
+  <changeSet id="daher-011g2-006-daher-patient-identity" author="daher-health">
+    <sql>
+      CREATE SEQUENCE daher_patient_identity_seq;
+
+      CREATE TABLE daher_patient_identity (
+        id BIGINT PRIMARY KEY DEFAULT nextval('daher_patient_identity_seq'),
+        patient_id NUMERIC(10,0) NOT NULL
+          REFERENCES clinlims.patient (id),
+        identifier_system VARCHAR(255) NOT NULL,
+        identifier_value VARCHAR(255) NOT NULL
+          CONSTRAINT daher_patient_identity_value_format
+          CHECK (identifier_value ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+        created_at TIMESTAMP NOT NULL DEFAULT now(),
+        last_updated TIMESTAMP NOT NULL DEFAULT now()
+      );
+
+      ALTER SEQUENCE daher_patient_identity_seq OWNED BY daher_patient_identity.id;
+
+      CREATE UNIQUE INDEX daher_patient_identity_system_value_uk
+        ON daher_patient_identity (identifier_system, identifier_value);
+
+      CREATE UNIQUE INDEX daher_patient_identity_patient_system_uk
+        ON daher_patient_identity (patient_id, identifier_system);
+    </sql>
+    <rollback>
+      <sql>
+        DROP TABLE IF EXISTS daher_patient_identity;
+        DROP SEQUENCE IF EXISTS daher_patient_identity_seq;
+      </sql>
+    </rollback>
+  </changeSet>
+</databaseChangeLog>

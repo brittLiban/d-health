@@ -2701,3 +2701,222 @@ overall remains NOT COMPLETE** — DH-011G/H/I/K/L all still open. **DH-011E rem
 — no production entrypoint assembles the adapter's delivery/recovery components into a running
 loop; this ticket's own crash-recovery/concurrency proofs used a test-only integration harness
 driving the real classes directly, exactly as DH-011P2 established.
+
+## DH-011G2 (LIBAN DECISION: SELECT OPTION D) -- native OpenMRS-UUID <-> OpenELIS Patient linkage
+
+Follows directly from DH-011G's investigation (this file has no DH-011G section of its own --
+DH-011G's evidence lives in `PROJECT_STATE.md`'s own DH-011G entry, since that ticket touched no
+OpenELIS patch). This ticket implements the patient-identity contract Liban selected: ADR-032 in
+`DECISIONS.md` has the full decision narrative and live-evidence account; this section is the
+technical/reproducibility record -- exact files, exact disposable-stack recipe, exact commands.
+
+### File inventory
+
+New, under `openelis-config/patches/order-correlation/`:
+
+- `006-daher-patient-identity.xml` -- Liquibase changeset: `daher_patient_identity` table, both
+  unique indexes, the UUID-format `CHECK` constraint, the FK to `clinlims.patient`.
+- `DaherPatientIdentity.java` -- JPA entity (`org.openelisglobal.dataexchange.fhir` package,
+  mirroring `DaherAnalysisCorrelation`'s exact shape). `SYSTEM =
+  "urn:daher-health:openmrs-patient-uuid"` is the one value V1 ever writes/reads.
+- `DaherPatientIdentityDAO.java` / `DaherPatientIdentityDAOImpl.java` -- `getBySystemAndValue`,
+  `getByPatientId`.
+- `DaherPatientIdentityService.java` / `DaherPatientIdentityServiceImpl.java` -- thin service
+  layer over the DAO, mirroring `DaherAnalysisCorrelationService*`.
+- `DaherPatientIdentityTransaction.java` -- the atomic create+link `@Component`
+  (`@Transactional(rollbackFor = Exception.class)`), mirroring `DaherOrderCorrelationTransaction`'s
+  javadoc-documented reason it cannot live directly on `PatientProvider.createPatient` (HAPI's
+  reflection-based dispatch finds no annotated methods on a JDK dynamic proxy -- confirmed live
+  during DH-011D3, not re-proven here, only reused).
+- `PatientProvider.java.patch` -- the provider patch: `extractDaherPatientIdentifier` (mandatory,
+  exact-one-identifier, UUID-format-validated extraction on `@Create`), the fast pre-check against
+  `daher_patient_identity` before any DB work, routing `createPatient`'s native persist through
+  `DaherPatientIdentityTransaction` instead of calling `patientService.persistPatientData`
+  directly, `extractSingleDaherPatientIdentifierValue`/`searchDaherPatientIdentityNatively`
+  (native `@Search` routing for this one identifier system, mirroring
+  `ServiceRequestProvider`'s `extractSingleDaherCorrelationValue`/
+  `searchDaherCorrelationNatively` almost exactly), and `attachDaherIdentifierIfLinked` (echoes
+  the linkage onto the outgoing FHIR Patient on `@Read`/`@Create`/`@Update`).
+
+Modified (regenerated, not hand-edited, from applying-then-diffing against the pristine tree):
+`base-changelog.xml.patch` (adds the `006-*.xml` include), `persistence.xml.patch` (registers
+`DaherPatientIdentity` as a JPA-managed class).
+
+`openelis-config/Dockerfile` and `.github/workflows/ci.yml`'s `openelis-order-correlation-build`
+job both updated with the new `COPY`/`git apply`/`cp` lines -- verified independently (Dockerfile
+via a real local `docker build`, CI's own enumeration via a dedicated scoped guard check, see
+below).
+
+Adapter (`adapter/src/daher_adapter/`): `openelis.py` gains `PATIENT_IDENTITY_SYSTEM`,
+`patient_identity_probe`/`create_openelis_patient`/`ensure_openelis_patient` on `OpenElisClient`,
+and the module-level `_with_patient_identity` helper (mirroring `_with_daher_identifier` exactly).
+New file `patient_identity.py`: `DaherPatientIdentityCoordinator`, mirroring
+`cancellation.py`'s `DaherCancellationCoordinator` shape -- built as a **separate** small
+coordinator rather than a change to `RecoveryCoordinator.reconcile`, because that method derives
+its own correlation internally as `source_correlation(identity)` (a sha256 digest of the *event*
+identity, always under `SOURCE_CORRELATION_SYSTEM`) -- correct for ServiceRequest's always-fresh
+per-event correlation, wrong for a Patient UUID that recurs across many orders. Live-caught this
+pass: an early version of the crash-recovery proof called `RecoveryCoordinator.reconcile` directly
+and it silently substituted a 64-char sha256 hex digest for the intended OpenMRS UUID, which then
+failed `extractDaherPatientIdentifier`'s own UUID-format validation on the Java side (a real
+defense-in-depth catch, not a coincidence) before any DB work happened -- no orphan data, confirmed
+by direct query, but the correlation-vocabulary mismatch was real and is why
+`DaherPatientIdentityCoordinator` exists as its own class rather than reusing `RecoveryCoordinator`
+as-is.
+
+### §3 -- OpenMRS Patient UUID source proof
+
+Live, on the pinned `openmrs/openmrs-reference-application-3-backend:3.7.x` build (disposable
+compose, `target: "off"`, `SSO_ENABLED=false`, no demo content -- booted in well under the ~49min
+DH-002 measured for the demo-content-on path, since no OCL concept import ran):
+
+- FHIR2 module confirmed present and started (`GET /ws/rest/v1/module` lists `fhir2`/`started:
+  true`; `GET /ws/fhir2/R4/metadata` returns 200) -- this had NOT been confirmed by DH-011G's own
+  investigation, which only established that no Daher code path currently exercises it.
+- Created a synthetic patient via the core REST API (`POST /ws/rest/v1/patient`, the same
+  contract `ui/src/api/client.ts`'s `createPatient` uses), no manually-supplied UUID. Core
+  `patient.uuid`: `9a78482f-e67a-4bc9-87fc-bfcd72a4d1f8`. `GET /ws/fhir2/R4/Patient/<that uuid>`:
+  200, `"id": "9a78482f-e67a-4bc9-87fc-bfcd72a4d1f8"` -- identical value, live-proven equality, not
+  inferred from the FHIR2 module's general translation convention.
+- `POST /ws/rest/v1/patient/<uuid>` changing name (to a genuinely different alphabetic name) and
+  birthdate: `uuid` in the response unchanged.
+- `docker restart` on the OpenMRS backend container, then re-read the same patient by UUID after
+  it became healthy again: identical UUID.
+- Three synthetic patients -- a mother and two "newborn twins" sharing `birthdate` and family
+  name, differing only in the (irrelevant) given name and gender -- each received a distinct,
+  server-generated UUID: `bda4bec2-529b-4bfb-9564-0f2c093c3313`, `3874c33d-7f64-4c93-8c95-
+  20e01d994c75`, `fc55745a-06dd-4474-b4ee-2470be886ac1`.
+
+Teardown: this OpenMRS stack (`dh011g2-omrs` project) was stopped and removed before this
+ticket's own commit; see the cleanup section below for the exact verification.
+
+### Disposable OpenELIS stack (recipe, for reproducibility)
+
+Compose project `dh011g2-patient-identity`: `openelis-certs` (keystore/truststore generation,
+`daher-health/certgen:0.1.0`, built from `openelis-config/certs`), `openelis-db`
+(`itechuw/openelis-global-2-database:3.2.1.11`, pinned digest, own random credentials), and
+`openelis-webapp` built as `dh011g2/openelis-webapp:verify` from `openelis-config/Dockerfile`
+(this ticket's patched image -- the exact same Dockerfile the real stack's `docker compose build`
+would produce, with `daher-health/openelis-webapp:3.2.1.11-order-correlation` as its production
+tag). No `keycloak`/SAML dependency (`SSO_ENABLED`-equivalent `org.itech.login.saml=false` in
+`CATALINA_OPTS`, matching the real stack's own SSO-off default) and no standalone `openelis-fhir`
+store deployed -- deliberately: this ticket's whole premise is that the Daher identity system must
+never depend on that store, so its absence is itself part of the proof, not an oversight (every
+other identifier system, `pat_nationalId` included, would be unreachable via `@Search` in this
+configuration -- unexercised and out of scope here, not claimed to work).
+
+This OpenELIS stack's own compose definition (its `openelis-certs`-sourced
+`/run/secrets/common.properties` mount included) was correct from the start and booted cleanly on
+its own terms -- its only first-boot failure was the XML "--" bug documented below. The
+demo-patient-control-file crash-loop was a separate, earlier failure in the *OpenMRS* stack
+(`dh011g2-omrs`, documented above), fixed there by mounting
+`openmrs-config/demo/patients.off.xml`; it has no bearing on this OpenELIS stack and is not
+conflated with it here.
+
+### The XML "--" bug (real, live-caught, not hypothetical)
+
+`006-daher-patient-identity.xml`'s first draft used "--" as a prose em-dash substitute throughout
+its `<!-- -->` comment, matching this repo's own house style in Java/Markdown. XML forbids the
+literal string "--" anywhere inside a comment's content (not merely as the `<!--`/`-->` delimiters
+themselves) -- Liquibase's own XML parser enforces this and failed loudly on first webapp boot:
+`SEVERE -- liquibase.parser The string "--" is not permitted within comments.`, which cascaded into
+a full Spring context failure (`referenceTablesDAOImpl`'s persistence dependency chain, several
+layers removed from the actual cause) that took direct log inspection, not the surface error, to
+diagnose. Fixed by replacing every prose "--" with plain punctuation (semicolons/colons); the
+existing `004`/`005` migrations happen to have zero prose double-hyphens in their own comments, so
+this defect was specific to this migration's first draft, not a pre-existing repo-wide risk.
+
+### Live matrix -- exact evidence
+
+All of ADR-032's live-evidence bullets were run against the stack above; the exact commands/values
+are preserved in this session's own transcript, not reproduced verbatim here to avoid duplicating
+ADR-032. Two items worth recording precisely, since they are easy to get wrong on a future re-read:
+
+- The 2+ cardinality/corruption case (§8/§14) genuinely cannot be constructed through the API --
+  `UNIQUE(identifier_system, identifier_value)` makes it impossible even via direct SQL insert
+  against the running disposable DB (tried; failed with the expected `duplicate key value
+  violates unique constraint` error, confirming the constraint rather than working around it).
+  `searchDaherPatientIdentityNatively`'s `matches.size() > 1 -> InternalErrorException` branch is
+  therefore genuinely unreachable in this ticket's own live testing -- proven correct by source
+  inspection and by the adapter-side unit test for the equivalent `MatchCount.MANY` case
+  (`test_patient_identity_probe_many_matches_is_ambiguous_not_the_first_id`), not by a live
+  reproduction that the schema itself rules out.
+- The DB-unreachable case (§8) was not live-exercised -- stopping the disposable Postgres mid-pass
+  risked destabilizing the rest of the run for marginal new evidence, given the exception-
+  propagation pattern is structurally identical to `ServiceRequestProvider`'s own already-proven
+  native-search design and is independently covered by
+  `test_patient_identity_probe_unreachable_target_is_ambiguous_never_absent`.
+- §21's migration-proof matrix (fresh DB / existing DB without touching existing Patient rows /
+  existing DB with no Daher linkage / deliberately-corrupt linkage fails safely) was only partly
+  live-exercised. Fresh-DB PASS was run twice (this stack's own first boot, and the from-scratch
+  pristine-clone `git apply` verification before commit). "Existing DB, no linkage" held
+  incidentally -- every fresh boot starts in that state before any Patient is created -- but was
+  not separately re-run against a stack pre-seeded with unlinked legacy Patient rows. The
+  corrupt-linkage-fails-safely case was proven by the direct-SQL `UNIQUE` violation above, not by a
+  full migration re-application. None of the four cases were run as an explicit second-boot-against-
+  an-already-migrated-DB pass the way `004`/`005` idempotence was for DH-011P2 (see line ~1541); this
+  migration relies on the same Liquibase changeset-tracking mechanism, not a separately re-proven
+  guarantee.
+
+### CI guard -- one real bug found and fixed by control-testing
+
+Per this repo's own evidence discipline ("control-test the guards" -- confirm each one fails for
+the reason it claims to check, not just that it passes on unmodified content), every new DH-011G2
+guard assertion in `.github/workflows/ci.yml`'s existing patch-content-guard script was broken
+deliberately in a scratch copy and confirmed to fail for the expected reason. One of these control
+tests found a genuine bug in the guard itself, not in the patch: the "every shipped patch is
+compiled in CI" check originally read the *entire* `ci.yml` file and searched for the exact
+`git apply .../PatientProvider.java.patch` line the compile job needs -- but that guard script's
+own Python source, which lives inside the same `ci.yml` file (in an earlier job's heredoc), trivially
+contains that exact string as one of its own literals. The check could therefore never fail no
+matter what the compile job actually did -- a genuine "control test caught a guard that can never
+fail" case, exactly the failure mode the discipline exists to catch. Fixed by scoping the search to
+only the `openelis-order-correlation-build` job's own text (between its header and the next
+top-level job's header), re-verified against the real file (passes) and against the same broken
+scratch copy (now correctly fails).
+
+Two related fixes, also control-test-driven: the "no `pat_nationalId` reuse" check on
+`PatientProvider.java.patch` initially scanned the whole diff, including this patch's own
+javadoc, which legitimately names `pat_nationalId`/`pat_guid` in prose explaining they must NOT be
+reused -- a real false-positive, fixed by isolating code lines (stripping `*`/`//`-prefixed
+comment lines from the added-diff text), the same technique
+`ServiceRequestProviderCancel.java.patch`'s own pre-existing `@Update`/PUT guard already uses. The
+equivalent adapter-side (`openelis.py`) check had the same false-positive from its own docstrings;
+fixed by stripping triple-quoted docstring bodies and `#`-comment lines before scanning.
+
+### Test suite state
+
+Adapter: **161 -> 176** unit tests (`tests/test_openelis.py`), 15 new
+(`patient_identity_probe`/`create_openelis_patient`/`ensure_openelis_patient` cardinality,
+identifier-injection, conflict-rejection, and reuse-vs-create branching), `ruff check` clean,
+`ruff format --check` clean. New gated integration file
+`tests/integration/test_dh011g2_patient_identity.py`, 9 tests, skipped by default and in CI
+(`DH011G2_LIVE_*` env-var gate, mirroring `test_dh011j_cancellation_crash_recovery.py`'s shape
+exactly) -- **9/9 passing** against the disposable stack this pass built. One test's first draft
+asserted the wrong outcome for the duplicate-UUID-different-demographics case (expected
+`AmbiguousTargetState`; the real, correct behavior is a successful reconciliation to the existing
+Patient, the same "duplicate conflict reconciles to the winner" shape `deliver_service_request`
+already has) -- caught by actually running the test against the live stack rather than trusting
+the assertion as written, fixed, re-verified passing.
+
+OpenELIS: patched reactor compiles to a produced `OpenELIS-Global.war` (local `docker build`,
+twice -- the first attempt caught the XML "--" bug above, the second succeeded clean). One real
+compile error along the way, unrelated to the "--" bug: `PatientProvider.java`'s new
+`searchDaherPatientIdentityNatively` calls `fhirTransformService.transformToFhirPatient(...)`,
+which throws the checked `FhirTransformationException` -- the method did not declare it, a genuine
+`unreported exception ... must be caught or declared` compile failure, fixed by adding `throws
+FhirTransformationException` to the method signature (its only caller already catches `Exception`
+broadly). No dedicated JUnit suite added for this patch, matching DH-011D's own precedent
+(compile-only CI companion job) -- this ticket's live behavioral proof is the evidence that
+substitutes for one.
+
+### Real facility and cleanup
+
+Real facility never touched at any point. Confirmed empty via `docker ps -a`/`docker images`/
+`docker volume ls`/`docker network ls`, filtered on `dh011g2`, before this ticket's own commit --
+see PROJECT_STATE.md/CURRENT_STATE.md's DH-011G2 entries for the exact verification output. The
+`dh011g2/openelis-webapp:verify` image and both disposable compose projects (`dh011g2-omrs`,
+`dh011g2-patient-identity`) were removed; the pristine OpenELIS source clones, scratch venv, and
+scratch proof scripts (outside the repo, under this session's scratchpad) were removed.
+
+READY TO COMMIT: Yes.

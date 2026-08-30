@@ -1112,6 +1112,13 @@ jobs:
               "DaherCancellationTransaction.java",
               "004-daher-analysis-correlation.xml",
               "005-daher-analysis-correlation-unique-analysis.xml",
+              "DaherPatientIdentity.java",
+              "DaherPatientIdentityDAO.java",
+              "DaherPatientIdentityDAOImpl.java",
+              "DaherPatientIdentityService.java",
+              "DaherPatientIdentityServiceImpl.java",
+              "DaherPatientIdentityTransaction.java",
+              "006-daher-patient-identity.xml",
           ):
               if required_copy not in dockerfile:
                   bad.append(f"Dockerfile: does not copy {required_copy} into the build context")
@@ -1460,13 +1467,223 @@ jobs:
                   bad.append("adapter/src/daher_adapter/openelis.py: cancel_service_request does "
                               "not call the native $cancel operation")
 
+          # --- DH-011G2 (LIBAN DECISION: SELECT OPTION D): native OpenMRS-UUID <-> OpenELIS
+          # Patient linkage. §23's required guards: the Daher patient identity system is
+          # recognized natively; pat_nationalId/pat_subjectNumber/pat_stNumber/pat_guid are never
+          # reused as a semantic substitute (Option B was rejected, see DECISIONS.md); the
+          # linkage table has its FK and both unique constraints; native search is exact-match
+          # only, never a demographic fallback; create-and-link is one transaction; every shipped
+          # patch is compiled in CI (checked against this very workflow file below, not just the
+          # Dockerfile).
+          pp_patch_path = base / "PatientProvider.java.patch"
+          if not pp_patch_path.exists():
+              bad.append("PatientProvider.java.patch is missing")
+              pp_added = ""
+          else:
+              pp_patch = pp_patch_path.read_text()
+              pp_added = "\n".join(l for l in pp_patch.splitlines() if l.startswith("+"))
+              # Code only, comments excluded (same technique the ServiceRequestProviderCancel
+              # check above uses for its own "@Update"/"PUT" scan) -- this patch's own javadoc
+              # legitimately names pat_nationalId/pat_guid in prose explaining they are NOT
+              # reused, which a whole-file substring check would otherwise misflag.
+              pp_code_lines = [
+                  l[1:].strip() for l in pp_patch.splitlines()
+                  if l.startswith("+") and not l[1:].strip().startswith(("*", "//"))
+              ]
+              pp_code = "\n".join(pp_code_lines)
+
+              if "extractDaherPatientIdentifier" not in pp_added:
+                  bad.append("PatientProvider.java.patch: extractDaherPatientIdentifier is missing")
+              if "final String openmrsPatientUuid = extractDaherPatientIdentifier(fhirPatient);" not in pp_added:
+                  bad.append("PatientProvider.java.patch: createPatient does not call extraction")
+              if "searchDaherPatientIdentityNatively" not in pp_added:
+                  bad.append("PatientProvider.java.patch: native search routing is missing")
+              if "daherPatientIdentityTransaction.persist(" not in pp_added:
+                  bad.append("PatientProvider.java.patch: createPatient does not route the native "
+                              "persist + linkage insert through DaherPatientIdentityTransaction "
+                              "(§9's atomic create-and-link requirement)")
+              if "attachDaherIdentifierIfLinked" not in pp_added:
+                  bad.append("PatientProvider.java.patch: outbound FHIR representation does not "
+                              "echo the Daher identifier (§15)")
+
+              # Exact-one-match selection rules on both the create-time uniqueness pre-check and
+              # the native search's own data-integrity checks -- zero and multiple must both be
+              # handled, never picked-first.
+              if "matches.size() > 1" not in pp_added:
+                  bad.append("PatientProvider.java.patch: multiple-match fail-closed check is missing")
+              if "DaherPatientIdentity.SYSTEM.equals(identifier.getSystem())" not in pp_added:
+                  bad.append("PatientProvider.java.patch: identifier selection is not an exact system match")
+
+              # §5/DECISIONS.md ADR: pat_nationalId etc. must never be treated as a Daher linkage
+              # substitute anywhere in this patch's new CODE (pp_code excludes comment lines --
+              # this javadoc legitimately names them in prose explaining they are NOT reused).
+              for forbidden in ("pat_nationalId", "pat_subjectNumber", "pat_stNumber", "pat_guid"):
+                  if forbidden in pp_code:
+                      bad.append(f"PatientProvider.java.patch: references {forbidden!r} -- Option B "
+                                  "(reusing a native OpenELIS identifier bucket for Daher linkage) "
+                                  "was rejected; native buckets must keep their own meanings "
+                                  "(DECISIONS.md ADR)")
+
+              # No fuzzy comparison and no demographic fallback anywhere in the new logic --
+              # identity must never be derived from name/DOB/gender matching (§8: "no demographic
+              # fallback").
+              for bad_pattern in (
+                  ".toLowerCase()", ".toUpperCase()", ".contains(", ".startsWith(", ".indexOf(",
+                  "getFamily()", "getGiven()", "getBirthDate()",
+              ):
+                  if bad_pattern in pp_code:
+                      bad.append(f"PatientProvider.java.patch: unexpected fuzzy-matching/demographic "
+                                  f"pattern {bad_pattern!r} -- native Daher identity lookup must be "
+                                  "exact-token-only, never a demographic fallback")
+
+              # No hard delete added to the Patient path (pristine PatientProvider.delete already
+              # never hard-deletes -- this patch must not change that).
+              for bad_pattern in ("DELETE FROM", "delete from", ".remove(", "TRUNCATE"):
+                  if bad_pattern in pp_code:
+                      bad.append(f"PatientProvider.java.patch: contains {bad_pattern!r} -- must never "
+                                  "hard-delete a Patient row")
+
+          link_entity_path = base / "DaherPatientIdentity.java"
+          if not link_entity_path.exists():
+              bad.append("DaherPatientIdentity.java is missing")
+          else:
+              link_entity_text = link_entity_path.read_text()
+              if "@Entity" not in link_entity_text or '@Table(name = "daher_patient_identity"' not in link_entity_text:
+                  bad.append("DaherPatientIdentity.java: not mapped as a JPA @Entity on the right table")
+              if 'SYSTEM = "urn:daher-health:openmrs-patient-uuid"' not in link_entity_text:
+                  bad.append("DaherPatientIdentity.java: SYSTEM constant does not match the adapter's own value")
+              if ("daher_patient_identity_system_value_uk" not in link_entity_text
+                      or "daher_patient_identity_patient_system_uk" not in link_entity_text):
+                  bad.append("DaherPatientIdentity.java: JPA @Table does not declare both unique "
+                              "constraints -- entity mapping must match the DB schema")
+
+          link_txn_path = base / "DaherPatientIdentityTransaction.java"
+          if not link_txn_path.exists():
+              bad.append("DaherPatientIdentityTransaction.java is missing")
+          else:
+              link_txn_text = link_txn_path.read_text()
+              if "@Transactional(rollbackFor = Exception.class)" not in link_txn_text:
+                  bad.append("DaherPatientIdentityTransaction.java: persist is not "
+                              "@Transactional(rollbackFor = Exception.class)")
+              if "patientService.persistPatientData(" not in link_txn_text:
+                  bad.append("DaherPatientIdentityTransaction.java: does not persist the native Patient")
+              if "daherPatientIdentityService.insert(" not in link_txn_text:
+                  bad.append("DaherPatientIdentityTransaction.java: does not insert the linkage row "
+                              "in the same transaction as the native Patient persist")
+
+          link_migration_path = base / "006-daher-patient-identity.xml"
+          if not link_migration_path.exists():
+              bad.append("006-daher-patient-identity.xml is missing")
+          else:
+              lm_text = link_migration_path.read_text()
+              if "CREATE TABLE daher_patient_identity" not in lm_text:
+                  bad.append("006-daher-patient-identity.xml: no CREATE TABLE daher_patient_identity")
+              if "REFERENCES clinlims.patient (id)" not in lm_text:
+                  bad.append("006-daher-patient-identity.xml: patient_id has no FK to clinlims.patient")
+              if ("CREATE UNIQUE INDEX daher_patient_identity_system_value_uk" not in lm_text
+                      or "CREATE UNIQUE INDEX daher_patient_identity_patient_system_uk" not in lm_text):
+                  bad.append("006-daher-patient-identity.xml: missing one or both required unique "
+                              "indexes (identifier_system+identifier_value, patient_id+identifier_system)")
+              if "<rollback>" not in lm_text:
+                  bad.append("006-daher-patient-identity.xml: no rollback block")
+              # Fails safely: no destructive backfill/merge of pre-existing patients.
+              for destructive in ("DELETE FROM", "TRUNCATE", "UPDATE clinlims.patient", "MERGE"):
+                  if destructive in lm_text:
+                      bad.append(f"006-daher-patient-identity.xml: contains a {destructive!r}-shaped "
+                                  "statement -- this migration must not backfill/merge pre-existing "
+                                  "patients (§18: never auto-link by demographic similarity)")
+
+          changelog_patch_path = base / "base-changelog.xml.patch"
+          if changelog_patch_path.exists():
+              changelog_added_g2 = "\n".join(
+                  l for l in changelog_patch_path.read_text().splitlines() if l.startswith("+")
+              )
+              if "liquibase/daher/006-daher-patient-identity.xml" not in changelog_added_g2:
+                  bad.append("base-changelog.xml.patch: does not include the DH-011G2 patient "
+                              "identity linkage migration")
+
+          persistence_patch_path = base / "persistence.xml.patch"
+          if persistence_patch_path.exists():
+              persistence_added_g2 = "\n".join(
+                  l for l in persistence_patch_path.read_text().splitlines() if l.startswith("+")
+              )
+              if "org.openelisglobal.dataexchange.fhir.DaherPatientIdentity" not in persistence_added_g2:
+                  bad.append("persistence.xml.patch: does not register DaherPatientIdentity as a "
+                              "JPA-managed class")
+
+          # --- §23: every shipped patch must actually be compiled in CI, not just the Dockerfile.
+          # The CI compile job (openelis-order-correlation-build below) keeps its own enumeration
+          # of git-apply/cp steps, mirroring the Dockerfile's -- both must independently list
+          # every DH-011G2 file, or this patch would ship in production while never having been
+          # compiled by CI.
+          #
+          # Scoped to ONLY the openelis-order-correlation-build job's own text, not the whole
+          # workflow file: this guard script itself lives inside ci.yml (in the "static" job,
+          # above) and its own source necessarily contains these exact filenames/strings as
+          # Python literals -- a whole-file search would therefore always find its own check and
+          # could never fail no matter what the compile job actually does (control-tested: a
+          # deliberately broken compile job with the apply line removed produced zero errors
+          # against a whole-file search). Scoping to the job body between its own header and the
+          # next top-level job's header is what makes this guard capable of failing at all.
+          ci_workflow_text = Path(".github/workflows/ci.yml").read_text()
+          job_start = ci_workflow_text.index("\n  openelis-order-correlation-build:")
+          job_end = ci_workflow_text.index("\n  oauth2login-provider-tests:", job_start)
+          ci_build_job_text = ci_workflow_text[job_start:job_end]
+
+          ci_apply_marker = 'git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/PatientProvider.java.patch"'
+          if ci_apply_marker not in ci_build_job_text:
+              bad.append("ci.yml: openelis-order-correlation-build does not apply "
+                          "PatientProvider.java.patch -- it would ship in the Dockerfile image "
+                          "without ever having been compiled by CI")
+          for required_ci_copy in (
+              "DaherPatientIdentity.java",
+              "DaherPatientIdentityTransaction.java",
+              "DaherPatientIdentityDAO.java",
+              "DaherPatientIdentityDAOImpl.java",
+              "DaherPatientIdentityService.java",
+              "DaherPatientIdentityServiceImpl.java",
+              "006-daher-patient-identity.xml",
+          ):
+              if required_ci_copy not in ci_build_job_text:
+                  bad.append(f"ci.yml: openelis-order-correlation-build does not install "
+                              f"{required_ci_copy} -- it would ship in the Dockerfile image "
+                              "without ever having been compiled by CI")
+
+          # --- adapter side: the Daher patient-identity system, probe, and both writer shapes ---
+          if adapter_openelis_path.exists():
+              if 'PATIENT_IDENTITY_SYSTEM = "urn:daher-health:openmrs-patient-uuid"' not in adapter_openelis_text:
+                  bad.append("adapter/src/daher_adapter/openelis.py: PATIENT_IDENTITY_SYSTEM "
+                              "constant is missing or does not match the Java-side SYSTEM value")
+              for required_fn in (
+                  "def patient_identity_probe", "def create_openelis_patient",
+                  "def ensure_openelis_patient",
+              ):
+                  if required_fn not in adapter_openelis_text:
+                      bad.append(f"adapter/src/daher_adapter/openelis.py: {required_fn} is missing")
+              # No reuse of the rejected native buckets in this file's actual CODE. Docstrings/
+              # comments legitimately name pat_nationalId etc. in prose (PATIENT_IDENTITY_SYSTEM's
+              # own docstring explains why they are NOT used) -- triple-quoted docstring bodies
+              # and #-comment lines are stripped first so that prose does not trip this check.
+              import re as _re
+              adapter_code_only = _re.sub(r'"""[\s\S]*?"""', "", adapter_openelis_text)
+              adapter_code_only = "\n".join(
+                  l for l in adapter_code_only.splitlines() if not l.strip().startswith("#")
+              )
+              for forbidden in ("pat_nationalId", "pat_subjectNumber", "pat_stNumber", "pat_guid"):
+                  if forbidden in adapter_code_only:
+                      bad.append(f"adapter/src/daher_adapter/openelis.py: references {forbidden!r} "
+                                  "in code -- Option B was rejected, native buckets must keep "
+                                  "their own meanings (DECISIONS.md ADR)")
+
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
-          print("ok — DH-011D/DH-011P/DH-011P2/DH-011J order-correlation patch set has all "
-                "required components, no forbidden fuzzy-matching patterns, the uniqueness index "
-                "stays scoped to FHIR-typed rows, the added-test transform is correlation-aware, "
-                "added-test cancellation is reachable only via $cancel with the ADR-018 status "
-                "gate enforced, and the adapter remains POST-only throughout")
+          print("ok — DH-011D/DH-011P/DH-011P2/DH-011J/DH-011G2 order-correlation patch set has "
+                "all required components, no forbidden fuzzy-matching patterns, the uniqueness "
+                "index stays scoped to FHIR-typed rows, the added-test transform is "
+                "correlation-aware, added-test cancellation is reachable only via $cancel with "
+                "the ADR-018 status gate enforced, the adapter remains POST-only throughout, and "
+                "the DH-011G2 patient-identity linkage never reuses a native OpenELIS identifier "
+                "bucket, is exact-match-only with no demographic fallback, and is compiled by CI")
           PY
 
   openelis-order-correlation-build:
@@ -1526,6 +1743,7 @@ jobs:
         run: |
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ServiceRequestProvider.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/ServiceRequestProviderCancel.java.patch"
+          git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/PatientProvider.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/FhirTransformServiceImpl.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/LiquibaseConfig.java.patch"
           git -C "$OPENELIS_SRC" apply "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/base-changelog.xml.patch"
@@ -1556,6 +1774,18 @@ jobs:
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationService.java"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherAnalysisCorrelationServiceImpl.java" \
             "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherAnalysisCorrelationServiceImpl.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentity.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherPatientIdentity.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentityTransaction.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/DaherPatientIdentityTransaction.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentityDAO.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/dao/DaherPatientIdentityDAO.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentityDAOImpl.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/daoimpl/DaherPatientIdentityDAOImpl.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentityService.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherPatientIdentityService.java"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/DaherPatientIdentityServiceImpl.java" \
+            "$OPENELIS_SRC/src/main/java/org/openelisglobal/dataexchange/fhir/service/DaherPatientIdentityServiceImpl.java"
 
           mkdir -p "$OPENELIS_SRC/src/main/resources/liquibase/daher"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/001-electronic-order-daher-correlation-unique.xml" \
@@ -1568,6 +1798,8 @@ jobs:
             "$OPENELIS_SRC/src/main/resources/liquibase/daher/004-daher-analysis-correlation.xml"
           cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/005-daher-analysis-correlation-unique-analysis.xml" \
             "$OPENELIS_SRC/src/main/resources/liquibase/daher/005-daher-analysis-correlation-unique-analysis.xml"
+          cp "$GITHUB_WORKSPACE/openelis-config/patches/order-correlation/006-daher-patient-identity.xml" \
+            "$OPENELIS_SRC/src/main/resources/liquibase/daher/006-daher-patient-identity.xml"
 
       - name: Compile the patched reactor through to a produced WAR
         # Mirrors openelis-config/Dockerfile's own build recipe (its BuildKit cache mounts

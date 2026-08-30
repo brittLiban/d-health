@@ -68,6 +68,15 @@ SERVICE_REQUEST = "ServiceRequest"
 # account of why, and what is not yet wired there.
 SERVICE_REQUEST_TARGET_SYSTEM = "urn:daher-health:adapter:source-event"
 
+# DH-011G2 (LIBAN DECISION: SELECT OPTION D): the OpenMRS Patient UUID is Daher V1's
+# source-system patient identity. This value is the Java-side constant's exact Python twin --
+# see openelis-config/patches/order-correlation/DaherPatientIdentity.java's SYSTEM field and
+# PatientProvider.java.patch's native routing for both directions of this contract. Never
+# pat_nationalId/pat_subjectNumber/pat_stNumber/pat_guid -- DH-011G's own investigation proved
+# those are either silently-dropped-if-unrecognized or already carry unrelated native OpenELIS
+# meanings; DECISIONS.md records why Option B (reusing pat_nationalId) was rejected.
+PATIENT_IDENTITY_SYSTEM = "urn:daher-health:openmrs-patient-uuid"
+
 
 @dataclass(frozen=True, slots=True)
 class HttpResult:
@@ -255,6 +264,119 @@ class OpenElisClient:
         if match.count is MatchCount.MANY:
             return VerifiedCreateResult(outcome=VerificationOutcome.AMBIGUOUS)
         return VerifiedCreateResult(outcome=VerificationOutcome.LOOKUP_UNAVAILABLE)
+
+    async def patient_identity_probe(self, correlation: SourceCorrelation) -> TargetProbeResult:
+        """DH-011G2 (LIBAN DECISION: SELECT OPTION D)'s `TargetProbe` for Patient. `correlation
+        .value` is the OpenMRS Patient UUID; `correlation.system` is expected to be
+        `PATIENT_IDENTITY_SYSTEM` (not enforced here -- the caller controls what it builds).
+
+        Requires `PatientProvider.java.patch`'s native routing to be live on the target OpenELIS
+        image; against the unpatched upstream provider this identifier search would instead
+        forward to the standalone secondary FHIR store, whose sync with native Patient creation
+        is best-effort (see `create_openelis_patient`'s docstring) -- exactly the false-ABSENT
+        this whole ticket exists to close for the Daher identity system specifically.
+        """
+        match = await self.identifier_search(PATIENT, PATIENT_IDENTITY_SYSTEM, correlation.value)
+        if match.count is MatchCount.ONE and match.fhir_id is not None:
+            return TargetProbeResult(
+                presence=TargetPresence.FOUND,
+                record=TargetRecord(system=PATIENT, record_id=match.fhir_id),
+            )
+        if match.count is MatchCount.ZERO:
+            return TargetProbeResult(presence=TargetPresence.ABSENT)
+        # MANY, UNREACHABLE, and the defensive ONE-without-an-id case all fail closed -- same
+        # DH-025 vocabulary every other probe in this file uses: "too many" and "couldn't tell"
+        # are not distinguished at this boundary, both mean "do not write, surface to an
+        # operator."
+        return TargetProbeResult(presence=TargetPresence.AMBIGUOUS)
+
+    async def create_openelis_patient(
+        self, correlation: SourceCorrelation, payload: Mapping[str, Any]
+    ) -> TargetRecord:
+        """DH-011G2's `TargetWriter` for Patient -- the real write protocol, usable directly as
+        `RecoveryCoordinator.reconcile`'s `write_target` for the ledger-tracked crash-recovery
+        path (§11), and internally by `ensure_openelis_patient` below for the synchronous,
+        non-crash-recovery case.
+
+        Same discipline as `deliver_service_request` (known bug 19's exact hazard): the POST's
+        own status is never trusted. Whether it returned 2xx, an error status, or raised
+        outright, the very next and only thing this method does is one authoritative native
+        reconciliation read via `identifier_search` on the Daher patient-identity system --
+        which `PatientProvider.java.patch` routes to native `daher_patient_identity` state, not
+        the secondary FHIR store, so this reconciliation is not exposed to that store's
+        best-effort sync gap (DH-011G's own finding: native Patient create and the secondary
+        store's sync are non-atomic for every *other* identifier system, which is exactly why
+        this ticket routes the Daher system away from it rather than trusting it here too).
+
+        Returns a `TargetRecord` only on exactly one authoritative match. Every other outcome --
+        zero matches after a possible write, 2+ matches, the POST itself never landing, or the
+        reconciliation read being unreachable/malformed -- raises `AmbiguousTargetState`. Never
+        issues a second POST under any of these outcomes.
+
+        This method does not probe before writing -- callers that need "reuse if it already
+        exists" (the correct behavior for a source identity like an OpenMRS Patient UUID, which
+        recurs across many orders for the same patient, unlike a ServiceRequest's always-fresh
+        correlation) must probe first themselves; see `ensure_openelis_patient`.
+        """
+        outgoing = _with_patient_identity(payload, correlation)
+
+        try:
+            await self._post(f"{self._base}/{PATIENT}", outgoing)
+        except Exception as error:  # noqa: BLE001 - a POST that never lands is itself ambiguous
+            raise AmbiguousTargetState(
+                f"Patient POST did not complete: {type(error).__name__}"
+            ) from error
+
+        match = await self.identifier_search(PATIENT, PATIENT_IDENTITY_SYSTEM, correlation.value)
+        if match.count is MatchCount.ONE and match.fhir_id is not None:
+            return TargetRecord(system=PATIENT, record_id=match.fhir_id)
+        if match.count is MatchCount.ZERO:
+            raise AmbiguousTargetState(
+                "Patient POST returned but native reconciliation found zero matches for "
+                f"OpenMRS UUID {correlation.value} -- cannot prove whether the write happened"
+            )
+        # MANY or UNREACHABLE
+        raise AmbiguousTargetState(
+            "Patient POST reconciliation is ambiguous (multiple native matches or the target "
+            f"was unreachable) for OpenMRS UUID {correlation.value}"
+        )
+
+    async def ensure_openelis_patient(
+        self, correlation: SourceCorrelation, payload: Mapping[str, Any]
+    ) -> TargetRecord:
+        """DH-011G2 §19/§10: the narrow, safe API a caller (the eventual order-ingestion path)
+        should use for "the OpenELIS Patient linked to this OpenMRS UUID, creating it if it does
+        not exist yet." Deliberately probe-first, unlike `deliver_service_request`'s always-POST
+        shape -- a patient's OpenMRS UUID is the *same* value across every order that patient
+        ever generates, so the common case is reuse, not create.
+
+        Contract (§10, exact): probe native Daher identity first. `FOUND` -> return the existing
+        record, no POST issued. `ABSENT` -> one create attempt via `create_openelis_patient`,
+        which itself always re-probes authoritatively after the POST and never trusts the POST's
+        own status. `AMBIGUOUS` -> raise `AmbiguousTargetState` without writing anything.
+
+        No fallback identifier, no demographic search, no pat_nationalId use -- the only lookup
+        this method performs is the exact `PATIENT_IDENTITY_SYSTEM` token search.
+
+        This is the synchronous, non-crash-recovery-tracked path -- it does not touch the ledger
+        and requires no recovery fence. For the ledger-tracked path (a durable claim recorded
+        before the attempt, so a crash between native commit and ledger completion can be
+        recovered by a fresh process without a second POST -- §11), a caller wires
+        `patient_identity_probe` and `create_openelis_patient` directly into
+        `RecoveryCoordinator.reconcile` instead of calling this method, exactly as DH-011J's own
+        concurrent-cancellation proof wires `cancellation_probe`/`cancel_service_request`.
+        """
+        probe = await self.patient_identity_probe(correlation)
+        if probe.presence is TargetPresence.FOUND:
+            if probe.record is None:  # Defensive; TargetProbeResult validates this at construction.
+                raise AmbiguousTargetState("found patient probe omitted its record")
+            return probe.record
+        if probe.presence is TargetPresence.AMBIGUOUS:
+            raise AmbiguousTargetState(
+                "Native Daher patient-identity probe could not prove presence or absence for "
+                f"OpenMRS UUID {correlation.value}"
+            )
+        return await self.create_openelis_patient(correlation, payload)
 
     async def service_request_probe(self, correlation: SourceCorrelation) -> TargetProbeResult:
         """DH-025's `TargetProbe`, bound to the one resource type whose search behavior this
@@ -448,6 +570,34 @@ def _with_daher_identifier(
                 continue  # drop; re-added below in canonical form, never duplicated
             others.append(entry)
     daher_identifier = {"system": SERVICE_REQUEST_TARGET_SYSTEM, "value": correlation.value}
+    return {**payload, "identifier": [*others, daher_identifier]}
+
+
+def _with_patient_identity(
+    payload: Mapping[str, Any], correlation: SourceCorrelation
+) -> Mapping[str, Any]:
+    """`_with_daher_identifier`'s exact twin for Patient -- see that function's docstring.
+    Injects `PATIENT_IDENTITY_SYSTEM`|correlation.value if absent, raises on a conflicting
+    existing value, normalizes if already present and correct. Never mutates `payload`.
+
+    `PatientProvider.java.patch` requires exactly one `PATIENT_IDENTITY_SYSTEM` identifier on
+    every create and fails closed (HTTP 400) otherwise -- this function is what guarantees that
+    invariant holds for every payload `create_openelis_patient` ever sends, the same way
+    `_with_daher_identifier` guarantees it for `deliver_service_request`.
+    """
+    existing = payload.get("identifier")
+    others: list[Any] = []
+    if isinstance(existing, Sequence) and not isinstance(existing, str | bytes):
+        for entry in existing:
+            if isinstance(entry, Mapping) and entry.get("system") == PATIENT_IDENTITY_SYSTEM:
+                if entry.get("value") != correlation.value:
+                    raise ValueError(
+                        "payload already carries a conflicting Daher patient-identity "
+                        f"identifier: {entry.get('value')!r} != {correlation.value!r}"
+                    )
+                continue  # drop; re-added below in canonical form, never duplicated
+            others.append(entry)
+    daher_identifier = {"system": PATIENT_IDENTITY_SYSTEM, "value": correlation.value}
     return {**payload, "identifier": [*others, daher_identifier]}
 
 

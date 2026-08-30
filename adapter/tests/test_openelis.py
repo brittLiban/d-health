@@ -8,6 +8,7 @@ import pytest
 
 from daher_adapter.config import Settings
 from daher_adapter.openelis import (
+    PATIENT_IDENTITY_SYSTEM,
     CancellationTargetState,
     HttpResult,
     MatchCount,
@@ -84,6 +85,10 @@ def create_patient(transport: ScriptedTransport):
 
 def correlation(value: str = "deadbeef") -> SourceCorrelation:
     return SourceCorrelation(system="urn:daher-health:adapter:source-event", value=value)
+
+
+def patient_correlation(value: str = "9a78482f-e67a-4bc9-87fc-bfcd72a4d1f8") -> SourceCorrelation:
+    return SourceCorrelation(system=PATIENT_IDENTITY_SYSTEM, value=value)
 
 
 def deliver(transport: ScriptedTransport, value: str = "deadbeef"):
@@ -697,3 +702,193 @@ def test_cancel_service_request_raises_when_reconciliation_cannot_prove_either_s
 
     with pytest.raises(AmbiguousTargetState):
         run(client(transport).cancel_service_request(correlation()))
+
+
+# --- patient_identity_probe / create_openelis_patient / ensure_openelis_patient -------------
+# DH-011G2 (LIBAN DECISION: SELECT OPTION D): the OpenMRS Patient UUID is Daher V1's
+# source-system patient identity, linked natively in OpenELIS. These mirror the
+# service_request_probe/deliver_service_request test shapes above -- same protocol, applied to
+# Patient, with the one deliberate difference that ensure_openelis_patient probes before ever
+# writing (a patient's OpenMRS UUID recurs across many orders; a ServiceRequest correlation
+# never does).
+
+
+def test_patient_identity_probe_zero_matches_is_absent() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    result = run(client(transport).patient_identity_probe(patient_correlation()))
+
+    assert result.presence is TargetPresence.ABSENT
+    assert result.record is None
+
+
+def test_patient_identity_probe_one_match_is_found_with_record() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("Patient", "pat-1"))))
+
+    result = run(client(transport).patient_identity_probe(patient_correlation()))
+
+    assert result.presence is TargetPresence.FOUND
+    assert result.record.system == "Patient"
+    assert result.record.record_id == "pat-1"
+
+
+def test_patient_identity_probe_many_matches_is_ambiguous_not_the_first_id() -> None:
+    """DH-011G's own live-proven duplicate-Patient gap: OpenELIS does not reject a resend on its
+    own, so this probe must never pick a winner among 2+ native matches."""
+    transport = ScriptedTransport()
+    two = bundle(resource("Patient", "pat-1"), resource("Patient", "pat-2"))
+    transport.queue_get(HttpResult(status=200, body=two))
+
+    result = run(client(transport).patient_identity_probe(patient_correlation()))
+
+    assert result.presence is TargetPresence.AMBIGUOUS
+
+
+def test_patient_identity_probe_unreachable_target_is_ambiguous_never_absent() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=500, body=None))
+
+    result = run(client(transport).patient_identity_probe(patient_correlation()))
+
+    assert result.presence is TargetPresence.AMBIGUOUS
+
+
+def create_openelis_patient(transport: ScriptedTransport, value: str | None = None):
+    oe_client = client(transport)
+    corr = patient_correlation(value) if value else patient_correlation()
+    return run(oe_client.create_openelis_patient(corr, PATIENT_PAYLOAD))
+
+
+def test_create_openelis_patient_injects_the_identity_identifier() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("Patient", "pat-1"))))
+
+    create_openelis_patient(transport, "abc-uuid")
+
+    posted_body = transport.posts[0][1]
+    identifiers = posted_body["identifier"]
+    assert {"system": PATIENT_IDENTITY_SYSTEM, "value": "abc-uuid"} in identifiers
+
+
+def test_create_openelis_patient_rejects_a_conflicting_caller_supplied_identifier() -> None:
+    transport = ScriptedTransport()
+    conflicting = {
+        "resourceType": "Patient",
+        "identifier": [{"system": PATIENT_IDENTITY_SYSTEM, "value": "wrong-value"}],
+    }
+
+    with pytest.raises(ValueError, match="conflicting"):
+        run(client(transport).create_openelis_patient(patient_correlation("abc-uuid"), conflicting))
+
+    assert len(transport.posts) == 0  # caught before any network call
+
+
+def test_create_openelis_patient_success_exactly_one_reconciliation_match() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("Patient", "pat-1"))))
+
+    result = create_openelis_patient(transport)
+
+    assert result.system == "Patient"
+    assert result.record_id == "pat-1"
+    assert len(transport.posts) == 1  # exactly one POST, no retry
+
+
+def test_create_openelis_patient_post_never_lands_is_ambiguous_not_a_retry() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(TimeoutError("timed out"))
+
+    with pytest.raises(AmbiguousTargetState):
+        create_openelis_patient(transport)
+
+    assert len(transport.posts) == 1
+    assert len(transport.gets) == 0  # no reconciliation possible with nothing to reconcile against
+
+
+def test_create_openelis_patient_zero_after_post_is_ambiguous_never_a_silent_success() -> None:
+    """This is DH-011G2 §24's own answer, unit-tested: known bug 19's shape (POST returns 2xx,
+    persistence did not happen) reads back as zero and never becomes a silent success."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=201, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle()))
+
+    with pytest.raises(AmbiguousTargetState, match="zero matches"):
+        create_openelis_patient(transport)
+
+    assert len(transport.posts) == 1  # no blind retry
+
+
+def test_create_openelis_patient_two_matches_after_post_is_ambiguous() -> None:
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    two = bundle(resource("Patient", "pat-1"), resource("Patient", "pat-2"))
+    transport.queue_get(HttpResult(status=200, body=two))
+
+    with pytest.raises(AmbiguousTargetState):
+        create_openelis_patient(transport)
+
+
+def test_create_openelis_patient_duplicate_conflict_reconciles_to_the_winner() -> None:
+    """A losing writer's conflict response (the DB-level unique index on daher_patient_identity
+    rejecting a race) must reconcile to whichever Patient actually exists, never be treated as
+    this writer's own failure."""
+    transport = ScriptedTransport()
+    transport.queue_post(HttpResult(status=500, body=resource("OperationOutcome")))
+    winner = bundle(resource("Patient", "winner-pat"))
+    transport.queue_get(HttpResult(status=200, body=winner))
+
+    result = create_openelis_patient(transport)
+
+    assert result.record_id == "winner-pat"
+    assert len(transport.posts) == 1  # the conflicted attempt, not a second one
+
+
+def test_ensure_openelis_patient_found_returns_existing_without_posting() -> None:
+    """§10/§19: FOUND means reuse -- no create attempt at all, no POST issued."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("Patient", "existing-pat"))))
+
+    result = run(client(transport).ensure_openelis_patient(patient_correlation(), PATIENT_PAYLOAD))
+
+    assert result.record_id == "existing-pat"
+    assert len(transport.posts) == 0  # reuse, never create
+    assert len(transport.gets) == 1  # exactly the probe, no second lookup
+
+
+def test_ensure_openelis_patient_absent_creates_exactly_once() -> None:
+    """§10/§19: ZERO permits exactly one create attempt, which itself always re-probes."""
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=200, body=bundle()))  # probe: absent
+    transport.queue_post(HttpResult(status=200, body=resource("OperationOutcome")))
+    transport.queue_get(HttpResult(status=200, body=bundle(resource("Patient", "new-pat"))))
+
+    result = run(client(transport).ensure_openelis_patient(patient_correlation(), PATIENT_PAYLOAD))
+
+    assert result.record_id == "new-pat"
+    assert len(transport.posts) == 1
+
+
+def test_ensure_openelis_patient_ambiguous_probe_never_writes() -> None:
+    """§10/§19: AMBIGUOUS stops before any POST -- never picks a winner, never retries blind."""
+    transport = ScriptedTransport()
+    two = bundle(resource("Patient", "pat-1"), resource("Patient", "pat-2"))
+    transport.queue_get(HttpResult(status=200, body=two))
+
+    with pytest.raises(AmbiguousTargetState):
+        run(client(transport).ensure_openelis_patient(patient_correlation(), PATIENT_PAYLOAD))
+
+    assert len(transport.posts) == 0
+
+
+def test_ensure_openelis_patient_unreachable_probe_never_writes() -> None:
+    transport = ScriptedTransport()
+    transport.queue_get(HttpResult(status=500, body=None))
+
+    with pytest.raises(AmbiguousTargetState):
+        run(client(transport).ensure_openelis_patient(patient_correlation(), PATIENT_PAYLOAD))
+
+    assert len(transport.posts) == 0
