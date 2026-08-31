@@ -70,10 +70,10 @@ jobs:
       - name: Dependency consistency
         run: pip check
       - name: Ruff lint
-        run: ruff check src tests migrations
+        run: ruff check src tests migrations scripts
         working-directory: adapter
       - name: Ruff format
-        run: ruff format --check src tests migrations
+        run: ruff format --check src tests migrations scripts
         working-directory: adapter
       - name: pytest
         # PYTHONPATH mirrors the image's ENV PYTHONPATH=/app/src.
@@ -104,7 +104,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0002_watermarks
+          EXPECTED_HEAD: 0003_dead_letter_resolutions
         working-directory: adapter
         run: |
           alembic upgrade head

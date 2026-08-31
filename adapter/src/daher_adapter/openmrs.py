@@ -34,11 +34,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 
 from daher_adapter.instants import MalformedInstant, ServerInstant, parse_instant
+from daher_adapter.ledger import MessageIdentity
 from daher_adapter.retry import TransientIntegrationError
+from daher_adapter.source_events import ResourceRejected, event_from_resource
 
 logger = logging.getLogger("daher_adapter.openmrs")
 
@@ -63,6 +66,32 @@ class OpenMrsProtocolError(RuntimeError):
 
 class TooManyPages(RuntimeError):
     """The window is larger than the configured page budget."""
+
+
+class OpenMrsResourceNotFound(RuntimeError):
+    """A single-resource read (not a search) confirmed the resource does not exist -- a real
+    HTTP 404, not a transport failure. `_fetch`'s real implementation must raise this, and only
+    this, for a confirmed 404 on `read_resource`; anything else (connection refused, timeout,
+    5xx) must still surface as a plain exception so `check_source_supersession` treats it as
+    UNREACHABLE, never as AMBIGUOUS-because-missing."""
+
+
+class SourcePresence(StrEnum):
+    """DH-011E4's dead-letter retry preflight result (PROVENANCE.md's DH-011E4 §7). Only
+    `CURRENT` may authorize a retry."""
+
+    CURRENT = "current"
+    SUPERSEDED = "superseded"
+    AMBIGUOUS = "ambiguous"
+    UNREACHABLE = "unreachable"
+
+
+@dataclass(frozen=True, slots=True)
+class SourcePreflightResult:
+    presence: SourcePresence
+    # A short, non-PHI explanation -- safe for operator CLI output (§11/§17). Never includes the
+    # resource payload itself.
+    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +212,31 @@ class OpenMrsOrderSource:
             )
         return bundle
 
+    def read_resource(self, resource_type: str, resource_id: str) -> Mapping[str, Any] | None:
+        """A direct FHIR `read` (`GET [base]/{type}/{id}`), not a `search` -- DH-011E4's
+        dead-letter retry preflight needs this, because `?status=` and `?identifier=` are both
+        confirmed-unsupported search parameters on this server (WATERMARK-DESIGN.md §6,
+        DECISIONS.md's DH-011C/D correction), so re-fetching the exact resource by id is the only
+        tested way to observe whether it has changed since it was dead-lettered.
+
+        Returns `None` only for a confirmed 404 (`OpenMrsResourceNotFound`, raised by `_fetch`'s
+        real implementation) -- a genuinely missing resource, distinct from an unreachable server,
+        which still propagates as a plain exception.
+        """
+        url = f"{self._base}/{resource_type}/{quote(resource_id, safe='')}"
+        try:
+            resource = self._fetch(url)
+        except OpenMrsResourceNotFound:
+            return None
+        if not isinstance(resource, Mapping):
+            raise OpenMrsProtocolError(f"expected a JSON object from {url!r}")
+        if resource.get("resourceType") != resource_type:
+            raise OpenMrsProtocolError(
+                f"expected a {resource_type!r} resource from {url!r}, got "
+                f"{resource.get('resourceType')!r}"
+            )
+        return resource
+
 
 def _total(bundle: Mapping[str, Any]) -> int:
     total = bundle.get("total")
@@ -223,3 +277,93 @@ def _next_link(bundle: Mapping[str, Any]) -> str | None:
 def unreachable(error: Exception) -> TransientIntegrationError:
     """Wrap a transport failure so `retry.py` treats it as retryable and nothing else does."""
     return TransientIntegrationError(f"OpenMRS unreachable: {type(error).__name__}")
+
+
+def check_source_supersession(
+    identity: MessageIdentity,
+    stored_payload: Mapping[str, object],
+    *,
+    source: OpenMrsOrderSource,
+) -> SourcePreflightResult:
+    """DH-011E4/DH-011E4B's mandatory dead-letter retry preflight (PROVENANCE.md's DH-011E4B §3).
+
+    **Proven complete for openmrs-core 2.8.7 / fhir2 4.2.0 (the exact pinned versions), not just
+    observed once.** `OrderServiceImpl.saveOrderInternal` routes both `Action.REVISE` and
+    `Action.DISCONTINUE` -- the only two order actions that can supersede an existing order --
+    through the identical `stopOrder` method on the previous order, which sets `dateStopped` and
+    refuses (`CannotStopInactiveOrderException`) unless that order is currently active; there is no
+    code path where either action succeeds without this mutation. fhir2's
+    `ServiceRequestTranslatorImpl.determineServiceRequestStatus` derives the original's FHIR
+    `status` purely from `dateStopped`/`autoExpireDate`, never from `Action` -- so this status
+    check is action-agnostic by construction, not by coincidence. `Action.RENEW` is not a
+    counter-example: it is never referenced in `OrderServiceImpl`'s save/validation logic at all
+    (zero uses outside the enum declaration, zero test coverage in openmrs-core's own suite), so it
+    cannot supersede an order in this version regardless of what the preflight does or does not
+    check. Full source citations and the complete action matrix:
+    `tests/test_openmrs.py`'s `test_supersession_superseded_on_status_change_with_version_unchanged`
+    docstring; live confirmation for both REVISE and DISCONTINUE: PROVENANCE.md's DH-011E4B §3.
+
+    `meta.lastUpdated` does **not** advance when this mutation happens (WATERMARK-DESIGN.md §6,
+    RESOLVED 2026-08-13; reconfirmed live for both actions 2026-08-31), which is exactly why the
+    watermark alone can never see it -- and `meta.versionId` was live-confirmed not to advance
+    either, for both actions. This function does not depend on either timestamp: it re-reads the
+    original resource by id and treats *either* the identity (built the same way
+    `event_from_resource` builds it for a fresh poll) or the status differing from what was
+    captured at dead-letter time as proof the source has moved. `?status=` and `?identifier=` are
+    both confirmed-unsupported search parameters on this server (`?replaces=` too, live-confirmed
+    HTTP 400 during this same investigation), which is why this is a direct `read`, never a
+    `search`.
+
+    Only `SourcePresence.CURRENT` means "safe to retry." Every other outcome -- including a
+    resource that no longer exists at all -- refuses, because none of them proves the dead-lettered
+    event is still exactly what the lab would receive.
+    """
+    try:
+        current_resource = source.read_resource(identity.resource_type, identity.resource_id)
+    except Exception as error:
+        return SourcePreflightResult(
+            presence=SourcePresence.UNREACHABLE,
+            detail=f"OpenMRS unreachable while checking the source: {type(error).__name__}",
+        )
+
+    if current_resource is None:
+        return SourcePreflightResult(
+            presence=SourcePresence.AMBIGUOUS,
+            detail="the original resource no longer exists at the source",
+        )
+
+    try:
+        current_event = event_from_resource(
+            current_resource,
+            resource_type=identity.resource_type,
+            direction=identity.direction,
+            source_system=identity.source_system,
+        )
+    except ResourceRejected as error:
+        return SourcePreflightResult(
+            presence=SourcePresence.AMBIGUOUS,
+            detail=f"the current source resource could not be parsed: {error}",
+        )
+
+    if current_event.identity != identity:
+        return SourcePreflightResult(
+            presence=SourcePresence.SUPERSEDED,
+            detail=(
+                f"source now reports version {current_event.identity.resource_version!r}, not "
+                f"the dead-lettered {identity.resource_version!r}"
+            ),
+        )
+
+    stored_status = stored_payload.get("status")
+    if current_event.status != stored_status:
+        return SourcePreflightResult(
+            presence=SourcePresence.SUPERSEDED,
+            detail=(
+                f"source status changed from {stored_status!r} to {current_event.status!r} "
+                f"since the dead letter was recorded"
+            ),
+        )
+
+    return SourcePreflightResult(
+        presence=SourcePresence.CURRENT, detail="source identity and status unchanged"
+    )

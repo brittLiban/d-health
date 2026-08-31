@@ -1,9 +1,11 @@
 """The poll cycle: paging, restart mid-window, and — the point of all of it — the watermark
 never advancing past work whose outcome is unknown.
 
-The delivery callable is injected everywhere here. There is no production implementation, because
-BLOCKER-6 has not decided how an order reaches OpenELIS (DH-011E is built, not activated). What
-these tests prove is the cycle's safety, which has to be right before any target is chosen.
+The delivery callable is injected everywhere here. There is no production implementation yet --
+BLOCKER-6 itself is resolved (Option F, the OpenMRS -> OpenELIS target architecture, is selected
+and proven), but the production `DeliverOrder` composition and real facility mapping inputs
+(DH-011H/DH-011I) are not yet assembled, and DH-011E stays built, not activated. What these tests
+prove is the cycle's safety, which has to be right before any target is chosen.
 
 Async tests use `asyncio.run` inside sync functions, matching `test_recovery.py`, so the suite
 needs no extra plugin.
@@ -496,4 +498,96 @@ class TestDH011E2PerEventRecoveryWriter:
         )
         assert ledger.get_state(identity_for("a")) == "completed"
         assert ledger.get_state(identity_for("b")) == "completed"
-        assert watermarks.current(**STREAM).raw == NOW
+
+
+class TestDH011E4RetryComposesWithTheExistingPoller:
+    """DH-011E4's operator retry ends at one ledger transition (`ledger.py`'s
+    `authorize_dead_letter_retry`) -- it never contacts the target itself. These tests prove that,
+    once authorized, the *next* `poll_once()` picks the event up through the completely unmodified
+    stale-claim path (`_handle`'s existing `processing`-and-not-ours branch ->
+    `RecoveryCoordinator.reconcile`), the same one DH-011K/DH-011E2 already proved live against
+    real OpenELIS. Nothing here is a new recovery algorithm; this is the composition claim those
+    live proofs did not cover, because a `dead_letter` never used to become eligible again at all.
+    """
+
+    def _authorize(self, ledger: LedgerRepository) -> None:
+        latest = ledger.latest_dead_letter(identity_for("a"))
+        assert latest is not None
+        ledger.authorize_dead_letter_retry(
+            identity_for("a"),
+            dead_letter_id=latest.id,
+            action="retry_after_correction",
+            reason="corrected the cause",
+            actor="liban",
+            actor_uid=1001,
+            actor_source="host_os_wrapper",
+            resulting_state="processing",
+        )
+
+    def test_target_absent_after_retry_gets_exactly_one_write_and_completes(self, db):
+        ledger = LedgerRepository(db)
+        ledger.claim(identity_for("a"))
+        ledger.move_to_dead_letter(
+            identity_for("a"), payload={}, error=ValueError("bad mapping"), attempts=1
+        )
+        self._authorize(ledger)
+
+        async def absent(_correlation):
+            return TargetProbeResult(presence=TargetPresence.ABSENT)
+
+        deliver = Deliveries()
+        server = FakeServer([bundle([sr("a", T1)], 1)])
+        poller, _, watermarks = build(db, server, deliver, probe=absent)
+
+        outcome = run(poller)
+
+        assert outcome.reconciled == 1
+        assert deliver.delivered == ["a"], "proven absence permits exactly one write"
+        assert ledger.get_state(identity_for("a")) == "completed"
+        assert watermarks.current(**STREAM).raw != T0, "watermark advances past the resolved event"
+
+    def test_target_found_after_retry_completes_without_a_second_write(self, db):
+        """A possibly-post-target dead letter (§2/§12): the original failure could have happened
+        after the write actually landed. The retry must not assume absence -- it must probe."""
+        ledger = LedgerRepository(db)
+        ledger.claim(identity_for("a"))
+        ledger.move_to_dead_letter(
+            identity_for("a"), payload={}, error=ValueError("read-back lost"), attempts=1
+        )
+        self._authorize(ledger)
+
+        async def found(_correlation):
+            return TargetProbeResult(
+                presence=TargetPresence.FOUND,
+                record=TargetRecord(system="test-target", record_id="tgt-a"),
+            )
+
+        deliver = Deliveries()
+        server = FakeServer([bundle([sr("a", T1)], 1)])
+        poller, _, watermarks = build(db, server, deliver, probe=found)
+
+        outcome = run(poller)
+
+        assert outcome.reconciled == 1
+        assert deliver.delivered == [], "already found -- never write again"
+        assert ledger.get_state(identity_for("a")) == "completed"
+        assert watermarks.current(**STREAM).raw != T0
+
+    def test_target_ambiguous_after_retry_makes_zero_writes_and_stays_blocked(self, db):
+        ledger = LedgerRepository(db)
+        ledger.claim(identity_for("a"))
+        ledger.move_to_dead_letter(
+            identity_for("a"), payload={}, error=ValueError("bad mapping"), attempts=1
+        )
+        self._authorize(ledger)
+
+        deliver = Deliveries()
+        server = FakeServer([bundle([sr("a", T1)], 1)])
+        poller, _, watermarks = build(db, server, deliver, probe=ambiguous)
+
+        outcome = run(poller)
+
+        assert outcome.halted_reason == "AmbiguousTargetState"
+        assert deliver.delivered == []
+        assert ledger.get_state(identity_for("a")) == "processing"
+        assert watermarks.current(**STREAM).raw == T0, "watermark stays blocked, not just delayed"

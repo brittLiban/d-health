@@ -3420,5 +3420,733 @@ fresh virtualenv after the split: `pip check`, `ruff check src tests migrations`
 test code changed since the live proof above, so the live Docker matrix was not rebuilt solely for
 this commit.
 
-READY TO COMMIT: independent review approved. See this ticket's own final handoff for this commit's
-exact SHA and CI result.
+READY TO COMMIT: independent review approved. Committed
+`22e8ec9adea112ebb85aedbd58399bff891348fb` (2026-08-30), pushed to `origin/master`, no force. CI
+run [33335414196](https://github.com/brittLiban/d-health/actions/runs/33335414196): all 8 jobs
+green.
+
+## DH-011E3 -- dead-letter operator resolution: evidence + design, no implementation
+
+**Ticket type: EVIDENCE + DESIGN.** No production code, migration, endpoint, or CLI was written.
+No commit. Base HEAD `22e8ec9adea112ebb85aedbd58399bff891348fb`, confirmed at start, worktree clean.
+
+### §2 -- every path that creates a dead letter
+
+`grep -rn "move_to_dead_letter"` across `adapter/src` finds exactly one production call site:
+`OrderPoller._walk` (`order_poller.py`), inside `except Exception as error:` -- the fallback branch
+after `except (DeadLetterRecoveryBlocked, AmbiguousTargetState)`, which halts instead of
+dead-lettering. That one `except Exception` wraps the *entire* `await self._handle(event)` call, so
+it catches failures from both of `_handle`'s branches: the fresh-claim path
+(`target = await self._deliver(event)`, direct) and the stale-claim recovery path
+(`self._recovery.reconcile(...)`, whose `write_target=write_recovered_event` closure also calls
+`self._deliver`, indirectly, inside `_retry_with_validated_correlation`). One mechanism, two
+callers, no branching on exception type beyond the two named recovery exceptions.
+
+| | ERROR CATEGORY | TARGET MUTATION POSSIBLE? | REFETCHABLE? | RETRY SAFE W/O PROBE? | RECOVERY COORDINATOR APPLICABLE? | OPERATOR CORRECTION POSSIBLE? |
+|---|---|---|---|---|---|---|
+| Fresh-claim delivery failure | Any exception `self._deliver` raises -- today, entirely hypothetical, since no `DeliverOrder` implementation exists (BLOCKER-6 unassembled) | **Not distinguished by the code.** A pre-write validation/mapping error and a post-write read-back failure both land in the same `except Exception` | Yes -- `event.payload` is captured into `DeadLetter.payload` at dead-letter time | **No, not proven.** Nothing probes the target before dead-lettering | Not today (state is `dead_letter`, not `processing` -- reconcile refuses it outright) | Only via a new mechanism (this ticket's subject) |
+| Stale-claim recovery-writer failure | Same as above, reached through `_retry_with_validated_correlation` inside `RecoveryCoordinator.reconcile`'s `write_target` | Same -- the probe already ran and returned ABSENT before `write_target` was even called, so a failure *here* is specifically a failure of the write itself, mid-flight | Yes, same mechanism | No -- same gap | N/A once dead-lettered (same as above) | Same |
+
+**The important negative finding:** no existing test exercises "the write actually landed, then an
+exception was raised anyway" as a distinct case from "the write never happened." `Deliveries.fail_on`
+in `test_order_poller.py` (`adapter/tests/test_order_poller.py:104-106`) raises *before* appending to
+`self.delivered`; `test_ledger.py`'s `test_exhausted_message_keeps_payload_in_dead_letter_not_audit`
+uses a bare `TimeoutError` with no target at all. Both are consistent with, but do not prove, "delivery
+failures are always pre-mutation." **§6 below does not rely on that assumption being true.**
+
+### §3 -- persisted schema, read directly, not inferred from names
+
+`ProcessedMessage` (`models.py:27-52`): `source_event_id` (unique, the full identity tuple, retained
+forever -- `ledger.py`'s `MessageIdentity.source_event_id` is a compact JSON array of
+`[source_system, direction, resource_type, resource_id, resource_version]`), `source_system`,
+`direction`, `resource_type`, `resource_id`, `resource_version`, `state`, `target_system`/
+`target_record_id` (populated only on `completed`), `claimed_at`, `completed_at`.
+
+`DeadLetter` (`models.py:91-113`): `payload` (JSON, **the entire original FHIR resource** --
+`dict(event.payload)` from `_walk`, itself `dict(resource)` from `event_from_resource` in
+`source_events.py:146`), `error_type` (exception class name, truncated 256), `error_summary`
+(`_safe_error_summary` -- `str(error)` whitespace-collapsed, truncated 1024, with an existing
+comment: "Stored only in the stack-owned adapter database. It is never emitted to application
+logs."), `attempts` (int, `CheckConstraint("attempts > 0")`), `created_at`.
+
+Two columns exist in the schema (`models.py:110-111`, migration `0001_safety_ledger.py:53-54`,
+2026-08-13) and are **dead code**: `resolved_at`, `resolution_note` -- `grep -rn` across
+`adapter/src`/`adapter/tests`/`adapter/migrations` finds them only in `models.py` and the migration
+that created them, never read or written anywhere. **No resolver-identity column exists anywhere in
+the schema.** `dead_letters.processed_message_id` carries `unique=True`
+(`sa.UniqueConstraint("processed_message_id", ...)`, migration line 61) -- **one `ProcessedMessage`
+supports at most one `DeadLetter` row today.** A second dead-lettering of the same event would need
+either a schema change or an overwrite; nothing in the current code attempts either (nothing can even
+reach that state today, since no path moves `dead_letter` back to `processing`).
+
+### §4 -- the invariant, and why Option A alone cannot satisfy it
+
+History-preservation forbids deleting either table, overwriting the original error, replacing
+`source_event_id`, or minting a second ledger identity for the same source event to dodge the first
+claim. **Option A as literally stated ("dead_letter -> processing") is schema-incomplete on its
+own**: given §3's unique constraint, a *second* real failure after a retry would either violate that
+constraint (`IntegrityError` on `move_to_dead_letter`'s `session.add(DeadLetter(...))`) or require
+overwriting the first row's `error_type`/`error_summary`/`payload` -- both forbidden by §4. Option A
+is therefore not a standalone alternative to Option B; it is incomplete without it.
+
+### §5/§17 -- recommended design, and why C was rejected
+
+**Recommended: A, completed by B, not a third "D" design.**
+
+1. A new `LedgerRepository` method, row-locked exactly like `mark_completed`/`move_to_dead_letter`
+   already are (`_locked_message`'s `SELECT ... FOR UPDATE`, `ledger.py:142-151`), refuses unless
+   `state == "dead_letter"` (the same `LedgerStateError` idiom `mark_completed` already uses for a
+   duplicate completion, `ledger.py:108-109`), and flips `state` back to `"processing"` -- nothing
+   else. It never contacts the target.
+2. A new, genuinely append-only `dead_letter_resolutions` table records one row per operator action
+   (§14) and never updates the original `DeadLetter` row.
+3. `dead_letters.processed_message_id`'s unique constraint is relaxed (drop `unique=True`, keep the
+   FK and index) so a second real failure creates a **second** immutable `DeadLetter` row instead of
+   colliding.
+
+Once (1) commits, `OrderPoller._handle` sees exactly the same thing it already sees for a crashed
+prior cycle's claim: `claim.claimed is False`, `claim.state == "processing"`, not raised by
+`DeadLetterRecoveryBlocked` -- it falls straight into the existing stale-claim branch
+(`order_poller.py:303-320`) and `RecoveryCoordinator.reconcile`'s already-proven FOUND/ABSENT/
+AMBIGUOUS branching runs unmodified. **Zero new recovery algorithm.**
+
+**Option C (a one-shot CLI calling `reconcile()` directly) was evaluated and rejected for V1.** It
+would need its own target probe/writer composition -- the identical BLOCKER-6 composition gap
+DH-011E2 closed only inside `OrderPoller` -- built a second time for a CLI process. It would also
+need to acquire `PostgresRecoveryFence`, an advisory lock explicitly "held for the adapter lifetime"
+(`recovery.py:110`) by the running adapter process; a second process cannot acquire the same
+session-scoped `pg_try_advisory_lock` while the adapter is live (`PostgresRecoveryFence.__enter__`
+raises `RecoveryFenceUnavailable` on failure, `recovery.py:134-136`), so Option C either cannot run
+while the adapter is up, or needs an entirely separate locking scheme. A+B needs neither: it lets
+the already-running (once activated) poller's own next cycle do the already-proven work.
+
+**Comparison table (idempotency / crash safety / auditability / implementation size / operator
+clarity / watermark behavior / target reconciliation / concurrency / future UI compatibility):**
+A alone fails auditability and crash-durability-of-history (no record if a retry fails again,
+possible constraint violation). B alone (an attempt table with no state transition) never actually
+makes the poller re-attempt anything -- inert without A. C duplicates composition and fence-acquisition
+work C's own process would need, and cannot run concurrently with a live adapter. A+B: idempotent
+(row-locked transition, §13), crash-safe (§12, reduces to already-proven DH-011K points),
+auditable (§14, append-only), small (one repository method + one small table + one relaxed
+constraint), operator-clear (single verb: "retry"), correct watermark behavior (§15, unchanged
+rule), correct target reconciliation (reuses DH-025 exactly), correct concurrency (row lock, §13),
+and UI-compatible later (the CLI and a future UI would call the identical repository method).
+
+### §6 -- the critical retry rule, satisfied structurally, not by convention
+
+Because step (1) never contacts the target, "could the target already be mutated" is answered
+exactly the way it already is for every stale `processing` claim -- by `RecoveryCoordinator.reconcile`'s
+probe, which must run before any write:
+`probe_target` -> `AMBIGUOUS` raises `AmbiguousTargetState` (fail closed); `FOUND` reconciles with
+zero writes; `ABSENT` permits exactly one write via `write_target`; an unreachable target surfaces
+as `AMBIGUOUS` from the probe implementation's own contract, not a separate code path here. No
+dead-letter-specific bypass of DH-025 exists or is proposed.
+
+### §7 -- source-version drift
+
+`MessageIdentity.source_event_id` (`ledger.py:42-55`) includes `resource_version`; `assemble_cohort`'s
+dedup key (`source_events.py:188-192`) is `(resource_type, resource_id, resource_version)`. v1 and
+v2 of the same `resource_id` are **provably separate** `ProcessedMessage` rows, and
+`source_correlation` (`recovery.py:104-106`) hashes the *full* identity tuple, so v1 and v2 produce
+**different** `SourceCorrelation` digests -- nothing in the target-probe layer recognizes them as
+"the same order." The original v1 payload is never lost regardless of source drift; it lives in
+`DeadLetter.payload` verbatim. **Two questions have no existing policy, and none is invented here:**
+should a v1 retry deliver its own stored (possibly now-stale) payload, or refuse/redirect to current
+source state; and if both v1 and v2 are ever independently delivered, does anything downstream
+recognize they describe the same clinical order. **Flagged for Liban.**
+
+### §8 -- cancellation while dead-lettered
+
+ADR-005 and ADR-018 (`DECISIONS.md`) already establish, as accepted fact, that a discontinuation
+arrives as a **new** `ServiceRequest` carrying `replaces` -- not a new version of the original.
+`source_events.py`'s own module docstring (lines 65-68) independently confirms the same mechanism:
+"stopping an order does not advance the original's `meta.lastUpdated`... this back-reference is the
+only way the cancellation is ever visible." If original event A dead-letters and a later cancelling
+event B (a distinct `resource_id`) arrives, B necessarily sorts after A in the cohort (A's
+`last_updated` is earlier) and `_walk`'s unconditional `break` on `DeadLetterRecoveryBlocked`
+(`order_poller.py:204-216`) means **B is never even reached, every cycle, for as long as A stays
+dead-lettered** -- this is the identical mechanism `test_dead_letter_halts_and_the_next_event_is_not_
+silently_skipped` (DH-011K) already proves for two unrelated resources; it applies unchanged to an
+original/cancellation pair. **Real, unresolved risk:** an operator retry of A that does not first
+check for a later `replaces`-pointing event could deliver an order the clinician already canceled
+upstream. Nothing in the current codebase checks this today -- DH-011J's `$cancel` operation is a
+separate mechanism for an *already-accepted* order, keyed off `daher_analysis_correlation`, not the
+general order-creation poller this ticket concerns. **Flagged for Liban, not decided**: whether a
+retry of A must re-check current source state for a superseding `replaces` event before delivering.
+If resolving this safely requires processing event history in sequence rather than resolving A in
+isolation, that is itself part of what needs deciding, not assumed here.
+
+### §9 -- operator actions vs. repository governance
+
+`AGENTS.md`'s own rule ("Always `Human Decision Required: Yes`... Anything changing what patient
+data leaves the system") squarely covers SKIP, DISCARD, and FORCE-COMPLETE: each would permanently
+suppress a clinical order, or mark one `completed` with no evidence any target write occurred.
+**None is implemented or recommended for V1.** RETRY-AFTER-CORRECTION is the only operator action
+this design proposes, and §6 shows it never bypasses DH-025.
+
+### §10 -- operator surface and authorization
+
+`adapter/src/daher_adapter/app.py` (read in full) has **no authentication subsystem whatsoever**:
+two unauthenticated health endpoints, and `docs_url=None, redoc_url=None, openapi_url=None`
+deliberately disable any exposed API surface. DH-008's OAuth2Login/Keycloak work secures OpenMRS
+and OpenELIS logins -- it has no relationship to this adapter process. Building a new authenticated
+web endpoint solely for this feature would be a disproportionate new subsystem for a V1 mechanism.
+**Recommended: a local administrative CLI on the facility host**, relying on the same host-access
+trust boundary already implicitly relied on for `alembic upgrade`/`docker compose` operations on
+that host. **Blocker stated, not glossed over, per this ticket's own §10 instruction:** the adapter
+cannot cryptographically verify who is running that CLI. A required `--actor`/`--reason` pair is
+operator-*asserted* intent, captured for audit, not verified identity — true operator authentication
+does not exist for this adapter today, and building it is out of this ticket's scope.
+
+### §11 -- PHI exposure
+
+Confirmed by §3: `DeadLetter.payload` holds the entire original FHIR resource unredacted --
+patient reference (`ServiceRequest.subject`) at minimum, possibly requester/test details depending
+on what a future `DeliverOrder` implementation's exception messages embed in `error_summary` (the
+existing code's own comment already treats both fields as sensitive). Any list/summary operator
+output must default to: source system, resource type, resource ID/version, error *type* (not the
+freeform summary by default), attempt count, `created_at`/`resolved_at` -- never the raw payload.
+Payload inspection, if ever needed, is a separate, explicitly privileged action, not routine list
+output.
+
+### §12 -- crash safety of the resolution action itself
+
+Step (1) (the ledger transition) is a single local DB commit with no target contact.
+- Crash before it commits: the transaction never happened; ledger stays `dead_letter`, no audit row
+  exists. The operator simply re-issues the same resolution command.
+- Crash after it commits: the event is now `processing`, exactly like any crashed prior cycle's
+  claim -- this is not a new scenario, it *is* DH-011K's crash point 2.
+- Probe returns FOUND, crash before `mark_completed`: DH-011K crash point 3/4, already proven --
+  next cycle re-probes, still FOUND, completes without a second write.
+- Probe returns ABSENT, target commits, response lost: DH-011K crash point 3, already proven --
+  next cycle re-probes, now FOUND, reconciles without a second write.
+- Target FOUND/write completes, ledger completes, crash before watermark advance: DH-011K crash
+  point 5, already proven -- next cycle treats it as the expected duplicate.
+
+**No new crash-recovery logic is required by this design** -- every scenario past the ledger
+transition collapses into a crash point DH-011K already live-qualified against real disposable
+infrastructure.
+
+### §13 -- concurrent operator resolution
+
+The same `SELECT ... FOR UPDATE` pattern already used by `mark_completed`/`move_to_dead_letter`
+(`ledger.py:142-151`) row-locks the `ProcessedMessage`. Two simultaneous resolution attempts
+serialize on that lock; the second, once unblocked, observes `state != "dead_letter"` (the first
+already flipped it) and refuses -- the identical `LedgerStateError` idiom `mark_completed` already
+uses to reject a duplicate completion (`ledger.py:108-109`). Enforced by the database, not by
+disabling a UI button.
+
+### §14 -- audit model
+
+New, append-only `dead_letter_resolutions`: `id`, `dead_letter_id`, `processed_message_id`, `actor`,
+`reason`, `requested_at`, `resolved_at`, `resulting_state`. The original `dead_letters` row is never
+updated or deleted by a resolution; `resolved_at`/`resolution_note` on that row stay unused (or are
+repurposed only as a denormalized "first attempt" convenience, an implementation detail, not a
+policy question).
+
+### §15 -- watermark behavior
+
+Unchanged in every case: unresolved `dead_letter` keeps the watermark behind it (proven, DH-011K).
+The operator's ledger-state flip makes the event *eligible* for the next `poll_once()`, nothing more
+-- an ambiguous or still-failing outcome leaves the watermark exactly where it was. Only a terminal
+`completed`/reconciled state lets `_walk`'s existing, unmodified "advance only past contiguous
+success" rule carry the watermark forward. **The resolution mechanism never touches the watermark
+directly.**
+
+### §16 -- test plan (design only)
+
+List unresolved dead letters, no PHI in output; unauthorized/malformed resolution refused; resolving
+a nonexistent/wrong event refused; original `DeadLetter` row and payload retained byte-for-byte
+after resolution; retry after a pre-target failure; retry with target now FOUND (zero writes); retry
+with target ABSENT (exactly one write); retry with target AMBIGUOUS (zero writes, re-halts); retry
+with target unreachable (fails closed); crash immediately after the ledger transition commits
+(reduces to an existing DH-011K crash-point-2 test shape); two concurrent resolution attempts (one
+wins, one refused); watermark stays blocked until the retry actually reaches a terminal state; the
+next event proceeds once the resolved predecessor is terminal; source-version drift (v1
+dead-lettered, v2 arrives -- confirms v2 is never reached while v1 is unresolved); cancellation-while-
+blocked (A dead-lettered, a later `replaces` event B never reached until A resolves); no hard delete
+of either table anywhere in the design (there is no code path that could).
+
+### Real facility and cleanup
+
+No infrastructure was built or torn down for this ticket -- evidence was gathered entirely by
+reading committed source, tests, migrations, and governance documents already in the repository.
+Real facility never touched.
+
+READY TO COMMIT: No. Design decision pending Liban's input on §7 (source-version drift policy) and
+§8 (cancellation-while-blocked policy). No production code, migration, endpoint, or CLI was written
+in this pass.
+
+## DH-011E4 -- auditable dead-letter retry with source-supersession protection
+
+**Policy approved and decided by Liban** (`DECISIONS.md`'s ADR-033): DH-011E3's recommended A+B
+design is approved; source-version policy is "retry uses the exact stored payload for the exact
+`MessageIdentity`, immutable, mandatory preflight before every retry"; supersession policy is
+"a superseded/canceled source fails the retry closed, always"; SKIP/DISCARD/FORCE-COMPLETE remain
+unsupported in V1. This section is the implementation's full evidentiary account.
+
+### §3 -- schema and migration
+
+`0003_dead_letter_resolutions.py`: adds `dead_letters.sequence` (1-based, backfilled to `1` for
+every pre-existing row -- never invented for a row that did not exist before this migration),
+drops `uq_dead_letters_processed_message_id`, adds a non-unique index on `processed_message_id`
+(FK columns are not auto-indexed on PostgreSQL) plus a composite unique index on
+`(processed_message_id, sequence)`, and creates the append-only `dead_letter_resolutions` table
+(both FKs `ondelete="RESTRICT"`, matching `dead_letters`' own FK). `downgrade()` re-adds the old
+unique constraint and will fail loudly, not silently, if a database that actually used the new
+one-to-many capability is downgraded past this point -- deleting the extra attempts to satisfy the
+old constraint would itself violate DH-011E4's own history invariant.
+
+Verified three ways against real PostgreSQL 16 (a disposable throwaway container, its own random
+credentials, torn down after each check):
+
+1. **Fresh database to head**: `alembic upgrade head` runs `0001` -> `0002` -> `0003` cleanly,
+   `alembic current`/`alembic heads` both report `0003_dead_letter_resolutions`.
+2. **Existing database, one historical dead-letter row**: downgraded to `0002_watermarks`, inserted
+   one `processed_messages`/`dead_letters` row pair using the pre-`0003` schema shape (no
+   `sequence` column, the old unique constraint live), upgraded to `0003`. The historical row
+   survived byte-for-byte (`id`, `payload`, `error_summary` all unchanged) with `sequence`
+   backfilled to `1`.
+3. **A second dead-letter attempt against that same message, post-migration**: inserted a second
+   `dead_letters` row for the same `processed_message_id` with `sequence=2` -- succeeded (would
+   have violated the old constraint). Inserting a third row reusing `sequence=2` was rejected by
+   the new composite unique index, confirmed via the real Postgres error:
+   `duplicate key value violates unique constraint "uq_dead_letters_processed_message_sequence"`.
+
+CI's `EXPECTED_HEAD` constant (`.github/workflows/ci.yml`, the same fresh-database-to-head guard
+DH-011K FINALIZE's own history documents) is updated to `0003_dead_letter_resolutions`.
+
+### §4/§5 -- the ledger method, and why A alone was schema-incomplete (confirmed, not just argued)
+
+`LedgerRepository.authorize_dead_letter_retry` (`ledger.py`): row-locks `ProcessedMessage` via the
+same `_locked_message` (`SELECT ... FOR UPDATE`) `mark_completed`/`move_to_dead_letter` already
+use, refuses unless `state == "dead_letter"`, refuses unless the `dead_letter_id` passed in is
+still `_current_dead_letter`'s result (the highest-`sequence` row for that message) -- closing the
+race between the caller's own unlocked network preflight and this locked transaction -- writes one
+`DeadLetterResolution` row inside the same transaction, and only for `resulting_state ==
+"processing"` flips `ProcessedMessage.state`. Called for a refusal too, so an operator's refused
+attempt is exactly as auditable as an authorized one.
+
+`move_to_dead_letter` itself now computes `sequence` as `MAX(sequence) + 1` for that
+`processed_message_id`, inside the same row lock it already held -- confirming DH-011E3's own §4
+finding that Option A ("flip the state back") could not survive a second real failure on its own:
+a second `move_to_dead_letter` call against a database still carrying the old unique constraint
+would have raised `IntegrityError` on `session.add(DeadLetter(...))`. `LedgerRepository.
+latest_dead_letter`/`list_dead_letters` were added for the CLI and the orchestrator;
+`list_dead_letters` returns `DeadLetterSummary`, a dataclass with no `payload`/`error_summary`
+field at all -- PHI safety enforced by the type itself, not by a downstream rendering convention
+that could be forgotten later.
+
+### §6 -- the retry rule, satisfied structurally
+
+Because `authorize_dead_letter_retry` never contacts the target, "was the target already mutated"
+is answered the same way it already is for every stale `processing` claim: the next `poll_once()`'s
+`RecoveryCoordinator.reconcile` probes first. Proven at the unit level (new
+`TestDH011E4RetryComposesWithTheExistingPoller` in `test_order_poller.py`): a dead-lettered event,
+authorized, then probed FOUND -> zero writes, completes; probed ABSENT -> exactly one write,
+completes; probed AMBIGUOUS -> zero writes, stays `processing`, watermark stays behind. No
+dead-letter-specific bypass of DH-025 exists anywhere in this change.
+
+### §7 -- the source preflight, and the live test that could have invalidated the design
+
+`openmrs.py`'s new `OpenMrsOrderSource.read_resource(resource_type, resource_id)` performs a FHIR
+`read` (`GET [base]/{type}/{id}`), never a `search` -- `?status=`/`?identifier=` are both
+confirmed-unsupported search parameters on this server (WATERMARK-DESIGN.md §6; PROJECT_STATE.md's
+DH-011C/D correction). `OpenMrsResourceNotFound` is raised by the real fetch implementation only
+for a confirmed 404, distinct from a transport failure. `check_source_supersession` re-derives a
+`SourceOrderEvent` from the re-read resource via the real, unmodified `event_from_resource` (never
+hand-rolled) and compares its `MessageIdentity` and `status` against what was stored at
+dead-letter time, returning `CURRENT`/`SUPERSEDED`/`AMBIGUOUS`/`UNREACHABLE`.
+
+**This design rested on one untested assumption going in**: that a real OpenMRS `DISCONTINUE`
+still produces the exact status-mutation-without-timestamp-advance shape WATERMARK-DESIGN.md §6
+documented on 2026-08-13. If it did not -- if a real discontinuation left the original resource's
+`status`/`meta.versionId`/`meta.lastUpdated` all unchanged -- `check_source_supersession` would
+return `CURRENT` for a cancelled order and the CLI would authorize a retry the lab should never
+receive, exactly the §10 failure this ticket names safety-critical. This was tested live, not
+assumed, before this section was written.
+
+**Live stack**: disposable `openmrs-db` (MariaDB) + `openmrs-backend` (`daher-health/openmrs-
+backend:3.7-off`, `OMRS_DEMO_CONTENT=off`, `SSO_ENABLED=false`), project `dh011e4`, own generated
+credentials, no Keycloak/Caddy/OpenELIS (this ticket's preflight logic touches OpenMRS only; the
+target-write path is unchanged from DH-011E2's own already-proven live evidence and was not
+re-run). Real synthetic patient/visit/encounter/order created via native REST (`POST
+/ws/rest/v1/order`) -- FHIR2 `ServiceRequest` create is unsupported on this server, the same DH-011K
+finding.
+
+**Result, captured verbatim from the running server (2026-08-31):**
+
+| | before `DISCONTINUE` | after `DISCONTINUE` (re-read by id) |
+|---|---|---|
+| `status` | `active` | `completed` |
+| `meta.versionId` | `1788152458000` | `1788152458000` -- unchanged |
+| `meta.lastUpdated` | `2026-08-31T08:00:58.000+03:00` | `2026-08-31T08:00:58.000+03:00` -- unchanged |
+
+Confirms WATERMARK-DESIGN.md §6's 2026-08-13 finding still holds. **This is the reason
+`check_source_supersession` must compare `status`, not only identity/version** -- identity
+comparison alone would have returned `CURRENT` for this real cancelled order.
+
+The discontinuing resource itself (`B`) carries `status: "unknown"` and `replaces: [{"reference":
+"ServiceRequest/<A's id>", ...}]`, confirming ADR-005/ADR-018's documented mechanism directly, not
+by inference. `GET .../ServiceRequest?replaces=ServiceRequest/{A}` was tested live and returned
+HTTP 400 (`OperationOutcome`, `"The FHIR endpoint on this server does not know how to handle GET
+operation[ServiceRequest] with parameters [[replaces]]"`) -- confirmed unsupported, not assumed.
+The preflight has exactly one working signal on this server (a direct re-read plus identity/status
+comparison), not two.
+
+**The real, unmodified `check_source_supersession` function was then run against this same live
+stack** (not a second, hand-simulated check): a freshly created, untouched order classified
+`CURRENT` ("source identity and status unchanged"); the really-discontinued order above,
+re-preflighted with its pre-discontinue payload as the stored baseline, classified `SUPERSEDED`
+("source status changed from 'active' to 'completed' since the dead letter was recorded"). Both
+outcomes match what the design predicted.
+
+Stack torn down and independently re-verified empty across all four `docker ps -a`/`images`/
+`volume ls`/`network ls` filters immediately after this test.
+
+### §8 -- cancellation-while-blocked: unchanged from DH-011E3, not solved here
+
+Per Liban's decision, this ticket implements source-supersession detection for the event being
+retried itself (§7). It does **not** implement automatic handling of a later, still-queued
+`replaces` event behind a resolved original -- `_walk`'s existing unconditional halt-on-dead-letter
+still means a later event is never reached while an earlier one is unresolved, and once the earlier
+one resolves (to `completed` or back to `dead_letter`), the later event is reached by the poller's
+own existing, unmodified ordering on the next cycle, exactly as before this ticket. No new behavior
+was added or needed for this specific case; it was deliberately not solved, per §8's own
+instruction not to decide "skip A because B cancels it" without explicit policy, which this
+ticket's LIBAN DECISIONS section did not supply.
+
+### §9 -- operator actions vs. governance (confirmed unchanged)
+
+RETRY AFTER CORRECTION is the only implemented action. `tests/test_cli.py`'s
+`test_no_destructive_commands_are_registered` inspects `build_parser()`'s actual argparse
+subcommand registry (walking `_subparsers`/`choices`, not grepping source text) and asserts it
+contains exactly `{dead-letter, list, retry}` -- none of `skip`/`discard`/`force-complete`/
+`force_complete`/`mark-completed`. Control-tested: a companion test registers a fake `skip`
+subcommand directly into the same parser object and confirms the identical check catches it,
+proving the guard actually inspects the registry rather than trivially passing on an empty
+intersection.
+
+### §10 -- operator surface and identity (implemented exactly as designed)
+
+`cli.py`'s `build_parser`/`main` build a real `LedgerRepository` and `OpenMrsOrderSource` from
+`Settings.from_env()` (two new optional fields, `omrs_base_url`/`omrs_auth` -- optional so every
+existing deployment's `Settings.from_env()` call keeps working unchanged; only the dead-letter CLI
+reads them, since the running FastAPI service still does not talk to OpenMRS at all).
+`_resolve_actor` prefers `DAHER_ADAPTER_HOST_ACTOR` (`actor_source="host_wrapper"`) over a typed
+`--actor` flag (`actor_source="operator_typed"`), refuses with a clear `CliUsageError` if neither
+is present, and never treats either as verified identity -- both are recorded, both are labeled for
+exactly what they are. `app.py` is untouched: no new route, no token, no login.
+
+### §12 -- crash safety, reasoned and reduced to already-proven points
+
+`authorize_dead_letter_retry`'s own transaction is a single local commit with no target contact.
+Crash before commit: nothing happened, ledger stays `dead_letter`. Crash after commit: the event is
+now `processing`, identical to DH-011K's own crash point 2. Everything downstream of that --
+probe-FOUND-then-crash, write-commits-then-response-lost, completed-then-crash-before-watermark --
+is DH-011K's crash points 3/4/5 verbatim; no new infrastructure was built to re-prove them, because
+nothing in this ticket changes the code path they already cover.
+
+### §13 -- concurrency, live-proven against real PostgreSQL
+
+Disposable single-container Postgres 16, project `dh011e4`, own random credentials, migrated to
+head. `test_two_concurrent_operators_only_one_authorization_wins`: two threads, two real
+connections, one dead letter -- exactly one `authorize_dead_letter_retry` call succeeds, the other
+raises `LedgerStateError`, exactly one `DeadLetterResolution` row exists.
+`test_two_concurrent_operators_never_produce_two_processing_transitions`: the same race repeated
+five times fresh, four concurrent workers each round (20 total race trials) -- every round produces
+exactly one winner, zero exceptions to that rule. `test_repeated_dead_letter_lifecycle_on_real_
+postgres`: dead-letter -> authorize -> dead-letter again -> authorize again, against real
+PostgreSQL, both `DeadLetter` rows retained with their own payloads, both `DeadLetterResolution`
+rows recorded. Stack torn down and re-verified empty after.
+
+### §14 -- audit model (implemented exactly as designed)
+
+`dead_letter_resolutions`: `id`, `dead_letter_id`, `processed_message_id`, `action`, `reason`,
+`actor`, `actor_source`, `requested_at`, `resolved_at`, `resulting_state`. Never updated, never
+deleted, by any code path in this repository.
+
+### §15 -- watermark behavior (unchanged, re-confirmed at the unit level)
+
+`test_target_ambiguous_after_retry_makes_zero_writes_and_stays_blocked` confirms the watermark stays
+at its pre-authorization position when the post-retry probe is `AMBIGUOUS`;
+`test_target_absent_after_retry_gets_exactly_one_write_and_completes`/`test_target_found_after_
+retry_completes_without_a_second_write` confirm it advances only once the event reaches a terminal,
+accounted-for state. No code in `dead_letter.py`/`cli.py` references `WatermarkRepository` at all.
+
+### §16 -- test plan, executed
+
+`test_ledger.py` (8 new): wrong-state refusal, missing reason/actor, successful authorization +
+audit row, refusal recorded without flipping state, stale-`dead_letter_id` refusal, full
+repeat-attempt lifecycle with correct sequencing, PHI-free `list_dead_letters`,
+current-attempt-only reporting. `test_openmrs.py` (11 new, new file): `read_resource` success/
+URL-encoding/404/wrong-type, and `check_source_supersession`'s all four outcomes plus a PHI-safety
+assertion on `detail`. `test_dead_letter.py` (6 new, new file): not-found, all four preflight
+outcomes wired through the orchestrator, and a signature-inspection proof that no target/watermark
+dependency exists. `test_cli.py` (9 new, new file): the destructive-command guard plus its own
+control test, actor resolution (all three paths), PHI-free list output, both retry outcomes.
+`test_order_poller.py` (3 new): the FOUND/ABSENT/AMBIGUOUS composition proofs (§6). Live-gated,
+real infrastructure: `test_dh011e4_dead_letter_retry.py` (3 tests, Postgres concurrency + repeat
+lifecycle) plus the one-shot OpenMRS supersession proof recorded in §7 above (not a permanent
+gated file -- a manual verification of real server behavior against the actual production
+functions, whose result is recorded here rather than re-derived on every CI run).
+
+### Test suite state
+
+Adapter: **181 -> 218** unit tests. New gated live-integration file
+`test_dh011e4_dead_letter_retry.py`: 3 tests, all passing live, skip cleanly with no env vars set
+(31 -> 34 total gated tests). `pip check`, `ruff check src tests migrations`, `ruff format --check
+src tests migrations`, full `pytest -q` (218 passed, 34 skipped) all clean.
+
+### Real facility and cleanup
+
+Real facility never touched. Two disposable stacks were built and torn down independently: a
+single-container Postgres 16 (project `dh011e4`, concurrency/lifecycle proof) and an OpenMRS-only
+stack (`openmrs-db` + `openmrs-backend`, project `dh011e4`, no Keycloak/Caddy/OpenELIS, the
+supersession preflight proof). Both independently re-verified empty across all four
+`docker ps -a`/`images`/`volume ls`/`network ls` filters after their respective teardowns; no
+scratch credential files, compose overrides, or generated `.env` files were left behind.
+
+READY TO COMMIT: see this ticket's own final handoff -- not committed in this pass, per this
+ticket's own explicit "Do NOT commit or push until all proof passes... Then STOP for review"
+instruction.
+
+## DH-011E4B -- closing the three independent-review acceptance gaps before commit
+
+Independent review approved DH-011E4's architecture but withheld commit approval on three specific
+gaps. This section is the evidentiary account of closing exactly those three, without broadening
+scope, touching real facility data, or activating DH-011E.
+
+### Gap 1 -- complete authoritative supersession detection
+
+**The exact pinned source, not inference.** `openmrs-reference-application-3-backend:3.7.x` (the
+base image `openmrs-config/Dockerfile` builds from) ships `openmrs-api-2.8.7.jar` (confirmed via
+`jar tf` inside a running container) and `fhir2-4.2.0.omod` (confirmed via `find` inside the same
+container -- matches what `source_events.py`'s own docstring already cited for `_sort`
+non-support). Fetched via `gh api repos/openmrs/openmrs-core/contents/...?ref=2.8.7` and
+`repos/openmrs/openmrs-module-fhir2/contents/...?ref=4.2.0` -- the exact tagged source, not a
+branch tip that could have drifted.
+
+**`Order.java` (openmrs-core 2.8.7):** `Action` is exactly four values --
+`NEW, REVISE, DISCONTINUE, RENEW` (line 53-57). `isActive(Date)` (line 462): `false` if voided or
+`action == DISCONTINUE`; otherwise `isActivated && !isDiscontinued && !isExpired`.
+`isDiscontinued(Date)` (line 525): purely `dateStopped != null && checkDate.after(dateStopped)` --
+no reference to `Action` at all.
+
+**`OrderServiceImpl.java` (openmrs-core 2.8.7), `saveOrderInternal` (line 176-184):**
+
+```java
+Order previousOrder = order.getPreviousOrder();
+if (REVISE == order.getAction()) {
+    if (previousOrder == null) {
+        throw new MissingRequiredPropertyException("Order.previous.required", (Object[]) null);
+    }
+    stopOrder(previousOrder, aMomentBefore(order.getDateActivated()), isRetrospective);
+} else if (DISCONTINUE == order.getAction()) {
+    discontinueExistingOrdersIfNecessary(order, isRetrospective);
+}
+```
+
+`discontinueExistingOrdersIfNecessary` (line 415-463) calls the identical `stopOrder` on either the
+explicit `previousOrder` or, if none was supplied, an auto-matched active order for the same
+concept/orderable (refusing with `AmbiguousOrderException` on a genuine multi-match; a no-match
+falls through as a no-op discontinue, an edge case that does not weaken this proof -- if the
+auto-match ever *does* resolve to the dead-lettered order, `stopOrder` still runs on it exactly the
+same way). `stopOrder` (line 857-881):
+
+```java
+private void stopOrder(Order orderToStop, Date discontinueDate, boolean isRetrospective) {
+    ...
+    if (DISCONTINUE == orderToStop.getAction()) {
+        throw new CannotStopDiscontinuationOrderException();
+    }
+    if (!ConfigUtil.getProperty(GP_ALLOW_SETTING_STOP_DATE_ON_INACTIVE_ORDERS, false)) {
+        if (isRetrospective && orderToStop.getDateStopped() != null) {
+            throw new CannotStopInactiveOrderException();
+        }
+        if (!isRetrospective && !orderToStop.isActive()) {
+            throw new CannotStopInactiveOrderException();
+        } else if (isRetrospective && !orderToStop.isActive(discontinueDate)) {
+            throw new CannotStopInactiveOrderException();
+        }
+    }
+    setProperty(orderToStop, "dateStopped", discontinueDate);
+    saveOrderInternal(orderToStop, null);
+}
+```
+
+**The structural guarantee this proves**: `stopOrder` is the *only* mutation REVISE or DISCONTINUE
+ever perform on the previous/original order, it is unconditionally reached by both actions (never
+optional, never skippable), and it can only succeed starting from an active order -- there is no
+third outcome besides "the original's `dateStopped` gets set" or "the whole save throws." A
+`grep -rn "RENEW"` across `openmrs-core`'s entire tree (source + tests) returns exactly one hit:
+the enum declaration in `Order.java` itself. `Action.RENEW` is never checked anywhere in
+`OrderServiceImpl`'s branching (neither the `REVISE ==`/`DISCONTINUE ==` checks above nor anywhere
+else), confirmed independently via GitHub code search
+(`search/code?q=Action.RENEW+repo:openmrs/openmrs-core` -- zero results) and via
+`search/code?q=RENEW+repo:openmrs/openmrs-core` -- the only other hits are three unrelated test
+files (module/admin "renewal" concepts, not `Order.Action.RENEW`). RENEW is declared, untested,
+and structurally incapable of stopping an order in this version.
+
+**`ServiceRequestTranslatorImpl.java` (fhir2 4.2.0), `determineServiceRequestStatus` (line
+132-149):**
+
+```java
+boolean isCompeted = order.isActivated()
+    && ((order.getDateStopped() != null && currentDate.after(order.getDateStopped()))
+        || (order.getAutoExpireDate() != null && currentDate.after(order.getAutoExpireDate())));
+boolean isDiscontinued = order.isActivated() && order.getAction() == Order.Action.DISCONTINUE;
+
+if (isCompeted && isDiscontinued) return UNKNOWN;
+else if (isDiscontinued) return REVOKED;
+else if (isCompeted) return COMPLETED;
+else return ACTIVE;
+```
+
+The ORIGINAL order's own `action` is `NEW` (or occasionally `REVISE`'s own target, never
+`DISCONTINUE`), so `isDiscontinued` is always `false` for it -- its status is decided entirely by
+`isCompeted`, which reads only `dateStopped`/`autoExpireDate`. **This is the proof that the status
+check is action-agnostic by construction, not by coincidence**: `stopOrder`'s one mutation
+(`dateStopped`) is the *only* input this branch of the translator ever looks at for the original
+order, regardless of which action stopped it. Line 106-118 additionally confirms `replaces` is set
+for both `DISCONTINUE` and `REVISE` successors (`case DISCONTINUE: case REVISE:
+serviceRequest.setReplaces(...)`), while `RENEW` uses `setBasedOn` instead -- a different,
+non-cancelling relationship, consistent with RENEW never calling `stopOrder`.
+
+**OpenMRS order action matrix (complete, source-cited):**
+
+- `NEW` -- not a successor action; creates the original itself.
+- `REVISE` -- successor always created; `previousOrder` required (throws otherwise); original
+  mutated (`stopOrder` sets `dateStopped`); original FHIR status becomes `completed`; preflight
+  detects: YES. Source: `OrderServiceImpl.java:176-181`, `stopOrder` at `:857-881`,
+  `ServiceRequestTranslatorImpl.java:132-149`.
+- `DISCONTINUE` -- successor always created; `previousOrder` explicit or auto-matched; original
+  mutated (`stopOrder` sets `dateStopped`); original FHIR status becomes `completed`; preflight
+  detects: YES. Source: `OrderServiceImpl.java:182-183,415-463,857-881`,
+  `ServiceRequestTranslatorImpl.java:132-149`.
+- `RENEW` -- never checked in `saveOrderInternal`'s branching; original NOT mutated; original
+  status unaffected; not a supersession mechanism in this version at all, so nothing for the
+  preflight to fail to detect. Source: absence, confirmed by full-repository code search.
+
+### Live controls, both proven supersession shapes
+
+Two disposable OpenMRS-only stacks (`openmrs-db` + `openmrs-backend`, `daher-health/openmrs-
+backend:3.7-off`, `OMRS_DEMO_CONTENT=off`, no Keycloak/Caddy/OpenELIS), projects `dh011e4` and
+`dh011e4b`, own generated credentials, on separate host ports so they never collide.
+
+**DISCONTINUE** (`dh011e4`, 2026-08-31): real synthetic patient/visit/encounter/order via native
+REST (`POST /ws/rest/v1/order` -- FHIR2 `ServiceRequest` create is unsupported, DH-011K's own
+finding). Before: `status=active`, `versionId=1788152458000`,
+`lastUpdated=2026-08-31T08:00:58.000+03:00`. `POST /ws/rest/v1/order` with `action: DISCONTINUE`,
+`previousOrder: <A>`. After (re-read by id): `status=completed`, `versionId` and `lastUpdated`
+byte-for-byte unchanged. The discontinuing resource carries `status: unknown`,
+`replaces: [{reference: ServiceRequest/<A>, ...}]`. `GET
+.../ServiceRequest?replaces=ServiceRequest/<A>` returns HTTP 400
+(`"The FHIR endpoint on this server does not know how to handle GET operation[ServiceRequest] with
+parameters [[replaces]]"`) -- confirmed unsupported, not assumed. The real, unmodified
+`check_source_supersession` was run against both a fresh untouched order (`CURRENT`) and this
+discontinued one (`SUPERSEDED`, `detail="source status changed from 'active' to 'completed' since
+the dead letter was recorded"`).
+
+**REVISE** (`dh011e4b`, 2026-08-31, a second fresh stack): identical recipe. Before: `status=active`,
+`versionId=1788153737000`, `lastUpdated=2026-08-31T08:22:17.000+03:00`. `POST /ws/rest/v1/order`
+with `action: REVISE`, `previousOrder: <A>`, a new `instructions` value (no clinical meaning --
+probe only). After (re-read by id): `status=completed`, `versionId`/`lastUpdated` unchanged --
+identical shape to DISCONTINUE. The revision resource itself shows `status=active`,
+`replaces: [{reference: ServiceRequest/<A>, ...}]`. The real, unmodified
+`check_source_supersession` classified this `SUPERSEDED` too
+(`detail="source status changed from 'active' to 'completed'..."`).
+
+Both stacks independently torn down and re-verified empty across all four `docker ps -a`/
+`images`/`volume ls`/`network ls` filters immediately after their respective proofs. `RENEW` was
+**not live-exercised** -- per §5's own instruction not to guess at an unsupported mechanism, and
+because the source proof above already establishes it cannot supersede an order in this version,
+constructing a live RENEW scenario would prove nothing further.
+
+**Is status-based preflight complete? YES.** Every V1 OpenMRS order action capable of superseding
+an existing order (REVISE, DISCONTINUE) is proven, both from the exact pinned source and from two
+independent live stacks, to always change that order's own FHIR status into something
+`check_source_supersession` refuses. `NEW` is not a successor action. `RENEW` cannot supersede
+anything in this openmrs-core version. No fourth action exists (`Order.Action` has exactly four
+values, confirmed from source). This is not "no valid successor path was found in testing" -- it
+is "no valid successor path can exist," proven from the service layer's own unconditional
+`stopOrder` mutation and the translator's own action-agnostic status derivation.
+
+### Gap 2 -- operator attribution
+
+**The problem, confirmed from source, not assumed.** `adapter/Dockerfile` runs the container as a
+fixed OS account (`useradd --uid 10001 ... adapter`, `USER adapter`). Any
+`docker compose exec adapter ...` invocation runs as this same fixed account regardless of which
+real human ran it -- `os.getuid()`/`getpass.getuser()` inside the container would always return the
+same value, never the host operator's own identity. This confirmed the exact "container boundary
+destroys OS identity" case the ticket named.
+
+**Redesign.** New `adapter/scripts/daher_adapter_admin.py` -- a host-side wrapper, stdlib only (no
+`daher_adapter` dependency, so it needs nothing installed beyond Python 3 on the host). `derive_
+host_actor()` calls `pwd.getpwuid(os.getuid())` on the *host*, before `docker compose exec` would
+otherwise destroy that identity. `build_exec_argv` (pure, unit-tested with no subprocess
+involved) constructs a fixed-prefix list: `["docker", "compose", "exec", "-e",
+"DAHER_ADAPTER_ACTOR_NAME=<name>", "-e", "DAHER_ADAPTER_ACTOR_UID=<uid>", "adapter", "python",
+"-m", "daher_adapter.cli", *cli_args]`. `main()` calls `subprocess.run(exec_argv, check=False)` --
+`shell` is never set to `True` anywhere in this file (the stdlib default, `False`, is what keeps
+every element literal). `daher_adapter.cli`'s `retry` subcommand no longer has a `--actor` argument
+at all (confirmed by a permanent test inspecting `argparse`'s own registered option strings, not by
+attempting to pass one and hoping it fails); its only identity source is the
+`DAHER_ADAPTER_ACTOR_NAME`/`DAHER_ADAPTER_ACTOR_UID` env-var pair, refusing clearly if either is
+absent.
+
+**Hostile-input proof** (`tests/test_daher_adapter_admin.py`, 9 strings: double quotes, single
+quotes, `; rm -rf /`, an embedded newline, `$(whoami)`, `` `whoami` ``, `| cat /etc/passwd`,
+`&& echo pwned`, `> /tmp/pwned`): every string reaches `build_exec_argv`'s returned list as its own
+unmodified element, and a mocked `subprocess.run` confirms both that `shell` is never `True` and
+that the exact hostile string is what `main()` actually passed through -- proven at the call site,
+not only at the pure-function level.
+
+**Trust claim, stated once, precisely:** operator attribution is derived from the authenticated
+local OS account at the facility-host trust boundary. A host root/Docker administrator can
+ultimately tamper with the system; V1 does not claim tamper-proof attribution against a compromised
+host administrator. Not cryptographic non-repudiation. `DeadLetterResolution.actor`/`actor_uid`/
+`actor_source` (new `actor_uid` column, migration `0003_dead_letter_resolutions` -- added to that
+still-uncommitted migration directly rather than as a follow-on, since nothing has shipped yet)
+record exactly this and nothing stronger.
+
+**Can the operator supply an arbitrary actor through a normal CLI flag? NO** -- confirmed by
+`tests/test_cli.py`'s `test_retry_has_no_actor_flag`, which inspects the registered `retry`
+subparser's own `option_strings` and asserts `--actor` is not among them.
+
+### Gap 3 -- the critical PostgreSQL evidence
+
+`adapter/tests/integration/test_dh011e4_dead_letter_retry.py` was already a **permanent gated
+file** from DH-011E4's first pass (skipif on `DH011E4_ADAPTER_DB_*`, never runs in CI, never reads
+the real `.env`) -- not a one-shot script. Re-verified live against a fresh disposable Postgres 16
+(project `dh011e4`, own random credentials): all 4 tests pass, including a new
+`test_no_duplicate_active_retry_sequential_reattempt_with_same_stale_id_refused` (added for
+completeness against the ticket's own item G) proving a sequential re-attempt against an
+already-won `dead_letter_id` is refused by the wrong-state check before it can even reach the
+stale-id guard. Migration re-verified fresh (`0002` → `0003` with the new `actor_uid` column) on
+the same disposable Postgres. Stack torn down and re-verified empty after.
+
+### §11 -- catch-all ordering, re-confirmed unchanged
+
+`order_poller.py`'s `_walk` was not touched by DH-011E4 or DH-011E4B. Re-read directly: `except
+(DeadLetterRecoveryBlocked, AmbiguousTargetState)` is the first except clause on `await
+self._handle(event)`, evaluated before the generic `except Exception` -- both still hit their
+dedicated fail-closed branch first, exactly as DH-011E3 characterized. A target response-loss
+error can still dead-letter through the generic branch (unchanged); any subsequent authorized
+retry always re-enters through `_handle`'s existing stale-`processing` branch into
+`RecoveryCoordinator.reconcile`'s probe-before-write, never a second path. Per this ticket's own
+instruction, generic exceptions are not classified into pre/post-target categories here -- the
+safe recovery design (probe before every write, always) makes that unnecessary.
+
+### Final verification
+
+Fresh venv: `pip check`, `ruff check src tests migrations scripts`, `ruff format --check src tests
+migrations scripts`, `pytest -q` -- 230 passed, 34 skipped, all clean. Migration verified three
+ways again (fresh; historical one-row; second-attempt) against real PostgreSQL with the `actor_uid`
+column present. `git diff --check` clean. Secret scan clean (the one hit, `ADAPTER_DB_PASSWORD:
+adapter` in `.github/workflows/ci.yml`, is the pre-existing disposable CI Postgres credential, not
+new). No `.env` in the diff. All disposable infrastructure (2× Postgres-only, 2× OpenMRS-only) torn
+down and re-verified empty.
+
+READY TO COMMIT: Yes. All three independent-review gaps closed. See DH-011E4B's own final handoff
+for the complete field-by-field record.

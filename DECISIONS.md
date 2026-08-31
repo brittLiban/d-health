@@ -4205,3 +4205,172 @@ the compile job's own body).
 resource (Docker containers/volumes/networks/images, the throwaway OpenMRS instance, all scratch
 files) confirmed and independently re-verified before this commit — see PROJECT_STATE.md/
 CURRENT_STATE.md's DH-011G2 entries. **READY TO COMMIT: Yes.**
+
+---
+
+## ADR-033 — Dead-letter retry: operator-authorized, source-preflighted, never a second recovery
+## algorithm
+
+**Date:** 2026-08-31 · **Status:** ACCEPTED · **Decided by:** Liban (DH-011E4, closure pass
+DH-011E4B)
+
+**Context.** DH-011K found, and DH-011E3 investigated without implementing, a real operational gap:
+`RecoveryCoordinator.reconcile` correctly refuses to auto-recover a `dead_letter` row
+(`DeadLetterRecoveryBlocked`) — proven fail-closed, live-qualified — but no path existed for an
+authorized operator to repair the underlying cause and explicitly allow that same source event to
+be attempted again. One permanent bad event would halt that resource/direction's polling stream
+forever. DH-011E3's own evidence pass (PROVENANCE.md) characterized every dead-letter creation
+path, the persisted schema (including two always-dead `resolved_at`/`resolution_note` columns
+since migration `0001_safety_ledger`), and five candidate designs, without implementing any of
+them or deciding the two policy questions it could not answer from source alone.
+
+**Decision — DH-011E3's recommended A+B design is approved, exactly as investigated:**
+
+1. **DEAD-LETTER RETRY: allowed only through explicit operator authorization after correction.**
+   `LedgerRepository.authorize_dead_letter_retry` (new) is the only production path that can ever
+   move a `ProcessedMessage` from `dead_letter` back to `processing`. It is row-locked exactly like
+   `mark_completed`/`move_to_dead_letter` already are, refuses unless the current state is
+   `dead_letter`, and refuses unless the `DeadLetter` attempt examined by the preflight is still
+   the message's current one (guards the race between an unlocked network preflight and this
+   locked transaction).
+
+2. **SOURCE EVENT: immutable.** `DeadLetter.payload`, once written, is never updated. A retried
+   event that fails again gets a new `DeadLetter` row (`sequence` 2, 3, …) — the previous unique
+   constraint on `dead_letters.processed_message_id` (one row per message) is relaxed to a
+   composite `(processed_message_id, sequence)` uniqueness (migration `0003_dead_letter_resolutions`).
+
+3. **RETRY PAYLOAD: the original stored payload belonging to the exact `MessageIdentity`.** The
+   retry never substitutes today's source content for what was captured at dead-letter time. What
+   changes source-side is detected, not incorporated.
+
+4. **SOURCE PREFLIGHT: mandatory before every retry authorization.**
+   `openmrs.check_source_supersession` re-reads the original resource by id (a FHIR `read`, never a
+   `search` — `?status=` and `?identifier=` are both confirmed-unsupported search parameters on
+   this server) and compares its current `MessageIdentity` and `status` against what was stored.
+   Returns one of `CURRENT` / `SUPERSEDED` / `AMBIGUOUS` / `UNREACHABLE`. Only `CURRENT` authorizes
+   the ledger transition; every other outcome still writes an auditable
+   `DeadLetterResolution` row (`resulting_state="refused_*"`) but never moves the ledger.
+
+   **Live-verified, not merely designed** (disposable `dh011e4` OpenMRS-only stack, 2026-08-31): a
+   real `DISCONTINUE` (`POST /ws/rest/v1/order`, `action: DISCONTINUE` + `previousOrder`) flips the
+   original `ServiceRequest.status` from `active` to `completed` **while `meta.versionId` and
+   `meta.lastUpdated` both stay byte-for-byte unchanged** — confirming WATERMARK-DESIGN.md §6's
+   2026-08-13 finding still holds on this server. This is the reason the preflight cannot rely on
+   version/timestamp comparison alone and must compare `status`. `GET
+   .../ServiceRequest?replaces=ServiceRequest/{id}` was tested live and returns HTTP 400
+   ("not-supported") — confirmed, not assumed, so the retry preflight has exactly one working
+   signal (status/identity re-read), not two. The real, unmodified `check_source_supersession`
+   function was run against both a real untouched order (`CURRENT`) and a really-discontinued one
+   (`SUPERSEDED`, detail: `"source status changed from 'active' to 'completed'..."`) and classified
+   both correctly.
+
+   **Completeness proven, not just observed once (DH-011E4B, 2026-08-31 independent review).**
+   Independent review of the first pass found this rested on a single observed DISCONTINUE example
+   without ruling out other order actions. Audited the exact pinned `openmrs-core` (2.8.7) and
+   `fhir2` (4.2.0) source at those tags: `OrderServiceImpl.saveOrderInternal` routes both
+   `Action.REVISE` and `Action.DISCONTINUE` — the only two actions that can supersede an existing
+   order — through the identical `stopOrder` method on the previous order, which sets
+   `dateStopped` and refuses (`CannotStopInactiveOrderException`) unless that order is currently
+   active; there is no code path where either action succeeds without this mutation. fhir2's
+   `ServiceRequestTranslatorImpl.determineServiceRequestStatus` derives the original's FHIR
+   `status` purely from `dateStopped`/`autoExpireDate`, never from `Action` — so the status check
+   is action-agnostic by construction. `Action.RENEW` is not a counter-example: it is never
+   referenced in `OrderServiceImpl`'s save/validation logic at all (zero uses outside the enum
+   declaration, zero test coverage anywhere in `openmrs-core`'s own suite), so it cannot supersede
+   an order in this version regardless of what the preflight checks. `Action.NEW` is not a
+   successor action. REVISE was then live-proven on a second disposable OpenMRS-only stack the
+   same day: `status` flipped `active` → `completed`, `meta.versionId`/`meta.lastUpdated`
+   unchanged — identical to DISCONTINUE — and the real, unmodified `check_source_supersession`
+   classified it `SUPERSEDED`. **Status-based detection is therefore complete for every V1
+   OpenMRS order action capable of superseding an existing order, not merely sufficient for the
+   one case originally tested.** Full source citations: `openmrs.py`'s
+   `check_source_supersession` docstring and `tests/test_openmrs.py`'s
+   `test_supersession_superseded_on_status_change_with_version_unchanged`.
+
+5. **SUPERSEDED/CANCELED UPSTREAM: automatic retry refused, always.** A dead-letter retry never
+   delivers an order the source has already superseded. No automatic mark-completed, no watermark
+   advance, no target write. The event stays `dead_letter`; the operator sees a plain, non-PHI
+   explanation and manual clinical review is implied, never automated.
+
+6. **SKIP/DISCARD/FORCE-COMPLETE: not supported in Daher V1.** Each would permanently suppress a
+   clinical order (or mark one `completed` with no evidence a target write occurred) — squarely
+   `AGENTS.md`'s "anything changing what patient data leaves the system" rule. **Human Decision
+   Required if ever wanted**; not implemented, and `tests/test_cli.py`'s
+   `test_no_destructive_commands_are_registered` inspects the actual argparse command registry
+   (not source-tree prose) to guard this, control-tested against a deliberately-registered fake
+   `skip` command to prove the guard itself fires.
+
+7. **Operator surface: a local facility-host CLI (`daher_adapter.cli`), not a web endpoint.**
+   `adapter/src/daher_adapter/app.py` has no authentication subsystem at all; a new privileged web
+   endpoint would be a disproportionate new subsystem for a V1 mechanism. A mandatory `--reason`
+   accompanies every retry.
+
+   **Operator attribution redesigned (DH-011E4B, 2026-08-31 independent review).** The first pass
+   accepted a typed `--actor` flag as a peer alternative to a host-wrapper-supplied value, both
+   equally trusted. Independent review found this indistinguishable in practice from claiming
+   attribution the adapter cannot back up. **`retry` now has no `--actor` argument at all.** The
+   only identity source it accepts is the pair `DAHER_ADAPTER_ACTOR_NAME`/`DAHER_ADAPTER_ACTOR_UID`,
+   both required, set only by the new `scripts/daher_adapter_admin.py` — a host-side wrapper that
+   derives them from `pwd.getpwuid(os.getuid())` on the facility host *before* `docker compose
+   exec` would otherwise destroy that identity, and forwards them as `-e` flags via
+   `subprocess.run` with a list argv (`shell=False` always — a `--reason` containing quotes, `;`,
+   a newline, `$(...)`, or backticks reaches the CLI's own `argparse` as one literal string,
+   proven directly in `tests/test_daher_adapter_admin.py` against nine hostile inputs). If neither
+   env var is present, the CLI refuses with a clear error naming the wrapper; it does not fall back
+   to any caller-suppliable value.
+
+   **The precise trust claim, stated once:** operator attribution is derived from the
+   authenticated local OS account at the facility-host trust boundary. A host root/Docker
+   administrator can ultimately tamper with the system; V1 does not claim tamper-proof attribution
+   against a compromised host administrator. It is not cryptographic non-repudiation, and nothing
+   in this codebase describes it as such. `DeadLetterResolution` records `actor` (the OS account
+   name), `actor_uid` (its numeric UID, more durable than a name that can be recycled), and
+   `actor_source` (always `"host_os_wrapper"` in V1 — kept as an explicit column, not a hardcoded
+   constant, so the audit trail is self-describing if a second surface is ever added).
+
+**What this does NOT do.** No new recovery algorithm: once the ledger transition commits, the
+event is indistinguishable from an ordinary stale `processing` claim, and the completely unmodified
+`RecoveryCoordinator.reconcile`/DH-025 probe-before-write machinery (live-qualified by DH-011K,
+rewired payload-aware by DH-011E2) handles everything downstream — proven at the unit level for
+target FOUND (zero writes, completes), ABSENT (exactly one write, completes), and AMBIGUOUS (zero
+writes, stays blocked, watermark stays behind). No new authentication subsystem. **Does not
+activate DH-011E** — no scheduler, no recurring task, nothing in `app.py` starts a poll cycle; the
+CLI's own job stops at the ledger transition.
+
+**Two items explicitly deferred, not decided here, per DH-011E3's own flag:**
+
+- **Source-version drift policy**: whether a retry of a dead-lettered event should ever be refused
+  or redirected when the *source*, not just the *event itself*, has moved to a materially different
+  version carrying different clinical content, versus the narrower supersession/cancellation check
+  this ADR does implement. Out of scope for this pass; the implemented preflight only detects
+  identity drift and the one documented status-mutation shape.
+- **Cancellation-while-blocked ordering policy**: whether resolving a dead-lettered original event
+  should ever automatically account for a later, still-unclaimed cancellation event queued behind
+  it, rather than leaving that queued event to reach the poller naturally once the original resolves.
+  Not decided; not implemented.
+
+**Independent review, DH-011E4B (2026-08-31): three acceptance gaps found and closed, none
+requiring a redesign of items 1–6 above.** (1) Supersession completeness — closed by the source
+audit and REVISE live-proof recorded under item 4. (2) Operator attribution trustworthiness —
+closed by the host-OS-wrapper redesign recorded under item 7. (3) The critical PostgreSQL
+concurrency/repeat-failure proof was already a permanent gated file
+(`test_dh011e4_dead_letter_retry.py`, not a one-shot script); a fourth test
+(`test_no_duplicate_active_retry_sequential_reattempt_with_same_stale_id_refused`) was added to it
+for completeness and re-run live.
+
+**Test counts, adapter (measured):** 230 unit tests passing (from 181 at DH-011E2; 218 after the
+first DH-011E4 pass; 12 more from DH-011E4B's REVISE completeness tests, the wrapper's own tests,
+and the CLI's redesigned-identity tests), plus 4 `test_dh011e4_dead_letter_retry.py` live-gated
+Postgres tests (real row-level locking concurrency — 20+ concurrent-race trials across two test
+shapes, all correct; real repeated-dead-letter lifecycle; real sequential-reattempt refusal) and
+two disposable OpenMRS-only live proofs of the source preflight, DISCONTINUE and REVISE (not
+permanent gated test files — one-shot manual verifications of real server behavior, recorded here
+and in PROVENANCE.md's DH-011E4B section). `pip check`/`ruff check`/`ruff format --check` all
+clean, including the new `scripts/` directory.
+
+**Real facility:** never started, stopped, or connected to. All disposable stacks (`dh011e4`
+Postgres-only ×2, `dh011e4`/`dh011e4b` OpenMRS-only ×2) were independently torn down and
+re-verified empty across all four `docker ps -a`/`images`/`volume ls`/`network ls` filters before
+this record was written. **READY TO COMMIT:** see DH-011E4B's own final handoff — not committed in
+this pass, per that ticket's own explicit "Do NOT commit or push... Then STOP for review"
+instruction.

@@ -92,6 +92,11 @@ class Settings:
     retry_multiplier_seconds: float
     retry_max_seconds: float
     openelis_site_code: str | None = None
+    # DH-011E4: only the dead-letter retry CLI reads these -- the running FastAPI service does
+    # not talk to OpenMRS at all yet (DH-011E is BUILT + VERIFIED, NOT ACTIVATED). Optional so
+    # every existing deployment's `Settings.from_env()` keeps working unchanged.
+    omrs_base_url: str | None = None
+    omrs_auth: str | None = None
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -118,6 +123,8 @@ class Settings:
             retry_multiplier_seconds=_positive_float(env, "ADAPTER_RETRY_MULTIPLIER_SECONDS", 1.0),
             retry_max_seconds=_positive_float(env, "ADAPTER_RETRY_MAX_SECONDS", 30.0),
             openelis_site_code=_optional_site_code(env, "OPENELIS_SITE_CODE"),
+            omrs_base_url=env.get("ADAPTER_OMRS_BASE_URL", "").strip() or None,
+            omrs_auth=env.get("ADAPTER_OMRS_AUTH", "").strip() or None,
         )
 
     @property
