@@ -1,0 +1,190 @@
+OpenELIS test name,LOINC,active?
+Actin Smooth Muscle,"",yes
+Albumin,"",yes
+AMACR (p504 s),"",yes
+Amylase,"",yes
+Anti-CD10,"",yes
+Anti-CD15,"",yes
+Anti-CD20,"",yes
+Anti-CD22,"",yes
+Anti-CD 3,"",yes
+Anti-CD30,"",yes
+Anti-CD34,"",yes
+Anti-CD45,"",yes
+Anti-CD 5,"",yes
+Anti-CD56,"",yes
+Anti-CD7,"",yes
+Anti-CD79a,"",yes
+Anti-CD99 (O13),"",yes
+Anti-CDX-2 (EPR2764Y),"",yes
+Anti-Chromogranin A,"",yes
+Anti-Cyclin D1 (SP4-R),"",yes
+Anti-Cytokeratin 20,"",yes
+Anti-Cytokeratin 5/6,"",yes
+Anti-Cytokeratin 7,"",yes
+Anti-Desmin,"",yes
+Anti-E-Cadherin,"",yes
+Anti-EMA (E29),"",yes
+Anti-ER,"",yes
+Anti-Gata 3,"",yes
+Anti-hepatocyte Specific Antigen (Hep Par-1),"",yes
+Anti-HER2,"",yes
+Anti-Ki67,"",yes
+Anti-melanosome (HMB45),"",yes
+Anti-MUC2,"",yes
+Anti-MUM1,"",yes
+Anti-p40 (BC28),"",yes
+Anti-p63 (4A4),"",yes
+Anti-Pan Keratin,"",yes
+Anti-PR,"",yes
+Anti-S100,"",yes
+Anti-Synaptophysin (SP11),"",yes
+Anti-Thyroid Transcription Factor,"",yes
+Anti-Vimentin,"",yes
+ARV resistance,"",yes
+BA#,"",no
+Baso %,"",yes
+Basophiles,"",yes
+Basophiles (%),"",yes
+BCL 2,"",yes
+BCL 6,"",yes
+BerEp4,"",yes
+Beta HCG,"",yes
+Bioline,"",yes
+Bioline,"",yes
+Bioline,"",yes
+Bioline,"",no
+Calponin,"",yes
+Calretinin,"",yes
+CCMH,"",yes
+CD3 percentage count,"",yes
+CD4,"",yes
+CD4 absolute count,"",yes
+CD4 Absolute count (mm3),"",yes
+CD4 percent  (%),"",yes
+CD4 percentage count,"",yes
+CINtec® p16 Histology,"",yes
+CMCH,"",yes
+COVID-19 ANTIBODY IgG,94547-7,yes
+COVID-19 ANTIBODY IgG,94547-7,yes
+COVID-19 ANTIBODY IgM,94547-7,yes
+COVID-19 ANTIBODY IgM,94547-7,yes
+COVID-19 PCR,94500-6,yes
+COVID-19 PCR,94500-6,yes
+COVID-19 PCR,94500-6,yes
+Creatinine,"",yes
+Créatininémie,"",yes
+DENGUE PCR,7855-0,yes
+DENGUE PCR,7855-0,yes
+DENGUE PCR,7855-0,yes
+Determine,"",yes
+Determine,"",yes
+DNA PCR,"",yes
+DOG1 (SP31),"",yes
+Eo %,"",yes
+EO#,"",no
+Eosinophiles,"",yes
+Eosinophiles (%),"",yes
+GB,"",yes
+Genie II,"",no
+Genie II 10,"",no
+Genie II 100,"",no
+Genie III,"",yes
+Genie III,"",yes
+Genie III,"",yes
+Génotypage,"",yes
+Glial Fibrillary Acidic Protein,"",yes
+Glucose,"",yes
+Glycémie,"",yes
+GOT/ASAT,"",yes
+GPT/ALAT,"",yes
+GR,"",yes
+Hb,"",yes
+HBsAg (Hepatitis B surface antigen),"",yes
+HCT,"",yes
+HCT(Whole Blood),4544-3,yes
+HDL cholesterol,"",yes
+Hematocrit,"",yes
+Hemoglobin,"",yes
+HEPATITIS B VIRAL LOAD,29615-2,yes
+HEPATITIS B VIRAL LOAD,29615-2,yes
+HEPATITIS C VIRAL LOAD,11011-4,yes
+HEPATITIS C VIRAL LOAD,11011-4,yes
+Her2 Dual ISH,"",yes
+HGB(Whole Blood),718-7,yes
+Histopathology examination,"",yes
+HIV INFANT VIRAL LOAD,"",yes
+HIV INFANT VIRAL LOAD,"",yes
+HIV INFANT VIRAL LOAD,"",yes
+HIV rapid test HIV,"",yes
+HIV rapid test HIV,"",yes
+HIV rapid test HIV,"",yes
+HIV VIRAL LOAD,10351-5,yes
+HIV VIRAL LOAD,10351-5,yes
+HIV VIRAL LOAD,10351-5,yes
+Inhibin,"",yes
+Innolia,"",yes
+Integral,"",yes
+LY#,"",no
+Lymph %,"",yes
+Lymphocytes (%),736-9,yes
+Lymphocytes (Abs),731-0,yes
+LYM#(Whole Blood),731-0,yes
+MCHC(Whole Blood),786-4,yes
+MCH(Whole Blood),785-6,yes
+MCV(Whole Blood),787-2,yes
+Medium corpuscular volum,"",yes
+MO#,"",no
+Mono %,"",yes
+Monocytes (%),5905-5,yes
+Monocytes (Abs),742-7,yes
+MPV(Whole Blood),32623-1,yes
+Murex,"",yes
+Murex,"",yes
+Murex,"",yes
+MXD#(Whole Blood),"",yes
+Myogenin (F5D),"",yes
+Napsin A (MRQ-60),"",yes
+NE#,"",no
+Neut %,"",yes
+Neutrophiles,"",yes
+Neutrophiles (%),"",yes
+NEU#(Whole Blood),751-8,yes
+p24 Ag,"",no
+P24 Ag,"",yes
+P24 Ag,"",yes
+P 53,"",yes
+Pax 5,"",yes
+Pax 8,"",yes
+Platelets,"",yes
+PLQ,"",yes
+PLT(Whole Blood),777-3,yes
+Proteinuria dipstick,"",yes
+RBC(Whole Blood),789-8,yes
+RDW(Whole Blood),788-0,yes
+Red Blood Cells Count (RBC),"",yes
+Stat-Pak,"",yes
+Stat-Pak,"",yes
+Stat-Pak,"",yes
+TCMH,"",yes
+Thyroglobulin (2H11+6E1),"",yes
+TMCH,"",yes
+Total cholesterol,"",yes
+Transaminases ALTL,"",yes
+Transaminases ASTL,"",yes
+Triglicerides,"",yes
+Urine prenancy test,"",yes
+VGM,"",yes
+Viral load,"",yes
+Viral Load,"",yes
+Vironostika,"",yes
+Vironostika,"",yes
+Vironostika,"",yes
+Vironostika,"",yes
+WBC(Whole Blood),6690-2,yes
+Western Blot 1,"",no
+Western Blot 2,"",no
+Western blot HIV,"",yes
+Western blot HIV,"",yes
+White Blood Cells Count (WBC),"",yes
+Wilms' tumor 1 protein (WT1),"",yes

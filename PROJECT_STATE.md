@@ -3074,8 +3074,8 @@ below is authoritative.** The poller is **DH-011E**, not DH-011A.
 | **DH-011F** | Watermark/paging test matrix | ⏸ with DH-011E |
 | **DH-011G** | Patient identity mapping — controlled identifiers, fail closed on ambiguity | ~~🛑 **Investigated 2026-08-30, Human Decision Required: Yes** — no OpenELIS patch needed for the recommended option (B: OpenMRS idgen identifier into `pat_nationalId`, live-proven exact search 1/0/0/0); a live-proven duplicate-creation gap applies to every option and requires adapter-side search-before-create regardless of Liban's choice.~~ (superseded, not deleted — kept for history) **Liban rejected the recommended option B and selected Option D instead — see DH-011G2 below.** Full account and decision matrix: this file's own DH-011G section (above, after the DH-011B write-up) |
 | **DH-011G2** | Implement DH-011G's Liban-selected identity contract: native OpenMRS-UUID ↔ OpenELIS Patient linkage (**LIBAN DECISION: SELECT OPTION D**) | ✅ **DONE, live-verified 2026-08-30** — `daher_patient_identity`, a Daher-owned native table, links the OpenMRS Patient UUID (`urn:daher-health:openmrs-patient-uuid`) to an OpenELIS Patient; `pat_nationalId`/`pat_subjectNumber`/`pat_stNumber`/`pat_guid` are untouched and keep their own native meanings. `PatientProvider.java.patch` adds atomic create+link (`DaherPatientIdentityTransaction`) and native `@Search` routing for this one identifier system, closing DH-011G's own split-store hazard **for this system specifically** (§24: native create can no longer succeed while the authoritative Daher search returns zero — live-proven via a real crash-after-commit recovery test). Full live matrix (OpenMRS UUID stability incl. restart/twins, cardinality, atomicity/rollback, corruption controls, concurrent same/different-patient creation, crash recovery, demographic-update-preserves-identity) against fully synthetic disposable infrastructure — see `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011G2 section and `DECISIONS.md`'s ADR-032 for the complete account. Adapter tests 161 → 176 (unit) + 9 new gated live-integration tests, all passing. Committed `de70db2` (2026-08-30), pushed to `origin/master`, CI run [33323310292](https://github.com/brittLiban/d-health/actions/runs/33323310292) all 8 jobs green on this exact SHA |
-| **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting |
-| **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off |
+| **DH-011H** | Practitioner/requester mapping (NEEDS LIBAN #6) | 🗓 meeting — **decision packet prepared 2026-08-31 (DH-011HI), not answered.** Reduces the open question to a staff list plus one newly-found gap: the clinician account type's approved 9-privilege set (ADR-017F, 26 Aug) does not include `Add Orders`, so no account can place a lab order today regardless of staff names. OpenELIS-side practitioner auto-creation on first order (parallel to DH-011G2's patient mechanism) flagged as a technical spike still needed, not a human question. No code changed; not committed. Full packet: artifact "Lab Order Sign-Off" (published 2026-08-31) |
+| **DH-011I** | Version-controlled test mapping registry; never fuzzy-match test names | 🛑 clinical sign-off — **decision packet prepared 2026-08-31 (DH-011HI), not answered.** Confirms the proven mechanism (DH-011M/P) resolves tests by LOINC code; only 42/177 OpenELIS tests and 21/37 OpenMRS lab sets carry one (docs/CLINICAL-SIGNOFF.md §5), so MVP test selection is constrained to LOINC-coded candidates unless a non-LOINC path is separately investigated and proven. Does not compose or select any test — DH-006's own sheet remains the authoritative candidate list, still awaiting the clinical lead. No code changed; not committed. Full packet: artifact "Lab Order Sign-Off" (published 2026-08-31) |
 | **DH-011J** | Cancellation via `replaces`; verify real OpenELIS status transitions | ✅ **DONE for V1 added-test cancellation. COMMITTED AND PUSHED 2026-08-30**: `86f26dfb28ecffae83a3c96adb5a691aaee909a4` on `origin/master`; CI run `33298838019` — all 8 jobs green. A new `$cancel` FHIR operation + `DaherCancellationTransaction` enforce a V1 eligibility contract based **solely on Analysis workflow state** (`NotStarted` → cancel, `Canceled` → idempotent, every other status → refuse) — including the one guard the pristine `deleteServiceRequest` lacks entirely, live-confirmed it would silently overwrite a `Finalized` result. Specimen-collection/receipt gating was investigated, found to have no reliable native signal on the path Daher uses, and is **deferred by decision** (Liban selected option (b)), not implemented — not a claim that specimens haven't been collected, only that the system cannot observe that fact. Full DH-025 crash-recovery/idempotency/concurrency (including a coordinator-level real-component proof)/isolation, plus an exact deterministic rollback fault-injection proof, all live against real disposable infrastructure — see `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011J/DH-011J2/DH-011J FINALIZE sections for the complete evidence. **Whole-initial-order cancellation deliberately NOT implemented** — see the Human Decision Required row below. ~~🛑 Not testable yet — DH-011B could create no order, so no native transition could be observed. The provider does expose `@Delete`/`@Update`, so the surface exists~~ (superseded, not deleted — kept for history) |
 | **DH-011K** | Crash-point qualification across all five points | ✅ **DONE, live-verified 2026-08-30** — no canonical five-point enumeration existed anywhere in the repository before this ticket (clarified here; `docs/WATERMARK-DESIGN.md` §5 named three). All five crash points, plus ambiguous-target/write-failure/dead-letter controls, claim concurrency, and the real `PostgresRecoveryFence`, live-qualified against a real disposable OpenMRS + patched OpenELIS + Postgres stack using the real production classes (`OrderPoller`, `RecoveryCoordinator`, `LedgerRepository`, `WatermarkRepository`, `OpenElisClient`), never a mocked target. Zero production code changed — a pure verification ticket. One new permanent unit test (176 → 177) plus a new 15-test gated live-integration file. A real production-wiring gap was found and documented, not fixed (out of scope): `OrderPoller`'s constructor-fixed `write_target` cannot regenerate a per-event payload from the opaque correlation hash alone, so whoever wires DeliverOrder for real must make the recovery write path event-aware. Full account: `openelis-config/patches/order-correlation/PROVENANCE.md`'s DH-011K section. Independent review approved commit — committed `0a6dc1a7adab58a4be851838aba6538446e138cf` (2026-08-30), pushed to `origin/master`, CI run [33329195493](https://github.com/brittLiban/d-health/actions/runs/33329195493) all 8 jobs green. The production-wiring finding was classified as a separate follow-on (see DH-011K FINALIZE below); closed by DH-011E2 (see below). |
 | **DH-011L** | End-to-end synthetic order demonstration → closes DH-011 | ⏸ |
@@ -6166,3 +6166,356 @@ names). DH-011E removed the poller/watermark from this list on 2026-08-17.
   stop-and-ask, so it needs an ADR before RES-001/002 or DH-027J/K proceed. `docs/ARCHITECTURE.md`
   still says data lives "on the facility's own VM" — deliberately left until the decision is made
   rather than quietly rewritten.
+
+---
+
+## DH-011H1 / DH-011I1 — 2026-08-31 stop report (synthetic/disposable only)
+
+**Human Decision Required: Yes.** Liban approved adding exactly `Add Orders` to the existing
+`Daher Clinician Admission` role and instructed the implementation to stop if any other privilege
+proved technically required. The CSV/Keycloak descriptions/static guards now carry that sole
+increment; reception remains exactly registration-only and lab-tech has no OpenMRS role grant.
+Liban also approved `Pilot Test Clinician` as the synthetic requester name and transport-only use
+of one genuinely prior-proven mapping if one existed; real staff names, the real numeric OpenELIS
+site number, and the clinical/lab-selected pilot list all remain pending.
+
+The starting commit `c592b898711e8a01aa4aff892f885621b611a0bb` confirms DH-011E4/E4B is
+committed DONE; this pass does not reopen it. DH-006 remains open and no clinical selection was
+made.
+
+The stop condition was reached on a genuinely fresh disposable OpenMRS database. The synthetic
+clinician authenticated with the exact ten configured privileges, but a real native REST Test
+Order attempt returned `400`: resolving its referenced Test concept requires the separate
+`Get Concepts` privilege. Zero fixture order rows existed afterward. Reception and a synthetic
+zero-role lab-tech were also denied before write (`Get Encounters` was their first missing payload
+resolution privilege), and the order count stayed zero. **`Get Concepts` was not granted.** Until
+Liban decides whether that second privilege is approved, the clinician-positive test and the
+runtime remove-`Add Orders` isolation control cannot pass. ADR-034 records the decision and stop.
+The committed configuration guard itself was negative-control tested on a throwaway copy: removing
+`Add Orders` produced exactly two failures naming the missing privilege. What remains blocked is a
+*runtime* isolation proof that gets past `Get Concepts` and then fails specifically on
+`Add Orders`.
+
+The already-running real facility stack was never queried, started, stopped, or mutated. All names,
+patients, providers, concepts, and orders in this investigation were synthetic and existed only in
+new `dh011h1` / `dh011h1omrs` Docker projects.
+
+### DH-011H practitioner result
+
+The patched pinned OpenELIS business FHIR path creates genuine native `clinlims.person` +
+`clinlims.provider` state, but discards both the submitted Practitioner id and submitted source
+identifier. The first `Pilot Test Clinician` create produced a random OpenELIS UUID; exact replay
+returned `201` and created a second native provider/person. A different source UUID with the same
+name created a third. No fuzzy match was attempted.
+
+An order referencing the first OpenELIS-native UUID linked `sample_human.provider_id` correctly.
+An omitted requester and a well-formed unknown requester each returned `201` and created a genuine
+native order with `provider_id=NULL`; a malformed UUID returned `500` and created no correlated
+order. A secondary-FHIR-store outage proved split state: Practitioner create returned `201` and
+native direct read worked, forwarded search failed, and no search row appeared after recovery.
+
+**DH-011H technical mechanism: NOT DONE / architecture decision required.** The smallest safe
+current-architecture proposal is a native, unique OpenMRS Provider UUID → OpenELIS provider link
+persisted atomically with provider creation, parallel to DH-011G2. An adapter-only map cannot close
+the crash-after-native-commit gap. Full evidence: `docs/DH-011H1-PRACTITIONER-SPIKE.md`.
+
+**DH-011H synthetic name:** `Pilot Test Clinician` is available as input only; it is not safely
+mapped. **DH-011H real facility input:** waiting on staff names.
+
+### DH-011I exact inventory result
+
+Fresh native extraction corrected the old packet count: `clinlims.test` contains **189 rows**,
+**177 active**, **12 inactive**, and **33 nonblank LOINC rows** (all active), not 42. The committed
+OpenMRS table independently remeasures to **37 candidates / 21 coded / 16 uncoded**.
+
+Literal LOINC comparison yields **zero exact matches**. All 21 coded OpenMRS candidates have no
+active OpenELIS match; all 33 coded OpenELIS rows are unreferenced by the OpenMRS candidate codes.
+Seven OpenELIS LOINCs have multiple active native rows (`10351-5`, `11011-4`, `29615-2`, `731-0`,
+`7855-0`, `94500-6`, `94547-7`) and fail closed in the new audit tests. The human clinical table is
+therefore intentionally empty and unselected. Full inventory/comparison:
+`docs/DH-011I-OPENELIS-TEST-INVENTORY.csv` and `docs/DH-011I-LOINC-COMPATIBILITY.md`.
+
+**DH-011I audit mechanism:** DONE (exact comparison and ambiguity refusal only; not a production
+registry). **DH-011I synthetic demo mapping:** NOT AVAILABLE from the requested evidence. DH-011M
+proved direct OpenELIS LOINC `736-9`; DH-011K separately used a freshly generated, run-local
+OpenMRS transport concept and hard-coded target LOINC `777-3`. The provenance explicitly says that
+fixture was not a DH-011I mapping, and no stable OpenMRS concept UUID was recorded. Claiming either
+as the requested OpenMRS-concept-to-OpenELIS mapping would fabricate the missing link.
+
+**DH-011I real pilot list:** waiting on clinical/lab sign-off; nothing preapproved.
+
+### DH-011L status
+
+**Cannot run under the approved inputs.** The mandatory privilege stop was reached before a
+clinician could place the source order. Independently, requester replay is unsafe and the requested
+prior exact OpenMRS-concept mapping does not exist in the cited DH-011M/P evidence. No production
+`DeliverOrder` was assembled, no `poll_once()` was invoked, and no recurring scheduler was
+activated. **READY TO COMMIT: NO** — the required proof matrix cannot go green without new human
+authority; no commit or push was made.
+
+---
+
+## DH-011H1 follow-up — 2026-08-31 second privilege stop (synthetic/disposable only)
+
+**Human Decision Required: Yes.** Liban answered ADR-034's question affirmatively and explicitly
+approved adding `Get Concepts` to `Daher Clinician Admission`. The uncommitted role now contains
+exactly the original nine admission privileges plus the two approved order-path privileges:
+`Get Concepts` and `Add Orders`. Reception remains its exact three-item registration set; no
+lab-tech OpenMRS role was added. ADR-035 records the decision append-only.
+
+A new fresh disposable OpenMRS/MariaDB stack loaded the exact eleven-item role. Four synthetic
+accounts authenticated with measured effective sets: clinician (the exact eleven), an
+`Add Orders` negative-control role (the same set minus only `Add Orders`), reception (the exact
+three), and lab-tech (zero roles/privileges). The shared fixture used a synthetic patient,
+encounter, Test concept, and a real OpenMRS Provider named `Pilot Test Clinician`.
+
+The clinician and the remove-`Add Orders` control both returned `400` before the write because the
+REST converter next resolved `careSetting`, whose service requires the separately protected
+`Get Care Settings` privilege. Reception and lab-tech returned `400` at the earlier
+`Get Encounters` conversion gate. A native query after all four attempts found **zero total rows in
+`orders`**, including zero per synthetic caller. `Get Care Settings` was not granted, even
+temporarily, because the ticket requires another stop rather than progressive privilege expansion.
+The clinician-positive and runtime `Add Orders`-isolation proofs therefore remain blocked.
+
+The OpenELIS Practitioner and LOINC findings from the preceding DH-011H1/I1 section are unchanged:
+requester intake is not replay-safe, the exact LOINC intersection is zero, no prior stable synthetic
+OpenMRS-concept mapping exists, and production `DeliverOrder` is not assembled. No `poll_once()` or
+scheduler was invoked. Real staff names, the real facility site number, and clinical/lab sign-off
+remain pending; DH-006 stays open. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2 — 2026-08-31 fourth privilege stop (synthetic/disposable only)
+
+**Human Decision Required: Yes.** Liban explicitly approved `Get Care Settings`, completing the
+chronological three-item order-path set: `Add Orders` (ADR-034), then `Get Concepts` (ADR-035), then
+`Get Care Settings` (ADR-036). The uncommitted clinician role now contains exactly those three
+additions on top of ADR-017D's original nine; reception remains exact-three and lab-tech has no
+OpenMRS role.
+
+A fresh disposable OpenMRS/MariaDB stack loaded the exact twelve privileges. The clinician's real
+synthetic Test Order POST passed the prior concept and care-setting gates, then returned `400` at
+the next converter step: `orderer ... Privileges required: Get Providers`. This is a read gate used
+to resolve the explicitly supplied Provider UUID before the `Add Orders` write check. The exact
+clinician-minus-`Add Orders` control hit the same earlier gate; clinician-minus-`Get Concepts`
+failed exactly at `Get Concepts`; clinician-minus-`Get Care Settings` failed exactly at
+`Get Care Settings`; reception and zero-role lab-tech failed at `Get Encounters`. A native query
+found zero total `orders` rows and zero for every synthetic caller.
+
+`Get Providers` was not granted or layered on temporarily. Per DH-011H2's explicit rule, work
+stopped before the approved practitioner architecture was implemented. Clinician-positive order
+creation and the `Add Orders` runtime isolation control remain blocked.
+
+Liban separately approved the native practitioner identity design (ADR-037): exact facility-local
+OpenMRS Provider UUID under `urn:daher-health:openmrs-provider-uuid`, stored in a Daher-owned native
+OpenELIS mapping with atomic person/provider+identity creation, unique exact lookup, no name or
+fuzzy fallback, no secondary-store dependency, and fail-closed requester validation before target
+order write. The decision is recorded but implementation, concurrency/rollback/outage proof, and
+adapter composition were **not started** because the privilege stop came first. Display-name update
+policy remains OPEN.
+
+DH-011I evidence is preserved unchanged and remains OPEN: 37/21 OpenMRS candidates, 189/177/33
+OpenELIS tests, seven duplicate active LOINCs, and zero exact one-to-one matches. No DH-011L run,
+no `poll_once()`, no scheduler, no production composition, and no real facility access occurred.
+**READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2 continuation 2 — 2026-08-31 pinned-source privilege stop
+
+**Human Decision Required: Yes.** Liban approved `Get Providers` as the fourth chronological
+order-path addition, but required a complete pinned OpenMRS source audit before the role changed.
+That audit used OpenMRS core `2.8.7` (`7ddf30f4...`) and `webservices.rest` `3.5.0`
+(`69fa31fc...`), matching the installed pinned backend artifacts.
+
+The exact `type=testorder` payload resolves protected references in resource-description order:
+`Get Encounters`, `Get Patients`, `Get Concepts`, `Get Care Settings`, `Get Providers`, then the
+newly identified **`Get Order Types`** gate for the required `orderType` UUID. The save entry then
+accepts `Add Orders` OR `Edit Orders` (`requireAll=false`), so the already approved `Add Orders` is
+sufficient and `Edit Orders` is not needed. Validators add no service check for this payload because
+`specimenSource` is absent. The internal active-order query is a same-instance call and does not
+cross the `Get Orders`-protected service proxy.
+
+The audit additionally found a later cold-path check: with no client-supplied `orderNumber`,
+`OrderServiceImpl.getOrderNumberGenerator()` calls the `Get Global Properties`-protected
+`AdministrationService.getGlobalProperty()` when its static cache is empty, before the already
+approved `Add Orders`-protected order-number seed allocation. Thus `Get Order Types` is the
+deterministic next runtime failure and `Get Global Properties` is also an unapproved requirement
+for a reliable cold create path.
+
+Per the mandatory stop, neither new privilege was granted and even the newly approved
+`Get Providers` was not yet applied. `roles-daher.csv` remains the original nine plus only
+`Add Orders`, `Get Concepts`, and `Get Care Settings`; no fresh runtime stack was started. ADR-038
+records the approval and stop append-only; the full table is
+`docs/DH-011H2-OPENMRS-ORDER-PRIVILEGE-AUDIT.md`.
+
+ADR-037's practitioner design remains accepted but unimplemented. No OpenELIS source audit,
+mapping table, adapter integration, build, concurrency/failure proof, `poll_once()`, scheduler,
+DH-011L run, or real-facility access occurred. DH-011I remains OPEN with its prior evidence
+unchanged. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2A — 2026-08-31 order-number boundary and inherited-privilege stop
+
+Liban approved and the uncommitted role now applies exactly `Get Providers` and `Get Order Types`
+in addition to the three prior order-path approvals. `Daher Clinician Admission` is now its
+original nine plus `Add Orders`, `Get Concepts`, `Get Care Settings`, `Get Providers`, and
+`Get Order Types`. Reception is unchanged; lab-tech gained nothing. Role tests and CI guards require
+the exact set and sole Daher-role ownership of all five additions.
+
+`Get Global Properties` was not added to the Daher role, but the fresh runtime proved a deeper
+baseline blocker: core automatically evaluates the built-in `Authenticated` role for every
+logged-in user, and that upstream role already holds `Get Global Properties`. The synthetic
+clinician could directly read the named system-setting REST resource and its value (`HTTP 200`).
+The disposable database held 358 properties; 79 names matched a conservative integration/security
+filter, including mail, FHIR, REST, OAuth, Open Concept Lab, scheduler, URL, username/password, and
+token categories. No non-null values were recorded. Configuration visibility is materially broader.
+
+For a true no-privilege negative control only, the shared privilege was removed from the disposable
+database and the app restarted. Cold order POST: `403 Get Global Properties`, zero new native rows.
+Administrator warm-up: `201`, one row. Warm clinician POST: one row committed, then HTTP 500 because
+generic Order response conversion requires the separately unapproved `Get Orders`. Restart returned
+the cold 403 with zero new rows. This proves source cache behavior and also proves that ordinary
+role configuration cannot satisfy Liban's requested exclusion while the shared upstream baseline
+remains unchanged.
+
+Client-supplied order numbers are **UNSAFE**: the enabling flag itself has a cold global-property
+read; the database has only a non-unique index; duplicate and empty numbers committed; five
+concurrent identical submissions created five identical native rows; 51 characters were rejected.
+Cache prewarming is **UNSAFE**. The preferred narrow server-side approach requires a new human
+architecture decision because it combines a scope-wide removal from `Authenticated`, an exact
+internal proxy read for the generator property, and a narrow create response that avoids broad
+`Get Orders`. Nothing was implemented.
+
+**Human Decision Required: Yes.** Decide whether to remove `Get Global Properties` from the shared
+`Authenticated` role and approve a reviewed narrow server-side order-create seam. `Get Orders` was
+not granted. DH-011H remains BLOCKED. ADR-037's practitioner design remains accepted/unimplemented;
+DH-011I is unchanged and OPEN; DH-011L did not run; no poller/scheduler or production composition
+was activated; no real facility was accessed. Full evidence:
+`docs/DH-011H2A-ORDER-NUMBER-BOUNDARY.md`. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2B — 2026-08-31 required-flow blocker after Authenticated hardening
+
+Liban approved replacing generic REST Order creation with a narrow Daher-owned new-TestOrder
+endpoint and approved testing removal of broad `Get Global Properties` inheritance from the
+built-in `Authenticated` role. The current uncommitted implementation accepts only
+`encounterUuid`, `conceptUuid`, and `careSettingUuid`; derives patient, the caller's sole Provider,
+fixed Test Order type, native order number, and creator; retains direct caller `Add Orders`; uses
+exact temporary internal read privileges with `finally` cleanup; and returns a minimal response
+without `Get Orders`. The candidate clinician role is the original nine admission privileges plus
+only `Add Orders`.
+
+Before runtime, the pinned Java 8 Maven reactor passed **32 tests** (8 API, 24 OMOD), the role suite
+passed **10**, the production image built successfully, and `git diff --check` was clean. A
+throwaway role control removing `Add Orders` caused exactly two targeted failures out of ten. A
+throwaway proxy-cleanup control removing the `finally` cleanup caused exactly two targeted failures
+out of three; the independent concurrency test remained green. No commit or push occurred.
+
+The clean disposable OpenMRS/MariaDB instance then loaded the exact candidate state. Native
+`orders` began at zero. The built-in `Authenticated` role no longer held `Get Global Properties`;
+the clinician role held exactly its intended ten direct privileges. Synthetic clinician,
+Reception, zero-role lab-tech, and sys-admin sessions all authenticated (`200`). Direct
+`/ws/rest/v1/systemsetting/order.orderNumberGeneratorBeanId` reads returned `403 Get Global
+Properties` for clinician, Reception, and lab-tech, while sys-admin retained access (`200`).
+
+**Required-flow failure / mandatory stop.** Reception's existing patient search
+`GET /ws/rest/v1/patient?q=H2BProofPatient` returned `403 Get Global Properties`. The runtime stack
+trace shows `HibernatePatientDAO.findPatients()` calling the protected global-property service.
+Thus removal from `Authenticated` breaks a required non-admin registration/search workflow; this
+is a real dependency, not merely generic administration exposure. Identifier-source discovery
+returned `200` with zero sources on this clean fixture, but no patient mutation was attempted and
+the patient-search authorization failure independently triggers DH-011H2B Part I's required stop.
+
+No order create (narrow or generic), admission mutation, poller, scheduler, OpenELIS change,
+DH-011L run, or real-facility access followed the stop. Native orders remained zero. Cold/warm,
+restart, generator-reset, positive-order, order-binding, bypass, and remaining existing-flow proofs
+are **not run**, not passed. The current code is review evidence only and the shared-role removal is
+not production-ready.
+
+**Human Decision Required: Yes.** Choose how required patient search will work while ordinary users
+remain unable to read arbitrary global properties. Re-granting inherited access contradicts the
+approved hardening goal; a narrow patient-search seam or an upstream/module authorization change
+expands this ticket into another security boundary and was not assumed. ADR-040 records the
+approved endpoint architecture and this stop. DH-011H2B and DH-011H remain **BLOCKED**; ADR-037 is
+still accepted/unimplemented; DH-011I is unchanged. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2C — 2026-08-31 external configuration containment and source-order closure
+
+Liban selected ADR-041: preserve built-in Authenticated `Get Global Properties` for pinned OpenMRS
+2.8.7 internal compatibility, do not build a replacement patient-search endpoint, and enforce a
+separate external HTTP configuration privilege. `Daher View System Configuration` is
+module-declared and converges after Initializer role loading to exactly one direct holder,
+`Organizational: System Administrator`. Clinician, reception, lab-tech, and Authenticated do not
+directly hold it. The exact HTTP allowlist covers `systemsetting` collection/query/by-id/all
+representations, locale/theme and visit configuration, name/address templates, system information,
+and the legacy REST settings form. No actual setting value is recorded in evidence.
+
+The first second-boot proof exposed and rejected an Initializer wildcard-role defect: direct
+holders rose from one to three. The post-roles loader was corrected to remove this new privilege
+from every non-sys-admin direct role. Two consecutive corrected boots each reported exactly one
+holder; ordinary setting reads remained fixed `403`, sys-admin remained upstream `200`, and
+Authenticated retained its core compatibility grant.
+
+The final clinician role is ADR-017D's original nine plus only direct `Add Orders` (10 total).
+The narrow module servlet accepts exactly `encounterUuid`, `conceptUuid`, and `careSettingUuid`;
+patient, sole authenticated-user Provider, fixed native Test Order type, native order number,
+`NEW` action, and creator are trusted/server-derived. There is no approved deterministic
+care-setting derivation, so the request retains that UUID. Four exact internal reads are proxied
+individually (`Get Providers`, `Get Concepts`, `Get Care Settings`, `Get Order Types`), always
+removed in `finally`; `Add Orders` is never proxied and `Get Orders` is not required.
+
+Disposable live matrix: all four synthetic logins `200`; clinician/reception patient searches
+`200`; lab-tech search `403` as applicable; ordinary configuration collection/query/by-id/
+representation reads `403`; sys-admin equivalents `200`; reception identifier generation,
+patient registration, and creator read-back `201/201/200`; clinician maternity Visit and linked
+Admission Encounter `201/201`. Cold, warm, generator-change, generator-reset, DB-recovery,
+corrected-image boot, and corrected-image restart orders all returned `201` with one native row
+per call. Native rows were real `test_order` rows with fixed Test Order type, encounter-bound
+patient, authenticated clinician's Provider, server-generated order number, and clinician creator.
+
+Every injected generic field (`patientUuid`, `ordererUuid`, `orderTypeUuid`, `orderNumber`,
+`action`, `previousOrder`) and a non-TestOrder `type` returned `400`/zero writes. Reception,
+zero-role lab-tech, clinician-minus-`Add Orders`, zero-Provider clinician, and two-Provider
+clinician returned `403`/zero writes. Generic REST `/order` create returned `400`/zero writes.
+Concurrent clinician A/B calls returned `201`/`201`, reception returned `403`, exactly two native
+rows appeared with distinct correct creators/providers, and generic concept reads remained `403`.
+A deliberately invalid generator returned fixed `500`/zero writes; reset recovered. A MariaDB
+outage returned fixed `500`/zero writes; the same JVM recovered after stale connection eviction,
+then search and create succeeded. Existing end-admission regression: reception `403`, clinician
+`200`, Visit stopped and not voided.
+
+Tests at this source state: OpenMRS module **37** (10 API + 27 OMOD), role **10**, seed/mapping
+**25**, form-safety **19 executed (18 passed + 1 expected skip)**; full adapter/static/shell/diff checks are
+recorded in the final handoff after their final rerun. The wildcard lifecycle defect has a
+permanent unit/static guard and a performed negative control. Full source audit and non-secret
+runtime evidence: `docs/DH-011H2C-EXTERNAL-CONFIGURATION-BOUNDARY.md`.
+
+**Status.** The OpenMRS source-order boundary is technically closed for independent review.
+DH-011H remains **OPEN/BLOCKED on ADR-037 implementation**: exact OpenMRS Provider UUID → native
+OpenELIS provider mapping is accepted but unimplemented. DH-011I remains OPEN (zero exact mappings),
+DH-011L did not run, DH-011 remains incomplete, and DH-012 remains blocked behind it. No
+`poll_once()`, scheduler, production `DeliverOrder`, real staff, real facility, or clinical mapping
+was used. **READY TO COMMIT is determined only after the final regression/control/cleanup pass.**
+
+**DH-011H2C closure pass.** Final reruns passed: OpenMRS module 37 (10 API + 27 OMOD), role 10,
+seed/mapping 25, form-safety 19 executed (18 passed with 1 expected empty-schema skip), and adapter baseline 230
+passed with 35 environment-gated skips. UI tests were not run because no endpoint client or UI file
+changed. The exact TestOrder/configuration static guard passed. Performed negative controls removed
+the wildcard cleanup and separately moved the loader back to the roles-domain order; each made its
+one targeted static assertion fail. Earlier controls remain preserved: caller privilege removal,
+proxy-finally removal, interceptor bypass, and protected-path deletion all failed their intended
+tests. Shell syntax, tracked secret scan, tracked JSON/XML/CSV parsing, `git diff --check`, and
+untracked-source whitespace scan are clean. Full push-triggered CI was not run because this ticket
+forbids commit/push.
+
+Cleanup is complete and verified: zero `dh011h2c` containers, volumes, networks, or proof images;
+the two pinned-source clones, Maven cache, response files, cookie files, and control copies are
+absent from `/tmp`. The removed database contained only synthetic fixtures and 10/10 native
+TestOrder rows; removal is permanent by design because the infrastructure was disposable. No
+production/facility resource changed. **READY TO COMMIT: YES for independent review of this
+uncommitted DH-011H2C source-order boundary; no commit or push was performed.**

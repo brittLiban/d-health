@@ -3911,6 +3911,47 @@ READY TO COMMIT: see this ticket's own final handoff -- not committed in this pa
 ticket's own explicit "Do NOT commit or push until all proof passes... Then STOP for review"
 instruction.
 
+## DH-011H1 / DH-011I1 -- practitioner and exact-LOINC closure spike (2026-08-31)
+
+This pass used a fresh disposable database, the exact committed patched OpenELIS build, and the
+embedded business FHIR endpoint only. It never queried or mutated the running facility stack.
+
+**Practitioner conclusion:** current create is native but not source-idempotent. Baseline provider
+and person counts were zero. A `Pilot Test Clinician` create returned `201`, generated a new
+OpenELIS UUID, and wrote `clinlims.person` + `clinlims.provider`; the submitted resource id and
+`urn:daher-health:openmrs-provider-uuid` identifier were discarded and `provider.external_id`
+remained NULL. Exact replay returned another `201` and wrote a second provider/person. A different
+source UUID with the same name wrote a third. Direct read and OpenELIS-native `provider_uuid`
+search worked; submitted-source identifier search returned zero. No name matching was attempted.
+
+A new native order referencing the first generated provider linked it through
+`sample_human.provider_id`. Missing requester and a well-formed unknown requester both returned
+`201` and created native Sample/Analysis state with `provider_id=NULL`; malformed requester UUID
+returned `500` and created no correlated order. With the secondary FHIR service deliberately down,
+Practitioner create still returned `201` and native read worked while search returned `500`; after
+recovery search returned zero and no backfill occurred. Full ids, rows, source explanation, and
+the smallest unimplemented native-identity-link proposal are in
+`docs/DH-011H1-PRACTITIONER-SPIKE.md`.
+
+**LOINC conclusion:** the native `clinlims.test` extraction is 189 total rows, 177 active, 12
+inactive, 33 carrying nonblank LOINC (all active). `docs/CLINICAL-SIGNOFF.md` parses to 37 OpenMRS
+candidates, 21 coded and 16 uncoded. Literal code intersection is zero. Seven active target codes
+are duplicated and therefore ambiguous; the audit tool refuses 2+ rather than choosing. Full
+native inventory and all four comparison groups are committed as
+`docs/DH-011I-OPENELIS-TEST-INVENTORY.csv` and
+`docs/DH-011I-LOINC-COMPATIBILITY.md`.
+
+**Prior-demo premise correction:** DH-011M proves a direct OpenELIS LOINC `736-9` native order,
+not an OpenMRS mapping. DH-011K creates a random, run-local OpenMRS Test concept, then its test-only
+delivery payload independently hard-codes LOINC `777-3`; its own provenance explicitly labels the
+concept `FHIR SEARCH FIXTURE ONLY / NOT NATIVE ORDER PROOF` and not a DH-011I mapping. No stable
+OpenMRS concept UUID → OpenELIS test mapping exists in the cited prior evidence. None was invented.
+
+The separate disposable OpenMRS privilege proof reached Liban's mandatory stop condition:
+`Add Orders` alone was added to the clinician role, but a real order POST requires the additional
+`Get Concepts` privilege while binding the Test concept. It was not granted. No DH-011L
+`poll_once()`, production `DeliverOrder`, scheduler, or real-site configuration was activated.
+
 ## DH-011E4B -- closing the three independent-review acceptance gaps before commit
 
 Independent review approved DH-011E4's architecture but withheld commit approval on three specific
@@ -4150,3 +4191,87 @@ down and re-verified empty.
 
 READY TO COMMIT: Yes. All three independent-review gaps closed. See DH-011E4B's own final handoff
 for the complete field-by-field record.
+
+---
+
+## DH-011H1 privilege follow-up — 2026-08-31 (`Get Care Settings` stop)
+
+This append corrects only the OpenMRS privilege boundary recorded by the earlier DH-011H1/I1
+section. Liban explicitly approved `Get Concepts` after ADR-034's stop; the uncommitted
+`Daher Clinician Admission` role now holds the original nine admission privileges plus exactly
+`Get Concepts` and `Add Orders` (ADR-035). No OpenELIS patch or adapter source changed.
+
+Fresh disposable OpenMRS/MariaDB proof loaded and measured that exact eleven-privilege role. A real
+Test Order POST using a synthetic patient, encounter, Test concept, and `Pilot Test Clinician`
+Provider advanced beyond concept resolution, then returned `400` at the next distinct conversion
+gate: `Privileges required: Get Care Settings`. The exact clinician-minus-`Add Orders` control hit
+the same gate, while reception and zero-role lab-tech still stopped at `Get Encounters`. Native
+`orders` count was zero after all four attempts. `Get Care Settings` was not granted, even
+temporarily; positive order creation and runtime isolation at `Add Orders` remain unproven.
+
+The earlier OpenELIS Practitioner intake result is unchanged: native create exists, but source
+identity is discarded, replay duplicates, unresolved requesters can create unattributed orders,
+and the secondary search store can diverge. Its smallest safe native atomic identity-link proposal
+still requires an architecture decision and remains unimplemented. Production transport was not
+assembled or activated; no `poll_once()` or scheduler ran. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2 — approved practitioner design, implementation stopped at fourth privilege
+
+Liban approved `Get Care Settings`; the exact uncommitted clinician role therefore carried the
+original nine admission privileges plus the chronologically approved `Add Orders`, `Get Concepts`,
+and `Get Care Settings`. A fresh disposable OpenMRS proof passed the two earlier read gates and
+failed next while resolving `orderer`: `Privileges required: Get Providers` (`HTTP 400`). This is a
+read privilege. It was not granted, including for probing. Native `orders` remained zero for the
+clinician, three single-removal controls, reception, and zero-role lab-tech. The `Get Concepts` and
+`Get Care Settings` controls reached their exact gates; the `Add Orders` control was masked by the
+earlier unapproved Provider read gate.
+
+ADR-037 records Liban's separate approval of a Daher-owned native mapping keyed only by
+`(urn:daher-health:openmrs-provider-uuid, exact OpenMRS Provider UUID)`, with atomic
+person/provider+mapping creation, uniqueness in both identity and provider directions, exact
+0/1/ambiguous lookup, no fuzzy/name fallback, no secondary FHIR-store dependency, and pre-write
+refusal of every missing/malformed/unresolved/ambiguous requester state. Display-name update policy
+is OPEN.
+
+No OpenELIS patch, adapter code, migration, or practitioner test was added: DH-011H2 explicitly
+required an immediate stop if a fourth privilege appeared before that implementation phase. No
+OpenELIS build, `poll_once()`, DH-011L, scheduler, production composition, or real facility access
+occurred. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2 continuation 2 — pinned OpenMRS source stop before practitioner work
+
+Liban approved the `Get Providers` read gate found by the preceding live proof, but required the
+remaining exact order path to be source-audited before that approval was applied. OpenMRS core
+2.8.7 and `webservices.rest` 3.5.0 prove that the same request next resolves required `orderType`
+through `Get Order Types`, and that a first/cache-miss order-number generation later reads a global
+property through `Get Global Properties`. Both are unapproved. The exact table and source methods
+are in `docs/DH-011H2-OPENMRS-ORDER-PRIVILEGE-AUDIT.md`.
+
+The stop occurred before any role edit, OpenELIS source audit, practitioner mapping, adapter change,
+or new runtime. ADR-037's exact Provider-UUID mapping design remains accepted but unimplemented;
+the unsafe upstream practitioner findings above remain current. No build, `poll_once()`, scheduler,
+DH-011L, production composition, or real-facility operation occurred. **READY TO COMMIT: NO.**
+
+---
+
+## DH-011H2A — order-number privilege boundary (OpenELIS patch unchanged)
+
+This continuation changed no OpenELIS patch or adapter code. The OpenMRS role now applies Liban's
+approved `Get Providers` and `Get Order Types`, but the pinned/runtime audit found that
+`Get Global Properties` is already effectively inherited by all logged-in users from OpenMRS's
+built-in `Authenticated` role. A disposable negative control removed that one shared row and
+proved cold order creation fails at the generator-property read with zero native orders; an
+administrator-warmed clinician save committed and then returned HTTP 500 at a new, unapproved
+post-save `Get Orders` response-conversion gate. Restart restored the cold failure.
+
+Client-supplied order numbers are unsafe (non-unique native index; duplicates, empty value, and
+five-way concurrent collision all committed), and cache prewarming is history-dependent. No
+workaround was adopted. ADR-039 records the required human architecture decision for changing the
+shared baseline and creating a narrow server-side seam. ADR-037's exact Provider-UUID mapping is
+still accepted but unimplemented. Practitioner and DH-011I evidence above is unchanged. No
+OpenELIS build, `poll_once()`, scheduler, DH-011L, production composition, or real-facility action
+occurred. **READY TO COMMIT: NO.**

@@ -239,6 +239,27 @@ the acceptance demonstration—one Keycloak login, both applications, no second 
 until Liban approves the mapping from `clinician`, `lab-tech`, and `sys-admin` to each application's
 native roles and the OpenMRS-provider rule. No mapping was inferred.
 
+### OpenMRS configuration visibility and V1 TestOrder create boundary
+
+OpenMRS 2.8.7's built-in `Authenticated` role retains `Get Global Properties`: core patient search
+and native order-number generation make protected internal `AdministrationService` reads. This is
+an internal platform compatibility contract, not permission for ordinary Daher users to browse
+configuration. The Daher module intercepts the pinned external setting/configuration HTTP paths
+and requires `Daher View System Configuration`, granted directly only to
+`Organizational: System Administrator`. Internal Java calls do not cross this interceptor.
+
+Daher V1 does not use generic REST `/order` for laboratory order entry. Its module endpoint creates
+only new native `TestOrder` objects from `encounterUuid`, `conceptUuid`, and `careSettingUuid`.
+Patient, the authenticated user's sole active Provider, Test Order type, `NEW` action, native order
+number, and audit creator are server-derived. The clinician must directly hold `Add Orders`; exact
+internal resolution temporarily proxies only `Get Providers`, `Get Concepts`, `Get Care Settings`,
+and `Get Order Types`, one trusted read at a time with `finally` cleanup. The response is
+Daher-owned and does not require `Get Orders`. See ADR-041 and
+`docs/DH-011H2C-EXTERNAL-CONFIGURATION-BOUNDARY.md`.
+
+This boundary ends at OpenMRS. ADR-037's exact Provider-UUID mapping into native OpenELIS remains a
+separate, unimplemented step; no name/fuzzy requester matching is part of this architecture.
+
 The committed 1-hour idle, 10-hour maximum, and 5-minute access-token lifetimes were approved by
 Liban for the pilot (ADR-013). They remain a human workflow/security decision if later changed.
 

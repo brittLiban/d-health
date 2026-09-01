@@ -205,6 +205,40 @@ jobs:
           ran=$(sed -n 's/^Ran \([0-9]*\) test.*/\1/p' /tmp/forms.log | tail -1)
           echo "form-safety tests executed: ${ran:-0}"
           test "${ran:-0}" -ge 19 || { echo "::error::expected at least 19 form tests, ran ${ran:-0}"; exit 1; }
+      - name: ADR-034-040 narrow TestOrder role guard
+        run: |
+          python -m unittest discover -s openmrs-config/initializer/roles -p 'test_*.py' -v 2>&1 | tee /tmp/roles.log
+          ran=$(sed -n 's/^Ran \([0-9]*\) test.*/\1/p' /tmp/roles.log | tail -1)
+          echo "role tests executed: ${ran:-0}"
+          test "${ran:-0}" -ge 10 || { echo "::error::expected at least 10 role tests, ran ${ran:-0}"; exit 1; }
+
+  openmrs-narrow-order:
+    name: OpenMRS narrow TestOrder module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+      - name: Compile the complete module reactor and run every test
+        working-directory: openmrs-config/modules/daherendadmission
+        run: mvn -B test
+      - name: Refuse silent test loss
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+
+          reports = list(Path("openmrs-config/modules/daherendadmission").glob("*/target/surefire-reports/TEST-*.xml"))
+          ran = sum(int(ET.parse(report).getroot().attrib["tests"]) for report in reports)
+          print(f"OpenMRS module tests executed: {ran}")
+          if ran < 37:
+              print(f"::error::expected at least 37 OpenMRS module tests, ran {ran}")
+              sys.exit(1)
+          PY
 
   static:
     name: static checks
@@ -549,7 +583,7 @@ jobs:
           # 3. The OpenMRS-side role CSV grants exactly the three privileges
           #    ADR-017A proved sufficient — nothing broader, ever.
           APPROVED = {"Edit Patient Identifiers", "Add Patients", "Get Patients"}
-          FORBIDDEN = {"Add Encounters", "Assign Beds", "Edit Patients", "Get Encounters"}
+          FORBIDDEN = {"Add Encounters", "Add Orders", "Assign Beds", "Edit Patients", "Get Care Settings", "Get Concepts", "Get Encounters", "Get Order Types", "Get Providers"}
           csv_path = Path("openmrs-config/initializer/roles/roles-daher.csv")
           if not csv_path.exists():
               bad.append("openmrs-config/initializer/roles/roles-daher.csv is missing")
@@ -593,7 +627,7 @@ jobs:
           print("ok — Daher Reception stays registration-only, additive, and existing roles are untouched")
           PY
 
-      - name: ADR-017D — Daher Clinician Admission is self-contained, clinician-only, unreachable from reception
+      - name: ADR-017D/ADR-040 — clinician admission plus narrow-endpoint Add Orders only
         # ADR-017C proved Add Visits/Add Encounters are blanket, unscopable
         # privileges in this OpenMRS distribution — no native way to restrict
         # either to a specific type or location. ADR-017D's response is
@@ -612,7 +646,7 @@ jobs:
           APPROVED_ADMISSION = {
               "Get Patients", "Get Visit Types", "Add Visits", "Get Visits",
               "Get Visit Attribute Types", "Get Beds", "Get Admission Locations",
-              "Add Encounters", "Get Encounters",
+              "Add Encounters", "Get Encounters", "Add Orders",
           }
           # Registration-write privileges (beyond the shared Get Patients read)
           # and administrative privileges must never appear on the admission
@@ -627,7 +661,8 @@ jobs:
           # in addition to the exact-three-privileges check ADR-017B already runs.
           FORBIDDEN_RECEPTION_ADMISSION = {
               "Add Visits", "Add Encounters", "Get Encounters",
-              "Get Beds", "Get Admission Locations",
+              "Get Beds", "Get Admission Locations", "Get Concepts", "Get Care Settings",
+              "Get Providers", "Get Order Types", "Add Orders",
           }
 
           csv_path = Path("openmrs-config/initializer/roles/roles-daher.csv")
@@ -688,7 +723,165 @@ jobs:
 
           if bad:
               print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
-          print("ok — Daher Clinician Admission is self-contained, clinician-only, and unreachable from reception")
+          add_orders_holders = [
+              r.get("Role name") for r in rows
+              if "Add Orders" in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if add_orders_holders != ["Daher Clinician Admission"]:
+              bad.append(
+                  "roles-daher.csv: Add Orders must be held by exactly Daher Clinician Admission, "
+                  f"found {add_orders_holders}"
+              )
+
+          get_concepts_holders = [
+              r.get("Role name") for r in rows
+              if "Get Concepts" in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if get_concepts_holders:
+              bad.append(
+                  "roles-daher.csv: Get Concepts must not be granted directly to a Daher role, "
+                  f"found {get_concepts_holders}"
+              )
+
+          get_care_settings_holders = [
+              r.get("Role name") for r in rows
+              if "Get Care Settings" in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if get_care_settings_holders:
+              bad.append(
+                  "roles-daher.csv: Get Care Settings must not be granted directly to a Daher role, "
+                  f"found {get_care_settings_holders}"
+              )
+
+          get_providers_holders = [
+              r.get("Role name") for r in rows
+              if "Get Providers" in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if get_providers_holders:
+              bad.append(
+                  "roles-daher.csv: Get Providers must not be granted directly to a Daher role, "
+                  f"found {get_providers_holders}"
+              )
+
+          get_order_types_holders = [
+              r.get("Role name") for r in rows
+              if "Get Order Types" in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if get_order_types_holders:
+              bad.append(
+                  "roles-daher.csv: Get Order Types must not be granted directly to a Daher role, "
+                  f"found {get_order_types_holders}"
+              )
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          broad_holders = [
+              (r.get("Role name"), privilege)
+              for r in rows
+              for privilege in ("Get Global Properties", "Get Orders")
+              if privilege in {p.strip() for p in r.get("Privileges", "").split(";") if p.strip()}
+          ]
+          if broad_holders:
+              bad.append(f"roles-daher.csv: broad read privileges are forbidden, found {broad_holders}")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — clinician has admission plus Add Orders only; generic lookup/read privileges are absent")
+          PY
+
+      - name: ADR-040/ADR-041 — narrow TestOrder and external configuration boundaries
+        run: |
+          python - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          root = Path("openmrs-config/modules/daherendadmission")
+          service = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherTestOrderServiceImpl.java").read_text()
+          interface = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherTestOrderService.java").read_text()
+          request = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherTestOrderRequest.java").read_text()
+          servlet = (root / "omod/src/main/java/org/openmrs/module/daherendadmission/web/CreateTestOrderServlet.java").read_text()
+          activator = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherEndAdmissionActivator.java").read_text()
+          constants = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherEndAdmissionConstants.java").read_text()
+          provisioner = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherExternalConfigurationPrivilegeProvisioner.java").read_text()
+          privilege_loader = (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherExternalConfigurationPrivilegeLoader.java").read_text()
+          interceptor = (root / "omod/src/main/java/org/openmrs/module/daherendadmission/web/DaherExternalConfigurationInterceptor.java").read_text()
+          context_xml = (root / "api/src/main/resources/moduleApplicationContext.xml").read_text()
+          config_xml = (root / "omod/src/main/resources/config.xml").read_text()
+
+          bad = []
+          if "Daemon" in service:
+              bad.append("DaherTestOrderServiceImpl must retain the real caller context, never Daemon")
+          if "GET_ORDERS" in service or "Get Orders" in service:
+              bad.append("DaherTestOrderServiceImpl must not proxy generic order read access")
+          expected_proxies = {
+              "GET_PROVIDERS", "GET_CONCEPTS", "GET_CARE_SETTINGS",
+              "GET_ORDER_TYPES",
+          }
+          actual_proxies = set(re.findall(r"privilegeExecutor\.execute\(PrivilegeConstants\.([A-Z_]+)", service))
+          if actual_proxies != expected_proxies:
+              bad.append(f"exact internal proxy set changed: expected {sorted(expected_proxies)}, found {sorted(actual_proxies)}")
+          for required in (
+              "Context.getAuthenticatedUser()",
+              "new TestOrder()",
+              "order.setPatient(encounter.getPatient())",
+              "order.setOrderer(orderer)",
+              "OrderType.TEST_ORDER_TYPE_UUID",
+          ):
+              if required not in service:
+                  bad.append(f"DaherTestOrderServiceImpl missing contract marker: {required}")
+          if "@Authorized(PrivilegeConstants.ADD_ORDERS)" not in interface:
+              bad.append("caller-owned Add Orders authorization is missing from the service boundary")
+          for forbidden_field in ("patientUuid", "ordererUuid", "orderTypeUuid", "orderNumber", "action", "previousOrder"):
+              if forbidden_field in request:
+                  bad.append(f"request DTO exposes forbidden generic-order field {forbidden_field}")
+          for accepted_field in ("encounterUuid", "conceptUuid", "careSettingUuid"):
+              if f'"{accepted_field}".equals(field)' not in servlet:
+                  bad.append(f"servlet does not explicitly accept {accepted_field}")
+          if "DaherExternalConfigurationPrivilegeProvisioner.ensureSysAdminGrant();" in activator:
+              bad.append("activator callbacks are unordered; privilege provisioning must not run there")
+          if "DaherExternalConfigurationPrivilegeProvisioner.ensureSysAdminGrant();" not in privilege_loader:
+              bad.append("Initializer loader does not provision the external configuration privilege")
+          if "Domain.ROLES.getOrder() + 1" not in privilege_loader:
+              bad.append("external configuration privilege loader must run after Initializer roles")
+          if "daherExternalConfigurationPrivilegeLoader" not in context_xml:
+              bad.append("external configuration privilege loader is not registered")
+          if "Daher View System Configuration" not in constants or "Organizational: System Administrator" not in constants:
+              bad.append("external configuration privilege/sys-admin role constants changed")
+          if "RoleConstants.AUTHENTICATED" not in provisioner or "authenticated.getPrivileges().contains(externalRead)" not in provisioner:
+              bad.append("provisioner does not fail closed if Authenticated receives the external privilege")
+          if "sysAdmin.addPrivilege" in provisioner or "addDirectPrivilege(sysAdmin, externalRead)" not in provisioner:
+              bad.append("sys-admin grant no longer uses the idempotent direct-grant helper")
+          if "userService.getAllRoles()" not in provisioner or "removeDirectPrivilege(role, externalRead)" not in provisioner:
+              bad.append("post-Initializer provisioning no longer removes wildcard copies from non-admin roles")
+          if "!DaherEndAdmissionConstants.SYS_ADMIN_ROLE.equals(role.getRole())" not in provisioner:
+              bad.append("external configuration direct-holder allowlist no longer excludes only the sys-admin role")
+          if "Context.hasPrivilege(DaherEndAdmissionConstants.VIEW_SYSTEM_CONFIGURATION_PRIVILEGE)" not in interceptor:
+              bad.append("HTTP interceptor does not require the Daher external configuration privilege")
+          protected_paths = {
+              "/rest/v1/systemsetting", "/rest/v1/systemsetting/**",
+              "/rest/v1/localeandthemeconfiguration", "/rest/v1/localeandthemeconfiguration/**",
+              "/rest/v1/visitconfiguration", "/rest/v1/visitconfiguration/**",
+              "/rest/v1/nametemplate", "/rest/v1/nametemplate/**",
+              "/rest/v1/addresstemplate", "/rest/v1/addresstemplate/**",
+              "/rest/v1/systeminformation", "/rest/v1/systeminformation/**",
+              "/module/webservices/rest/settings.form",
+          }
+          actual_paths = set(re.findall(r"<value>([^<]+)</value>", context_xml))
+          if actual_paths != protected_paths:
+              bad.append(f"external configuration path allowlist changed: expected {sorted(protected_paths)}, found {sorted(actual_paths)}")
+          if "org.springframework.web.servlet.handler.MappedInterceptor" not in context_xml:
+              bad.append("configuration boundary is not registered at the post-authentication MVC interception point")
+          if "<name>Daher View System Configuration</name>" not in config_xml:
+              bad.append("module does not declare the external configuration privilege")
+          if '<require_module version="2.12.0">org.openmrs.module.initializer</require_module>' not in config_xml:
+              bad.append("module must start after pinned Initializer imports the sys-admin role")
+          if (root / "api/src/main/java/org/openmrs/module/daherendadmission/DaherGlobalPropertyPrivilegeHardener.java").exists():
+              bad.append("superseded Authenticated-role privilege remover still exists")
+
+          if bad:
+              print("\n".join(f"::error::{item}" for item in bad))
+              sys.exit(1)
+          print("ok — TestOrder boundary is fixed-purpose, caller-bound, and uses the exact approved proxy set")
           PY
 
       - name: ADR-017E2 — Provider identity is role-derived, fail-closed, and a single mechanism

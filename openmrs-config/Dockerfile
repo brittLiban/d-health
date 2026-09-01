@@ -129,8 +129,8 @@ USER 1001
 # own `jar` tool (already on PATH in this base image) to extract, append one line to, and
 # re-insert the single properties file -- no new third-party dependency, and it removes CSRFGuard
 # protection only for this one narrow endpoint prefix, not app-wide (the endpoint's own
-# authorization -- see DaherMaternityAdmissionServiceImpl -- and the existing X-Daher-App-Request
-# convention are what still gate it).
+# authorization -- see DaherMaternityAdmissionServiceImpl and DaherTestOrderServiceImpl -- and
+# the existing X-Daher-App-Request convention are what still gate both narrow module operations).
 USER root
 RUN war=/openmrs/distribution/openmrs_core/openmrs.war \
     && workdir=$(mktemp -d) \

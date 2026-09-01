@@ -18,9 +18,19 @@
 	<author>Daher Health</author>
 	<description>${project.parent.description}</description>
 
+	<privilege>
+		<name>Daher View System Configuration</name>
+		<description>Allows Daher sys-admin users to view externally reachable OpenMRS configuration resources.</description>
+	</privilege>
+
 	<activator>${MODULE_PACKAGE}.DaherEndAdmissionActivator</activator>
 
 	<require_version>${openmrs.platform.version}</require_version>
+	<require_modules>
+		<!-- The sys-admin role is supplied by the pinned Initializer configuration, and the Daher
+		     post-roles loader implements Initializer's supported Loader SPI. -->
+		<require_module version="2.12.0">org.openmrs.module.initializer</require_module>
+	</require_modules>
 
 	<!-- Globally unique on purpose. See EndMaternityAdmissionServlet's own class javadoc for
 	     why (UI-015D: a duplicate servlet-name across two modules broke Spring context refresh
@@ -28,5 +38,10 @@
 	<servlet>
 		<servlet-name>daherEndMaternityAdmission</servlet-name>
 		<servlet-class>${MODULE_PACKAGE}.web.EndMaternityAdmissionServlet</servlet-class>
+	</servlet>
+
+	<servlet>
+		<servlet-name>daherCreateTestOrder</servlet-name>
+		<servlet-class>${MODULE_PACKAGE}.web.CreateTestOrderServlet</servlet-class>
 	</servlet>
 </module>

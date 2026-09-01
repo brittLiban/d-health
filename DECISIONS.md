@@ -4374,3 +4374,323 @@ re-verified empty across all four `docker ps -a`/`images`/`volume ls`/`network l
 this record was written. **READY TO COMMIT:** see DH-011E4B's own final handoff — not committed in
 this pass, per that ticket's own explicit "Do NOT commit or push... Then STOP for review"
 instruction.
+
+---
+
+## ADR-034 — Clinician `Add Orders` approved; `Get Concepts` is a separate blocked privilege
+
+**Date:** 2026-08-31 · **Status:** PARTIALLY IMPLEMENTED / BLOCKED · **Decided by:** Liban
+(DH-011H1)
+
+**Decision.** Add the existing OpenMRS `Add Orders` privilege, and only that privilege, to the
+existing `Daher Clinician Admission` role. Clinicians may place laboratory orders; reception and
+lab-tech may not. No real staff names are recorded: the only synthetic requester name approved for
+technical work is `Pilot Test Clinician`. If another privilege proves technically required, stop
+and return to Liban instead of broadening the role.
+
+**Applied configuration.** `roles-daher.csv` now adds exactly `Add Orders` to the prior nine-item
+clinician set. `Daher Reception` remains its exact three-item registration set, no Daher role
+inherits another, no lab-tech OpenMRS role is provisioned, and static/unit guards require the sole
+Daher-configured `Add Orders` holder to be `Daher Clinician Admission`.
+
+**Required stop condition found live.** On a fresh disposable OpenMRS database, a synthetic
+clinician holding exactly that ten-item set authenticated successfully but `POST /ws/rest/v1/order`
+was rejected before any order row was written: resolving the referenced Test concept calls the
+privilege-protected concept read and returned `Privileges required: Get Concepts`. Reception and a
+synthetic zero-role lab-tech were also denied before write (`Get Encounters` was their first missing
+payload-resolution privilege). The database contained zero fixture orders after both negatives and
+after the clinician attempt.
+
+`Get Concepts` was **not** added. It is a second authorization grant and therefore falls under
+Liban's explicit stop rule even though the live evidence shows it is a technical prerequisite of
+this REST order shape. The committed-role guard was negative-control tested on a throwaway CSV:
+removing `Add Orders` failed the exact-set and sole-holder tests. A clinician-positive order proof
+and a runtime isolation proof that reaches the `Add Orders` gate remain blocked until Liban decides
+whether `Get Concepts` is approved. No broader built-in role was granted as a workaround.
+
+---
+
+## ADR-035 — `Get Concepts` approved for clinician order resolution; `Get Care Settings` blocked
+
+**Date:** 2026-08-31 · **Status:** PARTIALLY IMPLEMENTED / BLOCKED · **Decided by:** Liban
+(DH-011H1 follow-up)
+
+**Decision.** Liban explicitly approved the `Get Concepts` privilege identified by ADR-034's
+mandatory stop. Add that read privilege only to `Daher Clinician Admission`, alongside the already
+approved `Add Orders`; do not add it to reception or any lab-tech identity. This approval does not
+authorize another privilege discovered later in the same REST conversion path.
+
+**Applied configuration.** The self-contained clinician role now has exactly eleven privileges:
+ADR-017D's original nine plus `Get Concepts` and `Add Orders`. `Daher Reception` remains its exact
+three-item registration role, the synthetic lab-tech has no OpenMRS role, and permanent guards
+require both new privileges to be held by the clinician role alone.
+
+**New mandatory stop found live.** A fresh disposable OpenMRS database loaded that exact role and
+authenticated the four synthetic callers used by the proof. A real Test Order POST by the
+clinician advanced beyond concept resolution, then returned `400`: resolving the explicitly
+supplied `careSetting` requires the distinct `Get Care Settings` privilege. A disposable role with
+the exact clinician set minus `Add Orders` reached the same earlier conversion gate; reception and
+the zero-role lab-tech still stopped at `Get Encounters`. Native `orders` remained exactly zero for
+every caller.
+
+`Get Care Settings` was **not** granted or temporarily layered onto the caller. Liban's original
+rule applies again: stop and report each additional privilege instead of discovering the eventual
+set by progressive authorization expansion. Consequently, clinician-positive order creation and
+the runtime control isolating `Add Orders` remain blocked. No order edit/delete/purge or broad
+administrative privilege was added.
+
+---
+
+## ADR-036 — `Get Care Settings` approved; `Get Providers` is the fourth privilege stop
+
+**Date:** 2026-08-31 · **Status:** PARTIALLY IMPLEMENTED / BLOCKED · **Decided by:** Liban
+(DH-011H2)
+
+**Decision.** Add `Get Care Settings` to `Daher Clinician Admission`, alongside the separately and
+chronologically approved `Add Orders` (ADR-034) and `Get Concepts` (ADR-035). Reception remains
+unchanged and lab-tech remains unable to originate OpenMRS orders. No fourth privilege is approved;
+if one appears, stop immediately.
+
+**Applied configuration.** The self-contained clinician role now has exactly twelve privileges:
+ADR-017D's original nine plus the three explicitly approved order-path additions (`Add Orders`,
+`Get Concepts`, `Get Care Settings`). Permanent guards require all three additions to be held by
+the clinician role alone and absent from reception; lab-tech still has no OpenMRS role grant.
+
+**Fourth privilege found live.** A fresh disposable OpenMRS database loaded that exact set. The
+real synthetic Test Order POST passed encounter, concept, and care-setting resolution, then failed
+while converting its `orderer` reference: `Privileges required: Get Providers` (`HTTP 400`). This
+is a read privilege: OpenMRS resolves the supplied Provider UUID before reaching the order write.
+Native `orders` count remained zero.
+
+The removal controls were partial by design at the mandatory stop: removing only `Get Concepts`
+failed exactly at `Get Concepts`; removing only `Get Care Settings` failed exactly at
+`Get Care Settings`; removing only `Add Orders` could not reach the write check because it and the
+fully approved caller both stopped first at unapproved `Get Providers`. Reception and zero-role
+lab-tech stopped at `Get Encounters`; every synthetic caller wrote zero native orders.
+
+`Get Providers` was **not** granted, including temporarily. Clinician-positive creation and the
+`Add Orders` load-bearing runtime control remain blocked. No practitioner implementation followed
+this stop.
+
+---
+
+## ADR-037 — Native OpenMRS Provider UUID → OpenELIS provider identity approved
+
+**Date:** 2026-08-31 · **Status:** ACCEPTED DESIGN / NOT IMPLEMENTED · **Decided by:** Liban
+(DH-011H2)
+
+**Decision.** The canonical requester identity is the facility-local pair
+`(urn:daher-health:openmrs-provider-uuid, <exact OpenMRS Provider UUID>)`. It is not a national
+identifier, name, email, initials, role, demographics, or the OpenELIS-generated Provider UUID.
+Names have zero identity authority and fuzzy matching is forbidden.
+
+Implement a Daher-owned native OpenELIS mapping, conceptually `daher_practitioner_identity`, with
+a foreign key to `clinlims.provider`, uniqueness on `(identifier_system, identifier_value)`, and a
+second uniqueness rule preventing more than one OpenMRS Provider UUID identity for the same native
+provider. Exact lookup is `0 = ABSENT`, `1 = FOUND`, `2+ = AMBIGUOUS/fail closed`. First native
+person/provider creation and mapping insertion must be one transaction, with no orphan on failure;
+replay reuses the mapped provider. Do not overload `provider.external_id` absent source proof that
+its semantics match this contract, and do not depend on the secondary FHIR search store.
+
+The Daher delivery composition must reject missing, malformed, unresolved, or ambiguous requester
+identity and mapping-store unavailability before any OpenELIS order write, making
+`sample_human.provider_id=NULL` unreachable through Daher even though upstream OpenELIS permits it.
+Display-name update policy remains **OPEN**: changed display data on replay must not silently
+overwrite the native profile without a later approved policy.
+
+**Implementation status.** Not started in DH-011H2 because ADR-036's privilege proof found the
+unapproved fourth privilege `Get Providers`, whose ticket instruction required an immediate stop
+before the practitioner implementation phase. This ADR records Liban's architecture decision so it
+does not need to be re-litigated after the privilege boundary is resolved.
+
+---
+
+## ADR-038 — `Get Providers` approved; pinned source audit finds later order-create privileges
+
+**Date:** 2026-08-31 · **Status:** ACCEPTED / NOT APPLIED / BLOCKED · **Decided by:** Liban
+(DH-011H2 continuation 2)
+
+**Decision and chronology.** Liban explicitly approved the fourth chronological order-path
+addition, `Get Providers`, after the live stop in ADR-036. The approvals remain separate and in
+this order: (1) `Add Orders` (ADR-034), (2) `Get Concepts` (ADR-035), (3)
+`Get Care Settings` (ADR-036), and (4) `Get Providers` (this ADR). `Get Providers` is a read
+privilege needed to resolve the submitted `orderer` Provider UUID. Reception remains unchanged and
+lab-tech remains unable to originate OpenMRS orders.
+
+**Mandatory source-first stop.** This continuation required a complete audit of the exact pinned
+OpenMRS CREATE path before changing the role, and prohibited any role modification if source proved
+another unapproved privilege. The exact OpenMRS core 2.8.7 and `webservices.rest` 3.5.0 sources
+prove that the required `orderType` UUID is resolved through
+`OrderService.getOrderTypeByUuid()`, annotated `Get Order Types`. This is the deterministic next
+runtime gate, after Provider resolution and before save.
+
+The source audit also proves a later cold-path read: this supported payload omits `orderNumber`, so
+`OrderServiceImpl.getOrderNumberGenerator()` reads `order.orderNumberGeneratorBeanId` through
+`AdministrationService.getGlobalProperty()` when the static generator cache is empty. The actual
+2.8.7 method annotation requires `Get Global Properties`. A warmed cache can conceal that check and
+therefore cannot prove a reliable minimum role.
+
+Neither `Get Order Types` nor `Get Global Properties` is approved or granted. In accordance with
+the stop rule, the already-approved `Get Providers` is recorded here but was **not yet applied** to
+`roles-daher.csv`; the role remains ADR-017D's original nine plus only the three previously applied
+additions. No new runtime proof or practitioner implementation was attempted. The complete source
+table and exact method chain are recorded in
+`docs/DH-011H2-OPENMRS-ORDER-PRIVILEGE-AUDIT.md`.
+
+---
+
+## ADR-039 — `Get Providers` and `Get Order Types` approved; broad configuration/order reads remain blocked
+
+**Date:** 2026-08-31 · **Status:** PARTIALLY IMPLEMENTED / BLOCKED · **Decided by:** Liban
+(DH-011H2A)
+
+**Decision and chronology.** Liban approved `Get Providers` after ADR-036's live Provider-resolution
+stop and approved `Get Order Types` after ADR-038's pinned-source audit. Both are read privileges
+on the exact supported Test Order CREATE conversion path. Apply both, and only those two new
+increments, to `Daher Clinician Admission`. `Get Global Properties` is explicitly **not approved**
+for that role: its cold-path use is an internal order-number-generator configuration read and its
+general grant exposes unrelated configuration. Reception and lab-tech remain unchanged.
+
+The resulting Daher role is ADR-017D's original nine privileges plus the five separately approved
+order additions, in chronological order: `Add Orders`, `Get Concepts`, `Get Care Settings`,
+`Get Providers`, and `Get Order Types`. Permanent guards require that exact set and ensure all five
+additions appear on no other Daher-configured role. No `Get Global Properties`, `Get Orders`, edit,
+delete, purge, or administrative privilege was added.
+
+**Upstream baseline makes the requested exclusion technically inseparable today.** Pinned core
+2.8.7 `UserContext.hasPrivilege()` automatically considers the built-in `Authenticated` role for
+every logged-in user. The fresh Daher-derived database's `Authenticated` role already holds
+`Get Global Properties`. Thus the clinician does not receive it from the Daher role but does hold
+it effectively, and a direct clinician system-setting GET returned the property's value. Removing
+that shared upstream grant would change every authenticated user's authorization and is a new
+scope-wide decision; it was not inferred or applied here.
+
+A disposable-only negative control removed that baseline row and restarted. The true cold
+clinician order then returned `403` specifically from
+`OrderServiceImpl.getOrderNumberGenerator()` →
+`AdministrationService.getGlobalProperty()` and wrote zero rows. An administrator warm-up made the
+next clinician save commit one native row, proving the check is cache-miss-only, but the response
+returned `500`: generic Order representation conversion separately requires the unapproved
+`Get Orders` privilege after save. Restart restored the cold 403/zero-row behavior. `Get Orders`
+is a broad clinical-data read and was not added or proxied.
+
+**Rejected technical shortcuts.** Client-assigned numbers are unsafe: the permission flag has its
+own cold global-property lookup, the native index is non-unique, duplicate and empty numbers
+commit, and five concurrent identical requests created five identical rows. Cache prewarming is
+also unsafe because restart and supported generator-property notifications reset/reintroduce the
+cold path and each process/replica has independent history.
+
+**Architecture decision required.** The preferred candidate preserves server numbering and
+standard validation while (1) removing the broad grant from `Authenticated`, (2) proxying
+`Get Global Properties` only around the exact internal generator-bean property read with mandatory
+`finally` removal, and (3) returning a narrow create result without the generic Order-read
+representation. This needs new reviewed code and changes a shared built-in role, so it is not
+approved or implemented by this ADR. The endpoint must not expose arbitrary global properties or
+orders, must retain the clinician as audit actor, and must not become a generic privileged proxy.
+
+Full evidence and the option table are in
+`docs/DH-011H2A-ORDER-NUMBER-BOUNDARY.md`. ADR-037's practitioner mapping remains accepted and
+unimplemented; DH-011I remains open and unchanged.
+
+---
+
+## ADR-040 — Narrow Daher TestOrder endpoint approved; shared global-property removal blocks patient search
+
+**Date:** 2026-08-31 · **Status:** PARTIALLY IMPLEMENTED / BLOCKED · **Decided by:** Liban
+(DH-011H2B)
+
+**Decision and chronology.** The generic OpenMRS REST `/order` create surface is not the Daher V1
+order-entry boundary. Liban approved a Daher-owned endpoint limited to new laboratory
+`TestOrder` creation. Its request contains only `encounterUuid`, `conceptUuid`, and
+`careSettingUuid`; patient, authenticated-clinician Provider, fixed Test Order type, native order
+number, and audit creator are server-derived. The endpoint must retain `Add Orders` as a direct
+caller privilege, may proxy only the exact internal read privileges required by those trusted
+lookups and the native save, must remove every proxy privilege in `finally`, and must return a
+small Daher response rather than generic Order serialization. Clinicians are not to receive direct
+`Get Orders` or `Get Global Properties` access. The intended final direct clinician set is
+ADR-017D's original nine plus only `Add Orders`.
+
+The uncommitted implementation follows that approved boundary and includes permanent parser,
+authorization, Provider-cardinality, encounter-binding, fixed-order-type, minimal-response, proxy
+cleanup, exception, and concurrency tests. The pinned Maven reactor passed 32 tests, the role suite
+passed 10, the production OpenMRS image built, and two performed negative controls made the
+specific role and proxy-cleanup tests fail. These are implementation facts, not adoption approval;
+the required disposable existing-flow matrix had not yet passed.
+
+**Mandatory stop found in the fresh disposable matrix.** Startup hardening removed
+`Get Global Properties` from the built-in `Authenticated` role. Clinician, reception, lab-tech,
+and sys-admin logins all returned `200`. Direct system-setting reads were denied `403 Get Global
+Properties` for the three ordinary users and remained `200` for sys-admin, proving the intended
+configuration-read boundary. However, the existing Reception patient search
+`GET /ws/rest/v1/patient?q=...` also returned `403 Get Global Properties` before returning any
+patient result. The pinned runtime stack trace places the protected read inside
+`HibernatePatientDAO.findPatients()`; the required registration/search workflow therefore really
+depends on the inherited privilege even though it does not itself expose a system-setting API.
+No order endpoint was invoked and native `orders` remained at the cold baseline of zero.
+
+Part I explicitly requires a stop if shared-role removal breaks a required non-admin flow that
+cannot safely be replaced within this ticket. Re-granting the privilege to Reception or
+clinicians would defeat the approved ordinary-user denial. Adding a second custom patient-search
+seam, or changing upstream patient-search authorization, is a new cross-workflow security surface
+and is not inferred here. The shared-role removal and narrow endpoint are therefore **not adopted
+as production-ready** in this pass; all work remains uncommitted.
+
+**Human Decision Required: Yes.** Decide the authorization architecture for required patient
+search while ordinary users remain unable to read arbitrary global properties. Candidate directions
+include explicitly retaining upstream inherited access, approving a narrowly reviewed search seam,
+or approving another bounded upstream/module change; none is selected by this ADR. Until that
+decision and a complete fresh cold/warm/restart and regression matrix, DH-011H2B is BLOCKED and
+not ready to commit. ADR-037 remains accepted and unimplemented; DH-011I remains unchanged.
+
+---
+
+## ADR-041 — Preserve internal `Get Global Properties`; contain external configuration at HTTP
+
+**Date:** 2026-08-31 · **Status:** ACCEPTED / IMPLEMENTED + LIVE-VERIFIED, UNCOMMITTED ·
+**Decided by:** Liban (DH-011H2C)
+
+**Decision.** Retain `Get Global Properties` on OpenMRS's built-in `Authenticated` role. Pinned
+OpenMRS 2.8.7 itself needs that internal authorization contract during normal patient search, and
+the native order-number generator also reads its selector through `AdministrationService`. Do not
+build a second Daher patient-search endpoint for this compatibility issue. Instead, prevent
+ordinary users from retrieving configuration through externally reachable HTTP resources. The
+new `Daher View System Configuration` privilege is the external boundary and is granted directly
+only to the existing `Organizational: System Administrator` role.
+
+This is not approval for clinicians, reception, or lab-tech to browse configuration. Internal Java
+authorization compatibility and externally reachable configuration visibility are distinct
+boundaries. A post-authentication `MappedInterceptor` now covers every pinned configuration
+resource found by source audit: `systemsetting` collection/query/single-resource/all
+representations, locale/theme configuration, visit configuration, name/address templates, system
+information, and the legacy webservices REST settings form. Ordinary authenticated requests
+receive fixed `403` JSON before upstream content is materialized; sys-admin receives normal
+upstream behavior. Internal service calls are unchanged.
+
+**Role lifecycle.** The privilege is module-declared and an Initializer loader runs after the roles
+domain. The first restart proof was correctly rejected: upstream wildcard roles absorbed the new
+privilege on second boot, raising direct holders from one to three. The loader now removes this
+one new privilege from every non-allowlisted direct role before idempotently granting sys-admin.
+Two corrected consecutive boots each converged to exactly one direct holder, while Authenticated
+retained `Get Global Properties`. No other privilege was needed or granted.
+
+**Narrow order boundary.** Continue with the approved Daher new-TestOrder endpoint rather than
+generic REST `/order`. Its request is exactly `encounterUuid`, `conceptUuid`, and
+`careSettingUuid`; no approved deterministic care-setting rule exists, so that field remains
+caller-supplied. The server derives patient, the authenticated user's sole active Provider, fixed
+Test Order type, native number, action, and creator. The caller must directly own `Add Orders`.
+Only `Get Providers`, `Get Concepts`, `Get Care Settings`, and `Get Order Types` are temporarily
+proxied around individual trusted reads and removed in `finally`. `Get Orders` is unnecessary
+because the endpoint returns a minimal Daher response. The clinician role therefore returns to
+ADR-017D's original nine direct privileges plus only `Add Orders`.
+
+**Evidence.** Disposable proof passed configuration containment, clinician/reception patient
+search, reception registration, maternity Visit+Encounter creation, cold/warm/post-restart and
+generator-change/reset orders, native TestOrder/type/patient/orderer/number/creator checks,
+injection rejection, generic-create denial, reception/lab-tech/missing-Add-Orders/Provider
+cardinality denial, concurrent clinician identity isolation, database-outage rollback/recovery,
+and the existing end-admission endpoint. Full non-secret audit and evidence are in
+`docs/DH-011H2C-EXTERNAL-CONFIGURATION-BOUNDARY.md`.
+
+ADR-037 remains accepted and unimplemented; this decision does not implement OpenELIS
+practitioner mapping. DH-011I remains open with zero exact one-to-one LOINC mappings, DH-011L did
+not run, and no poller/scheduler or real-facility flow was activated.

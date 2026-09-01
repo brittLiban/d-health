@@ -14,10 +14,12 @@
 	<packaging>pom</packaging>
 	<name>Daher End Maternity Admission</name>
 	<description>
-		Narrow, Daher-owned OpenMRS module (ADR-030, Option D). Exposes exactly one operation: end
-		the active canonical Daher Maternity Admission Visit by setting its stopDatetime. Never
-		grants the browser session Edit Visits, Assign Beds, Edit Admission Locations, Manage Queue
-		Entries, or Get Concepts -- the elevation exists only inside this one server-side operation.
+		Narrow, Daher-owned OpenMRS clinical-operations module (ADR-030/ADR-040). Exposes only two
+		operations: end the active canonical Daher Maternity Admission Visit and create a new
+		server-numbered TestOrder bound to its Admission encounter. Never
+		grants a Daher clinical role Edit Visits, Assign Beds, Edit Admission Locations, Manage Queue
+		Entries, Get Global Properties, Get Orders, or generic order-read/configuration authority;
+		external configuration HTTP resources are separately restricted to Daher sys-admin.
 		See DECISIONS.md ADR-030 and PROJECT_STATE.md BLOCKER-10 for the full design record.
 	</description>
 

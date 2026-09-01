@@ -25,6 +25,12 @@ public final class DaherEndAdmissionConstants {
 
 	public static final String CLINICIAN_ADMISSION_ROLE = "Daher Clinician Admission";
 
+	public static final String ADMISSION_ENCOUNTER_TYPE_UUID = "e22e39fd-7db2-45e7-80f1-60fa0d5a4378";
+
+	public static final String VIEW_SYSTEM_CONFIGURATION_PRIVILEGE = "Daher View System Configuration";
+
+	public static final String SYS_ADMIN_ROLE = "Organizational: System Administrator";
+
 	private DaherEndAdmissionConstants() {
 	}
 }

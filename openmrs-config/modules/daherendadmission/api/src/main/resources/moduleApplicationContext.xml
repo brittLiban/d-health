@@ -39,4 +39,51 @@
 		<property name="transactionAttributeSource" ref="transactionAttributeSource"/>
 	</bean>
 
+	<bean id="daherTestOrderServiceTarget"
+	      class="org.openmrs.module.daherendadmission.DaherTestOrderServiceImpl"/>
+
+	<!-- Initializer imports the existing sys-admin role in its roles domain. This loader runs
+	     immediately afterward and adds only the HTTP-configuration privilege. Module activator
+	     callbacks are not dependency-ordered on OpenMRS 2.8.7, so this must not live there. -->
+	<bean id="daherExternalConfigurationPrivilegeLoader"
+	      class="org.openmrs.module.daherendadmission.DaherExternalConfigurationPrivilegeLoader"/>
+
+	<!-- The same outer transaction/service-interceptor pattern as the admission operation. The
+	     target retains the real request-thread user; it does not run as Daemon. -->
+	<bean id="daherTestOrderService"
+	      class="org.springframework.transaction.interceptor.TransactionProxyFactoryBean">
+		<property name="transactionManager" ref="transactionManager"/>
+		<property name="target" ref="daherTestOrderServiceTarget"/>
+		<property name="preInterceptors" ref="serviceInterceptors"/>
+		<property name="transactionAttributeSource" ref="transactionAttributeSource"/>
+	</bean>
+
+	<!-- Handler mappings discover MappedInterceptor beans from ancestor contexts. This point runs
+	     after webservices.rest's Basic/session authentication filter but before any controller or
+	     resource method can materialize configuration. It therefore cannot affect internal Java
+	     AdministrationService calls used by patient search or native order numbering. -->
+	<bean id="daherExternalConfigurationMappedInterceptor"
+	      class="org.springframework.web.servlet.handler.MappedInterceptor">
+		<constructor-arg>
+			<list>
+				<value>/rest/v1/systemsetting</value>
+				<value>/rest/v1/systemsetting/**</value>
+				<value>/rest/v1/localeandthemeconfiguration</value>
+				<value>/rest/v1/localeandthemeconfiguration/**</value>
+				<value>/rest/v1/visitconfiguration</value>
+				<value>/rest/v1/visitconfiguration/**</value>
+				<value>/rest/v1/nametemplate</value>
+				<value>/rest/v1/nametemplate/**</value>
+				<value>/rest/v1/addresstemplate</value>
+				<value>/rest/v1/addresstemplate/**</value>
+				<value>/rest/v1/systeminformation</value>
+				<value>/rest/v1/systeminformation/**</value>
+				<value>/module/webservices/rest/settings.form</value>
+			</list>
+		</constructor-arg>
+		<constructor-arg>
+			<bean class="org.openmrs.module.daherendadmission.web.DaherExternalConfigurationInterceptor"/>
+		</constructor-arg>
+	</bean>
+
 </beans>

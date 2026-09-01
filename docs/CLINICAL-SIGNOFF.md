@@ -160,3 +160,17 @@ passing through here. The response is then recorded against **DH-006** in `PROJE
 the date and who gave it.
 
 **Until that happens, DH-006 stays open even if every other part of it is finished.**
+
+---
+
+## 8. Technical compatibility correction — 2026-08-31
+
+Section 5's OpenELIS `42 of 177` measurement is historical and must not be used for mapping. A
+fresh disposable extraction from the current pinned native database found **189 test rows, 177
+active, and 33 with LOINC**. The OpenMRS candidate table above still remeasures to **37 candidates,
+21 with LOINC**.
+
+Exact LOINC comparison found **zero matches** between the 21 coded candidates above and active
+OpenELIS tests. The pilot sign-off table is consequently empty; no test has been selected or
+approved. See `docs/DH-011I-LOINC-COMPATIBILITY.md` for the four exact comparison groups and
+`docs/DH-011I-OPENELIS-TEST-INVENTORY.csv` for the complete name/LOINC/active extraction.
