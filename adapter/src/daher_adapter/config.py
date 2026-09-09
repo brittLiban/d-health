@@ -97,6 +97,23 @@ class Settings:
     # every existing deployment's `Settings.from_env()` keeps working unchanged.
     omrs_base_url: str | None = None
     omrs_auth: str | None = None
+    # DH-EX-002: the Exchange's own OIDC identity boundary -- deliberately distinct from the
+    # connector `daher` Keycloak realm (keycloak/realm-config/daher-realm.json), which stays
+    # untouched. All three optional so every existing deployment keeps working unchanged; the
+    # Exchange API fails closed (401 on every request) when any is unset, rather than refusing to
+    # start -- see exchange/identity_auth.py's `UnconfiguredKeySource`.
+    exchange_oidc_issuer: str | None = None
+    exchange_oidc_audience: str | None = None
+    exchange_oidc_jwks_url: str | None = None
+    # Keycloak realm role name (relayed via the standard `realm_access.roles` claim) that grants
+    # DHealth platform-admin authority. Never inferred from an organization role -- see
+    # exchange/authorization.py.
+    exchange_platform_admin_role: str = "dhealth-platform-admin"
+    # Deliberately separate from `audit_path` above (the OpenMRS/OpenELIS connector's own audit
+    # log) -- DH-EX-002's audit events are a different closed schema with no `direction` field;
+    # sharing one file would force a reader to distinguish two unrelated shapes by inspection.
+    # `None` resolves to a sibling file next to `audit_path` (see `resolved_exchange_audit_path`).
+    exchange_audit_path: Path | None = None
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -125,6 +142,17 @@ class Settings:
             openelis_site_code=_optional_site_code(env, "OPENELIS_SITE_CODE"),
             omrs_base_url=env.get("ADAPTER_OMRS_BASE_URL", "").strip() or None,
             omrs_auth=env.get("ADAPTER_OMRS_AUTH", "").strip() or None,
+            exchange_oidc_issuer=env.get("EXCHANGE_OIDC_ISSUER", "").strip() or None,
+            exchange_oidc_audience=env.get("EXCHANGE_OIDC_AUDIENCE", "").strip() or None,
+            exchange_oidc_jwks_url=env.get("EXCHANGE_OIDC_JWKS_URL", "").strip() or None,
+            exchange_platform_admin_role=(
+                env.get("EXCHANGE_PLATFORM_ADMIN_ROLE", "").strip() or "dhealth-platform-admin"
+            ),
+            exchange_audit_path=(
+                Path(env["EXCHANGE_AUDIT_PATH"])
+                if env.get("EXCHANGE_AUDIT_PATH", "").strip()
+                else None
+            ),
         )
 
     @property
@@ -136,6 +164,22 @@ class Settings:
             host=self.db_host,
             port=self.db_port,
             database=self.db_name,
+        )
+
+    @property
+    def resolved_exchange_audit_path(self) -> Path:
+        if self.exchange_audit_path is not None:
+            return self.exchange_audit_path
+        return self.audit_path.with_name("exchange-" + self.audit_path.name)
+
+    @property
+    def exchange_oidc_configured(self) -> bool:
+        """`False` means the Exchange API must fail closed on every request -- never a partial
+        or best-effort validation. See `exchange/identity_auth.py`."""
+        return bool(
+            self.exchange_oidc_issuer
+            and self.exchange_oidc_audience
+            and self.exchange_oidc_jwks_url
         )
 
     @property

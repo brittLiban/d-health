@@ -1,0 +1,73 @@
+{
+  "realm": "dhealth-exchange",
+  "enabled": true,
+  "displayName": "DHealth Exchange",
+  "internationalizationEnabled": true,
+  "defaultLocale": "fr",
+  "supportedLocales": [
+    "fr",
+    "en"
+  ],
+  "loginTheme": "keycloak",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "waitIncrementSeconds": 60,
+  "failureFactor": 10,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 14400,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "dhealth-platform-admin",
+        "description": "DHealth Exchange platform administrator. Authenticates identities and creates organizations only -- never implies membership in, or a role within, any specific organization. Organization membership and role are authorized separately, from the Exchange database, not from a Keycloak role (see adapter exchange/authorization.py)."
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "dhealth-exchange-api",
+      "name": "DHealth Exchange API",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}",
+      "redirectUris": [
+        "https://exchange.${BASE_DOMAIN}/*"
+      ],
+      "webOrigins": [
+        "https://exchange.${BASE_DOMAIN}"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "+"
+      },
+      "protocolMappers": [
+        {
+          "name": "exchange-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "dhealth-exchange-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": []
+}

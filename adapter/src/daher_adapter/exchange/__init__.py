@@ -13,7 +13,8 @@ duplicating proven infrastructure. It does not share the OpenMRS/OpenELIS messag
 (``daher_adapter.ledger``) -- lab-order creation is a client-submitted business command, not a
 replayed source event, so it defines its own request-level idempotency concept
 (``exchange/orders.py``) following the same insert-first-wins pattern rather than importing it.
-``exchange/audit.py``'s ``ExchangeAuditEvent`` schema is defined but not yet wired to
-``daher_adapter.audit.AuditWriter`` or any caller (DH-EX-001R correction -- see that module's own
-docstring); reuse of the writer is deferred until a real caller exists.
+``exchange/audit.py``'s ``ExchangeAuditWriter`` is DH-EX-002's own strictly-typed writer for
+``ExchangeAuditEvent`` -- it reuses only the connector audit module's low-level file-append
+primitive, never its public ``AuditWriter`` type (DH-EX-001R correction preserved: no widening of
+that writer to accept arbitrary models).
 """

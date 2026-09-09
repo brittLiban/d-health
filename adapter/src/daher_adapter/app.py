@@ -10,7 +10,14 @@ from sqlalchemy import Engine, text
 from daher_adapter import __version__
 from daher_adapter.audit import AuditWriter
 from daher_adapter.config import Settings
-from daher_adapter.database import build_engine
+from daher_adapter.database import build_engine, build_session_factory
+from daher_adapter.exchange.api import build_exchange_router
+from daher_adapter.exchange.audit import ExchangeAuditWriter
+from daher_adapter.exchange.identity_auth import (
+    JWKSKeySource,
+    TokenValidator,
+    UnconfiguredKeySource,
+)
 from daher_adapter.logging import configure_logging
 from daher_adapter.recovery import ManagedRecoveryFence, PostgresRecoveryFence
 
@@ -28,6 +35,30 @@ def create_app(
     active_settings = settings or Settings.from_env()
     active_engine = engine or build_engine(active_settings)
     active_audit = audit_writer or AuditWriter(active_settings.audit_path)
+
+    # DH-EX-002: the Exchange API is always mounted -- it fails closed (401 on every request) via
+    # `UnconfiguredKeySource` when OIDC is not configured, rather than the whole adapter refusing
+    # to start. This must never affect `/health/live` or `/health/ready` above, which stay
+    # independent of Keycloak reachability.
+    exchange_session_factory = build_session_factory(active_engine)
+    exchange_audit = ExchangeAuditWriter(active_settings.resolved_exchange_audit_path)
+    exchange_key_source = (
+        JWKSKeySource(active_settings.exchange_oidc_jwks_url)
+        if active_settings.exchange_oidc_configured
+        else UnconfiguredKeySource()
+    )
+    exchange_token_validator = TokenValidator(
+        issuer=active_settings.exchange_oidc_issuer or "",
+        audience=active_settings.exchange_oidc_audience or "",
+        key_source=exchange_key_source,
+        platform_admin_role=active_settings.exchange_platform_admin_role,
+    )
+    exchange_router = build_exchange_router(
+        session_factory=exchange_session_factory,
+        token_validator=exchange_token_validator,
+        audit_writer=exchange_audit,
+        platform_admin_role=active_settings.exchange_platform_admin_role,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -73,5 +104,7 @@ def create_app(
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"status": "down"}
         return {"status": "up"}
+
+    app.include_router(exchange_router)
 
     return app

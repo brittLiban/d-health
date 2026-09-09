@@ -6864,7 +6864,8 @@ connectors:** deferred — connector-track work (DH-011H including the still-ope
 DH-011I, ADR-037) is **not erased and not being called complete**; it remains exactly where the
 DH-PIVOT-001 audit classified it (connector-track, not on the portal-first MVP critical path), and
 no file under `openmrs-config/` or `openelis-config/` was touched by DH-EX-001/DH-EX-001R.
-**Next:** DH-EX-002 (organization onboarding + auth) — **not started**.
+**Next:** DH-EX-002 (organization onboarding + auth) — implemented, not yet committed; see the
+DH-EX-002 entry below.
 
 **What this closure means, precisely.** The first Exchange core domain/persistence foundation
 ticket is closed and exact-SHA CI qualified. It does **not** mean the DHealth Exchange MVP is
@@ -6875,3 +6876,289 @@ production clinical test mappings, a results-inbox UI, a doctor follow-up UI, th
 connector, the OpenELIS Exchange connector, production deployment, and any real pilot. See
 `docs/ARCHITECTURE.md` §17 for the architecture and `DECISIONS.md`'s ADR-042 for the underlying
 product-pivot decision, unchanged by this closure.
+
+### DH-EX-002 · Organization onboarding, OIDC authentication, tenant isolation, minimal
+`/exchange/v1` API · P0 · 🔨 IMPLEMENTED + SQLite/PostgreSQL-QUALIFIED · ⏳ NOT COMMITTED — awaiting
+independent review
+
+**Ticket:** DH-EX-002. **Base:** on top of DH-EX-001's qualified foundation (`0004_exchange_core`).
+**Commit/push boundary:** explicitly **not committed, not pushed** — this entry documents
+implementation returned for independent review, the same DH-EX-001 → DH-EX-001R → DH-EX-001C
+sequence this ticket is expected to follow next.
+
+**What was built.** Migration `0005_exchange_org_auth` (`exchange_identities`,
+`exchange_organization_memberships`, `exchange_organization_role_assignments`, with matching FKs,
+CHECK constraints, and UNIQUE constraints). `exchange/identity_auth.py`: OIDC bearer-token
+validation via **PyJWT only** (`PyJWT[crypto]==2.13.0`, newly pinned, together with its
+`cryptography`/`cffi`/`pycparser` transitive deps) — no hand-written cryptography, an explicit
+algorithm allowlist that structurally excludes `alg=none`, and a `KeySource` protocol
+(`JWKSKeySource` for production, `StaticKeySource`/`UnconfiguredKeySource` for tests and the
+fail-closed default) so no test in this repository reaches the network. `exchange/membership.py`:
+identity bootstrap and membership/role repositories, all insert-first-wins idempotent, enforcing
+the provider/lab role matrix and refusing to attach a role to an inactive membership
+(`MembershipInactive`). `exchange/authorization.py`: `AuthorizationService` — the sole place
+`require_membership`/`require_role`/`require_org_admin`/`require_platform_admin` decisions are
+made, implementing the anti-enumeration policy (no relationship → 404, has relationship but lacks
+permission → 403, platform admin bypasses both except for a genuinely nonexistent org). Identity
+and organization authentication/authorization are separate: Keycloak (OIDC issuer + subject)
+authenticates; the Exchange database is the sole authority for organization membership and role —
+no per-organization Keycloak realm role was created. `exchange/api.py`: five endpoints under
+`/exchange/v1` (`GET /me`, `POST /organizations`, `GET /organizations/{id}`,
+`GET /organizations/{id}/memberships`, `POST /organizations/{id}/memberships`), closed Pydantic
+schemas throughout. `app.py`: the Exchange router is always mounted; when OIDC is unconfigured it
+fails closed (401 on every request) via `UnconfiguredKeySource` rather than the adapter refusing to
+start — `/health/live` and `/health/ready` are unaffected either way.
+
+**Two real defects found and fixed before shipping** (caught by an independent-reviewer pass over
+this same implementation, not by a pre-existing failing test): (1) a rejected multi-role
+`POST .../memberships` request (e.g. `["ORG_ADMIN", "LAB_TECH"]` against a PROVIDER organization)
+previously left a committed membership and a committed `ORG_ADMIN` grant behind before the 422 —
+role validity is now checked against the organization-type matrix *before* the membership row is
+created, so a rejected request commits nothing. (2) re-`POST`ing a membership that exists but is
+`INACTIVE` previously returned a silent 200 with the requested roles attached, which would have let
+an admin believe access was restored for someone deliberately deactivated — it now returns 409 and
+attaches nothing; `OrganizationRoleAssignmentRepository.assign` independently refuses to attach a
+role to an inactive membership regardless of caller.
+
+**One real bug found only by running the code, not by reading it:** `exchange/api.py` originally
+carried `from __future__ import annotations`. Combined with this module's nested-closure dependency
+pattern (`get_principal` and friends are defined *inside* `build_exchange_router`, not at module
+scope), FastAPI could not resolve `Depends(get_principal)` from the stringified annotation at
+request time — every protected endpoint silently returned `422 {"detail": "principal required"}`
+instead of running any authentication or authorization logic at all. This was not caught by code
+review; it surfaced only once the HTTP test suite was actually executed. Fixed by removing the
+future-annotations import from this one file (safe: the file uses only Python 3.10+ native union
+syntax, and the target runtime is 3.13). Recorded here because it is exactly the class of bug this
+repository's "distinguish written from verified from demonstrated" discipline exists to catch.
+
+**Tests:** 82 new tests, all passing, added to the committed (SQLite-backed) adapter suite —
+`test_exchange_token_validator.py` (19: the full authentication-negative matrix — missing/malformed
+header, malformed/unsigned/`alg=none`/wrong-signature/wrong-issuer/wrong-audience/expired/future-nbf
+/missing-sub/missing-exp/unresolvable-key tokens, all rejected; role/claim extraction),
+`test_exchange_identity_membership.py` (19: identity bootstrap idempotency and exact-identity
+scoping, the role matrix, inactive-membership refusal, and two 10-thread concurrency proofs — one
+for identity bootstrap, one for membership creation, each asserting exactly one row and zero
+escaped `IntegrityError`s), `test_exchange_authorization_service.py` (11: anti-enumeration,
+cross-tenant isolation, platform-admin bypass), `test_exchange_api.py` (30: the full HTTP-level
+matrix — platform-admin gating, org-admin scoping, role-escalation negative controls including the
+two defects above, audit-log assertions including "never a bearer token in the log", no wildcard
+CORS), `test_exchange_app_wiring.py` (3: the real `create_app()` assembly, proving the fail-closed
+default and that health endpoints are unaffected). Full adapter suite: 357 passed / 39 skipped
+(pre-existing, real-PostgreSQL-gated integration tests, unrelated to this ticket) — `ruff check` and
+`ruff format --check` both clean across `src`, `tests`, and `migrations`.
+
+**Real PostgreSQL 18 qualification** (`apt`-installed in a WSL2 sandbox, not Docker — see the
+Keycloak note below for why): `alembic upgrade head` from a `0004`-only database reaches
+`0005_exchange_org_auth` cleanly; `alembic downgrade 0004_exchange_core` was independently verified
+to drop exactly the three new tables (`exchange_identities`,
+`exchange_organization_memberships`, `exchange_organization_role_assignments`) and leave every
+DH-EX-001 table intact; re-upgrade is clean. A standalone, not-committed 25-thread concurrency
+script (matching the DH-EX-001R precedent of a real-database proof kept separate from the pytest
+suite) proved exactly one row created and zero errors for both the identity-bootstrap race and the
+membership-creation race against this real instance — not just SQLite. As with DH-EX-001R, this is
+not claimed to be byte-identical to CI's own `postgres:16-alpine`.
+
+**REAL KEYCLOAK QUALIFICATION = NOT RUN.** `docker pull` of a Keycloak image failed with a TLS
+handshake timeout reaching the registry CDN, both unprivileged and with `sudo` — the identical
+failure mode DH-EX-001R already recorded for this sandbox (Docker Hub/registry pulls unreliable
+here). No mock-JWT test above is being represented as equivalent to a real Keycloak token issuance/
+validation/tenant-isolation proof; every claim in this entry about token validation is proven
+against a **locally generated RSA keypair** via `StaticKeySource`, never a real IdP.
+
+**Keycloak realm config, prepared but not wired:** `keycloak/realm-config/dhealth-exchange-realm.json`
+is new — a separate `dhealth-exchange` realm, one realm role (`dhealth-platform-admin`, matching
+`Settings.exchange_platform_admin_role`'s default), one client (`dhealth-exchange-api`) with an
+explicit audience-claim mapper, `registrationAllowed: false` (no public self-service signup),
+brute-force protection mirroring the connector realm's already-established values
+(`daher-realm.json`, untouched by this ticket). Session lifetimes are shorter than the connector
+realm (`ssoSessionIdleTimeout` 1800s / `ssoSessionMaxLifespan` 14400s vs. the connector realm's
+3600s/36000s) reflecting this ticket's explicit "short-lived tokens" instruction for a
+cross-organization identity boundary; `accessTokenLifespan` is left at 300s, matching the connector
+realm's already-established value rather than inventing a new number. This file is **not** wired
+into `keycloak/reconcile-sso.sh` or `docker-compose.yml` and needs human security review before any
+activation — it exists so the OIDC contract this ticket implements has a concrete target realm
+shape to test/document against, per the ticket's explicit "prepare, stop short of changing
+deployment topology" instruction.
+
+**Audit is fail-open on the durability boundary, by omission, not by design decision — stated
+plainly because the ticket requires it, not because it was mitigated.** Every mutation (`POST
+/organizations`, `POST .../memberships`, each role assignment) commits its database write, then
+calls `ExchangeAuditWriter.append`, which raises on any failure (disk full, permission error, a
+short write) rather than swallowing it. Nothing catches that exception in `exchange/api.py`, so it
+propagates as an uncaught 500 — but the mutation is already committed. The concrete failure this
+produces: **a committed organization or membership with no audit line, surfaced to the caller only
+as a 500 with no indication the write actually succeeded.** This was not changed in this ticket and
+is not mitigated (no compensating transaction, no outbox pattern, no retry). Separately, two of the
+six DH-EX-002 audit `event_type` values `exchange/audit.py` defines —
+`membership_inactivated` and `role_removed` — have no HTTP call site in this ticket (no
+deactivate-membership or remove-role endpoint was built) and are therefore untested; do not read
+the six-value list as six values of equal coverage.
+
+**Repo-wide CRLF line-ending flip — discovered during this ticket, blocks the next one, not caused
+by DH-EX-002's own edits.** While preparing this work, `git status` showed ~344 tracked files across
+the whole repository as modified with no code review would explain. Verified precisely: `git diff -w
+--name-only` (ignore-whitespace) returns exactly the 8 files this ticket actually changed content
+in — nothing else. Byte inspection of one such file confirms the mechanism: `git show
+HEAD:README.md` ends lines in `0a` (LF); the working-tree copy now ends the same lines in `0d0a`
+(CRLF). Something outside this ticket's own edits flipped the working tree's line endings from the
+repository's LF convention to CRLF, tree-wide, at some point in this environment's history; the
+cause was not identified and is out of this ticket's scope to fix. This session's own edits are
+clean of it — the five pre-existing files this ticket modified
+(`adapter/src/daher_adapter/{config,app,audit}.py`, `adapter/requirements.txt`,
+`.github/workflows/ci.yml`) and this documentation pass (`PROJECT_STATE.md`, `CURRENT_STATE.md`)
+were explicitly normalized back to LF (`sed -i 's/\r$//'`) after editing, and every new file this
+ticket created is pure LF from creation (confirmed: `grep -c $'\r'` returns 0 on all twenty files
+this ticket touched). **This blocks DH-EX-002C** (or whatever ticket next runs `git add`): staging
+this ticket's real changes today would also stage ~344 unrelated whitespace-only files unless that
+ticket scopes `git add` to exactly the paths this entry lists. Fixing the flip itself (a
+`.gitattributes` policy plus `git add --renormalize .`) is a repository-hygiene decision, not a
+code change this ticket makes unilaterally — flagged for Liban, not resolved here.
+
+**Real facility:** untouched. **Pollers:** inactive. **Not built in this ticket** (explicitly out
+of scope, matching the ticket's own exclusion list): the lab-order API, Provider/Lab Portal UI,
+patient links, WhatsApp, payments, email/invitation-based membership onboarding. **Known MVP
+limitation, by design:** `POST .../memberships` attaches an existing identity by `identity_id`
+(UUID) only — it performs a lookup, never a creation, and never accepts a raw `(issuer, subject)`
+pair. The target person must authenticate at least once (e.g. call `GET /me`) and share their
+`identity_id` out-of-band before an org admin can attach them; no invitation/lookup-by-email flow
+exists yet.
+
+**Next:** independent review of this implementation (the DH-EX-001R-equivalent step) — see the
+DH-EX-002R entry below, superseding this line: that review has now happened.
+
+### DH-EX-002R · Independent security review + runtime qualification of DH-EX-002 · P0 ·
+✅ REVIEWED, ONE BLOCKER FIXED, ONE LATENT TEST-INFRASTRUCTURE BUG FOUND AND FIXED · ⏳ STILL NOT
+COMMITTED — awaiting Liban's review
+
+**Ticket:** DH-EX-002R, the DH-EX-001R-equivalent independent review step for DH-EX-002.
+**Base:** unchanged, `e93e7cc17c01ba79e24b34524cb76d42cc4d928a` — still not committed, not pushed.
+
+**BLOCKER found and fixed: the Exchange audit was fail-open, exactly as the DH-EX-002 handoff had
+already disclosed.** DH-EX-002R's approved architecture decision: for organization creation,
+membership creation, and role assignment, the mutation and its authoritative audit row now commit
+or roll back together as **one database transaction**. New table `exchange_security_audit_events`
+(folded into the still-uncommitted `0005_exchange_org_auth` migration, not a new `0006`, per this
+ticket's own instruction not to invent artificial migration history for unreviewed work) — closed
+schema (UUID FKs, CHECK-constrained short strings only, no free-text field, structurally incapable
+of holding a token). New module `adapter/src/daher_adapter/exchange/security_audit.py`
+(`ExchangeSecurityAuditRepository.record` — never opens or commits its own transaction, only
+`session.add()`s onto a session the caller already owns). `OrganizationRepository.create`,
+`OrganizationMembershipRepository.create`, and `OrganizationRoleAssignmentRepository.assign` all
+gained an optional `session` parameter: when given, the caller owns the transaction and the
+insert-or-fetch idempotency check runs inside a `SAVEPOINT` (`session.begin_nested()`) so a
+duplicate-key hit unwinds only to the savepoint, never poisoning the caller's outer transaction;
+when omitted, every existing caller (DH-EX-001's own code, this repo's other tests) is unaffected.
+`exchange/api.py`'s two mutation endpoints now wrap their writes in
+`with session_factory.begin() as session: ...`, which commits on success and rolls back
+everything -- membership, every role assignment, and every audit row -- if anything inside raises,
+including the audit insert itself. Authorization **refusals** (403/404, and the inactive-membership
+re-POST 409) are explicitly excluded from this table by design (a refusal is not a mutation) and
+stay in the existing best-effort file-based `ExchangeAuditWriter`, now wrapped so a refusal-audit
+write failure can never turn an intended 403/404/409 into an accidental 500 -- access denial must
+never depend on a database write succeeding, and now provably doesn't.
+
+**Proven by failure injection, not just code review** (`test_exchange_audit_atomicity.py`, 3 new
+tests): injecting a failure in the audit insert after organization creation leaves the DB with
+zero new organizations and zero new audit rows; injecting a `Session.commit()` failure does the
+same; injecting a failure on the *second* audit insert in a membership-creation-plus-role-grant
+request (proving the whole multi-statement transaction unwinds, not just the one call that failed)
+leaves zero new memberships, zero new role assignments, and zero new audit rows.
+
+**A second, unrelated real bug was found while building that proof: SQLite/pysqlite silently broke
+SAVEPOINT rollback semantics.** The very first version of the failure-injection test for the
+membership+role case failed unexpectedly: the membership row survived a rollback that should have
+erased it. Root-caused to a well-documented SQLAlchemy/SQLite gap -- the stdlib `sqlite3` DBAPI
+manages its own implicit transactions underneath SQLAlchemy's, which breaks `Session.begin_nested()`
+SAVEPOINT rollback unless disabled via SQLAlchemy's own documented workaround (`isolation_level =
+None` on connect, an explicit `BEGIN` on begin). Verified reproducible in isolation, then verified
+**absent against real PostgreSQL** (this repo's actual runtime driver, via psycopg) -- confirming
+this was purely a test-environment gap, not a production correctness bug. Fixed in the **shared**
+`adapter/tests/conftest.py` `engine` fixture (used by the whole adapter test suite, not just
+Exchange tests), because leaving it broken would have silently invalidated any future ticket's
+rollback-behavior test under this fixture, not just this one's. Full regression re-run after the
+fix: **366 passed / 39 skipped, zero regressions** (was 360 before this fix's 3 new atomicity
+tests were added; the fix itself changed no other test's outcome).
+
+**Reproduced and reconfirmed all four previously-fixed bugs from the DH-EX-002 handoff**, each with
+a permanent test: the multi-role atomicity fix (now additionally proven at the audit-row level --
+zero `ExchangeSecurityAuditEvent` rows for a rejected request, not just zero membership/role rows);
+the inactive-membership-reactivation 409; role-assignment refusing an inactive membership; and the
+`from __future__ import annotations` / FastAPI nested-dependency 422 regression, now with a
+permanently named regression test (`test_protected_routes_do_not_422_on_nested_dependency_resolution`).
+
+**Additional review findings, all closed:**
+- **Part D (platform-admin claim trust):** added explicit tests that the connector realm's
+  historical `sys-admin` role grants zero Exchange platform-admin authority, and that a token
+  carrying the correct role string but signed for the wrong issuer is rejected outright (401)
+  before its role content is ever evaluated.
+- **Part I (role-assignment replay semantics):** made explicit, in both a docstring and a new
+  permanent test, that `POST .../memberships`'s `roles` field is ensure/add, never replace --
+  omitting an already-held role from a request never removes it.
+- **Part J (org-admin delegation):** added an explicit test proving an ORG_ADMIN may grant
+  ORG_ADMIN to a peer within their own organization (approved MVP delegation), distinct from and
+  never conflated with granting platform admin or acting in another organization.
+- **Part O (Keycloak realm config):** added an explicit `"implicitFlowEnabled": false` to the
+  `dhealth-exchange-api` client -- Keycloak's default already disables it, but the review asked for
+  provable-not-just-assumed evidence, so it is now explicit rather than implicit. No other change;
+  `daher-realm.json` remains untouched.
+- **Part X (logging/secret leakage):** confirmed zero `logging`/`print` calls anywhere in
+  `adapter/src/daher_adapter/exchange/` -- there is no code path that could log a header, a token,
+  or a JWKS response even by accident.
+- **Part S (concurrency):** added the one missing proof, concurrent role assignment (10 threads,
+  SQLite, committed; 25 threads, real PostgreSQL, not committed) -- exactly one role row, zero
+  errors, matching the existing identity/membership proofs.
+
+**Real PostgreSQL 18 re-qualification** (fresh disposable database, `apt`-installed, not Docker --
+Docker Hub still unreachable in this sandbox, see below): `alembic upgrade head` from empty reaches
+`0005_exchange_org_auth` cleanly; `downgrade 0004_exchange_core` drops exactly the four new tables
+(the three from DH-EX-002 plus `exchange_security_audit_events`) and leaves every DH-EX-001 table
+intact; re-upgrade is clean; the new table's three `CHECK` constraints and four `ON DELETE
+RESTRICT` foreign keys were inspected directly via `pg_constraint` and match `models.py` exactly.
+All three concurrency proofs (identity, membership, role assignment; 25 threads each) pass with
+zero errors and exactly one row created. The rollback-semantics failure-injection proof was
+independently re-run against real PostgreSQL too (not just SQLite) and confirmed correct without
+any workaround needed -- see the pysqlite paragraph above.
+
+**REAL KEYCLOAK QUALIFICATION: still NOT RUN**, reconfirmed this review pass, same evidence as
+before -- `docker pull` (unprivileged and with `sudo`) fails with a TLS handshake timeout reaching
+the registry CDN. Not re-attempted further per this ticket's own explicit instruction not to spend
+the review fighting Docker Hub. Every claim above about token validation is proven against a
+locally generated RSA keypair, never a real IdP; this remains a required deployment/pilot gate, not
+something this review pass could close.
+
+**CRLF worktree-safety inventory, established at the start of this review and preserved
+throughout -- no `.gitattributes`, no repo-wide `git add`, nothing renormalized:**
+- **INTENDED SEMANTIC FILES (26):** 12 pre-existing tracked files with real content changes
+  (`.github/workflows/ci.yml`, `CURRENT_STATE.md`, `PROJECT_STATE.md`, `adapter/requirements.txt`,
+  `adapter/src/daher_adapter/{app,audit,config}.py`,
+  `adapter/src/daher_adapter/exchange/{__init__,audit,models,organizations}.py`,
+  `adapter/tests/conftest.py`) + 14 new files (`adapter/migrations/versions/0005_exchange_org_auth.py`,
+  `adapter/src/daher_adapter/exchange/{api,authorization,identity_auth,membership,security_audit}.py`,
+  six new `adapter/tests/test_exchange_*.py`/`exchange_auth_support.py` files, and
+  `keycloak/realm-config/dhealth-exchange-realm.json`).
+- **LINE-ENDING-ONLY FILE COUNT:** 341 tracked files show as modified purely from the pre-existing
+  repo-wide LF→CRLF flip (`git diff --name-only` returns 353; `git diff -w --name-only`, ignoring
+  whitespace, returns exactly the 12 files above) -- confirmed untouched by this review's own work
+  and left exactly as found, as unstaged noise, per this ticket's explicit instruction.
+- **UNEXPECTED SEMANTIC FILES:** none. `git diff --check` on the 26 intended files returns clean
+  (exit 0) after this review normalized two more files that had picked up CRLF from the pre-existing
+  flip when edited (`adapter/tests/conftest.py`, `adapter/src/daher_adapter/exchange/organizations.py`
+  -- the latter checked and found already clean) back to LF, the same treatment DH-EX-002's own
+  handoff already applied to five other files. The 341-file flip itself remains exactly as
+  DH-EX-002 found and reported it: unresolved, flagged for Liban, not touched here.
+
+**Tests:** 366 passed / 39 skipped (was 357 at the DH-EX-002 handoff; +9 this review: 3 atomicity
+failure-injection, 1 role-concurrency, 2 Part D, 1 Part J, 1 Part I, 1 Part Q regression-named).
+`ruff check`/`ruff format --check` clean across `src`, `tests`, `migrations`, `scripts`.
+`git diff --check` clean on all 26 intended files. Secret-shaped literal-assignment scan: two hits,
+both benign and pre-existing in nature (the CI workflow's own secret-scan step's error-message
+string, and `test_exchange_app_wiring.py`'s `db_password="not-a-real-secret"` placeholder, an exact
+match of `test_health.py`'s own established convention).
+
+**Not committed, not pushed.** Same boundary as DH-EX-002 itself.
+
+**Next:** Liban's review of this implementation. On approval, a combined DH-EX-002+DH-EX-002R
+commit/push/exact-SHA-CI ticket, following the established DH-EX-001+DH-EX-001R→DH-EX-001C pattern
+-- including bumping `EXPECTED_HEAD` if the migration content changes again before then, and
+scoping `git add` to exactly the file list above, never a repo-wide add, given the unresolved CRLF
+flip.

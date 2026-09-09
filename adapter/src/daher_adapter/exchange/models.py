@@ -40,6 +40,9 @@ from daher_adapter.models import Base, utc_now
 __all__ = [
     "DoctorReview",
     "DoctorReviewStatus",
+    "ExchangeIdentity",
+    "ExchangeIdentityStatus",
+    "ExchangeSecurityAuditEvent",
     "LabOffering",
     "LabOrder",
     "LabOrderItem",
@@ -49,6 +52,10 @@ __all__ = [
     "LabResultType",
     "LabSelection",
     "Organization",
+    "OrganizationMembership",
+    "OrganizationMembershipStatus",
+    "OrganizationRole",
+    "OrganizationRoleAssignment",
     "OrganizationStatus",
     "OrganizationType",
     "PatientReference",
@@ -517,3 +524,177 @@ class DoctorReview(Base):
     reviewed_by_practitioner_reference_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_practitioner_references.id", ondelete="RESTRICT")
     )
+
+
+# --- DH-EX-002: organization onboarding, identity, membership, and role assignment -------------
+
+
+class ExchangeIdentityStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class OrganizationMembershipStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class OrganizationRole(StrEnum):
+    """MVP organization roles only -- no billing/reception/pharmacy roles. Validity against
+    organization type (PROVIDER: ORG_ADMIN/CLINICIAN; LAB: ORG_ADMIN/LAB_TECH) is enforced by
+    ``exchange/membership.py``'s repository layer, not a DB constraint, for the same reason
+    ``LabOffering``'s lab-organization-type check is repository-enforced elsewhere in this file:
+    SQL cannot portably CHECK a value against a column on a different, joined-through table."""
+
+    ORG_ADMIN = "ORG_ADMIN"
+    CLINICIAN = "CLINICIAN"
+    LAB_TECH = "LAB_TECH"
+
+
+class ExchangeIdentity(Base):
+    """One authenticated human, identified **exactly** by their OIDC ``(issuer, subject)`` pair --
+    never by email, name, or phone, none of which are stable (DH-EX-002's explicit instruction).
+    Authentication and organization authorization are deliberately separate: a row existing here
+    means "DHealth has seen a validly-signed token for this issuer+subject", nothing more --
+    creating this row grants zero organization access on its own (see ``OrganizationMembership``).
+    Never stores a password, password hash, reset token, or any other credential material; those
+    live exclusively in the identity provider.
+    """
+
+    __tablename__ = "exchange_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uq_exchange_identities_issuer_subject"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    issuer: Mapped[str] = mapped_column(String(512), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Snapshots only, refreshed opportunistically from later tokens -- never the identity key,
+    # never compared for matching/merging purposes anywhere in this codebase.
+    display_name: Mapped[str | None] = mapped_column(String(256))
+    email: Mapped[str | None] = mapped_column(String(320))
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=ExchangeIdentityStatus.ACTIVE.value
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class OrganizationMembership(Base):
+    """One identity's membership in one organization. An identity may hold memberships in more
+    than one organization -- V1 does not force a single global org per human. Inactive memberships
+    must fail authorization (``exchange/authorization.py``); historical rows are never physically
+    deleted, only inactivated."""
+
+    __tablename__ = "exchange_organization_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "identity_id", name="uq_exchange_org_memberships_org_identity"
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'INACTIVE')", name="ck_exchange_org_memberships_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=OrganizationMembershipStatus.ACTIVE.value
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    role_assignments: Mapped[list[OrganizationRoleAssignment]] = relationship(
+        back_populates="membership"
+    )
+
+
+class OrganizationRoleAssignment(Base):
+    """One role held by one membership. A membership may hold more than one role (e.g. a small
+    provider org's sole user might be both ``ORG_ADMIN`` and ``CLINICIAN``); it may never hold the
+    same role twice, and it may never hold a role invalid for its organization's type -- both
+    enforced in ``exchange/membership.py``, the second because it requires joining through to the
+    organization's own type, which a same-table CHECK constraint cannot express."""
+
+    __tablename__ = "exchange_organization_role_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "membership_id", "role", name="uq_exchange_org_role_assignments_membership_role"
+        ),
+        CheckConstraint(
+            "role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH')",
+            name="ck_exchange_org_role_assignments_role",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    membership_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    membership: Mapped[OrganizationMembership] = relationship(back_populates="role_assignments")
+
+
+class ExchangeSecurityAuditEvent(Base):
+    """DH-EX-002R: the authoritative, transactional audit record for Exchange security mutations
+    (organization creation, membership creation, role assignment). Inserted in the **same
+    database transaction** as the mutation it records (see ``exchange/security_audit.py``) --
+    never written after a separate commit, and never the target of a best-effort fallback. If this
+    insert fails, the mutation it would have recorded is rolled back with it; nothing here is
+    reachable independent of a real, committed mutation.
+
+    Deliberately narrow and closed: no JWT, no bearer token, no password, no Keycloak secret, no
+    clinical data, no free-text payload. `event_type`/`outcome` are limited by CHECK constraint to
+    exactly the values this ticket's mutations actually produce -- widen only when a real new
+    caller exists, matching this package's established discipline (`exchange/audit.py`).
+
+    Authorization *refusals* are explicitly NOT recorded here -- a refusal is not a state mutation,
+    and access denial must never depend on a database write succeeding. Refusal telemetry stays in
+    the existing best-effort file-based `ExchangeAuditWriter` (`exchange/audit.py`), a deliberately
+    separate, non-authoritative mechanism.
+    """
+
+    __tablename__ = "exchange_security_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('organization_created', 'membership_created', 'role_assigned')",
+            name="ck_exchange_security_audit_events_event_type",
+        ),
+        CheckConstraint(
+            "outcome IN ('created', 'returned_existing')",
+            name="ck_exchange_security_audit_events_outcome",
+        ),
+        CheckConstraint(
+            "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH')",
+            name="ck_exchange_security_audit_events_role",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    subject_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    membership_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=True
+    )
+    role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)

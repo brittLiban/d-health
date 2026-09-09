@@ -1109,3 +1109,68 @@ reclassified, not touched by DH-EX-001/DH-EX-001R/DH-CI-001. No file under `open
 `openelis-config/` was modified by any of that work except DH-CI-001's single build-configuration
 line, which changed no clinical/application behavior. OpenMRS/OpenELIS pollers remain inactive; no
 real facility was touched by any ticket in this Exchange-foundation sequence.
+
+**CORRECTION appended 2026-09-09 (DH-EX-002, append-only — "NEXT IMPLEMENTATION TICKET: DH-EX-002
+— not begun" above is superseded, not retracted).** DH-EX-002 (organization onboarding, OIDC
+authentication, tenant isolation, a minimal `/exchange/v1` API) is **implemented and qualified,
+but explicitly not committed and not pushed** — this ticket's boundary requires returning the
+implementation for independent review first, the same position DH-EX-001 was in before DH-EX-001R.
+Full detail is in PROJECT_STATE.md's DH-EX-002 entry; the load-bearing facts:
+
+- **Auth architecture:** Keycloak (a new, separate `dhealth-exchange` realm — the existing
+  connector `daher` realm is untouched) authenticates identities by `(issuer, subject)` only, never
+  email. The Exchange Postgres database is the sole authority for organization membership and
+  role — no per-organization Keycloak realm role exists or was created. Platform-admin authority is
+  a single Keycloak realm role (`dhealth-platform-admin`), never inferred from an organization role.
+- **82 new tests, all passing**, against SQLite (the committed suite's existing convention) plus a
+  real-PostgreSQL migration and 25-thread concurrency qualification (not committed, matching the
+  DH-EX-001R precedent). Full adapter suite: 357 passed / 39 skipped, `ruff` clean.
+- **REAL KEYCLOAK QUALIFICATION = NOT RUN** — `docker pull` failed with a TLS handshake timeout in
+  this sandbox, the same failure DH-EX-001R already recorded. All token-validation claims are
+  proven against a locally generated RSA keypair, never a real IdP; this is stated plainly, not
+  papered over with a mock-equals-real claim.
+- **One real bug was caught only by running the code**, not by review: a `from __future__ import
+  annotations` import silently broke FastAPI's dependency injection for every protected endpoint
+  (all returned 422 instead of running any auth check). Fixed once the HTTP test suite actually ran
+  it. Recorded in full in PROJECT_STATE.md's DH-EX-002 entry as a concrete instance of why this
+  repository insists on runtime qualification over code-review-only sign-off.
+- **Known, deliberate MVP limitation:** attaching a member to an organization is a lookup by
+  `identity_id` only — the target must have authenticated at least once already; there is no
+  invitation/email flow yet.
+- Real facility untouched, pollers inactive, no lab-order API/portal UI/WhatsApp/patient surface
+  built — none of that was in this ticket's scope.
+- ~~Audit is fail-open on the durability boundary~~ — **fixed by DH-EX-002R, see below.**
+- **A repo-wide LF→CRLF line-ending flip was discovered during this ticket, affecting ~344 tracked
+  files this ticket never touched.** Confirmed whitespace-only (`git diff -w` shows zero real
+  change outside this ticket's own 8 files) and not caused by this ticket's edits. This session's
+  own changes were normalized back to LF; the tree-wide flip itself is unresolved and will make
+  `git add` unsafe without careful path scoping on whatever ticket commits next. Full evidence and
+  detail: PROJECT_STATE.md's DH-EX-002 entry.
+
+**CORRECTION appended 2026-09-09 (DH-EX-002R, append-only).** DH-EX-002R (the DH-EX-001R-equivalent
+independent review of DH-EX-002) has now run. Still **not committed, not pushed**. Load-bearing
+changes, full detail in PROJECT_STATE.md's DH-EX-002R entry:
+
+- **The audit fail-open BLOCKER above is fixed.** Organization creation, membership creation, and
+  role assignment now write their mutation *and* an authoritative `ExchangeSecurityAuditEvent` row
+  in one database transaction (`session_factory.begin()` in `exchange/api.py`) — proven not just by
+  code review but by three failure-injection tests that break the audit insert, the commit, and a
+  late audit insert mid-multi-statement-request, each confirming zero mutation and zero audit row
+  survive. Refusals (403/404/409) are explicitly excluded from this table (a refusal is not a
+  mutation) and stay in the existing best-effort file, now wrapped so a telemetry failure can never
+  turn an intended refusal into an accidental 500.
+- **A second, unrelated real bug was found while proving the above: SQLite/pysqlite silently broke
+  SAVEPOINT rollback** under a specific sequence (a nested `begin_nested()` that completes, followed
+  by a later unrelated failure in the same outer transaction). Confirmed absent against real
+  PostgreSQL (this repo's actual driver) — a test-environment gap, not a production bug. Fixed in
+  the shared `adapter/tests/conftest.py` engine fixture via SQLAlchemy's own documented workaround,
+  with a full regression re-run (366 passed / 39 skipped, zero regressions) proving the fix didn't
+  disturb any of the 350+ pre-existing tests that also use that fixture.
+- 9 more tests added (concurrent role assignment; platform-admin/issuer-confusion negatives;
+  org-admin-delegates-to-a-peer; role-omission-does-not-remove; a permanently named regression test
+  for the FastAPI nested-dependency 422 bug). Full suite: **366 passed / 39 skipped.**
+- Real PostgreSQL re-qualified (fresh migration, downgrade drops exactly the 4 new tables including
+  the new audit table, re-upgrade, all 3 concurrency proofs including the newly-added role one).
+  REAL KEYCLOAK QUALIFICATION remains NOT RUN (same Docker Hub TLS-timeout evidence as before).
+- **NEXT: Liban's review, then a combined DH-EX-002+DH-EX-002R commit/push/exact-SHA-CI ticket.**
+- **NEXT: independent review of this implementation (the DH-EX-001R-equivalent step), then commit.**

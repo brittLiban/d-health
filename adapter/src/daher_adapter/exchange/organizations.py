@@ -31,7 +31,9 @@ class OrganizationRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory
 
-    def create(self, *, org_type: str, name: str) -> OrganizationRecord:
+    def create(
+        self, *, org_type: str, name: str, session: Session | None = None
+    ) -> OrganizationRecord:
         # `org_type` is a plain `str`, not `OrganizationType`, deliberately: this is the
         # boundary an eventual org-onboarding API would expose to a caller, and the negative
         # control ("invalid organization type refused") needs a value Python's own enum
@@ -45,9 +47,18 @@ class OrganizationRepository:
         organization = Organization(
             org_type=valid_type.value, name=name, status=OrganizationStatus.ACTIVE.value
         )
-        with self._sessions() as session:
+        # No uniqueness constraint on `name` -- unchanged from DH-EX-001's original scope
+        # ("Do NOT model full onboarding/auth yet"), not a decision this ticket revisits.
+        # Duplicate organization names are therefore permitted by design, not an oversight.
+        if session is not None:
+            # Caller owns the transaction (DH-EX-002R: organization creation + its authoritative
+            # audit row must commit or roll back together) -- flush only, never commit here.
             session.add(organization)
-            session.commit()
+            session.flush()
+            return _to_record(organization)
+        with self._sessions() as owned_session:
+            owned_session.add(organization)
+            owned_session.commit()
             return _to_record(organization)
 
     def get(self, organization_id: uuid.UUID) -> OrganizationRecord:
