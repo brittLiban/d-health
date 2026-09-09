@@ -42,6 +42,52 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-dependency-plugin</artifactId>
+				<!--
+				DH-CI-001: the inherited maven-parent-openmrs-module pluginManagement binds this
+				plugin's "Expand resources" execution (goal unpack-dependencies, unpacking the
+				sibling reactor artifact daherendadmission-api's *.xml/*.properties into this
+				module's target/classes) to the generate-resources phase, which runs before
+				package. Under a reactor-wide `mvn test` (this repo's CI invocation, and the only
+				place these OMOD tests ever actually run; the real packaging build in
+				openmrs-config/Dockerfile uses -Dmaven.test.skip=true package), the sibling
+				daherendadmission-api module has not been packaged into a JAR yet. Maven only runs
+				each reactor module's lifecycle up to the requested phase (test, which comes before
+				package), so the artifact this goal needs to unpack from genuinely does not exist
+				yet, regardless of which OMOD-local phase this execution is bound to. This is the
+				documented MDEP-98 pitfall, reproduced live via `mvn -B test` from the reactor root
+				(PARENT and API succeed, OMOD fails at exactly this execution).
+
+				Rebinding to prepare-package, the last standard lifecycle phase before package,
+				keeps this a build-configuration-only change with two properties, both live
+				verified: (1) under `mvn test`, prepare-package is never reached, since it comes
+				after test in the standard lifecycle, so this execution simply does not run and
+				cannot fail; both OMOD test classes (CreateTestOrderServletTest,
+				DaherExternalConfigurationInterceptorTest) were confirmed to run and pass, proving
+				they never needed these unpacked resources in the first place. (2) under a full
+				reactor `mvn package`/`install` (the Dockerfile's actual packaging path), Maven
+				completes each reactor module's full lifecycle through the requested phase before
+				moving to the next dependent module, so daherendadmission-api is already packaged
+				by the time this module reaches prepare-package; confirmed via
+				`mvn -f pom.xml -Dmaven.test.skip=true package`, which still produces
+				omod/target/daherendadmission-1.0.0.omod with the resources correctly unpacked,
+				exactly matching the Dockerfile's own invocation.
+				-->
+				<executions>
+					<execution>
+						<id>Expand resources</id>
+						<phase>prepare-package</phase>
+						<goals>
+							<goal>unpack-dependencies</goal>
+						</goals>
+						<configuration>
+							<includeGroupIds>org.openmrs.module</includeGroupIds>
+							<includeArtifactIds>daherendadmission-api,daherendadmission-omod,daherendadmission-omod-common</includeArtifactIds>
+							<includeScope>compile</includeScope>
+							<includes>*.xml,*.properties</includes>
+							<outputDirectory>${project.build.outputDirectory}</outputDirectory>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>
