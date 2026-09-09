@@ -862,3 +862,89 @@ implementation or pilot acceptance:
 **Timeline note:** the pilot targets **1 September 2026**. Scope decisions above were taken partly
 to keep the surface area small enough to be stable by then. Anything that grows the container count
 between now and then should be weighed against that date.
+
+---
+
+## 17. The DHealth Exchange (post-pivot, ADR-042) — added 2026-09-08, does not replace §1–§16
+
+**This section describes a new, additive direction, not a rewrite.** Everything in §1–§16 above
+describes the maternity-first clinical stack as it actually is — built, partly verified, and still
+the honest record of that scope. Nothing in it is deleted or superseded by this section. §16's
+provisioning system in particular is a strong candidate foundation for the org-onboarding control
+plane below, not a competing system.
+
+**Why this section exists.** DECISIONS.md's ADR-042 records a product-direction pivot: DHealth is
+no longer primarily a maternity/birth-centre EMR. It is a digital lab order + result exchange
+connecting doctors/clinics/hospitals, patients, and independent laboratories — reachable through
+DHealth's own Provider/Lab portals, or through an existing EMR/LIS via a connector. OpenMRS and
+OpenELIS become the first two reference connectors, not the definition of the product.
+
+**Recommended architecture — Option C, hybrid.**
+
+```
+                         DHEALTH EXCHANGE (core)
+              organization identity · routing · order/result
+              status machine · correlation · idempotency ·
+              audit · dead-letter  — connector-agnostic
+                              │
+              ┌───────────────┴────────────────┐
+              │                                │
+        PROVIDER SIDE                      LAB SIDE
+              │                                │
+   DHealth Provider Portal            DHealth Lab Portal
+        (persists clinical                (persists clinical
+      payload — DHealth IS the          payload — DHealth IS the
+      endpoint for this org)            endpoint for this org)
+              OR                                OR
+    OpenMRS connector                  OpenELIS connector
+   (payload stays in OpenMRS;         (payload stays in OpenELIS;
+    Exchange holds routing             Exchange holds routing
+    metadata + correlation only)       metadata + correlation only)
+                              │
+                              ▼
+                     PATIENT SECURE LINK
+                  (WhatsApp/SMS-delivered —
+                   ADR-003's real-credential
+                   gate is now more load-bearing,
+                   not less)
+```
+
+Pure "central exchange stores only routing metadata" was evaluated and rejected: the Provider/Lab
+Portal requirement means DHealth **is** the endpoint system for portal-only organizations, so there
+is nowhere else for an order's test selection or a lab's result to live for those participants.
+Pure "central exchange stores full normalized clinical records" was rejected as an unbounded EMR
+risk. §16's "never a shared multi-tenant clinical database" rule (ADR-020/ADR-021) is unaffected —
+it is scoped to per-facility *clinical* stores (ADR-001), not to this routing/audit-scoped Exchange
+core.
+
+**Central data boundary (ADR-042).** The Exchange core may persist: organization identity,
+patient/practitioner references (source-system + source-identity only, no national ID, no fuzzy
+matching), requested test catalog entries, sender and selected-lab organization identity, a frozen
+price snapshot at selection time, order status, the lab result value, result-delivery state, and
+the doctor's follow-up disposition. It is explicitly **not** a longitudinal medical record: no
+free-text clinical notes, no medication list, no diagnosis history, no general encounter data.
+
+**Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
+
+| Component | Verdict |
+|---|---|
+| Message ledger, dead-letter/retry, audit log, crash-recovery coordinator (`ledger.py`, `dead_letter.py`, `audit.py`, `recovery.py`) | **KEEP AS CORE** — already connector-agnostic |
+| Patient/practitioner identity pattern (`openelis.py`'s `PATIENT_IDENTITY_SYSTEM`, ADR-037) | Pattern reusable, concrete binding is OpenMRS/OpenELIS-connector-specific |
+| Order poller/watermark, source-event model (`order_poller.py`, `watermark.py`, `source_events.py`) | **KEEP AS CONNECTOR** — FHIR/OpenMRS-shaped, not source-neutral |
+| Provisioning trust boundary / job-queue / pull-agent (§16) | **KEEP AS CORE** for org onboarding; `Facility` model needs an `Organization`/`OrganizationUser` refactor |
+| Keycloak realm | **KEEP AS CONNECTOR-scoped** — single-tenant-shaped today, needs a multi-org identity answer |
+| `ui/` design-system | **KEEP AS CORE** candidate for new portal UIs |
+| `ui/` feature code (`features/patients`, `features/admission`, `features/maternity`) | Not reusable as-is — 100% OpenMRS/maternity-coupled |
+
+**Canonical internal model:** DHealth-owned domain model (`adapter/src/daher_adapter/exchange/`),
+not FHIR resources. FHIR remains a connector/interoperability format where a connector needs it —
+exactly how the adapter already uses it for OpenMRS/OpenELIS — not the Exchange's own database
+shape.
+
+**Status:** DH-EX-001 (Exchange core domain + persistence foundation) is built and
+runtime-qualified — real `pytest`/`ruff`/`alembic upgrade head` against a disposable PostgreSQL
+database, per DH-EX-001R's independent review (2026-09-08). Not committed or pushed, pending
+Liban's own review. No Provider Portal, Lab Portal, or patient-link UI exists yet. No connector
+wiring (OpenMRS or OpenELIS) has changed. Full audit, gap analysis, and the proposed ticket
+sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review detail:
+PROJECT_STATE.md's DH-EX-001 and DH-EX-001R entries.

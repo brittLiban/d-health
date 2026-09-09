@@ -1,5 +1,19 @@
 # Daher Health
 
+**DHealth is a digital lab order + result exchange** connecting doctors/clinics, patients, and
+independent laboratories — reachable through DHealth's own Provider/Lab portals or through an
+existing EMR/LIS via a connector (DECISIONS.md's ADR-042, 2026-09-08). This is a **pivot in
+product direction**, not a rewrite: the maternity/birth-centre clinical stack described below —
+OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built and becomes the
+**first reference connector track** rather than the product's definition. Nothing below is deleted
+or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001/DH-EX-001R entries for what exists so far
+(built and runtime-qualified against real PostgreSQL, not yet committed — no Provider Portal, Lab
+Portal, or patient-link UI exists yet).
+
+---
+
 A health information system for a birth delivery centre and its laboratory in Djibouti.
 OpenMRS (patient records, maternity care) + OpenELIS (laboratory) + Keycloak (one login for both)
 + a small adapter that routes lab orders and results between them, all in Docker containers behind

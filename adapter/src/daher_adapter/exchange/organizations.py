@@ -1,0 +1,92 @@
+"""DH-EX-001: Organization creation and lookup. Deliberately no onboarding/auth/user model yet."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from daher_adapter.exchange.models import Organization, OrganizationStatus, OrganizationType
+
+
+class InvalidOrganizationType(ValueError):
+    """An organization type outside {PROVIDER, LAB} was requested."""
+
+
+class OrganizationNotFound(RuntimeError):
+    """No organization matches the given id."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrganizationRecord:
+    id: uuid.UUID
+    org_type: str
+    name: str
+    status: str
+
+
+class OrganizationRepository:
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._sessions = session_factory
+
+    def create(self, *, org_type: str, name: str) -> OrganizationRecord:
+        # `org_type` is a plain `str`, not `OrganizationType`, deliberately: this is the
+        # boundary an eventual org-onboarding API would expose to a caller, and the negative
+        # control ("invalid organization type refused") needs a value Python's own enum
+        # constructor would not already reject before this method runs.
+        try:
+            valid_type = OrganizationType(org_type)
+        except ValueError as error:
+            raise InvalidOrganizationType(f"unsupported organization type {org_type!r}") from error
+        if not name.strip():
+            raise ValueError("name is required")
+        organization = Organization(
+            org_type=valid_type.value, name=name, status=OrganizationStatus.ACTIVE.value
+        )
+        with self._sessions() as session:
+            session.add(organization)
+            session.commit()
+            return _to_record(organization)
+
+    def get(self, organization_id: uuid.UUID) -> OrganizationRecord:
+        with self._sessions() as session:
+            organization = session.get(Organization, organization_id)
+            if organization is None:
+                raise OrganizationNotFound(str(organization_id))
+            return _to_record(organization)
+
+    def require_type(self, organization_id: uuid.UUID, expected: OrganizationType) -> None:
+        """Fails closed if ``organization_id`` does not reference an organization of the
+        expected type (or does not exist / is not ACTIVE) -- the repository-level check standing
+        in for the cross-table CHECK constraint SQL cannot express portably."""
+        record = self.get(organization_id)
+        if record.status != OrganizationStatus.ACTIVE.value:
+            raise InvalidOrganizationType(
+                f"organization {organization_id} is not ACTIVE (status={record.status!r})"
+            )
+        if record.org_type != expected.value:
+            raise InvalidOrganizationType(
+                f"organization {organization_id} is {record.org_type!r}, "
+                f"expected {expected.value!r}"
+            )
+
+    def list_active(self, org_type: OrganizationType) -> list[OrganizationRecord]:
+        with self._sessions() as session:
+            organizations = session.scalars(
+                select(Organization).where(
+                    Organization.org_type == org_type.value,
+                    Organization.status == OrganizationStatus.ACTIVE.value,
+                )
+            ).all()
+            return [_to_record(organization) for organization in organizations]
+
+
+def _to_record(organization: Organization) -> OrganizationRecord:
+    return OrganizationRecord(
+        id=organization.id,
+        org_type=organization.org_type,
+        name=organization.name,
+        status=organization.status,
+    )

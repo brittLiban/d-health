@@ -40,6 +40,13 @@ class AuditWriter:
             os.close(descriptor)
 
     def append(self, event: AuditEvent) -> None:
+        # DH-EX-001R: DH-EX-001 briefly widened this parameter to `BaseModel` so
+        # `exchange/audit.py`'s `ExchangeAuditEvent` could reuse this writer. Reverted on review:
+        # `ExchangeAuditEvent` was never actually wired to any repository call in DH-EX-001 (no
+        # caller exists yet), so the widening weakened this writer's type-level guarantee (any
+        # `BaseModel`, not just the closed `AuditEvent` shape) for zero current benefit. Restore
+        # the strict type now; revisit reuse (or a narrower shared protocol) only when a real
+        # Exchange audit caller exists to justify it.
         self.ensure_available()
         encoded = (
             json.dumps(event.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))

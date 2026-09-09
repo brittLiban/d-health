@@ -104,7 +104,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0003_dead_letter_resolutions
+          EXPECTED_HEAD: 0004_exchange_core
         working-directory: adapter
         run: |
           alembic upgrade head

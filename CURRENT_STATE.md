@@ -1019,3 +1019,56 @@ This does **not** close DH-011H end to end. ADR-037's exact OpenMRS Provider UUI
 provider mapping is still unimplemented, and DH-011I still has zero exact one-to-one test mappings.
 No production composition, poller, scheduler, DH-011L run, real staff, or real facility data was
 used. Worktree remains uncommitted pending independent review.
+
+**CORRECTION appended 2026-09-08 (DH-PIVOT-001).** The above section's own "worktree remains
+uncommitted" language describes DH-011H2C's state *at the time that pass was written*. It is now
+stale: `4dfaeef26f624e09a1869fddd1565b4106d4612e` ("uncomplete but pushing", 2026-09-01) committed
+and pushed exactly this DH-011H2C source-order boundary work. See PROJECT_STATE.md's own
+append-only correction under the DH-011H2C entry, and `DECISIONS.md`'s ADR-042, for the same note.
+Nothing about the work's verification claims above changes.
+
+---
+
+## §0 Pivot note (2026-09-08, DH-PIVOT-001 / ADR-042)
+
+**Product direction changed.** DHealth is no longer primarily a maternity/birth-centre EMR — it is
+a digital lab order + result exchange connecting doctors/clinics, patients, and independent
+laboratories, with OpenMRS and OpenELIS as the first reference connectors rather than the product's
+definition. This is a *pivot*, not a correction: every maternity-first assessment above (DH-002
+through DH-011H2C, all blockers, all NEEDS LIBAN items) remains an accurate historical record of
+that scope and is unaffected. See `DECISIONS.md`'s ADR-042 for the full recorded decision
+(architecture: Option C hybrid; central data boundary; patient result-release policy for MVP;
+what leaves the new MVP's critical path and why nothing is deleted).
+
+**DH-EX-001 (Exchange core domain + persistence foundation) is the first ticket under the new
+direction.** New `adapter/src/daher_adapter/exchange/` subpackage: 12 ORM tables, 6 repository
+modules, 1 additive Alembic migration (`0004_exchange_core`), 8 new test files. **Written and
+manually re-reviewed, not run** — no Python interpreter was available in the authoring environment
+(confirmed: no working `python`/`python3`/`py`), so `ruff check`, `ruff format --check`, `pytest`,
+and a real `alembic upgrade head` have not actually been executed against this code. Every file was
+checked by script for this repo's 100-character line-length convention, and
+`.github/workflows/ci.yml`'s `EXPECTED_HEAD` was updated to `0004_exchange_core` so the existing
+migration-history CI guard does not silently fail on the next run. Full status: PROJECT_STATE.md's
+DH-EX-001 entry. **Not committed, not pushed, no OpenMRS/OpenELIS connector touched, no poller
+activated, no real facility or patient data used**, per that ticket's own boundary.
+
+**CORRECTION appended 2026-09-08 (DH-EX-001R, append-only — the paragraph above is superseded on
+the "not run" point only, not retracted).** A real runtime was found and used: WSL2's already-
+installed Ubuntu 26.04 provided a genuine Python 3.14 environment and, via `apt` (Docker Hub pulls
+were unreliable in this sandbox), a real PostgreSQL 18 server. `ruff`, `pytest`, and
+`alembic upgrade head` were all actually executed. Doing so found **four real defects no amount of
+re-reading had caught**: a dataclass silently dropping the price-snapshot fields; patient/
+practitioner source-identity uniqueness scoped too broadly (two different organizations reusing
+the same identity value/namespace would have silently merged into one reference — fixed by scoping
+to `(source_organization_id, source_system, source_identity_system, source_identity_value)`);
+`LabOrder.idempotency_key` uniqueness scoped globally instead of per-provider-organization (a
+real cross-tenant data-leak shape — fixed by scoping to `(provider_organization_id,
+idempotency_key)`, plus a new `IdempotencyKeyConflict` refusal when a resubmitted key's canonical
+content doesn't match); and `CatalogRepository.set_price` raising a raw, unhandled `IntegrityError`
+under genuine concurrent writes, reproduced live against real PostgreSQL and fixed. All four fixed
+and re-verified, including 10 repeated real-PostgreSQL concurrency runs post-fix with zero
+failures. Transaction atomicity (rollback leaves no partial aggregate; retry produces exactly one
+complete aggregate) was proven by real fault injection, not just reasoned about. Full account:
+PROJECT_STATE.md's DH-EX-001R entry. **READY FOR COMMIT: YES** per that ticket's own gate — still
+**not committed, not pushed**, stopped for Liban's review first. No OpenMRS/OpenELIS connector
+touched, no poller activated, no real facility or patient data used.

@@ -4694,3 +4694,99 @@ and the existing end-admission endpoint. Full non-secret audit and evidence are 
 ADR-037 remains accepted and unimplemented; this decision does not implement OpenELIS
 practitioner mapping. DH-011I remains open with zero exact one-to-one LOINC mappings, DH-011L did
 not run, and no poller/scheduler or real-facility flow was activated.
+
+## ADR-042 — Product pivot: DHealth Lab Exchange MVP; Option C hybrid data boundary; central
+Exchange may hold minimum transaction-scoped clinical order/result data
+
+**Date:** 2026-09-08 · **Status:** ACCEPTED (product direction) / ACCEPTED (architecture), NOT YET
+IMPLEMENTED beyond DH-EX-001's schema · **Decided by:** Liban (DH-PIVOT-001 audit, DH-EX-001 ticket)
+
+**Decision.** DHealth's MVP is no longer primarily a maternity/birth-centre information system
+with an attached laboratory. It is a digital lab order + result exchange connecting doctors/
+clinics/hospitals, patients, and independent laboratories — reachable either through DHealth's own
+Provider/Lab portals or through an existing EMR/LIS via a connector. OpenMRS and OpenELIS become
+the first two *reference connectors*, not the definition of the product. The prior maternity-first
+architecture recorded elsewhere in this file (ADR-001 through ADR-041) was correct and valid work
+for the scope that existed when each was written; none of it is retracted, deleted, or judged
+wrong in hindsight. This entry records a change of product direction, not a correction of prior
+engineering.
+
+**Recommended and approved architecture: Option C, hybrid.** A central DHealth Exchange core
+(organization identity, routing, order/result status machine, correlation, idempotency, audit,
+dead-letter — connector-agnostic) sits beneath two kinds of participant backend: DHealth-native
+Portal backends (which *do* persist transaction-scoped clinical payloads, because for a
+portal-only organization DHealth **is** the endpoint system — there is nowhere else for an order's
+test selection or a lab's result to live) and Connector adapters (OpenMRS/OpenELIS today, which
+keep clinical payloads in the endpoint system and give the Exchange only routing metadata and a
+correlation identifier, exactly as the existing adapter already does). Pure "central exchange
+stores only routing metadata" (Option B) was evaluated and rejected as unachievable given the
+Provider/Lab portal requirement; pure "central exchange stores full normalized clinical records"
+(Option A) was rejected as an unbounded EMR risk. ADR-020/ADR-021's "never a shared multi-tenant
+clinical database" rule is unaffected by this decision — it is scoped to per-facility *clinical*
+stores (ADR-001), not to a routing/audit-scoped Exchange core, and remains in force for any
+future connector-backed clinical stack.
+
+**Central data boundary, explicit.** The Exchange core is permitted to persist: organization
+identity, patient/practitioner references (source-system + source-identity only, never a national
+ID, never fuzzy-matched), the requested test catalog entries on an order, sender and selected-lab
+organization identity, a frozen price snapshot at selection time, order status, the lab result
+value, result-delivery state, and the doctor's follow-up disposition. The Exchange core is **not**
+a longitudinal medical record: no free-text clinical notes, no medication list, no diagnosis
+history, no general encounter data, and no field is added "because it might be useful" beyond what
+the golden journey requires (DH-EX-001's data-minimization rule).
+
+**Patient result-release policy for MVP.** The ordering doctor receives the full lab result. The
+patient does not automatically receive detailed numeric/clinical values — only order status, which
+lab was selected, that a result is ready, that the doctor has reviewed it, and the doctor's
+NO_FOLLOW_UP_REQUIRED / FOLLOW_UP_REQUIRED disposition. Detailed patient-facing result content
+remains explicitly deferred pending a separate clinical-policy decision; DH-EX-001 does not
+implement it.
+
+**WhatsApp/SMS patient notification is now more critical to the MVP, not less.** Under the prior
+maternity-first scope it was a secondary notification channel (pinned P0 #2: stays `BLOCKED`, not
+`DONE`, until real credentials run the flow — ADR-003, unchanged and still binding). Under the
+Exchange MVP it is also the mechanism that delivers the patient's lab-selection link and the
+result-ready/follow-up notice, i.e. core golden-path infrastructure. This does not relax ADR-003's
+real-credential gate; it raises the priority of clearing it.
+
+**What leaves the MVP critical path, not the codebase.** Deeper maternity workflows, bed
+management/seeding (ADR-007), the partograph (ADR-006), prenatal-panel expansion, and
+maternity-specific SSO activation (BLOCKER-5) are deprioritized from the *new* MVP's critical path.
+None of this code is deleted, and none of the underlying decisions (ADR-006, ADR-007) are
+superseded — a maternity/OpenMRS-connector pilot remains buildable later on the existing
+foundation. This is recorded here because AGENTS.md reserves cutting a pinned P0 item as an
+explicit human decision: pinned P0 #3 (bed seeding additive-only) and #4 (partograph data-entry
+only) leave the critical path by this same decision; pinned P0 #1 (backup + performed restore
+drill) and #2 (WhatsApp real credentials) remain pinned and, per the paragraph above, #2 is now
+more load-bearing than before.
+
+**Connector-track work preserved, not discarded.** DH-011H (OpenMRS TestOrder idempotency/
+privilege-boundary chain, ADR-034 through ADR-041), DH-011I (LOINC/test-mapping inventory, zero
+exact matches), and ADR-037 (OpenMRS Provider UUID → OpenELIS practitioner mapping, accepted,
+unimplemented) all remain valid, are not blocked, and are not blocking. They become
+OpenMRS/OpenELIS-connector-track work: needed only if/when a real OpenMRS- or OpenELIS-based
+participant joins a pilot, not for the first Exchange demo. The specific lesson from DH-011H (no
+idempotency-key mechanism exists on the native OpenMRS TestOrder-creation path) is the direct
+motivation for `LabOrder.idempotency_key` in DH-EX-001's schema — the generic fix now exists at
+the Exchange boundary and should be wired to whichever concrete order-creation surface a pilot
+actually uses, including the OpenMRS connector if it is ever activated.
+
+**Canonical internal model.** The Exchange core's own domain/database model (DH-EX-001) is
+DHealth-owned, not FHIR resources — FHIR remains a connector/interoperability format where a
+connector needs it (as the adapter already uses it for OpenMRS/OpenELIS), not the internal
+representation of Organization/LabOrder/LabSelection/LabResult and the rest of the Exchange
+domain. Forcing marketplace, lab-selection, and price concepts into upstream FHIR resource shapes
+was evaluated and rejected as unnecessary complexity for a domain FHIR was never designed to
+represent.
+
+**Correction, append-only.** PROJECT_STATE.md's DH-011H2C entry states "no commit or push was
+performed." That is stale: `git show --stat 4dfaeef26f624e09a1869fddd1565b4106d4612e` confirms
+`CreateTestOrderServlet.java`, `DaherExternalConfigurationInterceptor.java`,
+`DaherExternalConfigurationPrivilegeLoader.java`, and `DaherExternalConfigurationPrivilegeProvisioner
+.java` were in fact committed and pushed to `origin/master` as part of that commit ("uncomplete but
+pushing", 2026-09-01). The work itself is unaffected; only the "not committed" claim was wrong.
+
+**Full audit and evidence:** DH-PIVOT-001 architecture audit (delivered in-session, 2026-09-08) —
+component reuse table, gap analysis, and proposed ticket sequence DH-EX-001 through DH-EX-010.
+DH-EX-001 (this same date) implements the Exchange core domain/persistence foundation described
+above; see its own entry in PROJECT_STATE.md for build/test status.

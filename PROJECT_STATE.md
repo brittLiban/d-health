@@ -6519,3 +6519,256 @@ absent from `/tmp`. The removed database contained only synthetic fixtures and 1
 TestOrder rows; removal is permanent by design because the infrastructure was disposable. No
 production/facility resource changed. **READY TO COMMIT: YES for independent review of this
 uncommitted DH-011H2C source-order boundary; no commit or push was performed.**
+
+**CORRECTION appended 2026-09-08 (DH-PIVOT-001, append-only — the paragraph above is superseded on
+this one point only, not retracted).** "No commit or push was performed" is stale.
+`git show --stat 4dfaeef26f624e09a1869fddd1565b4106d4612e` ("uncomplete but pushing", 2026-09-01)
+confirms this exact DH-011H2C work — `CreateTestOrderServlet.java`,
+`DaherExternalConfigurationInterceptor.java`, `DaherExternalConfigurationPrivilegeLoader.java`,
+`DaherExternalConfigurationPrivilegeProvisioner.java`, plus the DH-011I inventory docs — was in
+fact committed and pushed to `origin/master` as part of that commit, found while surveying HEAD for
+the DH-PIVOT-001 architecture audit. Nothing about the work's completeness or verification status
+changes; only the "not committed" claim was wrong. **DH-011H remains OPEN/BLOCKED on ADR-037
+implementation**, unaffected by this correction. See DECISIONS.md's ADR-042 for the same note
+recorded against the decision log.
+
+---
+
+### DH-PIVOT-001 · Architecture + gap audit for the DHealth Lab Exchange pivot · P0 · ✅ DONE
+(audit only, no code)
+
+**Raised:** 2026-09-08, Liban. **Human Decision Required: Yes — resolved by Liban within this
+ticket** (product direction, Option C data boundary, patient result-release policy for MVP; see
+DECISIONS.md's ADR-042 for the full recorded decision).
+
+Full evidence-first repo audit for the pivot from "maternity/birth-centre EMR" to "digital lab
+order + result exchange." Covered: component reuse table (adapter ledger/dead-letter/audit/
+recovery-coordinator confirmed KEEP AS CORE; watermark/poller/source_events/openelis.py/
+cancellation.py confirmed OpenMRS/OpenELIS-connector-specific; provisioning's trust-boundary/
+job-queue architecture confirmed reusable as an org-onboarding control plane, its `Facility` model
+confirmed needing a genuine `Organization`/`OrganizationUser` refactor; the `ui/` design-system
+confirmed reusable, its feature code confirmed 100% OpenMRS/maternity-coupled and not reusable
+as-is); DH-011H classification (B leaning D — the remaining ADR-037 work is connector-specific and
+not MVP-critical for the golden demo; the underlying idempotency lesson is generic and now applied
+in DH-EX-001); DH-011I classification (connector-specific, clinically-gated, not obsolete — 0 exact
+LOINC matches confirmed, synthetic MVP catalog proposed instead); full gap analysis and a 9-ticket
+build sequence (DH-EX-001 through DH-EX-010, connector track deferred). No file inside the tracked
+repo was proposed for silent editing — the full report was returned for review before DH-EX-001 was
+separately approved and started.
+
+**DoD:** delivered as a structured report (MVP definition, golden journey, architecture
+recommendation, component reuse table, ticket sequence, estimates) plus proposed append-only doc
+diffs. Met.
+
+---
+
+### DH-EX-001 · Establish the DHealth Exchange core domain + persistence foundation · P0 ·
+🔨 BUILT, NOT RUN (no Python interpreter available in the authoring environment)
+
+**Raised:** 2026-09-08, Liban, as the first implementation ticket after DH-PIVOT-001.
+**Human Decision Required: No** for this ticket's own scope (schema/domain modeling only) —
+the product-direction and data-boundary decisions it implements were already made in ADR-042.
+
+**Problem.** DH-PIVOT-001 found the adapter's safety primitives (ledger, dead-letter, audit,
+crash-recovery coordinator) are already connector-agnostic and reusable, but there is no
+Exchange-native domain model anywhere in the repo: the adapter today only shallow-processes FHIR
+`ServiceRequest`/`DiagnosticReport`-shaped events, with no `Organization`, no rich `Order`
+aggregate, no lab-selection/pricing concept, and no non-FHIR-specific patient/practitioner
+reference model.
+
+**Implementation location decision (documented, not escalated — the ticket's own instructions gave
+a clear enough signal not to warrant a stop-and-ask):** new `adapter/src/daher_adapter/exchange/`
+subpackage. Shares `daher_adapter.models.Base` (one Alembic chain, one test-fixture
+`Base.metadata.create_all()`) and reuses `daher_adapter.audit.AuditWriter`'s exact
+append/fsync/flock/permissions mechanism (widened its type hint from `AuditEvent` to `BaseModel`,
+behavior unchanged) rather than building a second audit system, per this ticket's own explicit
+instruction to prefer reusing proven primitives. Imports nothing from `openmrs.py`, `openelis.py`,
+`order_poller.py`, `watermark.py`, `source_events.py`, `cancellation.py`, or `recovery.py` — the
+Exchange core stays connector-agnostic. This is the smallest change that doesn't touch any existing
+adapter module (only `audit.py`'s one type hint) and gives a clean future split point to a
+standalone `exchange/` service if that is ever wanted.
+
+**Built:** `exchange/models.py` (12 tables: `Organization`, `PatientReference`,
+`PractitionerReference`, `TestCatalogEntry`, `LabOffering`, `LabPrice`, `LabOrder`,
+`LabOrderItem`, `LabSelection`, `LabResult`, `ResultDelivery`, `DoctorReview`) plus
+`organizations.py`, `identity.py`, `catalog.py`, `orders.py`, `selection.py`, `results.py`,
+`audit.py` (repository layer) and migration `0004_exchange_core` (purely additive, touches no
+existing table). `idempotency_key` on `LabOrder` is the request-level idempotency primitive DH-011H
+found missing on the OpenMRS TestOrder path, implemented the same insert-first-wins way as
+`ledger.LedgerRepository.claim`. Status machine is the seven-state minimal machine from
+DH-PIVOT-001 with an explicit allowed-transition table (no physical specimen-collection state,
+matching the DH-011J2 lesson that this cannot be reliably inferred). `LabOrderItem` carries its own
+frozen per-item price snapshot, set once at selection and never re-read from `LabPrice` afterward.
+`ResultDelivery` and `DoctorReview` are created `PENDING` in the same transaction as the order and
+only ever move on an explicit repository call — never inferred from `LabResult` existing.
+
+**Tests:** 8 new test files under `adapter/tests/` (`test_exchange_organizations.py`,
+`test_exchange_identity.py`, `test_exchange_catalog.py`, `test_exchange_orders.py`,
+`test_exchange_selection.py`, `test_exchange_results.py`,
+`test_exchange_idempotency_concurrency.py`, plus `exchange_support.py` — shared helpers, not a
+`conftest.py`, so no existing test's collection or fixtures are touched) covering every category
+this ticket required: organization type validity, exact (never fuzzy) source-identity binding,
+catalog/offering/price eligibility including the inactive-offering and unknown-test negative
+controls, complete order-graph persistence with explicit sender/patient/practitioner ownership,
+invalid and terminal-state transition refusal, same-key/new-key idempotency behavior, a real
+multi-threaded SQLite concurrency test proving the DB unique constraint (not application logic) is
+the final authority on a duplicate concurrent claim, wrong-lab-result and no-lab-selected fail-closed
+controls, duplicate-result refusal, and delivery/review state independence.
+
+**⚠️ Not run. No Python interpreter is available in the environment this ticket was authored in**
+(confirmed: no `python`, `python3`, or `py` resolves to a real interpreter, only Windows Store
+execution-alias stubs). Every line of every new/modified file was manually re-read at least twice
+for syntax and logic correctness, all lines were checked to fit this repo's 100-character ruff
+`line-length` by script, and `.github/workflows/ci.yml`'s `EXPECTED_HEAD` was updated to
+`0004_exchange_core` (this would otherwise have been a silent CI break the next run). **None of the
+following has actually been executed and none should be treated as passing until it is:**
+`ruff check`, `ruff format --check`, `pytest`, `alembic upgrade head` against a real database. This
+is written and reviewed, not verified, and must not be reported as more than that. **Recommended
+first step of independent review: run the adapter suite in Docker/CI exactly as
+`.github/workflows/ci.yml`'s `adapter` job does, before reading anything else.**
+
+**Still required to close this ticket:** the above verification pass; independent review of the
+implementation-location and domain-model judgment calls (price-snapshot placement on
+`LabOrderItem` rather than a separate per-selection-item table; `ResultDelivery`/`DoctorReview`
+created eagerly at order-creation rather than lazily; `ExchangeAuditEvent` defined but not yet
+wired to any repository call, since wiring it needs an application-level `AuditWriter` instance/path
+that belongs to a later HTTP-API ticket, not this one). **DO NOT COMMIT. DO NOT PUSH.** — this
+ticket's own instruction, independent of completeness.
+
+---
+
+### DH-EX-001R · Independent review and runtime qualification of the Exchange core · P0 ·
+🟢 REVIEWED, RUNTIME-QUALIFIED — READY FOR COMMIT: YES, pending Liban's own review
+
+**Raised:** 2026-09-08, Liban, immediately following DH-EX-001, explicitly to close the "written,
+not run" gap the environment blocked at the time. **Human Decision Required: No** — every finding
+below was a technical correctness fix within DH-EX-001's already-approved architecture; nothing
+here changed product scope, the data boundary, or any clinical-surface decision.
+
+**CORRECTION, append-only (supersedes DH-EX-001's "no Python interpreter available" framing for
+this session, not for the one that wrote it — that entry's claim was true when written).** WSL2
+(Ubuntu 26.04, already installed, previously stopped) provides a real Linux runtime this ticket's
+review used directly: a Python 3.14 venv with the adapter's pinned `requirements-dev.txt`
+installed, and a real PostgreSQL 18 server (installed via `apt`, not Docker — Docker Hub pulls in
+this sandbox hit repeated `TLS handshake timeout`/DNS failures pulling `postgres:16-alpine`; native
+`apt install postgresql` was reliable and is functionally equivalent for schema/constraint/
+concurrency proof, though it is PostgreSQL 18, not the exact 16-alpine CI pins — noted, not hidden).
+`ruff check`/`ruff format --check`/`pytest` were run for real, and a disposable PostgreSQL database
+was used for real migration and concurrency qualification, exactly as this ticket required. No
+Docker container ultimately ran; the postgres CI job itself still uses `postgres:16-alpine`
+unchanged.
+
+**Four real defects found by actually running the code — none were visible from re-reading alone:**
+
+1. **`LabOrderItemRecord` silently dropped the price snapshot** (`orders.py`) — the dataclass
+   returned to callers never carried `selected_price_amount`/`selected_price_currency` at all,
+   even though the ORM row had them; the very first SQLite pytest run failed on this immediately.
+   Fixed: both fields added to the dataclass and populated in `_to_order_record`.
+2. **Patient/practitioner source-identity uniqueness was scoped too broadly**
+   (`UNIQUE(source_identity_system, source_identity_value)`, no organization) — proven live: two
+   different organizations asserting the same `(system, value)` pair would have silently merged
+   into one `PatientReference`/`PractitionerReference`, a cross-organization identity collision,
+   not a hypothetical one. Fixed: uniqueness is now
+   `(source_organization_id, source_system, source_identity_system, source_identity_value)` in
+   both `models.py` and migration `0004`; `identity.py`'s conflict-lookup queries updated to match.
+   New tests: `test_no_source_identity_collision_across_organizations_{patient,practitioner}`.
+3. **`LabOrder.idempotency_key` was globally unique, and a key collision returned the existing
+   order unconditionally** — two real bugs compounding: (a) a global unique key means two
+   independent organizations' clients could collide on the same key value by accident, and the
+   loser would have silently received the *other organization's order* back — a cross-tenant data
+   leak, not a UX bug; (b) even within one organization, a resubmitted key with different
+   patient/practitioner/requested-tests was returned as if it matched, silently handing back
+   mismatched data instead of refusing. Fixed: uniqueness is now
+   `(provider_organization_id, idempotency_key)`; a resubmission is only ever treated as a replay
+   if patient, practitioner, and the exact requested test-ID set match exactly, otherwise a new
+   `IdempotencyKeyConflict` is raised. `get_by_idempotency_key` signature changed accordingly
+   (now requires `provider_organization_id`) — a real, intentional API-contract change, recorded
+   here as required. New tests: `test_same_key_different_{patient,practitioner,test_set}_is_a_
+   conflict*`, `test_same_key_different_provider_org_creates_two_independent_orders` (confirming
+   org-scoping's *intended* effect — not a conflict, two legitimate independent orders).
+4. **`CatalogRepository.set_price` raised a raw `IntegrityError` under real concurrent writes** —
+   reproduced live against real PostgreSQL under 8-way concurrent contention (6 of 8 threads
+   failed on the first attempt). Root cause: a `SELECT ... FOR UPDATE` that blocks on a row a
+   concurrent winner has already superseded unblocks onto zero matching rows, not the winner's new
+   row, so the loser wrongly believed no current price existed and collided on insert. Fixed:
+   replaced with an unconditional `UPDATE ... WHERE superseded_at IS NULL` (never raises, matches
+   however many rows are actually currently true) followed by a bounded (25-attempt) retry around
+   the remaining insert-uniqueness race. Verified clean across 10 repeated real-PostgreSQL 8-way
+   concurrent runs after the fix, 0 failures.
+
+**Real PostgreSQL qualification, all live-executed and green** (`adapter/tests/integration/
+test_dhex001r_postgres_qualification.py`, new file, gated behind `DHEX001R_PG_*` env vars,
+skipped by default including in CI, matching this repository's existing live-integration-test
+convention): 10 concurrent creates with the same idempotency identity → exactly 1 `LabOrder`, 1
+`LabOrderItem` set, 1 `DoctorReview`, 1 `ResultDelivery` — no duplicates from the 9 losing
+attempts; 10 concurrent creates with 10 different keys and identical payload → 10 independent
+orders; 8 concurrent price updates on one offering → exactly 1 current price row survives (partial
+unique index), 0 unhandled exceptions; an invalid state transition refused under a real row lock,
+order status unchanged. Separately proven: fresh `alembic upgrade head` (0001→0004) on an empty
+database; an existing pre-DH-EX-001 database (upgraded only to `0003_dead_letter_resolutions`,
+with a real row inserted into `processed_messages`) upgrades cleanly to `0004_exchange_core` with
+that row untouched; `alembic downgrade 0003_dead_letter_resolutions` cleanly drops all 12
+`exchange_*` tables with the pre-existing row still intact; re-upgrading back to head succeeds.
+Schema introspection on the live database confirmed every CHECK/UNIQUE/FK constraint compiles
+exactly as `models.py` declares, including the corrected composite unique constraints. Five raw-SQL
+negative/positive controls against `exchange_lab_results`' CHECK constraints (bypassing the ORM
+entirely) confirmed the NUMERIC/TEXT mutual-exclusivity invariant is enforced by PostgreSQL itself,
+not merely by application code.
+
+**Transaction atomicity, proven by real fault injection** (added to `test_exchange_orders.py`, not
+a new file): three tests patch `DoctorReview`, `ResultDelivery`, and `Session.commit` respectively
+to raise mid-`create()`, after the point `LabOrder`+`LabOrderItem` rows would already have been
+flushed to the database within that same uncommitted transaction. All three: zero trace of the
+failed attempt afterward (`get_by_idempotency_key` raises `OrderNotFound`), and a retry with the
+identical idempotency key immediately afterward produces exactly one complete aggregate with no
+orphan rows. Note on scope: this implementation has exactly two flush points in its success path
+(LabOrder+LabOrderItems together at one explicit `flush()`, then DoctorReview+ResultDelivery
+together inside the final `commit()`), so "after LabOrder insert" and "after item insert" are the
+same boundary here, not two — stated plainly rather than implying five distinct injectable points
+that do not exist in this code.
+
+**Audit writer guarantee restored, not weakened.** DH-EX-001 widened
+`daher_adapter.audit.AuditWriter.append` from `AuditEvent` to `BaseModel` so `ExchangeAuditEvent`
+could reuse it. Review found `ExchangeAuditEvent` was never actually wired to any repository call
+in DH-EX-001 — no caller exists — so the widening weakened the writer's type guarantee for zero
+current benefit. Reverted: `append` is `AuditEvent`-typed again, exactly as before DH-EX-001.
+`ExchangeAuditEvent` remains defined (a forward-looking schema, still `extra="forbid"`) with an
+updated docstring stating plainly that writer integration is deferred to whichever ticket builds
+the first real Exchange-audit caller.
+
+**Design findings reviewed, no code change made (Part G — eager `ResultDelivery`/`DoctorReview`
+creation):** independent review confirmed this is a genuine, defensible tradeoff, not a bug.
+Lazy creation (create `ResultDelivery` only "when a result becomes deliverable", `DoctorReview`
+only "when a result exists to review") would require inferring that trigger point from something
+adjacent to result completion — which is exactly what DH-EX-001 explicitly forbids ("delivery
+status must never be inferred from `LabResult` completion"). Eager creation with PENDING rows for
+orders that are later REJECTED/CANCELLED is a real, acknowledged cosmetic property (a "pending
+review" list would need to join against order status to exclude them), not a data-integrity defect
+— left as a documented consideration for whichever ticket builds the actual query/listing API, not
+changed here.
+
+**Org-type safety (Part L), reviewed, no gap found:** `LabOffering`/`LabSelection`/`LabOrder`
+directly enforce PROVIDER/LAB type via `OrganizationRepository.require_type` at their own creation
+points; `LabResult`'s lab identity is transitively safe because it can only be recorded against an
+already-`require_type`-validated `LabSelection` (`WrongLabForResult` closes any mismatch); no
+public repository method bypasses these checks. `PractitionerReference` has no organization-type
+constraint at all, by design — DH-EX-001 never specified one, and neither did this review.
+
+**Ruff/format/pytest, all real:** `ruff check src tests migrations scripts` clean, `ruff format
+--check src tests migrations scripts` clean (69 files), full adapter suite **275 passed, 39
+skipped** (the 39 are this repo's existing live-infra-gated integration tests plus the 4 new
+`DHEX001R_PG_*`-gated ones — correctly skipped with no live Postgres env vars set, exactly the
+existing convention). `pip check` clean.
+
+**Files changed beyond DH-EX-001's original set:** `adapter/src/daher_adapter/exchange/{models,
+identity,orders,catalog}.py` (the four fixes above), `adapter/src/daher_adapter/audit.py` (revert),
+`adapter/src/daher_adapter/exchange/{__init__,audit}.py` (docstring corrections),
+`adapter/migrations/versions/0004_exchange_core.py` (matching constraint corrections), new
+`adapter/tests/integration/test_dhex001r_postgres_qualification.py`, additions to
+`test_exchange_orders.py`, `test_exchange_identity.py`, `test_exchange_selection.py`.
+
+**READY FOR COMMIT: YES** — no BLOCKER/HIGH findings remain open; every gate this ticket's own
+READY RULE names was checked against real execution, not assumption. **Not committed, not pushed**
+— stopped for Liban's own review first, per this ticket's explicit instruction, independent of the
+green result. No OpenMRS/OpenELIS connector touched, no poller activated, no real facility or
+patient data used anywhere in this review.
