@@ -6772,3 +6772,106 @@ READY RULE names was checked against real execution, not assumption. **Not commi
 — stopped for Liban's own review first, per this ticket's explicit instruction, independent of the
 green result. No OpenMRS/OpenELIS connector touched, no poller activated, no real facility or
 patient data used anywhere in this review.
+
+**CORRECTION appended 2026-09-09 (DH-EX-001C, append-only — the paragraph above is superseded on
+the "not committed" point only, not retracted).** DH-EX-001 and DH-EX-001R's combined fixes were
+committed as one unit: `b1f8d85c64992feff41e8acc078d0904c5ad0a00` ("feat(DH-EX-001): establish lab
+exchange core"), parent `4dfaeef26f624e09a1869fddd1565b4106d4612e`, pushed to `origin/master`. The
+first exact-SHA CI run on that commit (run `34311546981`) found 8 of 9 required jobs green and one
+red: "OpenMRS narrow TestOrder module" — independently confirmed **pre-existing and unrelated**
+(identical failure reproduced on the parent commit's own CI run, `33486726934`; zero files under
+`openmrs-config/` touched by this commit). See DH-CI-001 below for the fix and DH-EX-001's final
+closure entry for the fully-green exact-SHA result.
+
+---
+
+### DH-CI-001 · Repair the pre-existing OpenMRS OMOD Maven reactor build failure · P0 ·
+✅ DONE — CI hygiene only, no clinical/application logic changed
+
+**Raised:** 2026-09-08/09, Liban, immediately after DH-EX-001C's exact-SHA CI run exposed the
+pre-existing "OpenMRS narrow TestOrder module" job failure. **Human Decision Required: No** —
+build-configuration-only correction, no product/clinical/architecture decision involved.
+
+**Root cause.** The inherited `maven-parent-openmrs-module:2.2.0` `pluginManagement` binds
+`maven-dependency-plugin`'s "Expand resources" execution (goal `unpack-dependencies`, unpacking the
+sibling `daherendadmission-api` reactor artifact's `*.xml`/`*.properties` into the OMOD's
+`target/classes`) to the `generate-resources` phase. Under a reactor-wide `mvn test` — this repo's
+CI invocation, and the only place the OMOD's own tests ever actually run, since the real packaging
+build in `openmrs-config/Dockerfile` uses `-Dmaven.test.skip=true package` — the sibling API module
+has not been packaged into a JAR yet at that point in the lifecycle. This is the documented MDEP-98
+pitfall. **Confirmed pre-existing, not a DH-EX-001 regression**: reproduced identically against the
+parent commit `4dfaeef`'s own CI run before any fix was written. The actual OpenMRS tests
+themselves always passed; the reactor died at `unpack-dependencies` afterward, before the OMOD's
+own 27 tests were ever reached.
+
+**Fix.** `openmrs-config/modules/daherendadmission/omod/pom.xml` only — rebound the "Expand
+resources" execution (matched by id) from `generate-resources` to `prepare-package`, the last
+standard lifecycle phase before `package`. Under `mvn test`, `prepare-package` is never reached, so
+the execution cannot fail; under a full `mvn package`/`install` (the Dockerfile's real path), the
+sibling API module is already packaged by the time OMOD reaches `prepare-package`, since Maven
+completes each reactor module's full lifecycle before moving to the next dependent module. Both
+properties live-verified, not assumed. Reproducing this locally required installing Maven + OpenJDK
+8 into a previously-unused WSL2 Ubuntu instance; doing so also surfaced a real process hazard —
+running `mvn test`/`package` locally triggers this project's `spotless:apply`/`license:format`
+plugins in *apply* mode, silently reformatting ~24 tracked Java files as a side effect. Caught via
+`git status` before treating any run as final, and reverted with `git restore` every time, twice.
+
+**Evidence.** Local: full reactor `SUCCESS` (Parent/API/OMOD), 37/37 tests (API 10: `DaherTestOrder
+ContractTest` 7/7, `DaherProxyPrivilegeExecutorTest` 3/3; OMOD 27: `CreateTestOrderServletTest`
+6/6, `DaherExternalConfigurationInterceptorTest` 3/3, `EndMaternityAdmissionServletTest` 18/18), 0
+failures/errors/skips — the 27 OMOD tests had never previously run through this CI job at all.
+Package-regression control (`-Dmaven.test.skip=true package`, matching the Dockerfile) produced
+`omod/target/daherendadmission-1.0.0.omod` with `moduleApplicationContext.xml` and `config.xml`
+correctly unpacked. `git diff --check` clean; diff scope exactly one file, +46/-0.
+
+**Committed and pushed:** `4f9c1d10dc4543aa785c0bee939108a339b45e61` ("fix(ci): make OpenMRS OMOD
+test reactor lifecycle-safe"), parent `b1f8d85` (exact match, confirmed via `git rev-parse HEAD^`).
+**Exact-SHA CI qualified:** run `34317829117`, `head_sha = 4f9c1d10dc4543aa785c0bee939108a339b45e61`,
+conclusion `success`, **all 9 required jobs green** including "OpenMRS narrow TestOrder module"
+(both its "Compile the complete module reactor and run every test" and "Refuse silent test loss"
+steps green; job's own guard reports "OpenMRS module tests executed: 37"). No Java production or
+test file changed, no CI workflow file changed, no Exchange code changed, no OpenELIS code changed,
+no privilege/endpoint/clinical behavior changed, no poller activated, no real facility touched.
+
+---
+
+### DH-EX-001 · FINAL CLOSURE — Exchange core domain + persistence foundation · P0 ·
+✅ CLOSED / QUALIFIED (implementation + runtime + CI foundation gate only — see scope note below)
+
+**Ticket:** DH-EX-001 (+ DH-EX-001R independent review, + DH-CI-001 pre-existing CI hygiene fix).
+**Implementation commit:** `b1f8d85c64992feff41e8acc078d0904c5ad0a00`.
+**Qualification/master commit:** `4f9c1d10dc4543aa785c0bee939108a339b45e61`.
+**Exact CI run:** `34317829117` — `head_sha` exact match, conclusion `success`.
+**CI:** 9/9 required jobs green (`adapter — ruff + pytest`, `provisioning — ruff + pytest`,
+`ui — lint, typecheck, test, build`, `seed + form-safety suites`, `OpenMRS narrow TestOrder module`,
+`static checks`, `compose interpolates and parses`, `oauth2login — patched identity tests`,
+`openelis order-correlation patch — compiles`).
+**Tests:** adapter suite 275 passed / 39 skipped (SQLite); 4/4 live-PostgreSQL qualification tests
+passed (gated, opt-in, `DHEX001R_PG_*`); 37/37 OpenMRS module tests passed after DH-CI-001's Maven
+lifecycle repair. `ruff check`/`ruff format --check` clean.
+**Migration:** `0004_exchange_core` qualified — fresh `0001→0004`, upgrade from an existing
+`0003`-only database, downgrade, and re-upgrade all verified against a real disposable PostgreSQL
+instance, pre-existing data untouched throughout.
+**PostgreSQL qualification caveat, stated plainly:** DH-EX-001R's independent qualification ran
+against **PostgreSQL 18** (installed via `apt` in a WSL2 sandbox; Docker Hub pulls of this repo's
+actual CI pin, `postgres:16-alpine`, were unreliable in that environment). This is not claimed to
+be identical to CI's own Postgres — the SQL used (standard CHECK/UNIQUE constraints, partial
+indexes, no version-specific extensions) is not expected to diverge across that version range, but
+the two have not been proven byte-identical, and the CI adapter job's own `postgres:16-alpine`
+service is the actual authoritative target.
+**Real facility:** untouched. **Pollers:** inactive (none activated). **OpenMRS/OpenELIS Exchange
+connectors:** deferred — connector-track work (DH-011H including the still-open DH-011H2D thread,
+DH-011I, ADR-037) is **not erased and not being called complete**; it remains exactly where the
+DH-PIVOT-001 audit classified it (connector-track, not on the portal-first MVP critical path), and
+no file under `openmrs-config/` or `openelis-config/` was touched by DH-EX-001/DH-EX-001R.
+**Next:** DH-EX-002 (organization onboarding + auth) — **not started**.
+
+**What this closure means, precisely.** The first Exchange core domain/persistence foundation
+ticket is closed and exact-SHA CI qualified. It does **not** mean the DHealth Exchange MVP is
+complete. Still not built, all future tickets: organization onboarding, multi-org authentication,
+tenant user management, the Provider Portal's lab-order workflow, the Lab Portal, the patient
+secure link and lab-selection UI, WhatsApp/SMS integration, full lab directory administration,
+production clinical test mappings, a results-inbox UI, a doctor follow-up UI, the OpenMRS Exchange
+connector, the OpenELIS Exchange connector, production deployment, and any real pilot. See
+`docs/ARCHITECTURE.md` §17 for the architecture and `DECISIONS.md`'s ADR-042 for the underlying
+product-pivot decision, unchanged by this closure.

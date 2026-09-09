@@ -941,10 +941,13 @@ not FHIR resources. FHIR remains a connector/interoperability format where a con
 exactly how the adapter already uses it for OpenMRS/OpenELIS — not the Exchange's own database
 shape.
 
-**Status:** DH-EX-001 (Exchange core domain + persistence foundation) is built and
-runtime-qualified — real `pytest`/`ruff`/`alembic upgrade head` against a disposable PostgreSQL
-database, per DH-EX-001R's independent review (2026-09-08). Not committed or pushed, pending
-Liban's own review. No Provider Portal, Lab Portal, or patient-link UI exists yet. No connector
-wiring (OpenMRS or OpenELIS) has changed. Full audit, gap analysis, and the proposed ticket
-sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review detail:
-PROJECT_STATE.md's DH-EX-001 and DH-EX-001R entries.
+**Status:** DH-EX-001 (Exchange core domain + persistence foundation) is committed and
+exact-SHA CI qualified — real `pytest`/`ruff`/`alembic upgrade head` and real PostgreSQL
+concurrency/migration qualification, per DH-EX-001R's independent review and DH-CI-001's
+CI-hygiene fix (2026-09-08/09; qualified at commit `4f9c1d10dc4543aa785c0bee939108a339b45e61`, CI
+run `34317829117`, all required jobs green). This is the domain/persistence layer only: no HTTP
+API, no authentication, no Provider Portal, no Lab Portal, and no patient-link UI exist yet, and no
+connector wiring (OpenMRS or OpenELIS) has changed. It is not equivalent to a completed Exchange
+MVP. Full audit, gap analysis, and the proposed ticket sequence (DH-EX-001 through DH-EX-010):
+DH-PIVOT-001 (2026-09-08); build/review/closure detail: PROJECT_STATE.md's DH-EX-001 FINAL CLOSURE
+entry. Next: DH-EX-002 (organization onboarding + auth) — not started.

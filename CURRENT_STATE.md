@@ -1072,3 +1072,40 @@ complete aggregate) was proven by real fault injection, not just reasoned about.
 PROJECT_STATE.md's DH-EX-001R entry. **READY FOR COMMIT: YES** per that ticket's own gate — still
 **not committed, not pushed**, stopped for Liban's review first. No OpenMRS/OpenELIS connector
 touched, no poller activated, no real facility or patient data used.
+
+**CORRECTION appended 2026-09-09 (DH-EX-001D, append-only — the "not committed" point above is
+superseded, not retracted).** DH-EX-001 qualified at SHA
+`4f9c1d10dc4543aa785c0bee939108a339b45e61`. The combined DH-EX-001 + DH-EX-001R work was committed
+(`b1f8d85c64992feff41e8acc078d0904c5ad0a00`) and pushed. Its first exact-SHA CI run found one
+pre-existing, unrelated red job ("OpenMRS narrow TestOrder module" — confirmed identical on the
+parent commit `4dfaeef`'s own CI run, not a regression from this work); DH-CI-001 fixed that in a
+single build-configuration-only commit (`4f9c1d10dc4543aa785c0bee939108a339b45e61`, one file,
+`openmrs-config/modules/daherendadmission/omod/pom.xml`, +46/-0 — no Java, no CI workflow, no
+Exchange, no OpenELIS file touched). **Exact-SHA CI run `34317829117` on that commit: all 9
+required jobs green**, including the OpenMRS job (37/37 module tests, both its build-and-test and
+test-loss-guard steps green). Full account: PROJECT_STATE.md's DH-CI-001 entry and DH-EX-001's
+FINAL CLOSURE entry.
+
+**What is qualified and what is not, stated precisely.** The DHealth Exchange **core domain and
+persistence foundation** (`adapter/src/daher_adapter/exchange/`: Organization, PatientReference,
+PractitionerReference, TestCatalogEntry, LabOffering, LabPrice, LabOrder, LabOrderItem,
+LabSelection, LabResult, ResultDelivery, DoctorReview, plus their repository layer and migration
+`0004_exchange_core`) is committed and exact-SHA CI qualified — real `pytest`/`ruff`/
+`alembic upgrade head`, real PostgreSQL concurrency/atomicity qualification (PostgreSQL 18 in the
+qualification sandbox; **this repo's actual CI adapter job runs `postgres:16-alpine`** — the two
+have not been proven byte-identical, only not expected to diverge for the plain SQL used here).
+This is **not** the Exchange MVP. Still future work, all unstarted: organization onboarding,
+multi-org authentication, tenant user management, the Provider Portal's order workflow, the Lab
+Portal, the patient secure link/lab-selection UI, WhatsApp/SMS integration, lab-directory
+administration, production clinical test mappings, a results-inbox UI, a doctor follow-up UI, the
+OpenMRS Exchange connector, the OpenELIS Exchange connector, production deployment, and any real
+pilot. **NEXT IMPLEMENTATION TICKET: DH-EX-002** (organization onboarding + auth) — not begun.
+
+**Connector-track work, unaffected and unerased.** DH-011H (including the still-open DH-011H2D
+implementation thread), DH-011I (test-mapping, still zero exact matches), and ADR-037 (OpenMRS
+Provider UUID → OpenELIS practitioner mapping, accepted, still unimplemented) remain exactly as
+CURRENT_STATE.md's earlier sections above describe them — not completed by this pivot, not
+reclassified, not touched by DH-EX-001/DH-EX-001R/DH-CI-001. No file under `openmrs-config/` or
+`openelis-config/` was modified by any of that work except DH-CI-001's single build-configuration
+line, which changed no clinical/application behavior. OpenMRS/OpenELIS pollers remain inactive; no
+real facility was touched by any ticket in this Exchange-foundation sequence.
