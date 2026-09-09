@@ -7162,3 +7162,128 @@ commit/push/exact-SHA-CI ticket, following the established DH-EX-001+DH-EX-001R�
 -- including bumping `EXPECTED_HEAD` if the migration content changes again before then, and
 scoping `git add` to exactly the file list above, never a repo-wide add, given the unresolved CRLF
 flip.
+
+### DH-EX-002 · FINAL CLOSURE — organization onboarding, OIDC authentication, tenant isolation ·
+P0 · ✅ CLOSED / QUALIFIED (organization/auth/tenant-isolation foundation gate only — see scope
+note below)
+
+**Ticket:** DH-EX-002 (+ DH-EX-002R independent security/runtime review, combined into one commit).
+**Implementation + review commit:** `dc3d13b7a8d6a53422091b56138718a73e096715`.
+**Parent:** `e93e7cc17c01ba79e24b34524cb76d42cc4d928a` (DH-EX-001D's docs-closure commit).
+**Exact CI run:** `34390897519` — `head_sha` exact match, conclusion `success`.
+**CI:** 9/9 required jobs green (`adapter — ruff + pytest`, `provisioning — ruff + pytest`,
+`ui — lint, typecheck, test, build`, `seed + form-safety suites`, `OpenMRS narrow TestOrder module`,
+`static checks`, `compose interpolates and parses`, `oauth2login — patched identity tests`,
+`openelis order-correlation patch — compiles`).
+**Tests:** adapter suite 366 passed / 39 skipped, confirmed both locally and independently in CI's
+own logs. `ruff check`/`ruff format --check` clean. Dependency consistency (`pip check`) clean.
+**Migration:** `0005_exchange_org_auth` reaches head — `exchange_identities`,
+`exchange_organization_memberships`, `exchange_organization_role_assignments`,
+`exchange_security_audit_events`. Qualified: fresh `0001→0005`, `0004→0005`, downgrade `0005→0004`
+(confirmed to drop exactly the four new tables, DH-EX-001's tables untouched), re-upgrade
+`0004→0005` — all against a real, disposable PostgreSQL 18 instance. CI independently ran
+`alembic upgrade head` against its own **`postgres:16-alpine`** service and confirmed `alembic
+current == alembic heads == EXPECTED_HEAD == 0005_exchange_org_auth`. The local qualification
+sandbox (PostgreSQL 18) and CI's actual database (`postgres:16-alpine`) are not claimed to be
+identical -- CI independently proved migration/application compatibility on its own real 16 service,
+not just on the newer local one.
+
+**What DH-EX-002 established.** The DHealth Exchange **organization onboarding, authentication, and
+tenant-isolation boundary**, on top of DH-EX-001's core domain: `ExchangeIdentity` (exact OIDC
+`(issuer, subject)` key -- never email, name, or phone), `OrganizationMembership`
+(`UNIQUE(organization_id, identity_id)`), `OrganizationRoleAssignment`
+(`UNIQUE(membership_id, role)`), and `ExchangeSecurityAuditEvent` (the authoritative, transactional
+audit table DH-EX-002R's review added). A minimal `/exchange/v1` HTTP API -- exactly these five
+routes exist, no others: `GET /me`, `POST /organizations`, `GET /organizations/{id}`,
+`GET /organizations/{id}/memberships`, `POST /organizations/{id}/memberships`. No lab-order API, no
+pricing/selection API, no patient-link API, no Provider/Lab Portal exist yet -- those are explicitly
+future tickets, not implied by this closure.
+
+**Authentication model.** DHealth-native Exchange identities authenticate through OIDC; the stable
+identity key is `(issuer, subject)` only, never email/name/phone. A valid, previously-unseen token
+may create an `ExchangeIdentity` row on first use, and that alone grants **zero** organization
+access -- membership is a separate, explicit grant. A prepared, dedicated `dhealth-exchange`
+Keycloak realm (`keycloak/realm-config/dhealth-exchange-realm.json`) is the intended identity
+provider, kept entirely separate from the historical connector realm (`daher-realm.json`, **not
+modified by DH-EX-002**). Exchange platform-admin authority comes from exactly one validated realm
+role, `dhealth-platform-admin` -- never from `ORG_ADMIN`, never from the connector realm's
+`sys-admin`/`clinician`/`lab-tech` roles, and never from anything stored as an organization role.
+
+**REAL KEYCLOAK QUALIFICATION = NOT RUN.** A disposable Keycloak image/runtime could not be obtained
+in the local qualification sandbox -- registry pulls consistently failed with a TLS handshake
+timeout (verified reproducible, both unprivileged and with `sudo`). The implementation was
+qualified cryptographically against the real OIDC contract (RS256-only signature verification,
+exact issuer, exact audience, expiration, `nbf`, required `sub`, unknown-signing-key refusal,
+malformed-token refusal, JWKS-failure fail-closed, JWKS trust from configured application state
+only -- never a token-supplied `jku`/`x5u`) using locally generated RSA keys and realistic Keycloak
+`realm_access` claim shapes. **That is not equivalent to a live Keycloak integration test** and is
+not represented as one anywhere in this record. Real Keycloak qualification remains a required
+deployment/pilot gate, to be closed by a future ticket once a Keycloak runtime is available.
+
+**Organization authorization and tenant isolation.** The Exchange database, not Keycloak, is the
+sole authority for organization membership and role. Provider organizations may hold `ORG_ADMIN` or
+`CLINICIAN`; lab organizations may hold `ORG_ADMIN` or `LAB_TECH`; platform admin is never an
+organization role. Inactive memberships and inactive organizations are refused, not silently
+bypassed. Qualified negative controls include: an unrelated clinic cannot read another clinic's or
+lab's data; a lab cannot read a different lab's data; an `ORG_ADMIN` cannot manage another
+organization or grant platform admin; `CLINICIAN`/`LAB_TECH` cannot manage membership; a provider
+org cannot be assigned `LAB_TECH`; a lab org cannot be assigned `CLINICIAN`. Anti-enumeration
+contract, applied consistently: an unrelated tenant/resource returns 404 (indistinguishable from
+nonexistent); a member who lacks the required permission returns 403.
+
+**Audit -- the blocker DH-EX-002R found and fixed before this commit, not after.** DH-EX-002's
+initial implementation committed a security mutation, then wrote a filesystem audit line
+separately -- if that second write failed, a real organization/membership/role change could exist
+with no authoritative audit trail. DH-EX-002R corrected this **before any of it was committed**:
+organization creation, membership creation, and role assignment now insert their authoritative
+`ExchangeSecurityAuditEvent` row in the **same PostgreSQL transaction** as the mutation itself: if
+the audit insert fails, the mutation rolls back with it. Proven by failure injection, not only code
+review: an audit-insert failure, a `Session.commit()` failure, and a failure on the *second* audit
+insert in a multi-statement request (membership + role together) each leave **zero** mutation and
+**zero** audit row. Replays do not generate a false duplicate `*_created` event. Only the mutation
+types this ticket actually exposes over HTTP are qualified this way -- there is no
+deactivate-membership or remove-role endpoint yet, and none is claimed as qualified. Refusal
+telemetry (403/404/409) is explicitly non-authoritative, best-effort, file-based, and cannot block
+or depend on a database write succeeding. The historical connector `AuditWriter`
+(`daher_adapter/audit.py`) remains separate and unchanged.
+
+**Real bugs found and fixed before this became the committed state** (recorded here so this
+closure entry alone gives an accurate picture, without requiring cross-referencing the DH-EX-002/
+DH-EX-002R working entries above): (1) a multi-role membership request could previously commit a
+partial membership/role grant before discovering one invalid role -- fixed by validating the whole
+role set before any mutation begins; (2) re-`POST`ing an inactive membership could previously
+reactivate it silently -- fixed to return a conflict/refusal instead; (3) role assignment
+independently refuses an inactive membership regardless of caller; (4) a `from __future__ import
+annotations` import combined with FastAPI's nested-dependency resolution caused every protected
+route to return 422 before authentication ever ran -- fixed, and permanently regression-tested;
+(5) the audit fail-open blocker described above; (6) a SQLite/pysqlite-specific `SAVEPOINT`
+rollback gap in the shared test fixture (`adapter/tests/conftest.py`) was found while proving fix
+(5) and corrected -- confirmed to be a test-infrastructure-only gap, real PostgreSQL never exhibited
+it. None of these were ever the committed, deployed, or reviewed-as-safe state; all six were closed
+before this ticket's commit.
+
+**Concurrency.** Real PostgreSQL 18 (local qualification sandbox): 25 concurrent identical
+`(issuer, subject)` first-seen attempts produce exactly one identity and zero errors; 25 concurrent
+identical `(organization_id, identity_id)` membership attempts produce exactly one membership and
+zero errors; 25 concurrent identical `(membership_id, role)` assignment attempts produce exactly one
+role assignment and zero errors. CI's own PostgreSQL is `postgres:16-alpine`, not PostgreSQL 18 --
+the two are not claimed identical; CI independently proved migration/application compatibility on
+its actual 16 service via the exact-SHA run cited above.
+
+**Real facility:** untouched. **Pollers:** inactive. **Connector realm:** unchanged
+(`daher-realm.json`, `reconcile-sso.sh` not touched by DH-EX-002/DH-EX-002R). No file under
+`openmrs-config/` or `openelis-config/` was touched.
+
+**What this closure means, precisely.** DH-EX-002 closes the Exchange organization/authentication/
+tenant-isolation **foundation**. It does **not** mean: the DHealth MVP is complete; a Provider
+Portal order workflow exists; a Lab Portal exists; a patient secure link exists; a lab marketplace/
+pricing UI exists; WhatsApp/SMS integration exists; a lab pricing API exists; a results workflow
+exists; real Keycloak deployment is qualified; real organizations have been onboarded; real staff
+accounts exist; an OpenMRS Exchange connector exists; an OpenELIS Exchange connector exists;
+production deployment exists; or any pilot has begun. See `docs/ARCHITECTURE.md` §17 for the
+architecture and `DECISIONS.md`'s ADR-042 for the underlying product-pivot decision, unchanged in
+substance by this closure.
+
+**Next:** DH-EX-003 — lab directory, test offerings, and pricing, so DHealth can answer "for these
+requested tests, which participating labs can perform the entire order, and what will each lab
+charge?" — **not started.**

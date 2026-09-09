@@ -4699,7 +4699,9 @@ not run, and no poller/scheduler or real-facility flow was activated.
 Exchange may hold minimum transaction-scoped clinical order/result data
 
 **Date:** 2026-09-08 · **Status:** ACCEPTED (product direction) / ACCEPTED (architecture), NOT YET
-IMPLEMENTED beyond DH-EX-001's schema · **Decided by:** Liban (DH-PIVOT-001 audit, DH-EX-001 ticket)
+IMPLEMENTED beyond DH-EX-001's schema and DH-EX-002's organization/authentication/tenant-isolation
+boundary (see PROJECT_STATE.md's DH-EX-002 FINAL CLOSURE entry, 2026-09-09) · **Decided by:** Liban
+(DH-PIVOT-001 audit, DH-EX-001 ticket)
 
 **Decision.** DHealth's MVP is no longer primarily a maternity/birth-centre information system
 with an attached laboratory. It is a digital lab order + result exchange connecting doctors/

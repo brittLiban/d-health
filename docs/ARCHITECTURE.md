@@ -945,9 +945,25 @@ shape.
 exact-SHA CI qualified — real `pytest`/`ruff`/`alembic upgrade head` and real PostgreSQL
 concurrency/migration qualification, per DH-EX-001R's independent review and DH-CI-001's
 CI-hygiene fix (2026-09-08/09; qualified at commit `4f9c1d10dc4543aa785c0bee939108a339b45e61`, CI
-run `34317829117`, all required jobs green). This is the domain/persistence layer only: no HTTP
-API, no authentication, no Provider Portal, no Lab Portal, and no patient-link UI exist yet, and no
-connector wiring (OpenMRS or OpenELIS) has changed. It is not equivalent to a completed Exchange
-MVP. Full audit, gap analysis, and the proposed ticket sequence (DH-EX-001 through DH-EX-010):
-DH-PIVOT-001 (2026-09-08); build/review/closure detail: PROJECT_STATE.md's DH-EX-001 FINAL CLOSURE
-entry. Next: DH-EX-002 (organization onboarding + auth) — not started.
+run `34317829117`, all required jobs green).
+
+**DH-EX-002 (organization onboarding, OIDC authentication, tenant isolation) is also committed and
+exact-SHA CI qualified** (2026-09-09; qualified at commit `dc3d13b7a8d6a53422091b56138718a73e096715`,
+per DH-EX-002R's independent security/runtime review, CI run `34390897519`, all required jobs
+green). Qualified: exact OIDC `(issuer, subject)` identity, DB-owned organization membership/role
+authorization separate from authentication, a provider/lab tenant role matrix, platform-admin as a
+single Keycloak realm-role claim never derived from an organization role, and a transactionally
+authoritative security-mutation audit (mutation and its audit row commit or roll back together, one
+PostgreSQL transaction). A minimal `/exchange/v1` API exists for exactly this: identity bootstrap,
+organization creation, and membership/role management — no lab-order API, no pricing/selection API,
+no patient-link API. **Real Keycloak qualification was NOT run** (registry unreachable in the
+qualification sandbox) and remains a deployment/pilot gate, not closed by this status.
+
+Still not built, no connector wiring changed: any HTTP API beyond the five `/exchange/v1` routes
+above, the Provider Portal, the Lab Portal, patient-link UI, lab directory/pricing, and
+WhatsApp/SMS integration — none of this is equivalent to a completed Exchange MVP. No file under
+`openmrs-config/` or `openelis-config/` has changed, and the connector Keycloak realm
+(`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
+(DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
+PROJECT_STATE.md's DH-EX-001 and DH-EX-002 FINAL CLOSURE entries. Next: DH-EX-003 (lab directory,
+test offerings, pricing) — not started.

@@ -8,12 +8,15 @@ OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built a
 **first reference connector track** rather than the product's definition. Nothing below is deleted
 or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
-[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 FINAL CLOSURE entry for what exists so far: the
-Exchange **core domain and persistence foundation** is committed and CI-qualified (real PostgreSQL
-concurrency/migration checks, all required CI jobs green). The Provider Portal, Lab Portal, patient
-secure link, and WhatsApp/SMS integration are **next, not yet built** — this is the foundation
-those are built on, not the MVP itself. OpenMRS/OpenELIS remain supported, running exactly as
-built, as the first reference connector track.
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 and DH-EX-002 FINAL CLOSURE entries for what
+exists so far. The Exchange **core domain/persistence layer** (DH-EX-001) and the **organization
+onboarding, OIDC authentication, and multi-tenant authorization boundary** (DH-EX-002) are both
+committed and CI-qualified — secure multi-organization identity and tenant isolation now exist, with
+a transactionally-authoritative security-mutation audit. Real Keycloak integration remains a
+deployment/pilot qualification gate, not yet run. The Provider Portal, Lab Portal, patient secure
+link, lab directory/pricing, and WhatsApp/SMS integration are **still under construction, not yet
+built** — this is the foundation those are built on, not the MVP itself. OpenMRS/OpenELIS remain
+supported, running exactly as built, as the first reference connector track.
 
 ---
 

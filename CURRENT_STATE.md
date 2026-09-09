@@ -1172,5 +1172,23 @@ changes, full detail in PROJECT_STATE.md's DH-EX-002R entry:
 - Real PostgreSQL re-qualified (fresh migration, downgrade drops exactly the 4 new tables including
   the new audit table, re-upgrade, all 3 concurrency proofs including the newly-added role one).
   REAL KEYCLOAK QUALIFICATION remains NOT RUN (same Docker Hub TLS-timeout evidence as before).
-- **NEXT: Liban's review, then a combined DH-EX-002+DH-EX-002R commit/push/exact-SHA-CI ticket.**
-- **NEXT: independent review of this implementation (the DH-EX-001R-equivalent step), then commit.**
+- ~~NEXT: Liban's review, then a combined DH-EX-002+DH-EX-002R commit/push/exact-SHA-CI ticket.~~ —
+  **done, see the DH-EX-002D correction below.**
+
+**CORRECTION appended 2026-09-09 (DH-EX-002D, append-only — the "not committed"/"not begun" framing
+above is superseded, not retracted).** DH-EX-002 + DH-EX-002R were committed together
+(`dc3d13b7a8d6a53422091b56138718a73e096715`, parent `e93e7cc17c01ba79e24b34524cb76d42cc4d928a`),
+pushed, and exact-SHA CI qualified (run `34390897519`, all 9 required jobs green, adapter
+`366 passed / 39 skipped` confirmed independently in CI's own logs, migration head confirmed
+`0005_exchange_org_auth` against CI's real `postgres:16-alpine` service). Full account:
+PROJECT_STATE.md's **DH-EX-002 · FINAL CLOSURE** entry.
+
+**DH-EX-001 and DH-EX-002 are both closed.** The DHealth Exchange currently has: the core
+domain/persistence layer (DH-EX-001); organization identity, OIDC validation, memberships, tenant
+roles, the platform-admin boundary, a minimal onboarding/membership `/exchange/v1` API, and a
+transactionally-authoritative security-mutation audit (DH-EX-002). It does **not** yet have: a lab
+directory API, marketplace/pricing, a Provider Portal order workflow, a Lab Portal result workflow,
+a patient secure link, or WhatsApp/SMS integration. **REAL KEYCLOAK QUALIFICATION remains NOT RUN**
+— stated plainly here again because it is exactly the kind of fact that is easy to let go stale.
+
+**NEXT: DH-EX-003 — lab directory, test offerings, and pricing.**
