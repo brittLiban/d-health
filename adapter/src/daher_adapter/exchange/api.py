@@ -25,10 +25,12 @@ per the anti-enumeration policy documented on ``authorization.py``.
 """
 
 import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.audit import ExchangeAuditEvent, ExchangeAuditWriter
@@ -38,6 +40,23 @@ from daher_adapter.exchange.authorization import (
     NotAuthorized,
     OrganizationAccessContext,
     ResourceNotFound,
+)
+from daher_adapter.exchange.catalog import (
+    CatalogEntryConflict,
+    CatalogEntryNotFound,
+    CatalogEntryRecord,
+    CatalogRepository,
+    LabOfferingRecord,
+    LabPriceRecord,
+    OfferingConflict,
+    OfferingInactiveConflict,
+    OfferingNotFound,
+    PriceConflict,
+)
+from daher_adapter.exchange.directory import (
+    LabDirectoryListing,
+    LabDirectoryProfileRecord,
+    LabDirectoryProfileRepository,
 )
 from daher_adapter.exchange.identity_auth import TokenValidationError, TokenValidator
 from daher_adapter.exchange.membership import (
@@ -137,6 +156,217 @@ class MeResponse(BaseModel):
     memberships: list[MembershipSummary]
 
 
+# -- DH-EX-003: catalog, lab directory, offerings, pricing, marketplace --------------------------
+
+
+class CatalogEntryCreateRequest(BaseModel):
+    """No ``is_synthetic`` field, deliberately -- DH-EX-003's explicit instruction is that no
+    client request may submit a non-synthetic catalog entry through this API; the server always
+    forces ``is_synthetic=True`` (see ``create_catalog_test`` below), never trusting a client-sent
+    value for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=256)
+    version: int = Field(default=1, ge=1)
+
+
+class CatalogEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    code: str
+    version: int
+    display_name: str
+    active: bool
+    is_synthetic: bool
+
+
+class LabDirectoryProfileRequest(BaseModel):
+    """PUT-shaped full-replace: every field reflects the complete desired state, including
+    ``listed``/``accepting_orders`` -- omitting them resets to the safe `False` default rather
+    than mysteriously preserving whatever was there before."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    public_address: str = Field(min_length=1, max_length=512)
+    latitude: Decimal | None = None
+    longitude: Decimal | None = None
+    public_phone: str | None = Field(default=None, max_length=64)
+    listed: bool = False
+    accepting_orders: bool = False
+
+    @model_validator(mode="after")
+    def _validate_coordinates(self) -> "LabDirectoryProfileRequest":
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must both be present or both be absent")
+        if self.latitude is not None and not (Decimal("-90") <= self.latitude <= Decimal("90")):
+            raise ValueError("latitude must be between -90 and 90")
+        if self.longitude is not None and not (Decimal("-180") <= self.longitude <= Decimal("180")):
+            raise ValueError("longitude must be between -180 and 180")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_address_not_blank(self) -> "LabDirectoryProfileRequest":
+        # DH-EX-003R: `min_length=1` alone accepts a single space -- unusable as a marketplace-
+        # visible address whether or not `listed` happens to be true on this particular call, and
+        # `public_address` is a mandatory, non-nullable field with no "draft, no address yet"
+        # state modeled anywhere in this schema. Matches the `code.strip()`/`display_name.strip()`
+        # non-blank convention already used elsewhere in this package (`exchange/catalog.py`).
+        if not self.public_address.strip():
+            raise ValueError("public_address must not be blank")
+        return self
+
+
+class LabDirectoryProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    listed: bool
+    accepting_orders: bool
+    public_address: str
+    latitude: Decimal | None
+    longitude: Decimal | None
+    public_phone: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LabDirectoryListingResponse(BaseModel):
+    """Directory browse/detail shape -- `GET /labs` and `GET /labs/{id}`. Never returned for an
+    unlisted lab except to a platform admin (see `get_lab` below)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    listed: bool
+    accepting_orders: bool
+    public_address: str
+    latitude: Decimal | None
+    longitude: Decimal | None
+    public_phone: str | None
+
+
+class LabOfferingCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_entry_id: uuid.UUID
+    local_test_code: str | None = Field(default=None, max_length=128)
+
+
+class LabOfferingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    catalog_entry_id: uuid.UUID
+    local_test_code: str | None
+    active: bool
+
+
+class LabOfferingStatusUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool
+
+
+class LabPriceSetRequest(BaseModel):
+    """``expected_current_price_id`` has no default -- the caller must always state their
+    optimistic-concurrency expectation explicitly. `None` means "I expect no current price exists
+    yet"; a UUID means "I expect that exact row to still be current". DH-EX-003's Djibouti-MVP
+    scope: `currency` must be exactly `"DJF"`, enforced by the `Literal` type itself -- anything
+    else is a 422 from schema validation before any application code runs.
+
+    ``amount``'s ``max_digits``/``decimal_places`` mirror the database column exactly
+    (``exchange_lab_prices.amount`` is ``Numeric(12, 2)``) -- DH-EX-003R: without this, a value
+    with more than 2 decimal places or more than 10 integer digits reached the database rather
+    than being refused here, and PostgreSQL's behavior for the two cases differs in a way an API
+    caller should never have to discover by trial and error (silently rounding excess scale,
+    but raising a raw, unfiltered `numeric field overflow` for excess precision). Both now fail
+    the same, clean way: 422, at the schema boundary, before any application code runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
+    currency: Literal["DJF"]
+    expected_current_price_id: uuid.UUID | None
+
+
+class LabPriceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    lab_offering_id: uuid.UUID
+    amount: Decimal
+    currency: str
+    effective_at: datetime
+    superseded_at: datetime | None
+
+
+class MarketplaceLabOptionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_entry_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def _no_duplicate_entries(self) -> "MarketplaceLabOptionsRequest":
+        if len(set(self.catalog_entry_ids)) != len(self.catalog_entry_ids):
+            raise ValueError("catalog_entry_ids must not contain duplicates")
+        return self
+
+
+class MarketplacePriceLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_entry_id: uuid.UUID
+    catalog_code: str
+    display_name: str
+    offering_id: uuid.UUID
+    current_price_id: uuid.UUID
+    amount: Decimal
+    currency: str
+
+
+class MarketplaceLabIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    name: str
+
+
+class MarketplaceLabDirectory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_address: str
+    latitude: Decimal | None
+    longitude: Decimal | None
+    public_phone: str | None
+
+
+class MarketplaceLabOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lab: MarketplaceLabIdentity
+    directory: MarketplaceLabDirectory
+    prices: list[MarketplacePriceLine]
+    total_amount: Decimal
+    currency: str
+
+
+class MarketplaceLabOptionsResponse(BaseModel):
+    """``as_of`` is one timestamp for the whole response, not per-lab -- every lab option in a
+    single response was computed from the same query instant, so a per-lab timestamp would only
+    ever repeat the same value under a different name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: datetime
+    options: list[MarketplaceLabOption]
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -150,6 +380,8 @@ def build_exchange_router(
     role_assignments = OrganizationRoleAssignmentRepository(session_factory)
     authz = AuthorizationService(organizations, memberships, role_assignments)
     security_audit = ExchangeSecurityAuditRepository()
+    catalog = CatalogRepository(session_factory, organizations)
+    directory = LabDirectoryProfileRepository(session_factory, organizations)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -235,6 +467,19 @@ def build_exchange_router(
             _audit_refused(principal, organization_id)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_network_read_access(principal: AuthenticatedPrincipal) -> None:
+        """DH-EX-003: the gate for catalog/directory/marketplace reads -- not scoped to any single
+        organization (see `AuthorizationService.require_any_active_membership`'s own docstring for
+        why). A valid identity with zero memberships may still call `/me`, but not this."""
+        try:
+            authz.require_any_active_membership(principal)
+        except NotAuthorized as error:
+            _audit_refused(principal, None)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="an active organization membership is required",
             ) from error
 
     @router.get("/me", response_model=MeResponse)
@@ -454,4 +699,395 @@ def build_exchange_router(
             roles=held_roles,
         )
 
+    # -- DH-EX-003: catalog -----------------------------------------------------------------------
+
+    @router.get("/catalog/tests", response_model=list[CatalogEntryResponse])
+    def list_catalog_tests(
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[CatalogEntryResponse]:
+        _require_network_read_access(principal)
+        # DH-EX-003R: an ordinary network member sees ACTIVE + SYNTHETIC entries only -- an
+        # inactive or non-synthetic row must never look selectable/approved merely because it
+        # exists in the DB. Platform admin gets the unfiltered inspection view.
+        entries = catalog.list_entries(active_synthetic_only=not principal.platform_admin)
+        return [_to_catalog_response(entry) for entry in entries]
+
+    @router.post(
+        "/catalog/tests", response_model=CatalogEntryResponse, status_code=status.HTTP_201_CREATED
+    )
+    def create_catalog_test(
+        body: CatalogEntryCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> CatalogEntryResponse:
+        # Platform admin only -- creating a DHealth canonical catalog entry is platform work, not
+        # something a lab admin does (a lab admin instead *offers* an existing catalog entry, via
+        # POST .../offerings below).
+        try:
+            authz.require_platform_admin(principal)
+        except NotAuthorized as error:
+            _audit_refused(principal, None)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="platform admin required"
+            ) from error
+
+        try:
+            with session_factory.begin() as session:
+                # `is_synthetic=True` is hardcoded, never taken from the request body -- DH-EX-003
+                # explicitly forbids a client submitting `is_synthetic=false` through this API.
+                record, created = catalog.create_entry(
+                    code=body.code,
+                    display_name=body.display_name,
+                    version=body.version,
+                    is_synthetic=True,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="catalog_entry_created",
+                    actor_identity_id=principal.identity_id,
+                    outcome="created" if created else "returned_existing",
+                    resource_type="catalog_entry",
+                    resource_id=record.id,
+                )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except CatalogEntryConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _to_catalog_response(record)
+
+    # -- DH-EX-003: lab directory ---------------------------------------------------------------
+
+    @router.get("/labs", response_model=list[LabDirectoryListingResponse])
+    def list_labs(
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[LabDirectoryListingResponse]:
+        _require_network_read_access(principal)
+        return [_to_listing_response(listing) for listing in directory.list_listed()]
+
+    @router.get("/labs/{lab_id}", response_model=LabDirectoryListingResponse)
+    def get_lab(
+        lab_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabDirectoryListingResponse:
+        _require_network_read_access(principal)
+        # Platform admin may inspect an unlisted lab (onboarding/admin purposes); a normal member
+        # never sees one through this endpoint -- an unlisted lab and a nonexistent one both 404.
+        listing = directory.get_listing_for_lab(lab_id, include_unlisted=principal.platform_admin)
+        if listing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="lab not found")
+        return _to_listing_response(listing)
+
+    @router.put(
+        "/organizations/{lab_id}/directory-profile", response_model=LabDirectoryProfileResponse
+    )
+    def put_directory_profile(
+        lab_id: uuid.UUID,
+        body: LabDirectoryProfileRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabDirectoryProfileResponse:
+        _require_org_admin(principal, lab_id)
+
+        try:
+            with session_factory.begin() as session:
+                record, created, changed = directory.upsert(
+                    lab_organization_id=lab_id,
+                    public_address=body.public_address,
+                    latitude=body.latitude,
+                    longitude=body.longitude,
+                    public_phone=body.public_phone,
+                    listed=body.listed,
+                    accepting_orders=body.accepting_orders,
+                    session=session,
+                )
+                event_type = (
+                    "lab_directory_profile_created" if created else "lab_directory_profile_updated"
+                )
+                outcome = "created" if created else ("updated" if changed else "unchanged")
+                security_audit.record(
+                    session,
+                    event_type=event_type,
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome=outcome,
+                    resource_type="lab_directory_profile",
+                    resource_id=record.id,
+                )
+        except InvalidOrganizationType as error:
+            # `lab_id` is not an ACTIVE LAB organization -- e.g. a PROVIDER org's own admin
+            # calling this on their own organization. A business-rule 422, not a 403: the caller
+            # legitimately administers `lab_id`, the endpoint just does not apply to its type.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _to_profile_response(record)
+
+    # -- DH-EX-003: lab offerings ---------------------------------------------------------------
+
+    @router.get("/organizations/{lab_id}/offerings", response_model=list[LabOfferingResponse])
+    def list_lab_offerings(
+        lab_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[LabOfferingResponse]:
+        _require_org_admin(principal, lab_id)
+        return [_to_offering_response(o) for o in catalog.list_offerings_for_lab(lab_id)]
+
+    @router.post(
+        "/organizations/{lab_id}/offerings",
+        response_model=LabOfferingResponse,
+    )
+    def create_lab_offering(
+        lab_id: uuid.UUID,
+        body: LabOfferingCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOfferingResponse:
+        _require_org_admin(principal, lab_id)
+
+        try:
+            with session_factory.begin() as session:
+                record, created = catalog.create_offering(
+                    lab_organization_id=lab_id,
+                    catalog_entry_id=body.catalog_entry_id,
+                    local_test_code=body.local_test_code,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_offering_created",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created" if created else "returned_existing",
+                    resource_type="lab_offering",
+                    resource_id=record.id,
+                )
+        except InvalidOrganizationType as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except CatalogEntryNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="catalog entry not found"
+            ) from error
+        except OfferingInactiveConflict as error:
+            # Checked before the parent `OfferingConflict` -- this is a subclass, and except
+            # clauses are matched in order, so the more specific one must come first.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="offering exists but is inactive; reactivate it explicitly instead",
+            ) from error
+        except OfferingConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _to_offering_response(record)
+
+    @router.patch(
+        "/organizations/{lab_id}/offerings/{offering_id}", response_model=LabOfferingResponse
+    )
+    def update_lab_offering_status(
+        lab_id: uuid.UUID,
+        offering_id: uuid.UUID,
+        body: LabOfferingStatusUpdateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOfferingResponse:
+        _require_org_admin(principal, lab_id)
+        _existing_offering_for_lab_or_404(offering_id, lab_id)
+
+        with session_factory.begin() as session:
+            record, outcome = catalog.set_offering_active(offering_id, body.active, session=session)
+            security_audit.record(
+                session,
+                event_type="lab_offering_status_changed",
+                actor_identity_id=principal.identity_id,
+                organization_id=lab_id,
+                outcome=outcome,
+                resource_type="lab_offering",
+                resource_id=record.id,
+            )
+        return _to_offering_response(record)
+
+    # -- DH-EX-003: pricing -----------------------------------------------------------------------
+
+    @router.post(
+        "/organizations/{lab_id}/offerings/{offering_id}/prices", response_model=LabPriceResponse
+    )
+    def set_lab_offering_price(
+        lab_id: uuid.UUID,
+        offering_id: uuid.UUID,
+        body: LabPriceSetRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabPriceResponse:
+        _require_org_admin(principal, lab_id)
+        _existing_offering_for_lab_or_404(offering_id, lab_id)
+
+        try:
+            with session_factory.begin() as session:
+                record, outcome = catalog.set_price(
+                    offering_id=offering_id,
+                    amount=body.amount,
+                    currency=body.currency,
+                    expected_current_price_id=body.expected_current_price_id,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_price_changed",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome=outcome,
+                    resource_type="lab_price",
+                    resource_id=record.id,
+                )
+        except PriceConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = (
+            status.HTTP_201_CREATED if outcome == "created" else status.HTTP_200_OK
+        )
+        return _to_price_response(record)
+
+    def _existing_offering_for_lab_or_404(offering_id: uuid.UUID, lab_id: uuid.UUID):
+        # Never trust `offering_id` alone -- it must actually belong to `lab_id`, the tenant the
+        # caller was just proven to administer. An offering belonging to a *different* lab looks
+        # exactly like a nonexistent one from here, matching the anti-enumeration policy.
+        try:
+            existing = catalog.get_offering(offering_id)
+        except OfferingNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="offering not found"
+            ) from error
+        if existing.lab_organization_id != lab_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="offering not found")
+        return existing
+
+    # -- DH-EX-003: marketplace (read-only query, never mutates order state) --------------------
+
+    @router.post("/marketplace/lab-options", response_model=MarketplaceLabOptionsResponse)
+    def marketplace_lab_options(
+        body: MarketplaceLabOptionsRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MarketplaceLabOptionsResponse:
+        _require_network_read_access(principal)
+
+        # Fail closed on the whole request rather than silently dropping one requested test --
+        # every entry must exist, be ACTIVE, and (this pilot phase) be SYNTHETIC.
+        for entry_id in body.catalog_entry_ids:
+            try:
+                entry = catalog.get_entry(entry_id)
+            except CatalogEntryNotFound as error:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"catalog entry {entry_id} not found",
+                ) from error
+            if not entry.active:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not active",
+                )
+            if not entry.is_synthetic:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not a synthetic pilot-phase entry",
+                )
+
+        labs = catalog.find_whole_order_eligible_labs(body.catalog_entry_ids)
+        options = [
+            MarketplaceLabOption(
+                lab=MarketplaceLabIdentity(
+                    id=lab.lab_organization_id, name=lab.lab_organization_name
+                ),
+                directory=MarketplaceLabDirectory(
+                    public_address=lab.public_address,
+                    latitude=lab.latitude,
+                    longitude=lab.longitude,
+                    public_phone=lab.public_phone,
+                ),
+                prices=[
+                    MarketplacePriceLine(
+                        catalog_entry_id=line.catalog_entry_id,
+                        catalog_code=line.catalog_code,
+                        display_name=line.display_name,
+                        offering_id=line.offering_id,
+                        current_price_id=line.current_price_id,
+                        amount=line.amount,
+                        currency=line.currency,
+                    )
+                    for line in lab.prices
+                ],
+                total_amount=lab.total_amount,
+                currency=lab.currency,
+            )
+            for lab in labs
+        ]
+        return MarketplaceLabOptionsResponse(as_of=datetime.now(UTC), options=options)
+
     return router
+
+
+def _to_catalog_response(entry: CatalogEntryRecord) -> CatalogEntryResponse:
+    return CatalogEntryResponse(
+        id=entry.id,
+        code=entry.code,
+        version=entry.version,
+        display_name=entry.display_name,
+        active=entry.active,
+        is_synthetic=entry.is_synthetic,
+    )
+
+
+def _to_offering_response(offering: LabOfferingRecord) -> LabOfferingResponse:
+    return LabOfferingResponse(
+        id=offering.id,
+        lab_organization_id=offering.lab_organization_id,
+        catalog_entry_id=offering.catalog_entry_id,
+        local_test_code=offering.local_test_code,
+        active=offering.active,
+    )
+
+
+def _to_price_response(price: LabPriceRecord) -> LabPriceResponse:
+    return LabPriceResponse(
+        id=price.id,
+        lab_offering_id=price.lab_offering_id,
+        amount=price.amount,
+        currency=price.currency,
+        effective_at=price.effective_at,
+        superseded_at=price.superseded_at,
+    )
+
+
+def _to_profile_response(profile: LabDirectoryProfileRecord) -> LabDirectoryProfileResponse:
+    return LabDirectoryProfileResponse(
+        id=profile.id,
+        lab_organization_id=profile.lab_organization_id,
+        listed=profile.listed,
+        accepting_orders=profile.accepting_orders,
+        public_address=profile.public_address,
+        latitude=profile.latitude,
+        longitude=profile.longitude,
+        public_phone=profile.public_phone,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def _to_listing_response(listing: LabDirectoryListing) -> LabDirectoryListingResponse:
+    return LabDirectoryListingResponse(
+        lab_organization_id=listing.lab_organization_id,
+        lab_organization_name=listing.lab_organization_name,
+        listed=listing.listed,
+        accepting_orders=listing.accepting_orders,
+        public_address=listing.public_address,
+        latitude=listing.latitude,
+        longitude=listing.longitude,
+        public_phone=listing.public_phone,
+    )

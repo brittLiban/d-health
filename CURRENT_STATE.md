@@ -1192,3 +1192,91 @@ a patient secure link, or WhatsApp/SMS integration. **REAL KEYCLOAK QUALIFICATIO
 — stated plainly here again because it is exactly the kind of fact that is easy to let go stale.
 
 **NEXT: DH-EX-003 — lab directory, test offerings, and pricing.**
+
+**CORRECTION appended 2026-09-09 (DH-EX-003, append-only — the "NEXT" line above is superseded, not
+retracted).** DH-EX-003 (lab directory, DHealth test catalog, lab offerings, current pricing,
+whole-order eligibility) is implemented and real-PostgreSQL qualified, returned for independent
+review first — the same position DH-EX-001 and DH-EX-002 were each in before their own R-review.
+Full detail is in PROJECT_STATE.md's DH-EX-003 entry; the load-bearing facts:
+
+- **Not committed, not pushed.**
+- Migration `0006_exchange_lab_directory`, purely additive on `0005_exchange_org_auth`. Fresh
+  upgrade, downgrade (drops exactly the new table + reverses the audit-table widening, leaves
+  DH-EX-001/DH-EX-002 untouched), and re-upgrade all verified against real PostgreSQL 18 — but only
+  on a database with **no DH-EX-003 audit rows yet**. Also verified, deliberately, on a database
+  seeded with a DH-EX-003-shaped row (`organization_id IS NULL`, from a platform-level catalog-entry
+  mutation): the downgrade **fails** there (`NotNullViolation` re-narrowing `organization_id`), by
+  necessity, not by bug — and fails cleanly, leaving the DB at `0006` with zero partial schema
+  change (transactional DDL, confirmed via `alembic current`). Downgrading a live `0006` database
+  requires confirming no DH-EX-003 mutation has run first.
+- A real concurrency bug was found and fixed: `set_price`'s original discover-then-supersede as two
+  separate statements raced under PostgreSQL READ COMMITTED (4 threads wrongly believed they created
+  the first price in a 25-way same-price test) — invisible under SQLite, whose coarser locking
+  masked it. Fixed by folding both steps into one atomic `UPDATE ... RETURNING`. Re-verified clean
+  across 3 independent real-Postgres qualification re-runs after the fix.
+- Whole-order eligibility is all-tests-only by construction (a 3-pass query with a defensive line-
+  count re-check), never a partial-lab result — verified against the ticket's exact 4-lab scenario
+  on both SQLite and real PostgreSQL.
+- DHealth test catalog HTTP creation is synthetic-only at three independent layers (no
+  `is_synthetic` field on the request schema, handler hardcodes `is_synthetic=True`, marketplace
+  query filters and pre-validates `is_synthetic=true`).
+- DH-EX-002's transactional security-audit pattern was generalized (nullable `organization_id`,
+  polymorphic `resource_type`/`resource_id`), not replaced; audit atomicity re-proven with a
+  failure-injection test against real PostgreSQL. All 6 new audit `event_type` values have a live
+  HTTP call site (DH-EX-002 shipped 2 with none), but only 3 are asserted by exact `event_type`
+  string in a test; `lab_directory_profile_updated` and `lab_offering_status_changed` are never
+  actually exercised as a successful mutation via HTTP in any current test — full detail in
+  PROJECT_STATE.md's DH-EX-003 entry.
+- Full adapter suite: **429 passed / 39 skipped** (was 366 at the DH-EX-002 handoff), `ruff`/
+  `ruff format`/`pip check` all clean.
+- **REAL KEYCLOAK QUALIFICATION remains NOT RUN** — unaffected by this ticket, no new auth surface
+  added.
+- Not built (explicitly out of scope): order creation, patient links, any UI, WhatsApp, payments,
+  connector code. The marketplace endpoint is read-only — no `LabSelection` write, no
+  `LabOrderItem` price freeze.
+
+**CORRECTION appended 2026-09-09 (DH-EX-003R, append-only — the "NEXT: independent review" line
+above is superseded, not retracted).** DH-EX-003R (the DH-EX-001R/DH-EX-002R-equivalent independent
+review of DH-EX-003) has now run. Still **not committed, not pushed**. Full detail is in
+PROJECT_STATE.md's DH-EX-003R entry; the load-bearing facts:
+
+- **One BLOCKER found and fixed:** `require_any_active_membership` (the gate for
+  catalog/directory/marketplace reads) checked membership status only, never the membership's own
+  organization status — an identity whose only membership was in a **deactivated** organization
+  retained standing network-browsing access indefinitely. Fixed: now requires an ACTIVE membership
+  in an organization that is also currently ACTIVE. Verified at the HTTP layer (403 on all three
+  network-read endpoints immediately after deactivation; `/me` itself unaffected).
+- **Four HIGH findings fixed:** (1) a real mixed-currency-total gap — `find_whole_order_eligible_labs`
+  pass (3) never re-checked `LabPrice.currency == "DJF"` even though pass (1) required it, so a
+  non-DJF price reaching the DB by any path other than the HTTP API could have been silently summed
+  into a response still labeled `"DJF"`; (2) `GET /catalog/tests` returned every catalog entry
+  unfiltered to any network member, inactive/non-synthetic included, with no platform-admin
+  distinction — now `active_synthetic_only` for ordinary members, unfiltered for platform admin;
+  (3) the three-pass eligibility query's snapshot coherence under PostgreSQL READ COMMITTED was
+  only structurally self-healing, not proven — now runs under `REPEATABLE READ` on PostgreSQL
+  specifically, verified both by confirming the isolation level actually takes effect and by a
+  stress test (616 reads under continuous concurrent mutation, 0 inconsistent results); (4) the
+  previously-disclosed raw `NotNullViolation` on an incompatible `0006→0005` downgrade is now an
+  intentional, explicit fail-fast guard (`DowngradeBlockedByAuditHistory`) that runs before any DDL
+  and never deletes audit rows or fabricates ownership to force compatibility — verified in both
+  states against real PostgreSQL (compatible downgrade succeeds; incompatible downgrade refuses
+  immediately, `alembic current` confirms the DB stays exactly at `0006`, byte-for-byte unchanged).
+- **Three MEDIUM/LOW findings fixed:** a whitespace-only `public_address` could pass validation;
+  `LabPriceSetRequest.amount` had no `max_digits`/`decimal_places` matching the DB's
+  `Numeric(12, 2)` column; the two disclosed audit-coverage gaps
+  (`lab_directory_profile_updated`, `lab_offering_status_changed` never exercised on their
+  successful-mutation path via HTTP) are now closed with positive tests proving both the real
+  mutation and the no-op-replay outcome.
+- Also added: a LAB_TECH lab-management-mutation-refusal regression test (previously untested for
+  any DH-EX-003 endpoint); audit-atomicity failure injection for the three mutation classes the
+  DH-EX-003 handoff had only proven for offering-creation; the ticket's price-snapshot-non-
+  regression scenario (directly testable — DH-EX-001's `LabOrderItem`/`LabSelection` tables already
+  exist); real-Postgres 25-way concurrency proofs for catalog-entry and lab-offering creation.
+- Full adapter suite: **441 passed / 39 skipped** (was 429 at the DH-EX-003 handoff), `ruff`/
+  `ruff format`/`pip check` all clean. Real PostgreSQL 18 fully re-qualified after every fix.
+- **REAL KEYCLOAK QUALIFICATION remains NOT RUN** — unaffected by this review.
+- **READY FOR COMMIT: YES** per this review's own gate — but still explicitly not committed, not
+  pushed; Liban's review comes first, independent of that verdict.
+
+**NEXT: Liban's review of DH-EX-003+DH-EX-003R, then a combined commit/push/exact-SHA-CI ticket,
+then DH-EX-004 — lab order creation.**

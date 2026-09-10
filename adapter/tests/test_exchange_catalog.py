@@ -3,9 +3,11 @@ from decimal import Decimal
 
 import pytest
 from exchange_support import make_lab, make_priced_offering, make_provider
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
+from daher_adapter.exchange.models import LabPrice
 from daher_adapter.exchange.organizations import InvalidOrganizationType, OrganizationRepository
 
 
@@ -13,8 +15,11 @@ def test_synthetic_catalog_entry_persists(sessions: sessionmaker[Session]) -> No
     organizations = OrganizationRepository(sessions)
     catalog = CatalogRepository(sessions, organizations)
 
-    entry = catalog.create_entry(code="DH-CBC-001", display_name="Complete Blood Count (synthetic)")
+    entry, created = catalog.create_entry(
+        code="DH-CBC-001", display_name="Complete Blood Count (synthetic)"
+    )
 
+    assert created is True
     assert entry.is_synthetic is True
     assert catalog.get_entry(entry.id).code == "DH-CBC-001"
 
@@ -58,7 +63,9 @@ def test_offering_requires_an_active_lab_organization(sessions: sessionmaker[Ses
     organizations = OrganizationRepository(sessions)
     catalog = CatalogRepository(sessions, organizations)
     provider = make_provider(organizations)
-    entry = catalog.create_entry(code="DH-CBC-001", display_name="Complete Blood Count (synthetic)")
+    entry, _ = catalog.create_entry(
+        code="DH-CBC-001", display_name="Complete Blood Count (synthetic)"
+    )
 
     with pytest.raises(InvalidOrganizationType):
         catalog.create_offering(lab_organization_id=provider.id, catalog_entry_id=entry.id)
@@ -71,8 +78,19 @@ def test_historical_price_survives_a_later_price_change(sessions: sessionmaker[S
     entry, offering = make_priced_offering(
         catalog, lab_organization_id=lab.id, amount=Decimal("500.00")
     )
+    with sessions() as session:
+        current_price_id = session.scalar(
+            select(LabPrice.id).where(
+                LabPrice.lab_offering_id == offering.id, LabPrice.superseded_at.is_(None)
+            )
+        )
 
-    catalog.set_price(offering_id=offering.id, amount=Decimal("650.00"))
+    catalog.set_price(
+        offering_id=offering.id,
+        amount=Decimal("650.00"),
+        currency="DJF",
+        expected_current_price_id=current_price_id,
+    )
 
     eligible = catalog.find_eligible_labs(entry.id)
     assert len(eligible) == 1

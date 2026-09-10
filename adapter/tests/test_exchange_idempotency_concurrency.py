@@ -51,9 +51,14 @@ def test_concurrent_duplicate_claim_has_a_database_level_final_authority(tmp_pat
 
     provider = make_provider(organizations)
     lab = make_lab(organizations)
-    entry = catalog.create_entry(code="DH-CONCURRENCY-1", display_name="Concurrency test item")
-    offering = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
-    catalog.set_price(offering_id=offering.id, amount=Decimal("100"))
+    entry, _ = catalog.create_entry(code="DH-CONCURRENCY-1", display_name="Concurrency test item")
+    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    catalog.set_price(
+        offering_id=offering.id,
+        amount=Decimal("100"),
+        currency="DJF",
+        expected_current_price_id=None,
+    )
     patient = make_patient_reference(patients, provider_org_id=provider.id)
     practitioner = make_practitioner_reference(practitioners, provider_org_id=provider.id)
 

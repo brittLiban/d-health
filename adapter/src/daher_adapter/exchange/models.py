@@ -43,6 +43,7 @@ __all__ = [
     "ExchangeIdentity",
     "ExchangeIdentityStatus",
     "ExchangeSecurityAuditEvent",
+    "LabDirectoryProfile",
     "LabOffering",
     "LabOrder",
     "LabOrderItem",
@@ -644,17 +645,77 @@ class OrganizationRoleAssignment(Base):
     membership: Mapped[OrganizationMembership] = relationship(back_populates="role_assignments")
 
 
+class LabDirectoryProfile(Base):
+    """DH-EX-003: one lab organization's marketplace visibility/location profile. Strictly
+    one-to-one with a LAB organization -- a PROVIDER organization never has a row here, enforced
+    at the repository layer (the same "repository is the enforcement point" rule already used for
+    ``LabOffering``'s organization-type check).
+
+    ``listed``/``accepting_orders`` both default false: a newly-created lab organization is never
+    automatically marketplace-visible just by existing. ``listed`` controls whether the lab appears
+    in directory browsing at all; ``accepting_orders`` is the coarser, separate switch that also
+    gates whole-order eligibility -- a listed-but-not-accepting lab may still appear in directory
+    detail, but never as an order-eligible option (see ``exchange/directory.py``). No geocoding, no
+    opening-hours/availability schedule -- ``public_address`` is free-text, ``latitude``/
+    ``longitude`` are optional operator-entered coordinates, never inferred."""
+
+    __tablename__ = "exchange_lab_directory_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "lab_organization_id", name="uq_exchange_lab_directory_profiles_lab_organization"
+        ),
+        CheckConstraint(
+            "(latitude IS NULL AND longitude IS NULL) "
+            "OR (latitude IS NOT NULL AND longitude IS NOT NULL)",
+            name="ck_exchange_lab_directory_profiles_lat_lon_pair",
+        ),
+        CheckConstraint(
+            "latitude IS NULL OR (latitude >= -90 AND latitude <= 90)",
+            name="ck_exchange_lab_directory_profiles_latitude_range",
+        ),
+        CheckConstraint(
+            "longitude IS NULL OR (longitude >= -180 AND longitude <= 180)",
+            name="ck_exchange_lab_directory_profiles_longitude_range",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    listed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    accepting_orders: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    public_address: Mapped[str] = mapped_column(String(512), nullable=False)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    public_phone: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class ExchangeSecurityAuditEvent(Base):
-    """DH-EX-002R: the authoritative, transactional audit record for Exchange security mutations
-    (organization creation, membership creation, role assignment). Inserted in the **same
-    database transaction** as the mutation it records (see ``exchange/security_audit.py``) --
-    never written after a separate commit, and never the target of a best-effort fallback. If this
-    insert fails, the mutation it would have recorded is rolled back with it; nothing here is
-    reachable independent of a real, committed mutation.
+    """DH-EX-002R: the authoritative, transactional audit record for Exchange security mutations.
+    Inserted in the **same database transaction** as the mutation it records (see
+    ``exchange/security_audit.py``) -- never written after a separate commit, and never the target
+    of a best-effort fallback. If this insert fails, the mutation it would have recorded is rolled
+    back with it; nothing here is reachable independent of a real, committed mutation.
+
+    DH-EX-003 generalized this table's original organization/membership/role-only shape to also
+    cover catalog/directory/offering/price mutations, which have no single owning organization
+    (a platform-admin catalog-entry creation, in particular) -- `organization_id` is therefore
+    nullable as of DH-EX-003, and `resource_type`/`resource_id` identify the mutated
+    catalog/directory/offering/price row generically rather than overloading `membership_id`/
+    `role` (which stay exactly what DH-EX-002 defined them as, for org/membership/role events
+    only). This is a purely additive generalization -- every DH-EX-002 row and column keeps its
+    original meaning; nothing here narrows what already existed.
 
     Deliberately narrow and closed: no JWT, no bearer token, no password, no Keycloak secret, no
-    clinical data, no free-text payload. `event_type`/`outcome` are limited by CHECK constraint to
-    exactly the values this ticket's mutations actually produce -- widen only when a real new
+    clinical data, no free-text payload. `event_type`/`outcome`/`resource_type` are limited by
+    CHECK constraint to exactly the values real callers produce -- widen only when a real new
     caller exists, matching this package's established discipline (`exchange/audit.py`).
 
     Authorization *refusals* are explicitly NOT recorded here -- a refusal is not a state mutation,
@@ -666,16 +727,26 @@ class ExchangeSecurityAuditEvent(Base):
     __tablename__ = "exchange_security_audit_events"
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('organization_created', 'membership_created', 'role_assigned')",
+            "event_type IN ("
+            "'organization_created', 'membership_created', 'role_assigned', "
+            "'catalog_entry_created', 'lab_directory_profile_created', "
+            "'lab_directory_profile_updated', 'lab_offering_created', "
+            "'lab_offering_status_changed', 'lab_price_changed'"
+            ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
         CheckConstraint(
-            "outcome IN ('created', 'returned_existing')",
+            "outcome IN ('created', 'returned_existing', 'updated', 'unchanged')",
             name="ck_exchange_security_audit_events_outcome",
         ),
         CheckConstraint(
             "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH')",
             name="ck_exchange_security_audit_events_role",
+        ),
+        CheckConstraint(
+            "resource_type IS NULL OR resource_type IN "
+            "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price')",
+            name="ck_exchange_security_audit_events_resource_type",
         ),
     )
 
@@ -687,8 +758,9 @@ class ExchangeSecurityAuditEvent(Base):
     actor_identity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
     )
-    organization_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    # Nullable as of DH-EX-003 -- a platform-level catalog mutation has no owning organization.
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=True
     )
     subject_identity_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
@@ -697,4 +769,9 @@ class ExchangeSecurityAuditEvent(Base):
         ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=True
     )
     role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # DH-EX-003: generic target identification for catalog/directory/offering/price mutations.
+    # Deliberately not a FK -- the target table varies by `resource_type`, and a single polymorphic
+    # FK is not portably expressible; the CHECK constraint above is the closed-set guard instead.
+    resource_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)

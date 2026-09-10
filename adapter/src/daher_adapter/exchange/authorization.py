@@ -127,6 +127,37 @@ class AuthorizationService:
     ) -> OrganizationAccessContext:
         return self.require_role(principal, organization_id, OrganizationRole.ORG_ADMIN)
 
+    def require_any_active_membership(self, principal: AuthenticatedPrincipal) -> None:
+        """DH-EX-003: the gate for network-wide reads (catalog list, lab directory, the
+        marketplace whole-order query) that are not scoped to any single organization the caller
+        already belongs to -- unlike every other `require_*` method here, which checks a specific
+        `organization_id`. Platform admin always passes. Otherwise the caller must hold at least
+        one ACTIVE membership in an ACTIVE organization; a freshly-bootstrapped identity with zero
+        memberships (see `exchange/api.py`'s `get_principal`) may still call `/me`, but may not
+        browse the network.
+
+        DH-EX-003R correction: this originally checked membership status only, deliberately
+        *not* the membership's own organization status ("an org's own active/inactive status only
+        matters for org-scoped actions"). That reasoning does not hold for this specific check --
+        an organization is deactivated precisely to cut off its access, and network-wide reads are
+        access. An identity whose only membership is in a deactivated organization must not retain
+        a standing ability to browse the catalog/directory/marketplace indefinitely through this
+        non-org-scoped path; it is not "org-scoped" in name, but it is still access the deactivated
+        organization's membership should no longer grant."""
+        if principal.platform_admin:
+            return
+        memberships = self._memberships.list_for_identity(principal.identity_id)
+        for membership in memberships:
+            if membership.status != "ACTIVE":
+                continue
+            try:
+                organization = self._organizations.get(membership.organization_id)
+            except OrganizationNotFound:
+                continue
+            if organization.status == OrganizationStatus.ACTIVE.value:
+                return
+        raise NotAuthorized("at least one active membership in an active organization is required")
+
     def _get_organization_or_404(self, organization_id: uuid.UUID) -> OrganizationRecord:
         try:
             return self._organizations.get(organization_id)

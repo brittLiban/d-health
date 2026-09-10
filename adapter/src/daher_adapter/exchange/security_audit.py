@@ -21,8 +21,22 @@ from sqlalchemy.orm import Session
 
 from daher_adapter.exchange.models import ExchangeSecurityAuditEvent
 
-SecurityEventType = Literal["organization_created", "membership_created", "role_assigned"]
-SecurityOutcome = Literal["created", "returned_existing"]
+SecurityEventType = Literal[
+    "organization_created",
+    "membership_created",
+    "role_assigned",
+    # DH-EX-003 catalog/directory/offering/price mutation events.
+    "catalog_entry_created",
+    "lab_directory_profile_created",
+    "lab_directory_profile_updated",
+    "lab_offering_created",
+    "lab_offering_status_changed",
+    "lab_price_changed",
+]
+SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
+SecurityResourceType = Literal[
+    "catalog_entry", "lab_directory_profile", "lab_offering", "lab_price"
+]
 
 
 class ExchangeSecurityAuditRepository:
@@ -32,12 +46,17 @@ class ExchangeSecurityAuditRepository:
         *,
         event_type: SecurityEventType,
         actor_identity_id: uuid.UUID,
-        organization_id: uuid.UUID,
         outcome: SecurityOutcome,
+        organization_id: uuid.UUID | None = None,
         subject_identity_id: uuid.UUID | None = None,
         membership_id: uuid.UUID | None = None,
         role: str | None = None,
+        resource_type: SecurityResourceType | None = None,
+        resource_id: uuid.UUID | None = None,
     ) -> None:
+        # DH-EX-003: `organization_id` is optional -- a platform-level catalog-entry creation has
+        # no single owning organization, unlike every DH-EX-002 event type (which must still pass
+        # one; nothing here relaxes that at the caller level, only the column's own nullability).
         session.add(
             ExchangeSecurityAuditEvent(
                 event_type=event_type,
@@ -46,6 +65,8 @@ class ExchangeSecurityAuditRepository:
                 subject_identity_id=subject_identity_id,
                 membership_id=membership_id,
                 role=role,
+                resource_type=resource_type,
+                resource_id=resource_id,
                 outcome=outcome,
             )
         )

@@ -80,12 +80,14 @@ def _db_security_audit_events(sessions: sessionmaker[Session]) -> list[dict]:
             {
                 "event_type": row.event_type,
                 "actor_identity_id": str(row.actor_identity_id),
-                "organization_id": str(row.organization_id),
+                "organization_id": str(row.organization_id) if row.organization_id else None,
                 "subject_identity_id": (
                     str(row.subject_identity_id) if row.subject_identity_id else None
                 ),
                 "membership_id": str(row.membership_id) if row.membership_id else None,
                 "role": row.role,
+                "resource_type": row.resource_type,
+                "resource_id": str(row.resource_id) if row.resource_id else None,
                 "outcome": row.outcome,
             }
             for row in rows

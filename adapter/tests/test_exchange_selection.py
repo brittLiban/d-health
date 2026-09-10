@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -8,6 +9,7 @@ from exchange_support import (
     make_priced_offering,
     make_provider,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
@@ -15,7 +17,7 @@ from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
     PractitionerReferenceRepository,
 )
-from daher_adapter.exchange.models import LabOrderStatus
+from daher_adapter.exchange.models import LabOrderStatus, LabPrice
 from daher_adapter.exchange.orders import InvalidOrderTransition, LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.selection import LabCannotFulfillOrder, LabSelectionRepository
@@ -54,6 +56,15 @@ def _create_order(organizations, catalog, patients, practitioners, orders, *, la
     return result.order, entry, offering
 
 
+def _current_price_id(sessions: sessionmaker[Session], offering_id) -> uuid.UUID | None:
+    with sessions() as session:
+        return session.scalar(
+            select(LabPrice.id).where(
+                LabPrice.lab_offering_id == offering_id, LabPrice.superseded_at.is_(None)
+            )
+        )
+
+
 def test_one_chosen_lab_is_recorded_and_order_transitions_to_selected(
     sessions: sessionmaker[Session],
 ) -> None:
@@ -85,7 +96,12 @@ def test_price_snapshot_frozen_at_selection_survives_a_later_price_change(
     assert selected_item.selected_price_currency == "DJF"
 
     # Lab raises its price after the patient already selected and was quoted 500.00.
-    catalog.set_price(offering_id=offering.id, amount=Decimal("999.00"))
+    catalog.set_price(
+        offering_id=offering.id,
+        amount=Decimal("999.00"),
+        currency="DJF",
+        expected_current_price_id=_current_price_id(sessions, offering.id),
+    )
 
     still_frozen = orders.get(order.id).items[0]
     assert still_frozen.selected_price_amount == Decimal("500.00")
@@ -100,10 +116,15 @@ def test_unselected_lab_cannot_become_the_implicit_target(sessions: sessionmaker
     )
     # Lab Other is a real, legitimate alternative -- it can fulfill the same test -- but is never
     # chosen, so it must never end up recorded as the selection.
-    other_offering = catalog.create_offering(
+    other_offering, _ = catalog.create_offering(
         lab_organization_id=lab_other.id, catalog_entry_id=entry.id
     )
-    catalog.set_price(offering_id=other_offering.id, amount=Decimal("500.00"))
+    catalog.set_price(
+        offering_id=other_offering.id,
+        amount=Decimal("500.00"),
+        currency="DJF",
+        expected_current_price_id=None,
+    )
 
     selections.select(lab_order_id=order.id, lab_organization_id=lab_selected.id)
 
@@ -148,16 +169,26 @@ def test_multi_item_order_each_item_gets_its_own_lab_specific_price(
     a shared/aggregated/first-item value."""
     organizations, catalog, patients, practitioners, orders, selections = _build(sessions)
     lab = make_lab(organizations)
-    entry_cbc = catalog.create_entry(code="DH-MULTI-CBC", display_name="CBC")
-    entry_glu = catalog.create_entry(code="DH-MULTI-GLU", display_name="Glucose")
-    offering_cbc = catalog.create_offering(
+    entry_cbc, _ = catalog.create_entry(code="DH-MULTI-CBC", display_name="CBC")
+    entry_glu, _ = catalog.create_entry(code="DH-MULTI-GLU", display_name="Glucose")
+    offering_cbc, _ = catalog.create_offering(
         lab_organization_id=lab.id, catalog_entry_id=entry_cbc.id
     )
-    offering_glu = catalog.create_offering(
+    offering_glu, _ = catalog.create_offering(
         lab_organization_id=lab.id, catalog_entry_id=entry_glu.id
     )
-    catalog.set_price(offering_id=offering_cbc.id, amount=Decimal("500.00"))
-    catalog.set_price(offering_id=offering_glu.id, amount=Decimal("250.00"))
+    catalog.set_price(
+        offering_id=offering_cbc.id,
+        amount=Decimal("500.00"),
+        currency="DJF",
+        expected_current_price_id=None,
+    )
+    catalog.set_price(
+        offering_id=offering_glu.id,
+        amount=Decimal("250.00"),
+        currency="DJF",
+        expected_current_price_id=None,
+    )
 
     provider = make_provider(organizations, name="Clinic-multi")
     patient = make_patient_reference(

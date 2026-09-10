@@ -71,11 +71,16 @@ def make_priced_offering(
     currency: str = "DJF",
     active: bool = True,
 ) -> tuple[CatalogEntryRecord, LabOfferingRecord]:
-    entry = catalog.create_entry(code=code, display_name=display_name)
-    offering = catalog.create_offering(
+    entry, _ = catalog.create_entry(code=code, display_name=display_name)
+    offering, _ = catalog.create_offering(
         lab_organization_id=lab_organization_id, catalog_entry_id=entry.id
     )
-    catalog.set_price(offering_id=offering.id, amount=amount, currency=currency)
+    catalog.set_price(
+        offering_id=offering.id,
+        amount=amount,
+        currency=currency,
+        expected_current_price_id=None,
+    )
     if not active:
         catalog.set_offering_active(offering.id, False)
     return entry, offering
