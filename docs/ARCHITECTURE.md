@@ -975,10 +975,26 @@ was generalized, not replaced, to cover these new mutation types. This is a read
 and admin API — it does not create a `LabSelection`, does not freeze a `LabOrderItem` price, and
 there is no patient-facing marketplace UI yet.
 
-Still not built, no connector wiring changed: lab-order creation, patient selection, the Provider
-Portal, the Lab Portal, patient-link UI, and WhatsApp/SMS integration — none of this is equivalent
-to a completed Exchange MVP. No file under `openmrs-config/` or `openelis-config/` has changed, and
-the connector Keycloak realm (`daher-realm.json`) is untouched. Full audit, gap analysis, and the
-proposed ticket sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/
-closure detail: PROJECT_STATE.md's DH-EX-001, DH-EX-002, and DH-EX-003 FINAL CLOSURE entries. Next:
-DH-EX-004 (Provider lab-order creation) — not started.
+**DH-EX-004 (DHealth-native Provider lab-order creation) is also committed and exact-SHA CI
+qualified** (2026-09-10; qualified at commit `6cc6bdac45faf07a843a08699f8c1b8f269b313f`, per
+DH-EX-004R's independent clinical-order/security/data-integrity review, CI run `34441434606`, all
+required jobs green). Qualified: `POST/GET /exchange/v1/organizations/{provider_id}/orders` and
+`GET .../orders/{order_id}`, gated by a new `require_clinician` authorization check that
+deliberately does **not** let platform admin bypass — clinical ordering requires an ACTIVE
+`CLINICIAN` membership in the ACTIVE provider organization itself, not network-administration
+authority. The ordering practitioner is always server-derived from the authenticated
+`ExchangeIdentity` (never client-supplied) via a durable, UI-independent source-identity namespace,
+proven to produce a distinct `PractitionerReference` per provider organization for the same human. A
+new order requires provider-scoped canonical-UUIDv4 idempotency and creates one `LabOrder` +
+`LabOrderItem`s + `PENDING` `DoctorReview` + `PENDING` `ResultDelivery`, atomically with the
+authoritative `lab_order_created` audit row, landing at `AWAITING_LAB_SELECTION`. It does **not**
+create a `LabSelection`, does not require a currently-eligible lab to exist, and does not freeze a
+price — those remain later work.
+
+Still not built, no connector wiring changed: patient secure access, patient lab selection, price
+freezing, the Provider Portal, the Lab Portal, and WhatsApp/SMS integration — none of this is
+equivalent to a completed Exchange MVP. No file under `openmrs-config/` or `openelis-config/` has
+changed, and the connector Keycloak realm (`daher-realm.json`) is untouched. Full audit, gap
+analysis, and the proposed ticket sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001
+(2026-09-08); build/review/closure detail: PROJECT_STATE.md's DH-EX-001 through DH-EX-004 FINAL
+CLOSURE entries. Next: DH-EX-005 (patient secure link + lab selection) — not started.

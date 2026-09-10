@@ -1381,3 +1381,31 @@ in PROJECT_STATE.md's DH-EX-004R entry; the load-bearing facts:
 
 **NEXT: Liban's review of DH-EX-004+DH-EX-004R, then a combined commit/push/exact-SHA-CI ticket,
 then DH-EX-005 — patient secure link + lab selection.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-004 FINAL CLOSURE, append-only — the "NEXT: Liban's
+review" line above is superseded, not retracted).** DH-EX-004 + DH-EX-004R were committed together
+(`6cc6bdac45faf07a843a08699f8c1b8f269b313f`, parent `8bbf2de80b196e49c53b91943faa435419029736`),
+pushed, and exact-SHA CI qualified (run `34441434606`, all 9 required jobs green, adapter
+`495 passed / 39 skipped` confirmed independently in CI's own logs, migration head confirmed
+`0007_exchange_order_api` against CI's real `postgres:16-alpine` service, runtime-reported
+PostgreSQL 16.15). Full account: PROJECT_STATE.md's **DH-EX-004 · FINAL CLOSURE** entry.
+
+**DH-EX-001, DH-EX-002, DH-EX-003, and DH-EX-004 are all closed.** The DHealth Exchange currently
+has: the core domain/persistence layer (DH-EX-001); organization identity, OIDC validation,
+memberships, tenant roles, the platform-admin boundary, and a transactionally-authoritative
+security-mutation audit (DH-EX-002); a lab directory, a synthetic-only pilot test catalog, lab
+offering administration, DJF current pricing with CAS and immutable history, and whole-order lab
+eligibility evaluated under PostgreSQL `REPEATABLE READ` (DH-EX-003); and DHealth-native Provider
+lab-order creation/read — clinician-only authorization (platform admin has no implicit clinical
+access), server-derived durable practitioner provenance (distinct per provider organization),
+provider-scoped canonical-UUIDv4 idempotency, and a transactionally-atomic order+pending-rows+audit
+aggregate landing at `AWAITING_LAB_SELECTION` (DH-EX-004). It does **not** yet have: a patient
+secure link, patient lab selection, a frozen price snapshot, any `LabSelection` row, a Provider
+Portal UI, a Lab Portal, a result workflow, or WhatsApp/SMS integration. **REAL KEYCLOAK
+QUALIFICATION remains NOT RUN** — stated plainly here again because it is exactly the kind of fact
+that is easy to let go stale; DH-EX-004 added no new authentication surface.
+
+**NEXT: DH-EX-005 — patient secure link + lab selection.** Golden journey after DH-EX-005:
+clinician creates order → `AWAITING_LAB_SELECTION` → patient receives/uses scoped secure access →
+patient sees eligible labs/current prices → patient chooses one lab → selected lab + price
+snapshot become durable → order transitions to `SELECTED` — **not started.**
