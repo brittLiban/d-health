@@ -127,6 +127,47 @@ class AuthorizationService:
     ) -> OrganizationAccessContext:
         return self.require_role(principal, organization_id, OrganizationRole.ORG_ADMIN)
 
+    def require_clinician(
+        self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """DH-EX-004: the gate for clinical lab-order creation/read -- deliberately does **not**
+        let `platform_admin` bypass, unlike every other `require_*` method in this class. Network
+        administration is not clinical access: a platform admin needs their own ACTIVE `CLINICIAN`
+        membership in this specific provider organization to create or read its orders, exactly
+        like anyone else. `ORG_ADMIN` alone (without also holding `CLINICIAN`) is refused too --
+        organization administration and clinical ordering are separate authorities here, matching
+        the ticket's explicit "a platform administrator is a network administrator, not
+        automatically a clinician" instruction, generalized to org-admins of the provider itself.
+
+        A genuinely nonexistent organization still 404s for everyone, platform admin included --
+        that check happens before any membership/role lookup and never depends on `platform_admin`.
+        For a normal (non-platform-admin) caller with *zero* relationship to the organization, this
+        also 404s (anti-enumeration, matching `require_membership`'s convention: no claim at all on
+        an org is indistinguishable from that org not existing). For a platform admin specifically,
+        a real organization they lack `CLINICIAN` membership in is a 403, not a 404 -- a platform
+        admin already has visibility that the organization exists (they can list/create/manage
+        organizations), so pretending otherwise here would be an inconsistent lie, not genuine
+        anti-enumeration."""
+        organization = self._get_organization_or_404(organization_id)
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized("clinician role required")
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held_roles = self._roles.list_for_membership(membership.id)
+        if OrganizationRole.CLINICIAN.value not in held_roles:
+            raise NotAuthorized("clinician role required")
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
+
     def require_any_active_membership(self, principal: AuthenticatedPrincipal) -> None:
         """DH-EX-003: the gate for network-wide reads (catalog list, lab directory, the
         marketplace whole-order query) that are not scoped to any single organization the caller

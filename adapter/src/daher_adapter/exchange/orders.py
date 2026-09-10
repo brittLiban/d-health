@@ -85,6 +85,13 @@ class EmptyOrder(ValueError):
     """A LabOrder was requested with zero items."""
 
 
+class DuplicateOrderItems(ValueError):
+    """The same catalog_entry_id was requested more than once for one order -- refused rather
+    than silently deduplicated (DH-EX-004R: the HTTP schema already rejects this, but the
+    repository is the actual enforcement point, not just one caller -- matching this package's
+    established discipline for every other duplicate/conflict check)."""
+
+
 @dataclass(frozen=True, slots=True)
 class OrderItemInput:
     catalog_entry_id: uuid.UUID
@@ -139,11 +146,25 @@ class LabOrderRepository:
         patient_reference_id: uuid.UUID,
         practitioner_reference_id: uuid.UUID,
         items: list[OrderItemInput],
+        session: Session | None = None,
     ) -> CreateOrderResult:
+        """DH-EX-004: ``session`` lets a caller (the HTTP order-creation command) fold this into
+        one outer transaction alongside a practitioner-reference get-or-create and the
+        authoritative ``lab_order_created`` audit row -- when given, the insert attempt runs
+        inside a SAVEPOINT (``begin_nested``) so a duplicate idempotency-key race only unwinds to
+        that savepoint, never poisoning the caller's outer transaction, matching the exact pattern
+        already established for offerings/prices/memberships/practitioner references. When
+        omitted, this method still owns and commits its own transaction exactly as before,
+        preserving every existing caller (e.g. this package's own tests)."""
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
         if not items:
             raise EmptyOrder("a LabOrder must have at least one item")
+        requested_ids = [item.catalog_entry_id for item in items]
+        if len(set(requested_ids)) != len(requested_ids):
+            raise DuplicateOrderItems(
+                "an order must not request the same catalog_entry_id more than once"
+            )
 
         # Fails closed if the sender is not an ACTIVE provider organization.
         self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
@@ -156,6 +177,40 @@ class LabOrderRepository:
             for item in items
         ]
 
+        if session is not None:
+            return self._create_in_session(
+                session,
+                idempotency_key=idempotency_key,
+                provider_organization_id=provider_organization_id,
+                patient_reference_id=patient_reference_id,
+                practitioner_reference_id=practitioner_reference_id,
+                items=items,
+                snapshots=snapshots,
+            )
+        with self._sessions() as owned_session:
+            result = self._create_in_session(
+                owned_session,
+                idempotency_key=idempotency_key,
+                provider_organization_id=provider_organization_id,
+                patient_reference_id=patient_reference_id,
+                practitioner_reference_id=practitioner_reference_id,
+                items=items,
+                snapshots=snapshots,
+            )
+            owned_session.commit()
+            return result
+
+    def _create_in_session(
+        self,
+        session: Session,
+        *,
+        idempotency_key: str,
+        provider_organization_id: uuid.UUID,
+        patient_reference_id: uuid.UUID,
+        practitioner_reference_id: uuid.UUID,
+        items: list[OrderItemInput],
+        snapshots: list[tuple[uuid.UUID, object]],
+    ) -> CreateOrderResult:
         order = LabOrder(
             idempotency_key=idempotency_key,
             provider_organization_id=provider_organization_id,
@@ -172,8 +227,8 @@ class LabOrderRepository:
             for catalog_entry_id, entry in snapshots
         ]
 
-        with self._sessions() as session:
-            try:
+        try:
+            with session.begin_nested():
                 session.add(order)
                 # DoctorReview is created PENDING in the same transaction as the order itself --
                 # "review remains pending until explicit provider action" is true from the first
@@ -192,35 +247,32 @@ class LabOrderRepository:
                         status=ResultDeliveryStatus.PENDING.value,
                     )
                 )
-                session.commit()
-                return CreateOrderResult(order=_to_order_record(order), created=True)
-            except IntegrityError:
-                session.rollback()
-                existing = session.scalar(
-                    select(LabOrder).where(
-                        LabOrder.provider_organization_id == provider_organization_id,
-                        LabOrder.idempotency_key == idempotency_key,
-                    )
+                session.flush()
+            return CreateOrderResult(order=_to_order_record(order), created=True)
+        except IntegrityError:
+            existing = session.scalar(
+                select(LabOrder).where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+                    LabOrder.idempotency_key == idempotency_key,
                 )
-                if existing is None:
-                    raise
-                existing_record = _to_order_record(existing)
-                existing_item_ids = frozenset(
-                    item.catalog_entry_id for item in existing_record.items
-                )
-                requested_item_ids = frozenset(item.catalog_entry_id for item in items)
-                if (
-                    existing_record.patient_reference_id != patient_reference_id
-                    or existing_record.practitioner_reference_id != practitioner_reference_id
-                    or existing_item_ids != requested_item_ids
-                ):
-                    raise IdempotencyKeyConflict(
-                        f"idempotency_key {idempotency_key!r} for provider organization "
-                        f"{provider_organization_id} was already used for a request with a "
-                        f"different patient, practitioner, or requested test set -- refusing to "
-                        f"return mismatched data"
-                    ) from None
-                return CreateOrderResult(order=existing_record, created=False)
+            )
+            if existing is None:
+                raise
+            existing_record = _to_order_record(existing)
+            existing_item_ids = frozenset(item.catalog_entry_id for item in existing_record.items)
+            requested_item_ids = frozenset(item.catalog_entry_id for item in items)
+            if (
+                existing_record.patient_reference_id != patient_reference_id
+                or existing_record.practitioner_reference_id != practitioner_reference_id
+                or existing_item_ids != requested_item_ids
+            ):
+                raise IdempotencyKeyConflict(
+                    f"idempotency_key {idempotency_key!r} for provider organization "
+                    f"{provider_organization_id} was already used for a request with a "
+                    f"different patient, practitioner, or requested test set -- refusing to "
+                    f"return mismatched data"
+                ) from None
+            return CreateOrderResult(order=existing_record, created=False)
 
     def get(self, order_id: uuid.UUID) -> LabOrderRecord:
         with self._sessions() as session:
@@ -228,6 +280,36 @@ class LabOrderRepository:
             if order is None:
                 raise OrderNotFound(str(order_id))
             return _to_order_record(order)
+
+    def get_for_organization(
+        self, order_id: uuid.UUID, provider_organization_id: uuid.UUID
+    ) -> LabOrderRecord | None:
+        """DH-EX-004: tenant-safe lookup for the HTTP order-detail endpoint -- `get` above is
+        keyed globally by order UUID alone and is unsafe to back an HTTP route directly (nothing
+        stops a valid UUID belonging to a *different* provider from being probed). Returns
+        ``None`` both when the order does not exist at all and when it exists but belongs to a
+        different provider, so a caller maps either case to the same 404, never disclosing that
+        an order id belongs to someone else."""
+        with self._sessions() as session:
+            order = session.get(LabOrder, order_id)
+            if order is None or order.provider_organization_id != provider_organization_id:
+                return None
+            return _to_order_record(order)
+
+    def list_for_organization(
+        self, provider_organization_id: uuid.UUID, *, limit: int = 50
+    ) -> list[LabOrderRecord]:
+        """DH-EX-004: bounded, deterministically-ordered listing for the HTTP order-list endpoint
+        -- newest first, order UUID as a stable tie-break so two orders created in the same
+        instant still sort deterministically across repeated calls."""
+        with self._sessions() as session:
+            orders = session.scalars(
+                select(LabOrder)
+                .where(LabOrder.provider_organization_id == provider_organization_id)
+                .order_by(LabOrder.created_at.desc(), LabOrder.id.desc())
+                .limit(limit)
+            ).all()
+            return [_to_order_record(order) for order in orders]
 
     def get_by_idempotency_key(
         self, provider_organization_id: uuid.UUID, idempotency_key: str

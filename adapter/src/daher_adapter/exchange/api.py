@@ -24,12 +24,13 @@ never compares roles or organization ids inline. ``TokenValidationError`` always
 per the anti-enumeration policy documented on ``authorization.py``.
 """
 
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -58,6 +59,10 @@ from daher_adapter.exchange.directory import (
     LabDirectoryProfileRecord,
     LabDirectoryProfileRepository,
 )
+from daher_adapter.exchange.identity import (
+    PatientReferenceRepository,
+    PractitionerReferenceRepository,
+)
 from daher_adapter.exchange.identity_auth import TokenValidationError, TokenValidator
 from daher_adapter.exchange.membership import (
     ALLOWED_ROLES_BY_ORG_TYPE,
@@ -73,8 +78,36 @@ from daher_adapter.exchange.models import (
     OrganizationRole,
     OrganizationType,
 )
+from daher_adapter.exchange.orders import (
+    EmptyOrder,
+    IdempotencyKeyConflict,
+    LabOrderRecord,
+    LabOrderRepository,
+    OrderItemInput,
+)
 from daher_adapter.exchange.organizations import InvalidOrganizationType, OrganizationRepository
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
+
+# DH-EX-004R: the fixed, server-derived source-identity namespace for a DHealth-native ordering
+# clinician's `PractitionerReference` -- never a caller-supplied practitioner_reference_id (see
+# `create_lab_order` below). `source_identity_value` is always the authenticated
+# `AuthenticatedPrincipal.identity_id`, never an email/name/phone/role.
+#
+# `source_system` deliberately does NOT say "provider-portal" (the DH-EX-004 handoff's original
+# choice, corrected here): what this binds is "the DHealth Exchange itself asserts this
+# practitioner identity", not "the web Provider Portal UI specifically asserted it". The fact
+# being recorded -- an authenticated Exchange identity ordering clinically inside this provider
+# organization -- does not change if the web frontend is renamed, replaced by a native/mobile
+# client, or if a future non-portal API consumer submits the same request. A source-identity
+# namespace is meant to outlive any one client; naming it after today's UI would have made that
+# UI's name part of a durable database value for no benefit.
+_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM = "dhealth-exchange"
+_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM = "urn:dhealth:exchange-identity-id"
+
+# DH-EX-004R: canonical-only UUIDv4 textual form (RFC 4122 §3), lowercase hex, no braces/prefix.
+_CANONICAL_UUID4_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 
 
 class _InactiveMembershipReplay(Exception):
@@ -367,6 +400,69 @@ class MarketplaceLabOptionsResponse(BaseModel):
     options: list[MarketplaceLabOption]
 
 
+# -- DH-EX-004: provider lab-order creation -------------------------------------------------------
+
+
+class LabOrderCreateRequest(BaseModel):
+    """No ``provider_organization_id`` (comes from the path), no ``practitioner_reference_id``
+    (server-derived from the authenticated clinician -- see ``create_lab_order``), no lab id, no
+    price, no status. ``catalog_entry_ids`` duplicates are rejected outright, never silently
+    deduplicated -- a caller sending ``[A, A, B]`` almost certainly made a mistake, and silently
+    treating it as ``[A, B]`` would both hide that mistake and create idempotency ambiguity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_reference_id: uuid.UUID
+    catalog_entry_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def _no_duplicate_entries(self) -> "LabOrderCreateRequest":
+        if len(set(self.catalog_entry_ids)) != len(self.catalog_entry_ids):
+            raise ValueError("catalog_entry_ids must not contain duplicates")
+        return self
+
+
+class LabOrderItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_entry_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+
+
+class LabOrderResponse(BaseModel):
+    """Deliberately excludes ``selected_price_amount``/``selected_price_currency`` -- this ticket
+    never selects a lab, so both are always ``NULL`` on every item; omitting them from the response
+    entirely rather than returning them as ``null`` keeps the contract honest about what this
+    endpoint does and does not do yet."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    patient_reference_id: uuid.UUID
+    practitioner_reference_id: uuid.UUID
+    status: str
+    created_at: datetime
+    items: list[LabOrderItemResponse]
+
+
+class LabOrderSummaryResponse(BaseModel):
+    """The list-endpoint shape -- an ``item_count`` rather than the full item array, so a bounded
+    list of up to 100 orders never has to inline a proportionally larger amount of item data a
+    caller almost certainly does not need for a list view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    patient_reference_id: uuid.UUID
+    practitioner_reference_id: uuid.UUID
+    status: str
+    created_at: datetime
+    item_count: int
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -382,6 +478,9 @@ def build_exchange_router(
     security_audit = ExchangeSecurityAuditRepository()
     catalog = CatalogRepository(session_factory, organizations)
     directory = LabDirectoryProfileRepository(session_factory, organizations)
+    patients = PatientReferenceRepository(session_factory)
+    practitioners = PractitionerReferenceRepository(session_factory)
+    orders = LabOrderRepository(session_factory, organizations, catalog)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -481,6 +580,52 @@ def build_exchange_router(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="an active organization membership is required",
             ) from error
+
+    def _require_clinician(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        # DH-EX-004: deliberately `authz.require_clinician`, never `require_org_admin`/
+        # `require_role` -- platform admin must NOT bypass this one (see its docstring).
+        try:
+            return authz.require_clinician(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_idempotency_key(
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> str:
+        # DH-EX-004R: header, never the JSON body -- a canonical UUIDv4, one value per *intended*
+        # submission, and "canonical" is enforced literally by this regex, not just "parseable by
+        # Python's uuid.UUID". `uuid.UUID(...)` itself is deliberately lenient -- it also accepts
+        # braces (`{...}`), a `urn:uuid:` prefix, and any letter case, silently normalizing all of
+        # them to the same canonical string. That leniency is exactly wrong for a header whose own
+        # docstring already promised "canonical" as the contract: this endpoint must reject a
+        # noncanonical representation outright (422), never quietly accept and reformat it. The
+        # pattern below is RFC 4122 §3's textual representation restricted to version 4 (the
+        # literal `4` nibble) and the RFC 4122 variant (`8`/`9`/`a`/`b`) -- lowercase hex only, no
+        # braces, no prefix, no surrounding whitespace, and it structurally rejects v1/v3/v5 UUIDs
+        # too (a syntactically valid but wrong-version UUID is still not this contract's key).
+        if idempotency_key is None or not idempotency_key.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Idempotency-Key header is required",
+            )
+        if not _CANONICAL_UUID4_PATTERN.fullmatch(idempotency_key):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    "Idempotency-Key must be a canonical lowercase UUIDv4 "
+                    "(no braces, no urn: prefix, no surrounding whitespace)"
+                ),
+            )
+        return idempotency_key
 
     @router.get("/me", response_model=MeResponse)
     def get_me(principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)]) -> MeResponse:
@@ -1030,6 +1175,134 @@ def build_exchange_router(
         ]
         return MarketplaceLabOptionsResponse(as_of=datetime.now(UTC), options=options)
 
+    # -- DH-EX-004: provider lab-order creation --------------------------------------------------
+
+    @router.post(
+        "/organizations/{provider_id}/orders",
+        response_model=LabOrderResponse,
+    )
+    def create_lab_order(
+        provider_id: uuid.UUID,
+        body: LabOrderCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> LabOrderResponse:
+        # CLINICIAN specifically -- an ORG_ADMIN who does not also hold CLINICIAN, a LAB_TECH, a
+        # LAB org's ORG_ADMIN, and platform admin acting alone are all refused here, never just
+        # untested (see `AuthorizationService.require_clinician`'s docstring for why platform
+        # admin does not bypass this one check).
+        _require_clinician(principal, provider_id)
+
+        # Tenant-scoped, read-only pre-validation -- outside any write transaction, matching the
+        # marketplace endpoint's own pattern -- before anything is mutated. A patient reference
+        # that exists but belongs to a *different* provider looks exactly like a nonexistent one
+        # (anti-enumeration; never discloses "that patient belongs to someone else").
+        if patients.get_for_organization(body.patient_reference_id, provider_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient reference not found"
+            )
+
+        # Fail closed on the whole request rather than silently dropping one requested test --
+        # every entry must exist, be ACTIVE, and (this pilot phase) be SYNTHETIC. Duplicate ids
+        # are already rejected at the schema layer (`LabOrderCreateRequest._no_duplicate_entries`).
+        for entry_id in body.catalog_entry_ids:
+            try:
+                entry = catalog.get_entry(entry_id)
+            except CatalogEntryNotFound as error:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"catalog entry {entry_id} not found",
+                ) from error
+            if not entry.active:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not active",
+                )
+            if not entry.is_synthetic:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not a synthetic pilot-phase entry",
+                )
+
+        identity = identities.get(principal.identity_id)
+
+        # DH-EX-004: the ordering practitioner-reference get/create, the LabOrder aggregate
+        # (order + items + PENDING DoctorReview + PENDING ResultDelivery), and the authoritative
+        # `lab_order_created` audit row all commit or roll back together, in one database
+        # transaction. A duplicate idempotency-key race, an idempotency conflict, or an audit
+        # failure all leave nothing behind -- including no orphaned practitioner reference, since
+        # its own insert is part of this same transaction, not a separate prior commit.
+        try:
+            with session_factory.begin() as session:
+                practitioner = practitioners.get_or_create(
+                    source_organization_id=provider_id,
+                    source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+                    source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+                    source_identity_value=str(principal.identity_id),
+                    display_name=identity.display_name,
+                    session=session,
+                )
+                result = orders.create(
+                    idempotency_key=idempotency_key,
+                    provider_organization_id=provider_id,
+                    patient_reference_id=body.patient_reference_id,
+                    practitioner_reference_id=practitioner.id,
+                    items=[
+                        OrderItemInput(catalog_entry_id=entry_id)
+                        for entry_id in body.catalog_entry_ids
+                    ],
+                    session=session,
+                )
+                # Exact idempotent replay must never emit a second `lab_order_created` row -- the
+                # original mutation was already audited.
+                if result.created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_created",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=result.order.id,
+                    )
+        except (InvalidOrganizationType, ValueError, EmptyOrder) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except IdempotencyKeyConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_order_response(result.order)
+
+    @router.get("/organizations/{provider_id}/orders", response_model=list[LabOrderSummaryResponse])
+    def list_lab_orders(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[LabOrderSummaryResponse]:
+        # DH-EX-004R: `limit` is a real, bounded query parameter -- `ge=1, le=100` rejects 0,
+        # negative values, and anything above the documented maximum with a clean 422, rather than
+        # silently ignoring an out-of-range value or passing it through to an unbounded query.
+        _require_clinician(principal, provider_id)
+        return [
+            _to_order_summary_response(order)
+            for order in orders.list_for_organization(provider_id, limit=limit)
+        ]
+
+    @router.get("/organizations/{provider_id}/orders/{order_id}", response_model=LabOrderResponse)
+    def get_lab_order(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOrderResponse:
+        _require_clinician(principal, provider_id)
+        order = orders.get_for_organization(order_id, provider_id)
+        if order is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return _to_order_response(order)
+
     return router
 
 
@@ -1090,4 +1363,35 @@ def _to_listing_response(listing: LabDirectoryListing) -> LabDirectoryListingRes
         latitude=listing.latitude,
         longitude=listing.longitude,
         public_phone=listing.public_phone,
+    )
+
+
+def _to_order_response(order: LabOrderRecord) -> LabOrderResponse:
+    return LabOrderResponse(
+        id=order.id,
+        provider_organization_id=order.provider_organization_id,
+        patient_reference_id=order.patient_reference_id,
+        practitioner_reference_id=order.practitioner_reference_id,
+        status=order.status,
+        created_at=order.created_at,
+        items=[
+            LabOrderItemResponse(
+                catalog_entry_id=item.catalog_entry_id,
+                catalog_code_snapshot=item.catalog_code_snapshot,
+                catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+            )
+            for item in order.items
+        ],
+    )
+
+
+def _to_order_summary_response(order: LabOrderRecord) -> LabOrderSummaryResponse:
+    return LabOrderSummaryResponse(
+        id=order.id,
+        provider_organization_id=order.provider_organization_id,
+        patient_reference_id=order.patient_reference_id,
+        practitioner_reference_id=order.practitioner_reference_id,
+        status=order.status,
+        created_at=order.created_at,
+        item_count=len(order.items),
     )

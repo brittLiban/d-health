@@ -102,6 +102,20 @@ class PatientReferenceRepository:
                 raise ReferenceNotFound(str(reference_id))
             return _to_patient_record(reference)
 
+    def get_for_organization(
+        self, reference_id: uuid.UUID, organization_id: uuid.UUID
+    ) -> PatientReferenceRecord | None:
+        """DH-EX-004: tenant-safe lookup -- returns ``None`` both when the reference does not
+        exist at all and when it exists but belongs to a *different* organization, so a caller
+        can map either case to the same 404 without ever disclosing that a patient reference
+        exists elsewhere (the same anti-enumeration discipline `authorization.py` already applies
+        to organizations)."""
+        with self._sessions() as session:
+            reference = session.get(PatientReference, reference_id)
+            if reference is None or reference.source_organization_id != organization_id:
+                return None
+            return _to_patient_record(reference)
+
 
 class PractitionerReferenceRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
@@ -115,8 +129,46 @@ class PractitionerReferenceRepository:
         source_identity_system: str,
         source_identity_value: str,
         display_name: str | None = None,
+        session: Session | None = None,
     ) -> PractitionerReferenceRecord:
+        """DH-EX-004: ``session`` lets a caller (order creation) fold this get-or-create into its
+        own outer transaction -- when given, the insert-or-fetch attempt runs inside a SAVEPOINT
+        (``begin_nested``) so a duplicate-key race only unwinds to that savepoint, never poisoning
+        the caller's outer transaction, matching the exact pattern already established for
+        offerings/prices/memberships. When omitted, this method still owns and commits its own
+        transaction exactly as before, preserving every existing caller."""
         _require_identity(source_system, source_identity_system, source_identity_value)
+        if session is not None:
+            return self._get_or_create_in_session(
+                session,
+                source_organization_id=source_organization_id,
+                source_system=source_system,
+                source_identity_system=source_identity_system,
+                source_identity_value=source_identity_value,
+                display_name=display_name,
+            )
+        with self._sessions() as owned_session:
+            record = self._get_or_create_in_session(
+                owned_session,
+                source_organization_id=source_organization_id,
+                source_system=source_system,
+                source_identity_system=source_identity_system,
+                source_identity_value=source_identity_value,
+                display_name=display_name,
+            )
+            owned_session.commit()
+            return record
+
+    def _get_or_create_in_session(
+        self,
+        session: Session,
+        *,
+        source_organization_id: uuid.UUID,
+        source_system: str,
+        source_identity_system: str,
+        source_identity_value: str,
+        display_name: str | None,
+    ) -> PractitionerReferenceRecord:
         reference = PractitionerReference(
             source_organization_id=source_organization_id,
             source_system=source_system,
@@ -124,30 +176,41 @@ class PractitionerReferenceRepository:
             source_identity_value=source_identity_value,
             display_name=display_name,
         )
-        with self._sessions() as session:
-            try:
+        try:
+            with session.begin_nested():
                 session.add(reference)
-                session.commit()
-                return _to_practitioner_record(reference)
-            except IntegrityError:
-                session.rollback()
-                existing = session.scalar(
-                    select(PractitionerReference).where(
-                        PractitionerReference.source_organization_id == source_organization_id,
-                        PractitionerReference.source_system == source_system,
-                        PractitionerReference.source_identity_system == source_identity_system,
-                        PractitionerReference.source_identity_value == source_identity_value,
-                    )
+                session.flush()
+            return _to_practitioner_record(reference)
+        except IntegrityError:
+            existing = session.scalar(
+                select(PractitionerReference).where(
+                    PractitionerReference.source_organization_id == source_organization_id,
+                    PractitionerReference.source_system == source_system,
+                    PractitionerReference.source_identity_system == source_identity_system,
+                    PractitionerReference.source_identity_value == source_identity_value,
                 )
-                if existing is None:
-                    raise
-                return _to_practitioner_record(existing)
+            )
+            if existing is None:
+                raise
+            return _to_practitioner_record(existing)
 
     def get(self, reference_id: uuid.UUID) -> PractitionerReferenceRecord:
         with self._sessions() as session:
             reference = session.get(PractitionerReference, reference_id)
             if reference is None:
                 raise ReferenceNotFound(str(reference_id))
+            return _to_practitioner_record(reference)
+
+    def get_for_organization(
+        self, reference_id: uuid.UUID, organization_id: uuid.UUID
+    ) -> PractitionerReferenceRecord | None:
+        """DH-EX-004: same tenant-safe shape as `PatientReferenceRepository.get_for_organization`
+        -- a practitioner reference belonging to a different organization must never be usable,
+        even by id."""
+        with self._sessions() as session:
+            reference = session.get(PractitionerReference, reference_id)
+            if reference is None or reference.source_organization_id != organization_id:
+                return None
             return _to_practitioner_record(reference)
 
 

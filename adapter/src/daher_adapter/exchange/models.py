@@ -731,7 +731,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'organization_created', 'membership_created', 'role_assigned', "
             "'catalog_entry_created', 'lab_directory_profile_created', "
             "'lab_directory_profile_updated', 'lab_offering_created', "
-            "'lab_offering_status_changed', 'lab_price_changed'"
+            "'lab_offering_status_changed', 'lab_price_changed', "
+            "'lab_order_created'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -745,7 +746,7 @@ class ExchangeSecurityAuditEvent(Base):
         ),
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
-            "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price')",
+            "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

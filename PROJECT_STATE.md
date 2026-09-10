@@ -7730,3 +7730,281 @@ product-pivot decision, unchanged in substance by this closure.
 organization creating a DHealth lab order for an exact patient reference, an exact practitioner
 reference, exact DHealth catalog tests, and a provider-scoped idempotency key, resulting in
 `AWAITING_LAB_SELECTION` — **not started.**
+
+### DH-EX-004 · Provider lab-order creation, provider-scoped idempotency, clinician-derived
+practitioner provenance · P0 · 🔨 IMPLEMENTED + SQLite/PostgreSQL-QUALIFIED · ⏳ NOT COMMITTED —
+awaiting independent review
+
+**Ticket:** DH-EX-004. **Base:** on top of DH-EX-003's qualified foundation
+(`0006_exchange_lab_directory`). **Commit/push boundary:** explicitly **not committed, not
+pushed** — this entry documents implementation returned for independent review, the same
+DH-EX-001→DH-EX-001R→DH-EX-001C precedent this ticket is expected to follow next.
+
+**What was built.** Migration `0007_exchange_order_api`, purely additive on top of `0006`: widens
+`ExchangeSecurityAuditEvent`'s closed `event_type`/`resource_type` CHECK constraints to permit
+`'lab_order_created'`/`'lab_order'`, exactly the same pattern `0006` established — no table
+created or dropped, since `LabOrder`/`LabOrderItem`/`DoctorReview`/`ResultDelivery` already exist
+from `0004_exchange_core`. Three new `/exchange/v1` routes: `POST/GET
+/organizations/{provider_id}/orders`, `GET /organizations/{provider_id}/orders/{order_id}`. A
+new `AuthorizationService.require_clinician` method gates all three — deliberately the *only*
+`require_*` method that does not let `platform_admin` bypass (network administration is not
+clinical access, per the ticket's explicit instruction); an `ORG_ADMIN` who does not also hold
+`CLINICIAN` is refused too, matching the same reasoning. The ordering practitioner is never
+client-supplied: `create_lab_order` derives a DHealth-native `PractitionerReference` from the
+authenticated `AuthenticatedPrincipal.identity_id` alone (`source_organization_id` = the route's
+provider, `source_system="dhealth-provider-portal"`,
+`source_identity_system="urn:dhealth:exchange-identity-id"`, `source_identity_value` = the exact
+identity UUID — never email/name/phone/role), so one clinician forging another's
+`practitioner_reference_id` in the request body is structurally impossible (the field does not
+exist on the closed `extra="forbid"` request schema at all).
+
+**Refactored, not rebuilt, the existing DH-EX-001 order/reference infrastructure**, per the
+ticket's explicit "do not recreate the order model" instruction. `LabOrderRepository.create` and
+`PractitionerReferenceRepository.get_or_create` both gained an optional `session: Session | None
+= None` parameter, following the exact `begin_nested()`/SAVEPOINT pattern already established for
+offerings/prices/memberships/directory profiles — the insert-first-wins race for both the order's
+`(provider_organization_id, idempotency_key)` unique constraint and the practitioner reference's
+own unique constraint now runs inside a SAVEPOINT, so either race only unwinds to that savepoint
+rather than poisoning the caller's outer transaction. `create_lab_order` orchestrates practitioner
+get-or-create + order creation (order + items + PENDING `DoctorReview` + PENDING `ResultDelivery`)
++ the authoritative `lab_order_created` audit row inside one `session_factory.begin()` block, so a
+duplicate-key race, an idempotency conflict, or an audit failure all roll back together — including
+the practitioner reference, which is never left orphaned by a failed order attempt (it is only
+inserted "for real" the instant the whole transaction commits). Added tenant-safe lookups this
+ticket needed that did not previously exist: `PatientReferenceRepository.get_for_organization`,
+`PractitionerReferenceRepository.get_for_organization`, `LabOrderRepository.get_for_organization`,
+`LabOrderRepository.list_for_organization` — each returns `None` both when a row does not exist at
+all and when it exists but belongs to a *different* organization, so a caller maps either case to
+the same 404 without ever disclosing that an id belongs to someone else (the existing
+`LabOrderRepository.get`, keyed globally by UUID alone, remains but is never used to back an HTTP
+route directly).
+
+**Idempotency contract.** `Idempotency-Key` is an HTTP header (never the JSON body), required, must
+be a canonical UUIDv4 (missing or malformed → 422). Uniqueness stays
+`(provider_organization_id, idempotency_key)`, not global — unchanged from DH-EX-001/DH-EX-001R.
+A replay is recognized only when the immutable identity triple matches exactly: patient reference,
+*derived* practitioner reference, and the exact requested catalog-entry set (list ordering does not
+matter, duplicate ids are rejected before any set comparison at the schema layer —
+`extra="forbid"` + a `model_validator` on `LabOrderCreateRequest`). Any mismatch — including a
+*different authenticated clinician* replaying the same key, which surfaces as a practitioner-
+reference mismatch — is a 409, never a silently-returned wrong order. A new key with byte-identical
+clinical content always creates a second, legitimate order; there is no content-based
+deduplication anywhere in this path.
+
+**No lab availability requirement, no price snapshot, no status advance — all by explicit design,
+not oversight.** Order creation never queries `find_whole_order_eligible_labs` and never requires a
+currently-eligible lab to exist; a clinician's "these tests are needed" decision must not disappear
+because the marketplace currently has zero matching labs. Every `LabOrderItem`'s
+`selected_price_amount`/`selected_price_currency` stay `NULL` (the response schema omits both
+fields entirely rather than returning `null`, to keep the contract honest about what this ticket
+does not do yet); zero `LabSelection` rows are ever created; the order's only reachable status from
+this ticket is `AWAITING_LAB_SELECTION` — no transition endpoint exists yet.
+
+**Tests:** 33 new tests added to the committed (SQLite-backed) adapter suite (441 → 474 passed / 39
+skipped) — the full required matrix: the positive control (full aggregate + audit assertions),
+exact replay (no duplicate rows, no duplicate audit), three idempotency-conflict variants
+(different patient / different test set / **different authenticated clinician**, proving
+practitioner provenance is part of the immutable identity triple), new-key-same-content (two
+legitimate orders), the complete auth negative-control matrix (anonymous 401, invalid bearer 401,
+zero-membership 403/404, `LAB_TECH` 404, `LAB` `ORG_ADMIN` 404, provider `ORG_ADMIN`-without-
+`CLINICIAN` 403, `ORG_ADMIN`+`CLINICIAN` succeeds, **platform-admin-alone 403 — the ticket's
+explicit "network administration is not clinical access" permanent negative test**, inactive
+`CLINICIAN` membership 404, `CLINICIAN` in an inactive provider 403, cross-provider URL 404), the
+reference negative-control matrix (unknown/cross-provider patient 404, duplicate test ids 422,
+unknown/inactive/non-synthetic catalog test 404/422/422, zero tests 422, 51 tests 422, malformed/
+missing `Idempotency-Key` 422), the clinician-provenance control (`practitioner_reference_id` is
+not a field on the request schema at all — `extra="forbid"` rejects it outright), the
+no-price-snapshot/no-`LabSelection`/status-stays-`AWAITING_LAB_SELECTION` control, the
+no-lab-required-at-creation control, order list/detail plus cross-provider order-read 404, and an
+audit-atomicity failure-injection test proving zero order, zero orphaned practitioner reference,
+and zero audit row survive an injected audit failure. `ruff check`/`ruff format --check` both
+clean across `src`, `tests`, `migrations`; `pip check` clean.
+
+**Real PostgreSQL 18.6 qualification** (same WSL2 sandbox as every prior ticket in this sequence):
+`alembic upgrade head` from a `0006`-only database reaches `0007_exchange_order_api` cleanly;
+`alembic downgrade 0006_exchange_lab_directory` succeeds cleanly on a data-free database and
+re-upgrades cleanly; a 25-way same-idempotency-key concurrency script (mirroring exactly what
+`create_lab_order` does — practitioner get-or-create + order creation + audit in one transaction)
+proved exactly one order, one `DoctorReview`, one `ResultDelivery`, one `PractitionerReference`, and
+one `lab_order_created` audit row, zero raw `IntegrityError`; a 25-way conflicting-same-key
+concurrency script (alternating two different patients under one key) proved exactly one order row
+survives, with every other caller receiving a controlled `IdempotencyKeyConflict`, zero raw errors;
+a 25-way practitioner-reference concurrency script (one clinician's first order, 25 different
+patients, all racing simultaneously) proved exactly one `PractitionerReference` row and 25 distinct
+legitimate orders, zero raw errors; and the audit-atomicity failure-injection script re-confirmed
+zero order, zero orphaned practitioner reference, and zero audit row after an injected failure.
+**Migration `0007`'s downgrade contract, following the exact `0006` precedent DH-EX-003R
+established**: a data-free `0006`→ downgrade succeeds; downgrading a database seeded with a real
+`lab_order_created` audit row (produced by the concurrency script above, not synthetic test data)
+refuses immediately with an explicit `DowngradeBlockedByAuditHistory` message, before any DDL —
+independently confirmed via `alembic current` (still `0007`), a direct row-count query (all 27
+audit rows preserved), and the CHECK constraint's own definition (still the widened `0007` shape)
+afterward. None of this is claimed byte-identical to CI's own `postgres:16-alpine`, matching every
+prior ticket's same caveat.
+
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN.** DH-EX-004 added no new authentication surface — it
+reuses DH-EX-002's existing OIDC/`AuthenticatedPrincipal` machinery unchanged; only a new
+*authorization* check (`require_clinician`) was added, proven against a **locally generated RSA
+keypair** via `StaticKeySource`, never a real IdP.
+
+**Real facility:** untouched. **Pollers:** inactive. **No file under `openmrs-config/` or
+`openelis-config/` touched. No connector code touched. No OpenMRS TestOrder wiring.**
+
+**Not built in this ticket** (explicitly out of scope, matching the ticket's own exclusion list):
+patient lab selection, any Provider/Lab Portal UI, patient secure link, WhatsApp/SMS, a status-
+transition endpoint, lab routing, price freezing. `LabOrderRepository.transition` (DH-EX-001) is
+untouched and unreachable from any HTTP route in this ticket.
+
+**Next:** independent review of this implementation (the DH-EX-001R/DH-EX-002R/DH-EX-003R-
+equivalent step) — likely candidates to check first: the `require_clinician`
+404-vs-403-for-platform-admin distinction, and whether the practitioner-source-identity constant
+naming (`dhealth-provider-portal` / `urn:dhealth:exchange-identity-id`) should be reconsidered
+before it becomes load-bearing. On approval: combined DH-EX-004+DH-EX-004R commit/push/exact-SHA-CI,
+following the established pattern. After that: DH-EX-005 — patient secure link + lab selection —
+**not started.**
+
+### DH-EX-004R · Independent clinical-order/security/data-integrity review + real PostgreSQL
+qualification of DH-EX-004 · P0 · 🔨 REVIEWED + FIXED + SQLite/PostgreSQL-QUALIFIED · ⏳ NOT
+COMMITTED — awaiting Liban's review
+
+**Ticket:** DH-EX-004R, the DH-EX-001R/DH-EX-002R/DH-EX-003R-equivalent independent review step
+for DH-EX-004. **Base:** `8bbf2de80b196e49c53b91943faa435419029736` (DH-EX-003D's docs-closure
+commit — confirmed via `git rev-parse HEAD` before and after this review, staging area confirmed
+empty throughout). **Not committed, not pushed.**
+
+**CI workflow diff, independently verified.** `.github/workflows/ci.yml`'s full diff against HEAD
+is exactly the one expected line: `EXPECTED_HEAD: 0006_exchange_lab_directory` →
+`EXPECTED_HEAD: 0007_exchange_order_api`. No job removed, no test command weakened, no pytest skip
+added, no ruff/secret guard weakened, no migration comparison removed, no `continue-on-error`
+added, no job made non-blocking, no branch trigger changed. **CI GUARDS WEAKENED: NO.**
+
+**No BLOCKER found.** Four HIGH findings, all fixed within DH-EX-004's already-approved
+architecture:
+
+1. **The practitioner `source_system` constant named a specific UI, not the durable fact it
+   actually asserts.** `"dhealth-provider-portal"` ties a database value that is supposed to
+   outlive any one client to today's web frontend's name — if the Provider Portal were renamed,
+   replaced by a native/mobile client, or joined by a non-portal API consumer, the constant would
+   read as wrong even though the underlying fact ("this DHealth Exchange identity ordered
+   clinically inside this provider") had not changed. Fixed: renamed to `"dhealth-exchange"`.
+   Because nothing has been committed or deployed yet, this is a pure constant-value edit with no
+   data-migration concern — there are no historical rows anywhere using the old string.
+2. **`Idempotency-Key`'s "canonical UUIDv4" contract was not actually enforced as written.** The
+   original implementation validated via `uuid.UUID(header_value)`, which is deliberately lenient
+   — it also accepts a braced form (`{...}`), a `urn:uuid:` prefix, and any letter case, silently
+   normalizing all of them to the same canonical string before use. That is the opposite of what
+   "canonical" was documented to mean, and meant two different textual representations of the
+   same UUID were silently accepted as valid input rather than one of them being refused. Fixed
+   with a strict RFC 4122 §3 regex (`_CANONICAL_UUID4_PATTERN`) requiring lowercase hex, exact
+   hyphen placement, the literal version-4 nibble, and the RFC 4122 variant nibble — braces, URN
+   prefix, uppercase, surrounding whitespace, and non-v4 UUIDs (v1/v3/v5) are all now refused with
+   422, not silently reformatted or accepted. Proven by a parametrized test over 7 malformed forms
+   plus a dedicated v1-UUID rejection test and a canonical-form acceptance test.
+3. **The order-list endpoint never actually exposed the `limit` the ticket specified.** The
+   repository method had a `limit: int = 50` parameter, but no HTTP query parameter existed to set
+   it, and the parameter itself had no bounds validation — a hypothetical future caller passing an
+   arbitrary `limit` value directly to the repository (0, negative, unbounded) had nothing stopping
+   it. Fixed: `limit: Annotated[int, Query(ge=1, le=100)] = 50` on `list_lab_orders`, so 0,
+   negative, and >100 all now 422 cleanly at the HTTP boundary; 1/50/100 all verified to work.
+4. **Duplicate `catalog_entry_id`s were only rejected at the HTTP schema layer, not at the
+   repository boundary.** A caller reaching `LabOrderRepository.create` directly (bypassing the
+   Pydantic-validated HTTP path) could previously request the same test twice with no refusal —
+   inconsistent with this package's established "the repository is the enforcement point, not just
+   one caller" discipline applied everywhere else (offering/price/membership conflict checks). A
+   DB-level `UNIQUE(lab_order_id, catalog_entry_id)` constraint was considered and explicitly
+   **rejected** as the fix: `_create_in_session`'s existing `except IntegrityError:` handler
+   assumes any `IntegrityError` inside the SAVEPOINT means the idempotency-key race, and looks up
+   an "existing" order by `(provider_organization_id, idempotency_key)` — but a duplicate-item
+   constraint violation would fire on the *same* flush that also rolls back the `LabOrder` insert
+   itself (both are inside one SAVEPOINT), so that lookup would find nothing and the raw
+   `IntegrityError` would escape uncaught, a real regression risk for no added protection this
+   ticket's own call sites need. Fixed instead with an early, explicit, pre-transaction check in
+   `LabOrderRepository.create` (`DuplicateOrderItems`, a `ValueError` subclass so it's already
+   caught by `create_lab_order`'s existing `except (..., ValueError, ...)` clause) — unambiguous,
+   no interaction with the idempotency-race handler, proven by a repository-level test that
+   bypasses HTTP entirely.
+
+**Five additional controls closed, each proving something the DH-EX-004 handoff asserted by
+reasoning but had not yet demonstrated by test:**
+
+- **Platform-admin order-existence oracle (Part D).** `_require_clinician` runs *before* any order
+  lookup in both `GET .../orders/{id}` and the list endpoint, so a platform admin lacking
+  `CLINICIAN` gets the identical 403 — same status code, same body — whether the order UUID in the
+  URL is real or entirely made up. Proven directly: a real order's UUID and a fresh `uuid.uuid4()`
+  both produce byte-identical 403 responses for the same platform-admin token.
+- **Practitioner reference is per-provider, never shared across tenants (Part G).** One
+  `ExchangeIdentity`, `CLINICIAN` in two different provider organizations, produces two distinct
+  `PractitionerReference` rows — proven, not merely implied by the unique-constraint shape.
+- **Losing a conflicting idempotency-key race leaves no orphaned practitioner reference (Part
+  H).** This is meaningfully different from the already-covered general audit-failure-orphan test:
+  here a genuinely *new* clinician (no prior `PractitionerReference` at all) submits a request that
+  conflicts with an order another clinician already created under the same key. The request
+  correctly 409s, and — because practitioner get-or-create and order creation share one
+  transaction — the new clinician's practitioner reference never persists purely because their
+  request lost the race. Proven at both the SQLite HTTP-test level and, more importantly, under
+  real PostgreSQL concurrency (see qualification below).
+- **Adversarial patient-reference source-organization-type check (Part K).** A `PatientReference`
+  row was deliberately seeded (bypassing this ticket's own API, as only a malformed/direct-write
+  scenario could produce) with `source_organization_id` pointing at a **LAB** organization, then a
+  real clinician attempted to order against it from their own (different) provider. Result: 404,
+  exactly as for any other cross-tenant reference — confirming the protection here is the *exact*
+  organization-id equality check against the route's own already-CLINICIAN-verified organization,
+  not any implicit trust in what type of organization a reference happens to point at.
+- **Same-key replay is set-identity, not list-order (Part P).** `[A, B, C]` then `[C, B, A]` under
+  the same key is proven to be recognized as the exact same logical request (200, same order id) —
+  request-set identity, never list presentation order, matching `IdempotencyKeyConflict`'s own
+  set-comparison logic exactly.
+
+**Tests:** 21 new tests added to the committed (SQLite-backed) adapter suite (474 → 495 passed / 39
+skipped) — `ruff check`/`ruff format --check` both clean across `src`, `tests`, `migrations`;
+`pip check` clean.
+
+**Real PostgreSQL 18.6 qualification, re-run in full after every fix** (same WSL2 sandbox): the
+full `pg_dh_ex_004_qualification.py` script — same-key concurrency, conflicting-same-key
+concurrency, practitioner-reference concurrency, **the new losing-conflict-practitioner-rollback
+proof (Part H, run at real-database scale, not just SQLite)**, and audit-atomicity failure
+injection — passed cleanly with all fixes applied; the incompatible-downgrade refusal was
+re-confirmed against this run's real `lab_order_created` audit history (28 rows), refusing before
+any DDL, `alembic current` confirmed still `0007_exchange_order_api` afterward. None of this is
+claimed byte-identical to CI's own `postgres:16-alpine`, matching every prior ticket's same caveat.
+
+**Security/clinical-data logging review.** Searched every changed file for logging statements: none
+exist in `orders.py`, `identity.py`, or `authorization.py`; `api.py`'s only telemetry paths are the
+existing `_audit_refused` (organization id + actor id only, pre-existing from DH-EX-002) and the
+authoritative `lab_order_created` audit row itself, which — confirmed by direct inspection of the
+`security_audit.record(...)` call site — carries only `organization_id`, `actor_identity_id`,
+`resource_type="lab_order"`, and `resource_id`; no patient reference, no practitioner reference, no
+test names, no request body, no JWT, no `Authorization` header appear anywhere in this ticket's
+changes.
+
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN** — unaffected by this review; the only new surface
+touched is an authorization check (`require_clinician`), not authentication.
+
+**Real facility:** untouched. **Pollers:** inactive. **No file under `openmrs-config/` or
+`openelis-config/` touched. No connector code touched.**
+
+**Files changed beyond DH-EX-004's original set:** none new — every fix above is inside the same 8
+files DH-EX-004 already touched (`git status` confirms the identical 6 modified + 2 new file list,
+re-verified after this review).
+
+**READY FOR COMMIT: YES** per this ticket's own gate — no BLOCKER/HIGH finding remains open, the CI
+workflow change is narrow and non-weakening, clinician-only authorization holds (including the
+platform-admin-has-no-implicit-clinical-authority boundary, now proven at the order-existence-oracle
+level too), practitioner identity is stable/server-derived/durably-named and proven separate across
+providers, a losing conflicting request leaves no orphan practitioner (proven under real Postgres
+concurrency, not just reasoned about), invalid requests leave no practitioner side effect, patient
+lookup is provider-scoped and adversarially tested against a mistyped-organization reference,
+duplicate tests are refused at both the schema and repository boundary, idempotency-key semantics
+are now explicit and strictly canonical, same-key concurrency yields exactly one complete aggregate,
+every same-key conflict class fails closed, the SAVEPOINT/outer-transaction pattern is proven
+PostgreSQL-safe, order+pending-rows+audit are atomic, replay produces no duplicate audit, no
+`LabSelection`/price snapshot is ever created, order list/detail are tenant-safe with a bounded and
+validated `limit`, migration `0007` qualifies in both downgrade states, real PostgreSQL
+qualification passes, and the full adapter suite passes.
+
+**Still explicitly not committed, not pushed — Liban's review comes first, per this ticket's own
+closing instruction, independent of the READY FOR COMMIT verdict above.**
+
+**Next:** Liban's review of this implementation. On approval, a combined DH-EX-004+DH-EX-004R
+commit/push/exact-SHA-CI ticket, following the established pattern. After that: DH-EX-005 —
+patient secure link + lab selection — **not started.**

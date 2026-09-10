@@ -1304,3 +1304,80 @@ the kind of fact that is easy to let go stale; DH-EX-003 added no new authentica
 **NEXT: DH-EX-004 — Provider lab-order creation** (exact patient reference, exact practitioner
 reference, exact DHealth catalog tests, provider-scoped idempotency key, resulting in
 `AWAITING_LAB_SELECTION`) — **not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-004, append-only — the "NEXT: DH-EX-004 ... not started"
+line above is superseded, not retracted).** DH-EX-004 (provider lab-order creation) is implemented
+and real-PostgreSQL qualified, returned for independent review first — the same position DH-EX-001,
+DH-EX-002, and DH-EX-003 were each in before their own R-review. Full detail is in
+PROJECT_STATE.md's DH-EX-004 entry; the load-bearing facts:
+
+- **Not committed, not pushed.**
+- Migration `0007_exchange_order_api`, purely additive on `0006_exchange_lab_directory` — widens
+  the audit table's CHECK constraints for `lab_order_created`/`lab_order` only; no new table (the
+  order/item/review/delivery tables already existed from `0004_exchange_core`).
+- Three new routes: `POST/GET /organizations/{provider_id}/orders`,
+  `GET /organizations/{provider_id}/orders/{order_id}` — gated by a new `require_clinician`
+  authorization check that deliberately does **not** let platform admin bypass (network
+  administration ≠ clinical access) and refuses an `ORG_ADMIN` who lacks `CLINICIAN` too.
+- The ordering practitioner is always server-derived from the authenticated identity — never
+  client-supplied (`practitioner_reference_id` is not even a field on the request schema).
+- `LabOrderRepository.create` and `PractitionerReferenceRepository.get_or_create` were refactored
+  (not rebuilt) to accept a caller-owned session with SAVEPOINT-scoped race handling, so
+  practitioner get/create + order creation + the authoritative `lab_order_created` audit row all
+  commit or roll back together in one transaction — no orphaned practitioner reference on any
+  failure path.
+- No lab-availability requirement at order creation, no price snapshot
+  (`selected_price_amount`/`currency` stay `NULL`), no `LabSelection` row, status stays
+  `AWAITING_LAB_SELECTION` — all by explicit design.
+- Real-Postgres 25-way concurrency proofs: same-idempotency-key (exactly one order/review/
+  delivery/practitioner/audit row), conflicting-same-key (exactly one winner, controlled conflicts
+  for the rest), and practitioner-reference-under-concurrent-first-orders (exactly one
+  `PractitionerReference` despite 25 simultaneous first orders for one clinician). Migration `0007`'s
+  downgrade follows the exact `0006` precedent: refuses cleanly, before any DDL, when a real
+  `lab_order_created` audit row exists.
+- Full adapter suite: **474 passed / 39 skipped** (was 441 at the DH-EX-003C handoff), `ruff`/
+  `ruff format`/`pip check` all clean.
+- **REAL KEYCLOAK QUALIFICATION remains NOT RUN** — unaffected, no new authentication surface (only
+  a new authorization check).
+- Not built (explicitly out of scope): patient lab selection, any Portal UI, patient secure link,
+  WhatsApp/SMS, a status-transition endpoint, lab routing, price freezing.
+
+**NEXT: independent review of DH-EX-004 (the R-step), then a combined commit/push/exact-SHA-CI
+ticket, then DH-EX-005 — patient secure link + lab selection.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-004R, append-only — the "NEXT: independent review" line
+above is superseded, not retracted).** DH-EX-004R (the DH-EX-001R/DH-EX-002R/DH-EX-003R-equivalent
+independent review of DH-EX-004) has now run. Still **not committed, not pushed**. Full detail is
+in PROJECT_STATE.md's DH-EX-004R entry; the load-bearing facts:
+
+- **No BLOCKER.** Four HIGH findings fixed: (1) the practitioner `source_system` constant named a
+  specific UI (`"dhealth-provider-portal"`) rather than the durable fact it asserts — renamed to
+  `"dhealth-exchange"`; (2) `Idempotency-Key`'s "canonical UUIDv4" contract was not actually
+  enforced — `uuid.UUID()` silently accepted braced/URN/uppercase forms — now a strict RFC 4122 §3
+  regex rejects anything non-canonical; (3) the order-list `limit` had no HTTP query parameter or
+  bounds validation — now `Query(ge=1, le=100)`, default 50; (4) duplicate `catalog_entry_id`s were
+  only rejected at the HTTP schema layer, not the repository boundary — now an explicit
+  pre-transaction `DuplicateOrderItems` check (a DB-level `UNIQUE` constraint was considered and
+  deliberately rejected — it would have made a duplicate-item race collide with the existing
+  idempotency-key `IntegrityError` handler and escape as a raw, uncaught error).
+- Five additional controls proven that the DH-EX-004 handoff had asserted by reasoning but not yet
+  tested: platform admin gets the byte-identical 403 for a real vs. fake order UUID (no
+  order-existence oracle); the same clinician identity gets two separate `PractitionerReference`
+  rows across two different providers; **a losing conflicting idempotency-key request leaves no
+  orphaned practitioner reference — proven under real PostgreSQL concurrency, not just SQLite**; an
+  adversarial `PatientReference` seeded at a LAB organization's id still 404s for a real provider's
+  clinician; same-key replay is proven set-identity (`[A,B,C]` = `[C,B,A]`), never list order.
+- CI workflow diff independently re-verified: exactly the one expected `EXPECTED_HEAD` line change,
+  no guard weakened anywhere.
+- No logging of patient/practitioner/test/JWT/Authorization-header data found anywhere in this
+  ticket's changes; the audit row itself carries only organization id, actor id, resource type,
+  and resource id.
+- Full adapter suite: **495 passed / 39 skipped** (was 474 at the DH-EX-004 handoff), `ruff`/
+  `ruff format`/`pip check` all clean. Real PostgreSQL 18.6 fully re-qualified after every fix,
+  including the new losing-conflict-practitioner proof at real-database concurrency scale.
+- **REAL KEYCLOAK QUALIFICATION remains NOT RUN** — unaffected by this review.
+- **READY FOR COMMIT: YES** per this review's own gate — but still explicitly not committed, not
+  pushed; Liban's review comes first, independent of that verdict.
+
+**NEXT: Liban's review of DH-EX-004+DH-EX-004R, then a combined commit/push/exact-SHA-CI ticket,
+then DH-EX-005 — patient secure link + lab selection.**

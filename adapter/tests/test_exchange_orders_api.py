@@ -1,0 +1,1254 @@
+"""DH-EX-004: the HTTP-level required matrix for provider lab-order creation -- clinician-only
+authorization, exact patient/practitioner provenance, provider-scoped idempotency, no lab
+selection/price snapshot yet, and transactional creation audit.
+
+Same harness pattern as ``test_exchange_api_marketplace.py``: a bare ``FastAPI()`` app with
+``build_exchange_router`` mounted directly, a ``StaticKeySource``-backed ``TokenValidator`` (local
+RSA keypair, zero network).
+"""
+
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+import pytest
+from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
+from exchange_support import make_lab, make_provider
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from daher_adapter.exchange.api import build_exchange_router
+from daher_adapter.exchange.audit import ExchangeAuditWriter
+from daher_adapter.exchange.catalog import CatalogRepository
+from daher_adapter.exchange.identity import (
+    PatientReferenceRepository,
+)
+from daher_adapter.exchange.models import (
+    DoctorReview,
+    ExchangeSecurityAuditEvent,
+    LabOrder,
+    LabOrderItem,
+    LabSelection,
+    PractitionerReference,
+    ResultDelivery,
+)
+from daher_adapter.exchange.organizations import OrganizationRepository
+from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
+
+
+@pytest.fixture
+def keypair():
+    return generate_keypair()
+
+
+@pytest.fixture
+def client(sessions: sessionmaker[Session], keypair, tmp_path: Path) -> TestClient:
+    _, public_key = keypair
+    validator = build_validator(public_key)
+    router = build_exchange_router(
+        session_factory=sessions,
+        token_validator=validator,
+        audit_writer=ExchangeAuditWriter(tmp_path / "exchange-audit.jsonl"),
+        platform_admin_role=PLATFORM_ADMIN_ROLE,
+    )
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+@pytest.fixture
+def organizations(sessions: sessionmaker[Session]) -> OrganizationRepository:
+    return OrganizationRepository(sessions)
+
+
+@pytest.fixture
+def catalog(
+    sessions: sessionmaker[Session], organizations: OrganizationRepository
+) -> CatalogRepository:
+    return CatalogRepository(sessions, organizations)
+
+
+@pytest.fixture
+def patients(sessions: sessionmaker[Session]) -> PatientReferenceRepository:
+    return PatientReferenceRepository(sessions)
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _bootstrap_identity(client: TestClient, private_key, subject: str, **token_kwargs) -> str:
+    token = make_token(private_key, subject=subject, **token_kwargs)
+    response = client.get("/exchange/v1/me", headers=_auth(token))
+    assert response.status_code == 200, response.text
+    return response.json()["identity_id"]
+
+
+def _grant_roles(
+    client: TestClient, private_key, org_id, identity_id, subject: str, roles: list[str]
+) -> None:
+    platform_admin_token = make_token(
+        private_key, subject=f"setup-admin-{subject}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.post(
+        f"/exchange/v1/organizations/{org_id}/memberships",
+        headers=_auth(platform_admin_token),
+        json={"identity_id": identity_id, "roles": roles},
+    )
+    assert response.status_code in (200, 201), response.text
+
+
+def _setup_clinician(
+    client: TestClient, private_key, organizations: OrganizationRepository, name: str, *, roles=None
+):
+    """Returns (provider, token) -- a fresh PROVIDER org with a CLINICIAN member."""
+    provider = make_provider(organizations, name=name)
+    identity_id = _bootstrap_identity(client, private_key, f"clinician-{name}")
+    _grant_roles(
+        client, private_key, provider.id, identity_id, f"clinician-{name}", roles or ["CLINICIAN"]
+    )
+    token = make_token(private_key, subject=f"clinician-{name}")
+    return provider, token, identity_id
+
+
+def _create_patient(
+    client: TestClient, private_key, patients: PatientReferenceRepository, provider_id, name: str
+) -> uuid.UUID:
+    record = patients.get_or_create(
+        source_organization_id=provider_id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value=f"SYNTH-PATIENT-{name}",
+        display_name="Synthetic Patient",
+    )
+    return record.id
+
+
+def _make_tests(catalog: CatalogRepository, count: int = 2) -> list[uuid.UUID]:
+    ids = []
+    for i in range(count):
+        entry, _ = catalog.create_entry(
+            code=f"DHEALTH-ORDER-DEMO-{i}", display_name=f"Demo Order Test {i}"
+        )
+        ids.append(entry.id)
+    return ids
+
+
+def _new_key() -> str:
+    return str(uuid.uuid4())
+
+
+def _audit_events(sessions: sessionmaker[Session], event_type: str) -> list[dict]:
+    with sessions() as session:
+        rows = session.scalars(
+            select(ExchangeSecurityAuditEvent).where(
+                ExchangeSecurityAuditEvent.event_type == event_type
+            )
+        ).all()
+        return [
+            {
+                "outcome": row.outcome,
+                "resource_type": row.resource_type,
+                "resource_id": str(row.resource_id) if row.resource_id else None,
+                "organization_id": str(row.organization_id) if row.organization_id else None,
+            }
+            for row in rows
+        ]
+
+
+# -- positive control ------------------------------------------------------------------------
+
+
+def test_clinician_creates_order_positive_control(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token, identity_id = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 2)
+    key = _new_key()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["provider_organization_id"] == str(provider.id)
+    assert body["patient_reference_id"] == str(patient_id)
+    assert body["status"] == "AWAITING_LAB_SELECTION"
+    assert len(body["items"]) == 2
+    for item in body["items"]:
+        assert "selected_price_amount" not in item
+        assert "selected_price_currency" not in item
+
+    # Practitioner derivation: exactly maps to Clinician A's ExchangeIdentity, scoped to provider.
+    with sessions() as session:
+        practitioner = session.get(
+            PractitionerReference, uuid.UUID(body["practitioner_reference_id"])
+        )
+        assert practitioner.source_organization_id == provider.id
+        assert practitioner.source_identity_value == identity_id
+
+        doctor_reviews = session.scalar(
+            select(func.count())
+            .select_from(DoctorReview)
+            .where(DoctorReview.lab_order_id == uuid.UUID(body["id"]))
+        )
+        assert doctor_reviews == 1
+        result_deliveries = session.scalar(
+            select(func.count())
+            .select_from(ResultDelivery)
+            .where(ResultDelivery.lab_order_id == uuid.UUID(body["id"]))
+        )
+        assert result_deliveries == 1
+        selections = session.scalar(
+            select(func.count())
+            .select_from(LabSelection)
+            .where(LabSelection.lab_order_id == uuid.UUID(body["id"]))
+        )
+        assert selections == 0
+
+    events = _audit_events(sessions, "lab_order_created")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "created"
+    assert events[0]["resource_type"] == "lab_order"
+    assert events[0]["resource_id"] == body["id"]
+    assert events[0]["organization_id"] == str(provider.id)
+
+
+# -- exact replay / idempotency ----------------------------------------------------------------
+
+
+def test_exact_replay_returns_same_order_no_duplicates(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 2)
+    key = _new_key()
+    body = {
+        "patient_reference_id": str(patient_id),
+        "catalog_entry_ids": [str(t) for t in test_ids],
+    }
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json=body,
+    )
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json=body,
+    )
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["practitioner_reference_id"] == second.json()["practitioner_reference_id"]
+
+    with sessions() as session:
+        order_count = session.scalar(select(func.count()).select_from(LabOrder))
+        item_count = session.scalar(select(func.count()).select_from(LabOrderItem))
+    assert order_count == 1
+    assert item_count == 2
+
+    events = _audit_events(sessions, "lab_order_created")
+    assert len(events) == 1, "replay must never emit a second lab_order_created audit row"
+
+
+def test_idempotency_conflict_different_patient(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_a = _create_patient(client, private_key, patients, provider.id, "A")
+    patient_b = _create_patient(client, private_key, patients, provider.id, "B")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_a),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert first.status_code == 201
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_b),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert second.status_code == 409
+
+
+def test_idempotency_conflict_different_test_set(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 3)
+    key = _new_key()
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert first.status_code == 201
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[1])]},
+    )
+    assert second.status_code == 409
+
+
+def test_idempotency_conflict_different_clinician(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """Same provider, same key, two different authenticated clinicians -- practitioner
+    provenance differs, so this must be a 409, never a mismatched order silently returned."""
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="Shared-Provider")
+    id_a = _bootstrap_identity(client, private_key, "clinician-shared-A")
+    _grant_roles(client, private_key, provider.id, id_a, "clinician-shared-A", ["CLINICIAN"])
+    token_a = make_token(private_key, subject="clinician-shared-A")
+    id_b = _bootstrap_identity(client, private_key, "clinician-shared-B")
+    _grant_roles(client, private_key, provider.id, id_b, "clinician-shared-B", ["CLINICIAN"])
+    token_b = make_token(private_key, subject="clinician-shared-B")
+
+    patient_id = _create_patient(client, private_key, patients, provider.id, "shared")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+    body = {"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]}
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": key},
+        json=body,
+    )
+    assert first.status_code == 201
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token_b), "Idempotency-Key": key},
+        json=body,
+    )
+    assert second.status_code == 409
+
+
+def test_new_key_same_content_creates_new_order(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    body = {"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]}
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json=body,
+    )
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json=body,
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+
+    with sessions() as session:
+        order_count = session.scalar(select(func.count()).select_from(LabOrder))
+    assert order_count == 2
+
+
+# -- auth negative controls ---------------------------------------------------------------------
+
+
+def test_anonymous_is_401(client: TestClient) -> None:
+    response = client.post(
+        f"/exchange/v1/organizations/{uuid.uuid4()}/orders",
+        headers={"Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 401
+
+
+def test_invalid_bearer_is_401(client: TestClient) -> None:
+    response = client.post(
+        f"/exchange/v1/organizations/{uuid.uuid4()}/orders",
+        headers={"Authorization": "Bearer not-a-real-token", "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 401
+
+
+def test_zero_membership_identity_refused(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="Zero-Membership-Target")
+    token = make_token(private_key, subject="zero-membership-orderer")
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code in (403, 404)
+
+
+def test_lab_tech_refused(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="LabTech-Target")
+    lab = make_lab(organizations, name="LabTech-Home-Lab")
+    identity_id = _bootstrap_identity(client, private_key, "lab-tech-orderer")
+    _grant_roles(client, private_key, lab.id, identity_id, "lab-tech-orderer", ["LAB_TECH"])
+    token = make_token(private_key, subject="lab-tech-orderer")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 404  # no relationship at all to this provider
+
+
+def test_lab_org_admin_refused(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="LabAdmin-Target")
+    lab = make_lab(organizations, name="LabAdmin-Home-Lab")
+    identity_id = _bootstrap_identity(client, private_key, "lab-admin-orderer")
+    _grant_roles(client, private_key, lab.id, identity_id, "lab-admin-orderer", ["ORG_ADMIN"])
+    token = make_token(private_key, subject="lab-admin-orderer")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 404
+
+
+def test_provider_org_admin_without_clinician_refused(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, _, _ = _setup_clinician(
+        client, private_key, organizations, "OrgAdminOnly", roles=["ORG_ADMIN"]
+    )
+    token = make_token(private_key, subject="clinician-OrgAdminOnly")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 403  # known tenant, insufficient clinical permission
+
+
+def test_org_admin_plus_clinician_can_order(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """A user holding ORG_ADMIN + CLINICIAN may order -- because they explicitly hold CLINICIAN."""
+    private_key, _ = keypair
+    provider, _, _ = _setup_clinician(
+        client, private_key, organizations, "BothRoles", roles=["ORG_ADMIN", "CLINICIAN"]
+    )
+    token = make_token(private_key, subject="clinician-BothRoles")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "both")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 201
+
+
+def test_platform_admin_alone_refused(client: TestClient, keypair, organizations) -> None:
+    """DH-EX-004 permanent negative test: network administration is not clinical access."""
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="PlatformAdmin-Target")
+    admin_token = make_token(
+        private_key, subject="platform-admin-orderer", roles=[PLATFORM_ADMIN_ROLE]
+    )
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(admin_token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 403  # org visibly exists to platform admin -- not 404
+
+    read_response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(admin_token)
+    )
+    assert read_response.status_code == 403
+
+
+def test_inactive_clinician_membership_refused(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    from daher_adapter.exchange.models import OrganizationMembership
+
+    private_key, _ = keypair
+    provider, token, identity_id = _setup_clinician(
+        client, private_key, organizations, "InactiveMember"
+    )
+    with sessions() as session:
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == provider.id,
+                OrganizationMembership.identity_id == uuid.UUID(identity_id),
+            )
+        )
+        membership.status = "INACTIVE"
+        session.commit()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert (
+        response.status_code == 404
+    )  # find_active returns None -- indistinguishable from no membership
+
+
+def test_clinician_in_inactive_provider_refused(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    from daher_adapter.exchange.models import Organization
+
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "InactiveProvider")
+    with sessions() as session:
+        org_row = session.get(Organization, provider.id)
+        org_row.status = "INACTIVE"
+        session.commit()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 403
+
+
+def test_clinician_a_using_provider_b_url_is_404(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "A")
+    provider_b, _, _ = _setup_clinician(client, private_key, organizations, "B")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider_b.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 404
+
+
+# -- reference negative controls -----------------------------------------------------------------
+
+
+def test_unknown_patient_reference_is_404(
+    client: TestClient, keypair, organizations, catalog
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    test_ids = _make_tests(catalog, 1)
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(uuid.uuid4()), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 404
+
+
+def test_patient_from_another_provider_is_404(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "A")
+    provider_b, _, _ = _setup_clinician(client, private_key, organizations, "B")
+    patient_b = _create_patient(client, private_key, patients, provider_b.id, "B")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider_a.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_b), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 404
+
+
+def test_duplicate_test_ids_rejected(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0]), str(test_ids[0])],
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_unknown_catalog_test_is_404(client: TestClient, keypair, organizations, patients) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 404
+
+
+def test_inactive_catalog_test_fails_closed(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    from daher_adapter.exchange.models import TestCatalogEntry
+
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    with sessions() as session:
+        session.get(TestCatalogEntry, test_ids[0]).active = False
+        session.commit()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 422
+
+
+def test_non_synthetic_catalog_test_fails_closed(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    entry, _ = catalog.create_entry(
+        code="DHEALTH-REAL-ORDER", display_name="Not Synthetic", is_synthetic=False
+    )
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(entry.id)]},
+    )
+    assert response.status_code == 422
+
+
+def test_zero_tests_rejected(client: TestClient, keypair, organizations, patients) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": []},
+    )
+    assert response.status_code == 422
+
+
+def test_more_than_fifty_tests_rejected(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 51)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_malformed_idempotency_key_rejected(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": "not-a-uuid"},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 422
+
+
+def test_missing_idempotency_key_rejected(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers=_auth(token),
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 422
+
+
+# -- clinician provenance control ----------------------------------------------------------------
+
+
+def test_request_body_cannot_supply_practitioner_reference_id(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+            "practitioner_reference_id": str(uuid.uuid4()),
+        },
+    )
+    assert response.status_code == 422  # extra="forbid"
+
+
+# -- no lab routing / no price snapshot / no status advance --------------------------------------
+
+
+def test_no_price_snapshot_and_status_stays_awaiting_lab_selection(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 201
+    order_id = uuid.UUID(response.json()["id"])
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "AWAITING_LAB_SELECTION"
+        for item in order.items:
+            assert item.selected_price_amount is None
+            assert item.selected_price_currency is None
+        selection_count = session.scalar(
+            select(func.count())
+            .select_from(LabSelection)
+            .where(LabSelection.lab_order_id == order_id)
+        )
+        assert selection_count == 0
+
+
+def test_order_creation_does_not_require_an_eligible_lab(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """The clinical decision must not disappear merely because the marketplace currently has
+    zero matching labs -- no lab offering/directory profile exists anywhere in this test."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "AWAITING_LAB_SELECTION"
+
+
+# -- order list / detail --------------------------------------------------------------------------
+
+
+def test_order_list_and_detail(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = created.json()["id"]
+
+    listing = client.get(f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token))
+    assert listing.status_code == 200
+    assert any(o["id"] == order_id for o in listing.json())
+    assert "items" not in listing.json()[0]
+    assert "item_count" in listing.json()[0]
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    )
+    assert detail.status_code == 200
+    assert detail.json()["id"] == order_id
+    assert len(detail.json()["items"]) == 1
+
+
+def test_cross_provider_order_read_is_404(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "A")
+    provider_b, token_b, _ = _setup_clinician(client, private_key, organizations, "B")
+    patient_a = _create_patient(client, private_key, patients, provider_a.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider_a.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_a), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = created.json()["id"]
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/{order_id}", headers=_auth(token_b)
+    )
+    assert response.status_code == 404
+
+
+# -- audit atomicity failure injection -------------------------------------------------------------
+
+
+def test_audit_failure_leaves_zero_order_and_zero_practitioner(
+    client: TestClient, keypair, organizations, catalog, patients, sessions, monkeypatch
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    with sessions() as session:
+        before_orders = session.scalar(select(func.count()).select_from(LabOrder))
+        before_practitioners = session.scalar(
+            select(func.count()).select_from(PractitionerReference)
+        )
+        before_audit = session.scalar(select(func.count()).select_from(ExchangeSecurityAuditEvent))
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("simulated audit-insert failure")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit-insert failure"):
+        client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(token), "Idempotency-Key": _new_key()},
+            json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+        )
+
+    with sessions() as session:
+        after_orders = session.scalar(select(func.count()).select_from(LabOrder))
+        after_practitioners = session.scalar(
+            select(func.count()).select_from(PractitionerReference)
+        )
+        after_audit = session.scalar(select(func.count()).select_from(ExchangeSecurityAuditEvent))
+    assert after_orders == before_orders
+    assert after_practitioners == before_practitioners, "no orphaned practitioner reference"
+    assert after_audit == before_audit
+
+
+# -- DH-EX-004R: platform-admin order-existence oracle (Part D) ----------------------------------
+
+
+def test_platform_admin_order_existence_is_not_leaked(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """A platform admin lacking CLINICIAN must receive the identical 403 whether the order UUID
+    in the URL is real or completely made up -- the authorization check must short-circuit before
+    any order-specific lookup, so a platform admin can never learn "this order id exists" from the
+    response alone."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    real_order_id = created.json()["id"]
+
+    admin_token = make_token(
+        private_key, subject="platform-admin-oracle-check", roles=[PLATFORM_ADMIN_ROLE]
+    )
+
+    real_response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{real_order_id}",
+        headers=_auth(admin_token),
+    )
+    fake_response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{uuid.uuid4()}",
+        headers=_auth(admin_token),
+    )
+    assert real_response.status_code == fake_response.status_code == 403
+    assert real_response.json() == fake_response.json()
+
+
+# -- DH-EX-004R: practitioner reference is per-provider, never shared (Part G) -------------------
+
+
+def test_practitioner_reference_is_separate_per_provider(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """The same clinician ExchangeIdentity, CLINICIAN in two different provider organizations,
+    must resolve to two distinct PractitionerReference rows -- never one reused across tenants."""
+    private_key, _ = keypair
+    provider_a = make_provider(organizations, name="MultiOrgClinician-A")
+    provider_b = make_provider(organizations, name="MultiOrgClinician-B")
+    identity_id = _bootstrap_identity(client, private_key, "multi-org-clinician")
+    _grant_roles(
+        client, private_key, provider_a.id, identity_id, "multi-org-clinician-a", ["CLINICIAN"]
+    )
+    _grant_roles(
+        client, private_key, provider_b.id, identity_id, "multi-org-clinician-b", ["CLINICIAN"]
+    )
+    token = make_token(private_key, subject="multi-org-clinician")
+
+    patient_a = _create_patient(client, private_key, patients, provider_a.id, "A")
+    patient_b = _create_patient(client, private_key, patients, provider_b.id, "B")
+    test_ids = _make_tests(catalog, 1)
+
+    order_a = client.post(
+        f"/exchange/v1/organizations/{provider_a.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_a), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_b = client.post(
+        f"/exchange/v1/organizations/{provider_b.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_b), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert order_a.status_code == 201
+    assert order_b.status_code == 201
+    assert (
+        order_a.json()["practitioner_reference_id"] != order_b.json()["practitioner_reference_id"]
+    )
+
+
+# -- DH-EX-004R: losing a conflicting-key race must leave no orphan practitioner (Part H) ---------
+
+
+def test_losing_conflicting_request_leaves_no_orphan_practitioner(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    """A brand-new clinician (no PractitionerReference yet) submits a CONFLICTING same-key
+    request against an order another clinician already created. The request must fail with 409,
+    and -- because practitioner get/create + order creation are one transaction -- the new
+    clinician's practitioner reference must not survive merely because their request lost."""
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="OrphanCheck-Provider")
+    id_winner = _bootstrap_identity(client, private_key, "orphan-check-winner")
+    _grant_roles(client, private_key, provider.id, id_winner, "orphan-check-winner", ["CLINICIAN"])
+    token_winner = make_token(private_key, subject="orphan-check-winner")
+    id_loser = _bootstrap_identity(client, private_key, "orphan-check-loser")
+    _grant_roles(client, private_key, provider.id, id_loser, "orphan-check-loser", ["CLINICIAN"])
+    token_loser = make_token(private_key, subject="orphan-check-loser")
+
+    patient_id = _create_patient(client, private_key, patients, provider.id, "orphan-check")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    winner = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token_winner), "Idempotency-Key": key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert winner.status_code == 201
+
+    with sessions() as session:
+        before_practitioners = session.scalar(
+            select(func.count()).select_from(PractitionerReference)
+        )
+
+    # The loser has never ordered before -- their PractitionerReference does not exist yet.
+    loser = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token_loser), "Idempotency-Key": key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert loser.status_code == 409
+
+    with sessions() as session:
+        after_practitioners = session.scalar(
+            select(func.count()).select_from(PractitionerReference)
+        )
+        loser_practitioner = session.scalar(
+            select(func.count())
+            .select_from(PractitionerReference)
+            .where(
+                PractitionerReference.source_organization_id == provider.id,
+                PractitionerReference.source_identity_value == id_loser,
+            )
+        )
+    assert after_practitioners == before_practitioners, (
+        "the loser's practitioner reference must not survive a lost idempotency-conflict race"
+    )
+    assert loser_practitioner == 0
+
+
+# -- DH-EX-004R: adversarial patient-reference source-organization-type check (Part K) ------------
+
+
+def test_patient_reference_seeded_at_a_lab_org_cannot_be_used(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """Adversarial: a PatientReference row whose source_organization_id happens to point at a LAB
+    organization (never producible through this ticket's own API, but not structurally impossible
+    at the DB layer) must still never be usable for an order -- the exact-equality check against
+    the route's own (CLINICIAN-verified, therefore PROVIDER-typed) organization id is what
+    actually protects this, not any type check on the patient reference itself."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    lab = make_lab(organizations, name="AdversarialPatientLab")
+    adversarial_patient = patients.get_or_create(
+        source_organization_id=lab.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="ADVERSARIAL-LAB-SEEDED-PATIENT",
+    )
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(adversarial_patient.id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert response.status_code == 404
+
+
+# -- DH-EX-004R: duplicate catalog entries refused at the repository boundary too (Part N) --------
+
+
+def test_duplicate_catalog_entries_refused_at_repository_level(
+    sessions, organizations, catalog, patients
+) -> None:
+    """The HTTP schema already rejects duplicate catalog_entry_ids -- this proves the repository
+    itself is the actual enforcement point, not merely one caller, matching this package's
+    established discipline for every other duplicate/conflict check."""
+    from daher_adapter.exchange.orders import (
+        DuplicateOrderItems,
+        LabOrderRepository,
+        OrderItemInput,
+    )
+
+    provider = make_provider(organizations, name="RepoDuplicateCheck")
+    patient = patients.get_or_create(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="REPO-DUPLICATE-PATIENT",
+    )
+    entry, _ = catalog.create_entry(code="DHEALTH-REPO-DUP", display_name="Repo Dup Test")
+    orders_repo = LabOrderRepository(sessions, organizations, catalog)
+
+    with pytest.raises(DuplicateOrderItems):
+        orders_repo.create(
+            idempotency_key=_new_key(),
+            provider_organization_id=provider.id,
+            patient_reference_id=patient.id,
+            practitioner_reference_id=uuid.uuid4(),
+            items=[
+                OrderItemInput(catalog_entry_id=entry.id),
+                OrderItemInput(catalog_entry_id=entry.id),
+            ],
+        )
+
+
+# -- DH-EX-004R: Idempotency-Key canonical-form enforcement (Part O) -------------------------------
+
+
+@pytest.mark.parametrize(
+    "malformed_key",
+    [
+        "550E8400-E29B-41D4-A716-446655440000",  # uppercase
+        "{550e8400-e29b-41d4-a716-446655440000}",  # braced
+        "urn:uuid:550e8400-e29b-41d4-a716-446655440000",  # URN form
+        " 550e8400-e29b-41d4-a716-446655440000",  # leading whitespace
+        "550e8400-e29b-41d4-a716-446655440000 ",  # trailing whitespace
+        "550e8400e29b41d4a716446655440000",  # no hyphens
+        "not-a-uuid-at-all",
+    ],
+)
+def test_idempotency_key_rejects_noncanonical_representations(
+    client: TestClient, keypair, organizations, catalog, patients, malformed_key
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": malformed_key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 422, (
+        f"expected 422 for {malformed_key!r}, got {response.status_code}"
+    )
+
+
+def test_idempotency_key_rejects_non_v4_uuid(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """A syntactically valid but wrong-version UUID (v1, time-based) must still be refused --
+    "canonical UUIDv4" means version 4 specifically, not merely "any UUID-shaped string"."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    v1_uuid = str(uuid.uuid1())
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": v1_uuid},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 422
+
+
+def test_idempotency_key_accepts_exact_canonical_form(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    canonical_key = str(uuid.uuid4())
+    assert canonical_key == canonical_key.lower()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": canonical_key},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 201
+
+
+# -- DH-EX-004R: same-key replay is set-identity, not list-order (Part P) -------------------------
+
+
+def test_replay_matches_regardless_of_test_set_order(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 3)
+    key = _new_key()
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    reordered = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in reversed(test_ids)],
+        },
+    )
+    assert first.status_code == 201
+    assert reordered.status_code == 200
+    assert first.json()["id"] == reordered.json()["id"]
+
+
+# -- DH-EX-004R: order list limit query parameter (Part Y) -----------------------------------------
+
+
+@pytest.mark.parametrize("limit", [1, 50, 100])
+def test_order_list_limit_accepts_valid_range(
+    client: TestClient, keypair, organizations, catalog, patients, limit
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "A")
+    test_ids = _make_tests(catalog, 1)
+    client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders?limit={limit}", headers=_auth(token)
+    )
+    assert response.status_code == 200
+    assert len(response.json()) <= limit
+
+
+@pytest.mark.parametrize("limit", [0, -1, 101])
+def test_order_list_limit_rejects_out_of_range(
+    client: TestClient, keypair, organizations, limit
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders?limit={limit}", headers=_auth(token)
+    )
+    assert response.status_code == 422
