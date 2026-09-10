@@ -104,7 +104,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0008_exchange_patient_access
+          EXPECTED_HEAD: 0009_exchange_lab_workflow
         working-directory: adapter
         run: |
           alembic upgrade head

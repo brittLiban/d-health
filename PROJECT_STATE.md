@@ -8571,3 +8571,230 @@ ADR-042 for the underlying product-pivot decision, unchanged in substance by thi
 **Next:** DH-EX-006 — selected-lab workflow. Golden backend journey after DH-EX-006: a selected
 LAB can see its assigned order, accept or reject it, and an accepted order follows an explicit
 processing lifecycle — **not started.**
+
+---
+
+### DH-EX-006 · Selected-lab assigned-order workflow · P0 · 🔨 IMPLEMENTED + SELF-REVIEWED +
+SQLite/PostgreSQL-QUALIFIED · ⏳ NOT COMMITTED, NOT PUSHED, NOT CI-QUALIFIED, NOT INDEPENDENTLY
+REVIEWED
+
+**Ticket:** DH-EX-006. **Base:** on top of DH-EX-005's qualified foundation (commit
+`fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f`, DH-EX-005D's docs-closure). **Not yet committed** —
+this entry documents implementation + self-review + qualification state only. No `DH-EX-006R`
+(independent review) ticket has run yet.
+
+**What DH-EX-006 adds.** The selected LAB's own view of, and workflow actions on, an order already
+assigned to it by a patient's DH-EX-005 selection — `GET/POST
+/exchange/v1/organizations/{lab_id}/lab-orders[...]`. A new `AuthorizationService.require_lab_tech`
+method (mirroring `require_clinician` exactly, including "platform admin does not bypass") gates
+every route on an ACTIVE `LAB_TECH` membership in an ACTIVE lab organization. **Assignment
+ownership is `LabSelection` alone** — the new `LabWorkflowRepository` never re-derives it from
+DH-EX-003 marketplace eligibility (`LabDirectoryProfile.listed`/`accepting_orders`,
+`LabOffering.active`, or `LabPrice`); a lab that becomes unlisted, stops accepting orders,
+deactivates an offering, or changes its price after a patient already chose it still sees, accepts,
+rejects, and starts processing that specific assigned order — the exact same "historical commitment
+outlives current marketplace state" principle DH-EX-005 established for frozen prices. The existing,
+unmodified `LabOrderStatus` machine gates exactly three transitions: `SELECTED`→`ACCEPTED`,
+`SELECTED`→`REJECTED`, `ACCEPTED`→`IN_PROGRESS` — no generic arbitrary-status endpoint, no direct
+`SELECTED`→`IN_PROGRESS` shortcut, and structurally no path to `COMPLETED` (confirmed by grep: the
+word never appears in any transition logic, only in a docstring naming it out of scope). Each
+mutation is idempotent for a lost-response retry (replaying an already-completed transition returns
+the current state with zero mutation and zero duplicate audit row) and locks `LabOrder` `FOR UPDATE`
+first, exactly matching DH-EX-005's own established lock-order discipline, which is what serializes
+concurrent workflow commands down to one winner. Provider-authoritative transactional audit
+(`lab_order_accepted`/`lab_order_rejected`/`lab_order_processing_started`, `resource_type=
+'lab_order'`) commits in the same transaction as the mutation it describes. No `LabResult` row, no
+`DoctorReview`/`ResultDelivery` mutation, and no message transport, UI, or connector code exists
+anywhere in this diff.
+
+**Test coverage: 29 new tests in `test_exchange_lab_workflow.py`.** The exact golden
+accept→start-processing journey and a separate golden rejection flow (both verifying zero
+`LabResult` rows and unchanged `PENDING` `DoctorReview`/`ResultDelivery`); the post-selection
+marketplace-change boundary (unlisted + not-accepting + inactive-offering + price-change, assigned
+work still succeeds); inactive-lab-organization and inactive-membership authorization refusal
+(assignment itself never erased); cross-lab list/detail/mutation isolation (404, no disclosure of
+which lab actually owns an order); platform-admin-alone and `ORG_ADMIN`-alone refusal (403, same
+response for a real vs. fabricated order id — no existence oracle), `ORG_ADMIN`+`LAB_TECH` allowed;
+provider-clinician-cannot-act-as-lab (404); one `ExchangeIdentity` holding `LAB_TECH` in two labs
+with zero assignment crossover; direct `SELECTED`→`IN_PROGRESS` refusal and the full incompatible-
+transition 409 contract; accept/start replay idempotency with duplicate-audit assertions; frozen
+price immutability across a later price change; patient-grant revocation/expiry independence from
+the lab assignment; accept/reject/start audit-atomicity failure injection (3 tests); audit field
+correctness; and list bounds/ordering/status-filter validation. Full adapter suite: **570 passed /
+39 skipped** (up from 541 before this ticket), `ruff format`/`ruff check` clean, `git diff --check`/
+CR-byte/secret-literal scans all clean.
+
+**Concurrency proof, two tiers, matching this repo's own established discipline.** SQLite (direct
+repository calls, no HTTP/TestClient layer — DH-EX-005R's own session found that stack's thread
+pool compounds badly under genuine write contention): 25-way accept, 25-way reject, 25-way
+start-processing, a 5-iteration accept-vs-reject race, and a 5-iteration accept-vs-start race, all
+via a dedicated `BEGIN IMMEDIATE` + 30s-busy-timeout engine. **Real PostgreSQL 18.6** (WSL2 `apt`
+install, scratch database `dhex006_qual`, fresh 0001→0009 upgrade): 25-way accept, 25-way reject,
+25-way start-processing (exactly one real transition each, zero raw `IntegrityError`), a 10-
+iteration accept-vs-reject race (exactly one winner every time, final status always `ACCEPTED` or
+`REJECTED`, never both), a 10-iteration accept-vs-start race (never a direct `SELECTED`→
+`IN_PROGRESS` without the `ACCEPTED` transition having actually occurred — both coherent orderings
+observed), cross-lab access refusal, accept/reject/start audit-rollback-on-failure, post-selection
+marketplace-change-does-not-block-assigned-work, and patient-grant-revoke/expiry-independence — all
+against real `timestamptz`/`FOR UPDATE` semantics, not SQLite's.
+
+**Migration `0009_exchange_lab_workflow` (`down_revision = 0008_exchange_patient_access`) —
+qualified against real PostgreSQL 18.6.** Purely additive: widens only
+`exchange_security_audit_events`'s `event_type` CHECK for `lab_order_accepted`/
+`lab_order_rejected`/`lab_order_processing_started`. No new table, no new column — `LabOrder.status`
+already covers the three transitions unchanged, and `LabOrder.updated_at` (`onupdate=utc_now`,
+already reliably maintained on every status write) backs the work-queue listing's `updated_at DESC`
+ordering with no new bookkeeping column. `resource_type` needed no widening (`'lab_order'` already
+existed from `0007`). Fresh `0001→0009` upgrade: clean. Compatible downgrade (`0009→0008`, zero
+lab-workflow audit rows): succeeds, re-upgrades cleanly. Incompatible downgrade (a real
+`lab_order_accepted` audit row present): raises `DowngradeBlockedByLabWorkflowHistory` before any
+DDL; `alembic current` confirmed still `0009` afterward, CHECK-constraint count and the audit row
+itself confirmed byte-identical. `EXPECTED_HEAD: 0008_exchange_patient_access` →
+`EXPECTED_HEAD: 0009_exchange_lab_workflow` is the CI workflow's complete diff — one line, nothing
+else.
+
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN.** DH-EX-006 adds no new authentication surface — it
+reuses DH-EX-002's existing OIDC/`AuthenticatedPrincipal` machinery unchanged; the only new surface
+is an *authorization* check (`require_lab_tech`), proven against a locally generated RSA keypair via
+`StaticKeySource`, never a real IdP.
+
+**Real facility:** untouched. **Pollers:** inactive. **No WhatsApp/SMS/patient UI/Lab Portal
+frontend/result workflow was built** — the ticket's explicit boundary, honored: no `/complete`
+route exists, `LabOrderStatus.COMPLETED` is unreachable through any code path added by this ticket,
+zero `LabResult` rows are ever created by a workflow command, and `DoctorReview`/`ResultDelivery`
+are never touched. No file under `openmrs-config/` or `openelis-config/` touched.
+
+**Files changed:** `adapter/src/daher_adapter/exchange/lab_workflow.py` (new — assignment/status
+repository), `adapter/migrations/versions/0009_exchange_lab_workflow.py` (new),
+`adapter/src/daher_adapter/exchange/authorization.py` (`require_lab_tech`),
+`adapter/src/daher_adapter/exchange/security_audit.py` (widened `SecurityEventType`/
+`SecurityResourceType` Literals — also closed a pre-existing gap where the DH-EX-004/DH-EX-005
+event/resource values had been added to the DB CHECK constraint but never to these Python-level
+Literal types), `adapter/src/daher_adapter/exchange/models.py` (widened
+`ExchangeSecurityAuditEvent` CHECK), `adapter/src/daher_adapter/exchange/api.py` (5 new lab-workflow
+routes + response schemas + `_require_lab_tech`), `.github/workflows/ci.yml` (`EXPECTED_HEAD`
+bump), `adapter/tests/test_exchange_lab_workflow.py` (new, 29 tests).
+
+**What this state means, precisely.** DH-EX-006 is **implemented, self-reviewed, and qualified
+against both SQLite and real PostgreSQL 18.6** — it is **not committed, not pushed, not
+CI-qualified, and not independently reviewed** (no DH-EX-006R has run). It does **not** mean: a Lab
+Portal or Provider Portal UI exists; result entry, delivery, or doctor review exists; an order ever
+reaches `COMPLETED`; WhatsApp/SMS integration exists; real Keycloak deployment is qualified; an
+OpenMRS or OpenELIS Exchange connector exists; production deployment exists; or any pilot has begun.
+
+**Next:** Liban's independent review of this implementation (the DH-EX-006R step, following the
+DH-EX-001R through DH-EX-005R precedent), then a combined commit/push/exact-SHA-CI ticket, then
+DH-EX-006D documentation closure, then DH-EX-007 — lab result submission and delivery — **not
+started.**
+
+---
+
+### DH-EX-006R · Independent selected-lab workflow/authorization/concurrency review + real
+PostgreSQL qualification · P0 · 🔨 REVIEWED + GAPS CLOSED + PROVEN · ⏳ NOT COMMITTED, NOT PUSHED
+
+**Ticket:** DH-EX-006R, the DH-EX-001R through DH-EX-005R-equivalent independent review step for
+DH-EX-006. **Base:** `fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f` (DH-EX-005D's docs-closure commit)
+— independently re-confirmed via `git rev-parse HEAD`, `git diff --cached` confirmed empty. **Exact
+file set** independently re-inventoried via `git status --porcelain`, matches the DH-EX-006 handoff's
+own claimed 10-file set exactly.
+
+**No BLOCKER found — the two BLOCKER-level review targets this ticket named explicitly were both
+confirmed correct by direct, fresh code reading, not merely re-trusting the implementation
+session's own claims.** (1) **Mutation + assignment + audit atomicity (Part H):** every one of the
+three API endpoints (`accept_lab_order`/`reject_lab_order`/`start_processing_lab_order`) opens
+exactly one `with session_factory.begin() as session:` block, passes that same `session` into
+`lab_workflow.accept/reject/start_processing(..., session=session)` (which — confirmed by reading
+`_transition_in_session` directly — never self-commits when given an external session), and calls
+`security_audit.record(session, ...)` on the identical session before the block closes; an audit
+failure therefore rolls back the status mutation with it, proven again by a fresh audit-atomicity
+run (both SQLite and a newly independent real-Postgres run, see below). (2) **Assignment check
+before replay semantics (Part Y/AB/AD):** `_transition_in_session` locks the order, then checks
+`LabSelection` ownership (raising `LabOrderNotAssigned` if absent/mismatched) **before** the
+`current == to_status` idempotent-replay check runs at all — a wrong-lab caller can never reach the
+replay branch regardless of the order's actual status.
+
+**One real test-coverage gap closed for exactly this second point, proven previously only by code
+reading, not by a permanent test:** no existing test had probed a wrong lab against an order Lab A
+had *already* transitioned (every existing cross-lab test only probed a still-`SELECTED` order).
+Added `test_other_lab_probing_an_already_mutated_order_still_gets_404_not_replay` — Lab A genuinely
+accepts, Lab B then probes detail/accept/reject/start-processing on that now-`ACCEPTED` order and
+gets 404 for every one, never a false replay/conflict response leaking the order's current state to
+an unassigned lab.
+
+**Three further test-coverage gaps closed, all confirming already-correct behavior, no code
+changes required:**
+1. **Part Q (list ordering):** the prior list test only checked bounds, never the `updated_at DESC`
+   ordering claim itself. Added `test_list_ordering_reflects_most_recent_activity` — an older order
+   (created first) is explicitly mutated after a newer order exists, and is proven to now sort
+   first, directly confirming `LabOrder.updated_at`'s `onupdate=utc_now` is what backs the
+   work-queue ordering, not an assumption about it.
+2. **Part AE (rejection terminality):** the existing incompatible-transition test covered
+   reject-after-accept and accept-after-start, but never accept/start *after reject* specifically.
+   Added `test_rejection_is_terminal_accept_and_start_both_refused_after` — both refused with 409,
+   zero mutation, zero spurious audit.
+3. **Part BB/BC (audit actor under multi-user same-lab access):** no test proved the persisted
+   audit actor corresponds to whichever of two independently-authorized same-lab identities
+   actually caused a transition. A genuine two-thread HTTP race was attempted first and abandoned
+   — it reproduced the exact SQLite/`TestClient`-stack fragility DH-EX-005R already diagnosed and
+   worked around (a `BEGIN IMMEDIATE` + 30s-timeout dedicated engine still timed out after ~35s
+   under real two-thread HTTP contention). The property itself is sequential, not concurrent, so
+   `test_audit_actor_reflects_whichever_identity_actually_caused_the_transition` proves it
+   deterministically instead: identity_1 causes the real transition, identity_2 (also a fully
+   authorized Lab A `LAB_TECH`) immediately replays it, and the persisted audit actor is asserted
+   to be identity_1, never identity_2 or a stale value.
+
+**Everything else verified PASS by direct code inspection and/or a fresh, independent real-Postgres
+re-run (not re-trusting the implementation session's own report):** CI diff is exactly the one
+`EXPECTED_HEAD` line (re-diffed). `require_lab_tech` mirrors `require_clinician` exactly (re-read).
+Assignment ownership is proven solely by `LabSelection` — confirmed by grep: `lab_workflow.py`
+imports and references no `LabDirectoryProfile`/`LabOffering`/`LabPrice` symbol anywhere in its
+code, only in docstring prose explaining why not (Part BF). `LabSelection` is never mutated by any
+transition method (Part J, grepped — no `selection.` assignment anywhere in `_transition_in_session`).
+No `/complete` route and no reachable path to `COMPLETED` exist anywhere in the diff (Part AF,
+grepped — the word appears only in docstrings/comments naming it explicitly out of scope). No
+specimen-collection vocabulary anywhere (Part AG, grepped). No logging calls at all in
+`lab_workflow.py` (Part BI). List query is a plain INNER JOIN with an explicit `ON`/`WHERE`
+predicate against `LabSelection.lab_organization_id`, structurally incapable of returning an
+unselected or foreign-lab order (Part O). The `event_type` CHECK constraint, independently queried
+via `pg_get_constraintdef` against a fresh real-Postgres database, contains all 12 prior
+DH-EX-002/003/004/005 values plus the 3 new ones — 15 total, none lost (Part AX).
+
+**Real PostgreSQL 18.6 re-qualification this review pass** (scratch database
+`dhex006r_qual`, dropped after use — this review pass changed no production code, only tests, so
+this independently *reproduces* the implementation session's own qualification rather than proving
+something new, exactly as intended for an R-ticket): fresh `0001→0009`; compatible downgrade
+(`0009→0008`) + clean re-upgrade; an incompatible-downgrade run built against a **complete, real
+0008-era clinical chain** (organization, membership, patient/practitioner references, a `LabOrder`
+in `ACCEPTED` status, `LabOrderItem` with a frozen `1000.00 DJF` price, a `PatientAccessGrant`, a
+`LabSelection`, and a real `lab_order_accepted` audit row) — refused before any DDL with
+`DowngradeBlockedByLabWorkflowHistory`, every one of those rows (including the frozen price)
+independently re-queried and confirmed byte-identical afterward (this also satisfies Part AZ's
+"migration over real 0008 data" requirement); 25-way accept/reject/start-processing (exactly one
+real transition each); a 10-iteration accept-vs-reject race (exactly one winner every time); a
+10-iteration accept-vs-start race (never a direct `SELECTED`→`IN_PROGRESS` shortcut); cross-lab
+access refusal; accept/reject/start audit-rollback-on-failure; post-selection marketplace-
+independence; and patient-grant-revoke/expiry-independence — 11/11 passed.
+
+**Full regression, independently re-run after every fix in this pass:** `pip check` clean; `ruff
+check`/`ruff format --check` clean on `src`/`tests`/`migrations` (94 files); `pytest
+--collect-only` — **613 collected**; full suite **574 passed / 39 skipped** (570 + 4 new tests from
+this review pass); `git diff --check` clean; CR-byte scan clean on every changed/untracked file;
+secret-shaped-literal scan clean.
+
+**READY FOR COMMIT: YES**, conditional on Liban's own review of this report — every checklist item
+in the ticket's "READY FOR COMMIT RULE" is satisfied, no BLOCKER/HIGH remains, and the four
+test-coverage gaps found were closed with permanent regression tests, not just asserted fixed.
+
+**No WhatsApp/SMS/patient UI/Lab Portal UI/result workflow code added this pass** (grepped).
+**Real Keycloak qualification remains NOT RUN** — no new OIDC-adjacent surface.
+
+**Files changed beyond DH-EX-006's original set:** none — this review pass's only change is 4 new
+tests appended to `test_exchange_lab_workflow.py` (574 total vs. 570 before this review pass, an
+exact +4). No production code (`lab_workflow.py`, `api.py`, `authorization.py`,
+`security_audit.py`, `models.py`, the migration) was modified — the BLOCKER-level targets this
+ticket most needed to verify were already correct as implemented.
+
+**Next:** Liban's own review of this report. **DO NOT COMMIT. DO NOT PUSH** per this ticket's own
+standing instruction, even though READY FOR COMMIT = YES — stopping for Liban's sign-off. On
+approval: a combined DH-EX-006+DH-EX-006R commit/push/exact-SHA-CI ticket, then DH-EX-006D
+documentation closure, then DH-EX-007 — lab result submission and delivery — **not started.**

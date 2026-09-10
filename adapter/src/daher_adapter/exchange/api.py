@@ -65,6 +65,12 @@ from daher_adapter.exchange.identity import (
     PractitionerReferenceRepository,
 )
 from daher_adapter.exchange.identity_auth import TokenValidationError, TokenValidator
+from daher_adapter.exchange.lab_workflow import (
+    InvalidLabWorkflowTransition,
+    LabOrderNotAssigned,
+    LabWorkflowOrderRecord,
+    LabWorkflowRepository,
+)
 from daher_adapter.exchange.membership import (
     ALLOWED_ROLES_BY_ORG_TYPE,
     ExchangeIdentityRepository,
@@ -573,6 +579,37 @@ class AuthenticatedPatientAccess:
     lab_order_id: uuid.UUID
 
 
+# -- DH-EX-006: selected-lab assigned-order workflow ----------------------------------------------
+
+
+class LabWorkflowOrderItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    selected_price_amount: Decimal | None
+    selected_price_currency: str | None
+
+
+class LabWorkflowOrderResponse(BaseModel):
+    """The selected lab's own narrow clinical-work view -- deliberately excludes
+    `PatientReference`/`ExchangeIdentity`/membership/audit internal ids, patient contact data, and
+    any Provider-side detail beyond a safe organization display name. `patient_display_name` is
+    whatever transaction-scoped snapshot DH-EX-001 recorded, or `None` if it was never supplied --
+    never fabricated, never used for anything beyond operational display (see
+    `exchange/lab_workflow.py`'s module docstring)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    status: str
+    selected_at: datetime
+    updated_at: datetime
+    patient_display_name: str | None
+    ordering_provider_name: str
+    requested_tests: list[LabWorkflowOrderItemResponse]
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -596,6 +633,7 @@ def build_exchange_router(
     patient_access = PatientAccessGrantRepository(
         session_factory, ttl_hours=patient_access_ttl_hours
     )
+    lab_workflow = LabWorkflowRepository(session_factory, organizations)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -712,6 +750,24 @@ def build_exchange_router(
     ) -> OrganizationAccessContext:
         try:
             return authz.require_org_admin(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_lab_tech(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        # DH-EX-006: deliberately `authz.require_lab_tech`, never `require_org_admin`/
+        # `require_role` -- platform admin must NOT bypass this one, mirroring
+        # `_require_clinician` exactly (see `AuthorizationService.require_lab_tech`'s docstring).
+        try:
+            return authz.require_lab_tech(principal, organization_id)
         except ResourceNotFound as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
@@ -1672,6 +1728,156 @@ def build_exchange_router(
 
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return _patient_order_response(access.lab_order_id)
+
+    # -- DH-EX-006: selected-lab assigned-order workflow ------------------------------------------
+
+    def _lab_workflow_order_response(record: LabWorkflowOrderRecord) -> LabWorkflowOrderResponse:
+        provider = organizations.get(record.provider_organization_id)
+        patient = patients.get(record.patient_reference_id)
+        return LabWorkflowOrderResponse(
+            order_id=record.id,
+            status=record.status,
+            selected_at=record.selected_at,
+            updated_at=record.updated_at,
+            patient_display_name=patient.display_name,
+            ordering_provider_name=provider.name,
+            requested_tests=[
+                LabWorkflowOrderItemResponse(
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    selected_price_amount=item.selected_price_amount,
+                    selected_price_currency=item.selected_price_currency,
+                )
+                for item in record.items
+            ],
+        )
+
+    @router.get("/organizations/{lab_id}/lab-orders", response_model=list[LabWorkflowOrderResponse])
+    def list_lab_workflow_orders(
+        lab_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        order_status: Annotated[LabOrderStatus | None, Query(alias="status")] = None,
+    ) -> list[LabWorkflowOrderResponse]:
+        _require_lab_tech(principal, lab_id)
+        records = lab_workflow.list_for_lab(lab_id, limit=limit, status_filter=order_status)
+        return [_lab_workflow_order_response(record) for record in records]
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}", response_model=LabWorkflowOrderResponse
+    )
+    def get_lab_workflow_order(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabWorkflowOrderResponse:
+        _require_lab_tech(principal, lab_id)
+        record = lab_workflow.get_for_lab(order_id, lab_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return _lab_workflow_order_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/accept",
+        response_model=LabWorkflowOrderResponse,
+    )
+    def accept_lab_order(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabWorkflowOrderResponse:
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, transitioned = lab_workflow.accept(
+                    order_id=order_id, lab_organization_id=lab_id, session=session
+                )
+                # Idempotent replay (already ACCEPTED): no mutation happened, so no second
+                # authoritative audit row -- one real transition, one event, matching every other
+                # replay-safe mutation in this package (issue/revoke/selection).
+                if transitioned:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_accepted",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _lab_workflow_order_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/reject",
+        response_model=LabWorkflowOrderResponse,
+    )
+    def reject_lab_order(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabWorkflowOrderResponse:
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, transitioned = lab_workflow.reject(
+                    order_id=order_id, lab_organization_id=lab_id, session=session
+                )
+                if transitioned:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_rejected",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _lab_workflow_order_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/start-processing",
+        response_model=LabWorkflowOrderResponse,
+    )
+    def start_processing_lab_order(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabWorkflowOrderResponse:
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, transitioned = lab_workflow.start_processing(
+                    order_id=order_id, lab_organization_id=lab_id, session=session
+                )
+                if transitioned:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_processing_started",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _lab_workflow_order_response(record)
 
     return router
 

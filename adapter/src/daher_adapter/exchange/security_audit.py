@@ -32,10 +32,24 @@ SecurityEventType = Literal[
     "lab_offering_created",
     "lab_offering_status_changed",
     "lab_price_changed",
+    # DH-EX-004 provider lab-order creation.
+    "lab_order_created",
+    # DH-EX-005 patient access grant lifecycle.
+    "patient_access_issued",
+    "patient_access_revoked",
+    # DH-EX-006 selected-lab assigned-order workflow.
+    "lab_order_accepted",
+    "lab_order_rejected",
+    "lab_order_processing_started",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
-    "catalog_entry", "lab_directory_profile", "lab_offering", "lab_price"
+    "catalog_entry",
+    "lab_directory_profile",
+    "lab_offering",
+    "lab_price",
+    "lab_order",
+    "patient_access_grant",
 ]
 
 

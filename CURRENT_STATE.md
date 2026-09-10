@@ -1512,3 +1512,68 @@ already-qualified OIDC machinery unchanged.
 **NEXT: DH-EX-006 — selected-lab workflow.** Golden backend journey after DH-EX-006: a selected LAB
 can see its assigned order → accept or reject it → an accepted order follows an explicit processing
 lifecycle — **not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-006, append-only — the "NEXT: DH-EX-006 ... not started"
+line above is superseded, not retracted).** DH-EX-006 (selected-lab assigned-order workflow) is now
+**implemented, self-reviewed, and qualified against both SQLite and real PostgreSQL 18.6**. Still
+**not committed, not pushed**, and no DH-EX-006R independent review has run yet. Full detail is in
+PROJECT_STATE.md's DH-EX-006 entry; the load-bearing facts:
+
+- A `LAB_TECH` in an ACTIVE lab organization (new `require_lab_tech` authorization check, mirroring
+  `require_clinician` — platform admin and `ORG_ADMIN` alone are both refused) can list/read its
+  assigned orders and move one through `SELECTED`→`ACCEPTED`, `SELECTED`→`REJECTED`, or
+  `ACCEPTED`→`IN_PROGRESS`. **Assignment ownership is `LabSelection` alone** — never re-derived from
+  DH-EX-003 marketplace eligibility, so a lab that becomes unlisted, stops accepting orders,
+  deactivates an offering, or changes its price after a patient already chose it still owns and can
+  work that specific assigned order (proven by a permanent test, SQLite and real Postgres both).
+  Frozen selection-time prices remain immutable throughout. Patient-grant revocation/expiry never
+  erases the assignment (the two are independent facts once a selection exists).
+- No `/complete` route, no path to `COMPLETED` anywhere in the new code, zero `LabResult` rows ever
+  created by a workflow command, `DoctorReview`/`ResultDelivery` untouched — DH-EX-007's scope,
+  deliberately not preempted.
+- 29 new tests (golden accept+start-processing journey, golden rejection flow, cross-lab isolation,
+  authorization matrix, replay idempotency, audit atomicity, frozen-price/patient-grant
+  independence). Full adapter suite: **570 passed / 39 skipped** (was 541 before this ticket), ruff
+  clean.
+- Real PostgreSQL 18.6: fresh `0001→0009`, compatible downgrade, incompatible downgrade refusal
+  (`DowngradeBlockedByLabWorkflowHistory`, before any DDL), 25-way accept/reject/start-processing,
+  accept-vs-reject and accept-vs-start races (10 iterations each, always coherent, never a direct
+  `SELECTED`→`IN_PROGRESS` shortcut), cross-lab refusal, and audit-rollback-on-failure for all three
+  mutations, all proven directly.
+
+**NEXT: Liban's independent review of DH-EX-006 (the DH-EX-006R step), then a combined
+commit/push/exact-SHA-CI ticket, then DH-EX-006D documentation closure, then DH-EX-007 — lab result
+submission and delivery — not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-006R, append-only — the "NEXT: Liban's independent review"
+line above is superseded, not retracted).** DH-EX-006R (the independent review) has now run. Still
+**not committed, not pushed**. Full detail is in PROJECT_STATE.md's DH-EX-006R entry; the
+load-bearing facts:
+
+- **No BLOCKER found.** The two BLOCKER-level targets this review most needed to check — that
+  mutation + assignment-ownership check + audit all share one transaction, and that the
+  wrong-lab-assignment check happens *before* idempotent-replay handling (so a wrong-lab caller can
+  never get a false "replay success" on an order it doesn't own) — were both confirmed correct by
+  fresh code reading, no fix needed.
+- Four test-coverage gaps closed, all confirming already-correct behavior: a wrong lab probing an
+  order Lab A already transitioned now has a permanent test (previously only the still-`SELECTED`
+  case was tested); the `updated_at DESC` list-ordering claim now has a permanent test proving an
+  older-but-just-mutated order sorts before an untouched newer one; rejection-terminality
+  (accept/start refused after reject) now has its own test; and audit-actor-correctness under
+  multi-user same-lab access is now proven deterministically (a genuine two-thread HTTP race was
+  tried and abandoned — it reproduced the exact SQLite/TestClient fragility DH-EX-005R already
+  worked around; the property itself doesn't need a race to prove).
+- **Zero production code changed this review pass** — only 4 new tests. 574 passed / 39 skipped
+  (was 570), `ruff` clean.
+- Real PostgreSQL 18.6 independently re-verified (not just re-trusted): fresh `0001→0009`;
+  incompatible downgrade tested against a *complete* real 0008-era clinical chain (order, frozen
+  price, patient grant, selection, and a real `lab_order_accepted` audit row) — refused before any
+  DDL, every row confirmed byte-identical afterward; 25-way accept/reject/start-processing;
+  accept-vs-reject and accept-vs-start races (10x each); cross-lab refusal; audit rollback for all
+  three mutations; post-selection marketplace independence; patient-grant independence — 11/11.
+- **READY FOR COMMIT: YES** per the ticket's own checklist, but the ticket explicitly says stop for
+  Liban's sign-off regardless — not committed, not pushed.
+
+**NEXT: Liban's own sign-off on this review, then a combined DH-EX-006+DH-EX-006R
+commit/push/exact-SHA-CI ticket, then DH-EX-006D documentation closure, then DH-EX-007 — lab result
+submission and delivery — not started.**

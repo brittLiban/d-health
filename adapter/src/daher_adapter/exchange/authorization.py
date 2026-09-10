@@ -168,6 +168,42 @@ class AuthorizationService:
             organization=organization, membership=membership, via_platform_admin=False
         )
 
+    def require_lab_tech(
+        self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """DH-EX-006: the gate for selected-lab assigned-order workflow (list/detail/accept/
+        reject/start-processing) -- deliberately does **not** let `platform_admin` bypass, the
+        same reasoning `require_clinician` already established: network administration is not
+        clinical authority, here specifically not clinical *laboratory processing* authority. An
+        `ORG_ADMIN` of the lab organization who does not also hold `LAB_TECH` is refused too --
+        organization administration and lab clinical work are separate authorities, exactly
+        mirroring `require_clinician`'s provider-side "ORG_ADMIN alone is not CLINICIAN" rule.
+
+        A genuinely nonexistent organization still 404s for everyone, platform admin included.
+        For a normal (non-platform-admin) caller with *zero* relationship to the organization,
+        this also 404s (anti-enumeration, matching `require_membership`'s convention). For a
+        platform admin specifically, a real organization they lack `LAB_TECH` membership in is a
+        403, not a 404 -- a platform admin already has visibility that the organization exists."""
+        organization = self._get_organization_or_404(organization_id)
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized("lab technician role required")
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held_roles = self._roles.list_for_membership(membership.id)
+        if OrganizationRole.LAB_TECH.value not in held_roles:
+            raise NotAuthorized("lab technician role required")
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
+
     def require_any_active_membership(self, principal: AuthenticatedPrincipal) -> None:
         """DH-EX-003: the gate for network-wide reads (catalog list, lab directory, the
         marketplace whole-order query) that are not scoped to any single organization the caller
