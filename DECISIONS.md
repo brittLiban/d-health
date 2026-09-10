@@ -4700,10 +4700,11 @@ Exchange may hold minimum transaction-scoped clinical order/result data
 
 **Date:** 2026-09-08 · **Status:** ACCEPTED (product direction) / ACCEPTED (architecture), NOT YET
 IMPLEMENTED beyond DH-EX-001's schema, DH-EX-002's organization/authentication/tenant-isolation
-boundary, DH-EX-003's lab directory/catalog/offering/pricing/whole-order-eligibility backend, and
-DH-EX-004's DHealth-native Provider lab-order creation/read API (see PROJECT_STATE.md's DH-EX-002,
-DH-EX-003, and DH-EX-004 FINAL CLOSURE entries, 2026-09-09/10) — patient secure access, patient lab
-selection, price freezing, and every lab/result/follow-up-facing workflow remain unimplemented ·
+boundary, DH-EX-003's lab directory/catalog/offering/pricing/whole-order-eligibility backend,
+DH-EX-004's DHealth-native Provider lab-order creation/read API, and DH-EX-005's secure patient
+order access + atomic patient lab selection (see PROJECT_STATE.md's DH-EX-002, DH-EX-003,
+DH-EX-004, and DH-EX-005 FINAL CLOSURE entries, 2026-09-09/10) — every lab/result/follow-up-facing
+workflow beyond a patient's own lab choice remains unimplemented ·
 **Decided by:** Liban (DH-PIVOT-001 audit, DH-EX-001 ticket)
 
 **Decision.** DHealth's MVP is no longer primarily a maternity/birth-centre information system

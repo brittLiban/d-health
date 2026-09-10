@@ -991,10 +991,29 @@ authoritative `lab_order_created` audit row, landing at `AWAITING_LAB_SELECTION`
 create a `LabSelection`, does not require a currently-eligible lab to exist, and does not freeze a
 price — those remain later work.
 
-Still not built, no connector wiring changed: patient secure access, patient lab selection, price
-freezing, the Provider Portal, the Lab Portal, and WhatsApp/SMS integration — none of this is
-equivalent to a completed Exchange MVP. No file under `openmrs-config/` or `openelis-config/` has
-changed, and the connector Keycloak realm (`daher-realm.json`) is untouched. Full audit, gap
-analysis, and the proposed ticket sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001
-(2026-09-08); build/review/closure detail: PROJECT_STATE.md's DH-EX-001 through DH-EX-004 FINAL
-CLOSURE entries. Next: DH-EX-005 (patient secure link + lab selection) — not started.
+**DH-EX-005 (secure patient order access + atomic patient lab selection) is also committed and
+exact-SHA CI qualified** (2026-09-10; qualified at commit
+`1a382f86df82c35e20a6bf79bccb22961d65cf47`, per DH-EX-005R's independent security/concurrency
+review, CI run `34514393091`, all required jobs green). Qualified: a clinician (the same
+`require_clinician` boundary as DH-EX-004) issues an opaque, order-scoped 256-bit bearer grant
+(`POST/DELETE .../orders/{order_id}/patient-access`) — only its SHA-256 digest is ever persisted.
+Three patient-scoped routes (`GET /patient/order`, `GET /patient/order/lab-options`,
+`POST /patient/order/selection`), authenticated by that bearer grant alone, are a structurally
+separate code path from OIDC and accept no client-supplied order/provider/patient id. Selection
+re-runs the full DH-EX-003 whole-order eligibility contract, requires the patient's exact current
+price-id consent, and re-validates the access grant itself (order match, unrevoked, unexpired)
+inside the same transaction that freezes `LabOrderItem` prices, creates one `LabSelection`
+(carrying `selected_via_patient_access_grant_id` as its own provenance, never a fabricated
+`ExchangeIdentity`), and transitions the order to `SELECTED`. DH-EX-005R found and fixed one
+BLOCKER (selection originally trusted grant/order identifiers resolved before its own mutation
+transaction began, letting a grant revoked in that gap still authorize a selection) — fixed and
+proven via 20 real-PostgreSQL selection-vs-revoke races. It does **not** mean a selected lab can see
+or act on its order, and no result is ever produced or delivered — those remain later work.
+
+Still not built, no connector wiring changed: the Provider Portal, the Lab Portal, and WhatsApp/SMS
+integration — none of this is equivalent to a completed Exchange MVP. No file under
+`openmrs-config/` or `openelis-config/` has changed, and the connector Keycloak realm
+(`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
+(DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
+PROJECT_STATE.md's DH-EX-001 through DH-EX-005 FINAL CLOSURE entries. Next: DH-EX-006 (selected-lab
+workflow) — not started.

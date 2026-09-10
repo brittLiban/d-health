@@ -1483,3 +1483,32 @@ load-bearing facts:
 **NEXT: Liban's own sign-off on this review, then a combined DH-EX-005+DH-EX-005R
 commit/push/exact-SHA-CI ticket, then DH-EX-005D documentation closure, then DH-EX-006 — lab
 acceptance and result workflow — not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-005 FINAL CLOSURE, append-only — the "NEXT: Liban's own
+sign-off" line above is superseded, not retracted).** DH-EX-005 + DH-EX-005R were committed together
+(`1a382f86df82c35e20a6bf79bccb22961d65cf47`, parent `f3d8715b83c29297f1671174453a549d3be45a69`),
+pushed (after 14 attempts due to sustained network transport instability, independently confirmed
+via `git ls-remote` before every retry that nothing was silently pushed), and exact-SHA CI qualified
+(run `34514393091`, all 9 required jobs green, adapter `541 passed / 39 skipped` confirmed
+independently in CI's own logs, migration head confirmed `0008_exchange_patient_access` against
+CI's real `postgres:16-alpine` service, runtime-reported PostgreSQL 16.15). Full account:
+PROJECT_STATE.md's **DH-EX-005 · FINAL CLOSURE** entry.
+
+**DH-EX-001 through DH-EX-005 are all closed.** The DHealth Exchange currently has: the core
+domain/persistence layer (DH-EX-001); organization identity, OIDC validation, memberships, tenant
+roles, the platform-admin boundary, and a transactionally-authoritative security-mutation audit
+(DH-EX-002); a lab directory, a synthetic-only pilot test catalog, lab offering administration, DJF
+current pricing with CAS and immutable history, and whole-order lab eligibility (DH-EX-003);
+DHealth-native Provider lab-order creation/read (DH-EX-004); and now opaque order-scoped patient
+bearer access, patient auth structurally separate from OIDC, patient-facing order/lab-options views,
+exact-price-id patient consent, in-transaction grant and marketplace revalidation, immutable frozen
+price snapshots, and the transition to `SELECTED` (DH-EX-005). It does **not** yet have: a Provider
+Portal or Lab Portal UI, a selected lab's own view of or action on its order, a result workflow, or
+WhatsApp/SMS integration. **REAL KEYCLOAK QUALIFICATION remains NOT RUN** — stated plainly here
+again because it is exactly the kind of fact that is easy to let go stale; DH-EX-005's patient path
+is intentionally not Keycloak-based, and the provider-side surface it does touch reuses DH-EX-002's
+already-qualified OIDC machinery unchanged.
+
+**NEXT: DH-EX-006 — selected-lab workflow.** Golden backend journey after DH-EX-006: a selected LAB
+can see its assigned order → accept or reject it → an accepted order follows an explicit processing
+lifecycle — **not started.**

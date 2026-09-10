@@ -8456,3 +8456,118 @@ revoke-audit-atomicity test = 9 new tests, 532 + 9 = 541, exact).
 standing instruction, even though READY FOR COMMIT = YES — stopping for Liban's sign-off. On
 approval: a combined DH-EX-005+DH-EX-005R commit/push/exact-SHA-CI ticket, then DH-EX-005D
 documentation closure, then DH-EX-006 — lab acceptance and result workflow — **not started.**
+
+---
+
+### DH-EX-005 · FINAL CLOSURE — Secure patient order access + atomic patient lab selection · P0 ·
+✅ CLOSED / QUALIFIED
+
+**Ticket:** DH-EX-005 (+ DH-EX-005R independent patient-access/selection security/concurrency
+review, combined into one commit, following the DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R →
+DH-EX-001C/DH-EX-002C/DH-EX-003C/DH-EX-004C pattern).
+
+**Implementation + review commit:** `1a382f86df82c35e20a6bf79bccb22961d65cf47`.
+**Parent:** `f3d8715b83c29297f1671174453a549d3be45a69` (DH-EX-004D's docs-closure commit) —
+confirmed exact via `git rev-parse HEAD^` immediately after commit.
+**Exact-SHA CI:** run `34514393091`, `head_sha` confirmed exactly
+`1a382f86df82c35e20a6bf79bccb22961d65cf47` via `gh run view --json headSha`, all 9 required jobs
+`success` (OpenMRS narrow TestOrder module, adapter, seed + form-safety suites, static checks, ui,
+openelis order-correlation patch, compose interpolates and parses, oauth2login patched identity
+tests, provisioning). Adapter CI's own raw log: `541 passed, 39 skipped, 1 warning in 41.13s`;
+`alembic current` = `alembic heads` = `expected head` = `0008_exchange_patient_access`, all three
+read directly from CI's log, not recalled from a prior claim. Exactly 14 files committed (9
+modified + 3 new implementation/migration/test files, plus PROJECT_STATE.md/CURRENT_STATE.md),
+staged by explicit path, independently confirmed against the DH-EX-005R review's own file list
+before commit. Push required 14 attempts due to sustained transport-layer network instability
+(independently confirmed via `git ls-remote` before every retry that nothing was silently pushed,
+and via a plain HTTPS GET to github.com taking 51s that the network itself, not git or auth, was
+degraded) — succeeded cleanly once the network recovered, no force, no amended history.
+
+**What DH-EX-005 established.** Opaque, order-scoped patient access: a clinician (the same
+`require_clinician` CLINICIAN-in-ACTIVE-PROVIDER-org boundary DH-EX-004 established, still no
+platform-admin bypass) issues/revokes a 256-bit `secrets.token_urlsafe(32)` bearer grant for a
+`LabOrder` `AWAITING_LAB_SELECTION` — only its SHA-256 digest is ever persisted, the raw token
+returned once. Three patient-scoped routes (`GET /patient/order`, `GET /patient/order/lab-options`,
+`POST /patient/order/selection`) are authenticated by that bearer grant alone, via a dependency
+structurally separate from OIDC, and accept no client-supplied order/provider/patient id —
+structurally removing an entire IDOR class. Lab options derive strictly from the order's own items
+and reuse DH-EX-003's whole-order eligibility contract. Selection requires the patient's exact
+current-price-id consent and, inside the *same* mutation transaction, re-runs the full eligibility
+contract, re-validates the access grant itself (order match, unrevoked, unexpired — the
+DH-EX-005R BLOCKER fix, below), freezes per-item price snapshots, creates one `LabSelection`
+(carrying `selected_via_patient_access_grant_id` as its own authoritative provenance, never a
+fabricated `ExchangeIdentity`), and transitions the order to `SELECTED`. Same-lab replay is a safe
+idempotent 200 returning the original frozen receipt unconditionally, even after the lab's price has
+since changed; a different-lab second selection is a clean 409, never a silent overwrite.
+
+**DH-EX-005R's review — one BLOCKER, four smaller hardening gaps, all fixed before this commit.**
+**BLOCKER:** `LabSelectionRepository.select()` trusted the `lab_order_id`/`grant_id` the FastAPI
+auth dependency had already resolved in its own short-lived, closed transaction, never re-checking
+the grant's live state before mutating — proven exploitable deterministically (revoke a grant, then
+call `select()` with its already-captured, now-stale ids; it succeeded). Fixed: `select()` now
+re-reads the exact grant row inside its own transaction, immediately after locking the order and
+before any other selection logic, verifying it's still bound to this order, unrevoked, and
+unexpired; any failure raises `PatientAccessGrantInvalidated`, mapped to the same generic 401 every
+other invalid-grant case uses. Proven via deterministic tests, a concurrent-thread race, and **20
+real-PostgreSQL races** (staggered, 10/10 each ordering, zero corrupted outcomes). Four smaller
+fixes: `Cache-Control: no-store` added to all four patient-sensitive responses; a 512-character
+bearer-input bound added before hashing/DB lookup; a permanent negative control proving a real
+`LabResult` row never leaks through the patient response; and a revoke-audit-atomicity
+failure-injection test mirroring the existing issuance one. Also independently re-verified from the
+implementation session's own self-review: the `issue()`/`revoke()` order-first lock-serialization
+fix, and the narrowed `IntegrityError` retry (only a proven `token_hash` collision may trigger
+regeneration).
+
+**Real PostgreSQL qualification, local vs. CI, kept distinct — never conflated.** Local
+qualification (WSL2 `apt`-installed PostgreSQL 18.6, matching every prior ticket in this sequence,
+re-run immediately before this commit): fresh `0001→0008`, `0007→0008` upgrade over genuine
+pre-existing data (all rows preserved), compatible downgrade + clean re-upgrade, incompatible
+downgrade refusal (proven separately for a real grant row and an audit-row-only trigger, both
+raising `DowngradeBlockedByPatientAccessHistory` before any DDL), a 25-way grant-issuance race, a
+10-iteration issue-vs-revoke race, a 20-iteration selection-vs-revoke race, an expiry-boundary
+control, 25-way same-lab and two-lab selection races, price-update/offering-deactivation/
+accepting-orders races (all two-outcome-only, zero mixed/corrupted results), and issuance/selection
+rollback under injected failure. **CI's own PostgreSQL service is `postgres:16-alpine`** (runtime
+reported PostgreSQL 16.15), independently confirmed via CI's own migration-head check reaching
+`0008_exchange_patient_access` and its own `541 passed / 39 skipped` pytest line — not claimed
+byte-identical to the local PostgreSQL 18.6 qualification, matching every prior ticket's same
+caveat.
+
+**Migration `0008_exchange_patient_access`, purely additive on `0007_exchange_order_api`, and
+CONDITIONALLY reversible — same contract DH-EX-003R/DH-EX-004R established, applied here.** New
+`exchange_patient_access_grants` table (partial unique index enforcing one live grant per order,
+proven directly at the raw-SQL level against real Postgres), `LabSelection.
+selected_via_patient_access_grant_id`, and a purely-additive widening of the security-audit CHECK
+constraints for `patient_access_issued`/`patient_access_revoked`/`patient_access_grant` — every
+prior DH-EX-002/003/004 valid value confirmed still present via direct `pg_get_constraintdef`
+inspection. Downgrade refuses before any DDL once real grant or patient-access audit rows exist.
+
+**CI workflow diff, independently re-verified before commit.** `.github/workflows/ci.yml`'s
+complete diff against its prior state is exactly one line —
+`EXPECTED_HEAD: 0007_exchange_order_api` → `EXPECTED_HEAD: 0008_exchange_patient_access` — no job
+removed, no test weakened, no guard disabled, no `continue-on-error` introduced.
+
+**REAL KEYCLOAK QUALIFICATION = NOT RUN.** Patient bearer access is intentionally, structurally not
+Keycloak-based — the only OIDC-adjacent surface DH-EX-005 touches (provider grant issuance/
+revocation) reuses DH-EX-002's existing, already-qualified OIDC machinery unchanged, proven against
+a **locally generated RSA keypair** via `StaticKeySource`, never a real IdP. This remains a
+deployment/pilot qualification gate, not closed by this status, exactly as recorded for DH-EX-001
+through DH-EX-004.
+
+**Real facility:** untouched. **Pollers:** inactive. **No WhatsApp/SMS transport, patient UI, Lab
+Portal, or result workflow exists.** No file under `openmrs-config/` or `openelis-config/` touched.
+
+**What this closure means, precisely.** DH-EX-005 closes **secure patient order access and atomic
+patient lab selection** — an opaque order-scoped bearer grant, patient auth structurally separate
+from OIDC, order-scoped patient responses, exact price-id consent, in-transaction grant and
+marketplace revalidation, immutable frozen price snapshots, and a transition to `SELECTED`. It does
+**not** mean: a Provider Portal or Lab Portal UI exists; a selected lab can see or act on its order;
+lab acceptance/processing exists; result entry or delivery exists; doctor follow-up action exists;
+WhatsApp/SMS integration exists; real Keycloak deployment is qualified; real clinical catalog
+mappings exist; an OpenMRS or OpenELIS Exchange connector exists; production deployment exists; or
+any pilot has begun. See `docs/ARCHITECTURE.md` §17 for the architecture and `DECISIONS.md`'s
+ADR-042 for the underlying product-pivot decision, unchanged in substance by this closure.
+
+**Next:** DH-EX-006 — selected-lab workflow. Golden backend journey after DH-EX-006: a selected
+LAB can see its assigned order, accept or reject it, and an accepted order follows an explicit
+processing lifecycle — **not started.**

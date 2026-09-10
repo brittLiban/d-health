@@ -8,21 +8,23 @@ OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built a
 **first reference connector track** rather than the product's definition. Nothing below is deleted
 or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
-[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-004 FINAL CLOSURE entries for what
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-005 FINAL CLOSURE entries for what
 exists so far. The Exchange **core domain/persistence layer** (DH-EX-001), the **organization
 onboarding, OIDC authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab
 directory, synthetic test catalog, lab offerings, DJF pricing, and whole-order lab eligibility
-backend** (DH-EX-003), and **DHealth-native Provider lab-order creation** (DH-EX-004) are all
-committed and CI-qualified — DHealth's backend can now accept an authenticated clinician's
-provider-scoped lab order (exact patient reference, exact synthetic DHealth tests, canonical
-idempotency key) and leave it `AWAITING_LAB_SELECTION`, with secure multi-organization identity,
-tenant isolation, and a transactionally-authoritative security-mutation audit throughout. Real
-Keycloak integration remains a deployment/pilot qualification gate, not yet run. Patient secure
-access, patient lab selection, price freezing, the Provider Portal, Lab Portal, and WhatsApp/SMS
-integration are **still under construction, not yet built** — this is the backend foundation those
-are built on, not a patient-facing marketplace and not the MVP itself; no order can yet be carried
-end-to-end from creation through a patient-chosen lab. OpenMRS/OpenELIS remain supported, running
-exactly as built, as the first reference connector track.
+backend** (DH-EX-003), **DHealth-native Provider lab-order creation** (DH-EX-004), and **secure
+patient order access + patient lab selection** (DH-EX-005) are all committed and CI-qualified —
+DHealth's backend can now carry an authenticated clinician's provider-scoped lab order (exact
+patient reference, exact synthetic DHealth tests, canonical idempotency key) from
+`AWAITING_LAB_SELECTION` through an opaque, order-scoped patient bearer grant, a patient's
+exact-price-consent lab choice, an immutable frozen price snapshot, and on to `SELECTED`, with
+secure multi-organization identity, tenant isolation, patient/OIDC auth kept structurally separate,
+and a transactionally-authoritative security-mutation audit throughout. Real Keycloak integration
+remains a deployment/pilot qualification gate, not yet run. The Provider Portal, Lab Portal, and
+WhatsApp/SMS integration are **still under construction, not yet built** — this is the backend
+foundation those are built on, not a patient-facing marketplace and not the MVP itself; a selected
+lab does not yet see or act on the order, and no result is ever produced or delivered. OpenMRS/
+OpenELIS remain supported, running exactly as built, as the first reference connector track.
 
 ---
 
