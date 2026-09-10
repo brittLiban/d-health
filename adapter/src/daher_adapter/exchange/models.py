@@ -59,6 +59,7 @@ __all__ = [
     "OrganizationRoleAssignment",
     "OrganizationStatus",
     "OrganizationType",
+    "PatientAccessGrant",
     "PatientReference",
     "PractitionerReference",
     "ResultDelivery",
@@ -424,6 +425,15 @@ class LabSelection(Base):
     selected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    # DH-EX-005: which scoped patient access grant authorized this selection -- nullable because
+    # a pre-DH-EX-005 (or any future non-patient-driven) selection never had one; every selection
+    # made through the new patient API populates it. This FK, not a generic audit-actor field, is
+    # this row's own authoritative provenance -- a patient using an opaque grant is not an
+    # ExchangeIdentity, and no fake one is ever created to force it into the existing audit shape
+    # (see `exchange/patient_access.py`'s module docstring for the full reasoning).
+    selected_via_patient_access_grant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_patient_access_grants.id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class LabResult(Base):
@@ -732,7 +742,7 @@ class ExchangeSecurityAuditEvent(Base):
             "'catalog_entry_created', 'lab_directory_profile_created', "
             "'lab_directory_profile_updated', 'lab_offering_created', "
             "'lab_offering_status_changed', 'lab_price_changed', "
-            "'lab_order_created'"
+            "'lab_order_created', 'patient_access_issued', 'patient_access_revoked'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -746,7 +756,8 @@ class ExchangeSecurityAuditEvent(Base):
         ),
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
-            "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order')",
+            "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
+            "'patient_access_grant')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
@@ -776,3 +787,53 @@ class ExchangeSecurityAuditEvent(Base):
     resource_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     resource_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+
+
+# --- DH-EX-005: opaque, order-scoped patient access -----------------------------------------
+
+
+class PatientAccessGrant(Base):
+    """DH-EX-005: an opaque, high-entropy bearer credential scoping a patient's access to
+    exactly one ``LabOrder`` -- never a patient account, never an ``ExchangeIdentity``, never
+    OIDC. Only ``token_hash`` (a SHA-256 digest) is ever persisted; the raw token exists only in
+    the issuance HTTP response and the patient's own possession of it -- see
+    ``exchange/patient_access.py`` for why a fast cryptographic hash (not a slow password KDF) is
+    the correct choice for an already-256-bit-random secret.
+
+    At most one row per ``lab_order_id`` may have ``revoked_at IS NULL`` at a time (the partial
+    unique index below) -- "one live grant per order", enforced by the database, not just
+    application logic. An *expired* but not-yet-revoked grant still counts as "live" for that
+    constraint's purposes; ``exchange/patient_access.py``'s issuance path explicitly retires an
+    expired grant (sets ``revoked_at``) before inserting its replacement, in the same transaction,
+    rather than ever holding two unrevoked rows for one order."""
+
+    __tablename__ = "exchange_patient_access_grants"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_exchange_patient_access_grants_token_hash"),
+        CheckConstraint(
+            "expires_at > issued_at",
+            name="ck_exchange_patient_access_grants_expiry_after_issue",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= issued_at",
+            name="ck_exchange_patient_access_grants_revoked_after_issue",
+        ),
+        Index(
+            "uq_exchange_patient_access_grants_one_live_per_order",
+            "lab_order_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

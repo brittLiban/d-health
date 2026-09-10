@@ -9,14 +9,16 @@ from exchange_support import (
     make_priced_offering,
     make_provider,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
+from daher_adapter.exchange.directory import LabDirectoryProfileRepository
 from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
     PractitionerReferenceRepository,
 )
-from daher_adapter.exchange.models import DoctorReviewStatus, ResultDeliveryStatus
+from daher_adapter.exchange.models import DoctorReviewStatus, LabPrice, ResultDeliveryStatus
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.results import (
@@ -41,6 +43,7 @@ class Repos:
     results: LabResultRepository
     deliveries: ResultDeliveryRepository
     reviews: DoctorReviewRepository
+    directory: LabDirectoryProfileRepository
 
 
 def _build(sessions: sessionmaker[Session]) -> Repos:
@@ -56,13 +59,34 @@ def _build(sessions: sessionmaker[Session]) -> Repos:
         results=LabResultRepository(sessions),
         deliveries=ResultDeliveryRepository(sessions),
         reviews=DoctorReviewRepository(sessions),
+        directory=LabDirectoryProfileRepository(sessions, organizations),
     )
 
 
-def _create_and_select(repos: Repos, *, lab_id, key: str = "req-1"):
+def _current_price_id(sessions: sessionmaker[Session], offering_id) -> object:
+    with sessions() as session:
+        return session.scalar(
+            select(LabPrice.id).where(
+                LabPrice.lab_offering_id == offering_id, LabPrice.superseded_at.is_(None)
+            )
+        )
+
+
+def _create_and_select(
+    repos: Repos, sessions: sessionmaker[Session], *, lab_id, key: str = "req-1"
+):
     """Creates one priced offering, a one-item order against it, and immediately selects
     `lab_id`. Returns (refreshed order, ordering practitioner record)."""
-    entry, _offering = make_priced_offering(
+    repos.directory.upsert(
+        lab_organization_id=lab_id,
+        public_address="Test Lab Address",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    entry, offering = make_priced_offering(
         repos.catalog, lab_organization_id=lab_id, amount=Decimal("500.00"), code=f"DH-{key}"
     )
     provider = make_provider(repos.organizations, name=f"Clinic-{key}")
@@ -79,14 +103,17 @@ def _create_and_select(repos: Repos, *, lab_id, key: str = "req-1"):
         practitioner_reference_id=practitioner.id,
         items=[OrderItemInput(catalog_entry_id=entry.id)],
     ).order
-    repos.selections.select(lab_order_id=order.id, lab_organization_id=lab_id)
+    price_id = _current_price_id(sessions, offering.id)
+    repos.selections.select(
+        lab_order_id=order.id, lab_organization_id=lab_id, expected_price_ids=frozenset({price_id})
+    )
     return repos.orders.get(order.id), practitioner
 
 
 def test_result_binds_to_the_correct_order_item_and_lab(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     item_id = order.items[0].id
 
     recorded = repos.results.record_numeric(
@@ -104,7 +131,7 @@ def test_result_from_a_different_lab_than_selected_fails_closed(
     repos = _build(sessions)
     lab_selected = make_lab(repos.organizations, name="Lab Selected")
     lab_impostor = make_lab(repos.organizations, name="Lab Impostor")
-    order, _practitioner = _create_and_select(repos, lab_id=lab_selected.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab_selected.id)
     item_id = order.items[0].id
 
     with pytest.raises(WrongLabForResult):
@@ -137,7 +164,7 @@ def test_result_before_any_lab_selected_fails_closed(sessions: sessionmaker[Sess
 def test_duplicate_result_for_the_same_item_refused(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     item_id = order.items[0].id
     repos.results.record_numeric(
         lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
@@ -152,7 +179,7 @@ def test_duplicate_result_for_the_same_item_refused(sessions: sessionmaker[Sessi
 def test_result_completion_does_not_automatically_deliver(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     repos.results.record_numeric(
         lab_order_item_id=order.items[0].id, lab_organization_id=lab.id, value=Decimal("1")
     )
@@ -167,7 +194,7 @@ def test_delivery_state_independent_of_result_and_destination_explicit(
 ) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
 
     delivered = repos.deliveries.mark_delivered(order.id)
 
@@ -181,7 +208,7 @@ def test_doctor_review_remains_pending_until_explicit_action(
 ) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
 
     review = repos.reviews.get_for_order(order.id)
     assert review.status == DoctorReviewStatus.PENDING.value
@@ -191,7 +218,7 @@ def test_doctor_review_remains_pending_until_explicit_action(
 def test_doctor_review_no_follow_up_required_explicit(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
 
     reviewed = repos.reviews.mark_no_follow_up_required(
         order.id, reviewed_by_practitioner_reference_id=practitioner.id
@@ -205,7 +232,7 @@ def test_doctor_review_no_follow_up_required_explicit(sessions: sessionmaker[Ses
 def test_doctor_review_follow_up_required_explicit(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, practitioner = _create_and_select(repos, lab_id=lab.id)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
 
     reviewed = repos.reviews.mark_follow_up_required(
         order.id, reviewed_by_practitioner_reference_id=practitioner.id

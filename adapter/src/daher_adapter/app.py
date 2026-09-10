@@ -58,6 +58,7 @@ def create_app(
         token_validator=exchange_token_validator,
         audit_writer=exchange_audit,
         platform_admin_role=active_settings.exchange_platform_admin_role,
+        patient_access_ttl_hours=active_settings.exchange_patient_access_ttl_hours,
     )
 
     @asynccontextmanager

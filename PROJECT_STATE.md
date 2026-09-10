@@ -8126,3 +8126,333 @@ closure.
 clinician creates order → `AWAITING_LAB_SELECTION` → patient receives/uses scoped secure access →
 patient sees eligible labs/current prices → patient chooses one lab → selected lab + price
 snapshot become durable → order transitions to `SELECTED` — **not started.**
+
+---
+
+### DH-EX-005 · Secure patient order access + atomic patient lab selection · P0 · 🔨 IMPLEMENTED +
+SELF-REVIEWED + SQLite/PostgreSQL-QUALIFIED · ⏳ NOT COMMITTED, NOT PUSHED, NOT CI-QUALIFIED, NOT
+INDEPENDENTLY REVIEWED
+
+**Ticket:** DH-EX-005. **Base:** on top of DH-EX-004's qualified foundation (commit
+`f3d8715b83c29297f1671174453a549d3be45a69`, DH-EX-004D's docs-closure). **Not yet committed** — this
+entry documents implementation + self-review + qualification state only, exactly as DH-EX-004's own
+pre-commit entries did. No `DH-EX-005R` (independent review) ticket has run yet — this ticket's own
+mandated self-review pass is not a substitute for that separate lifecycle step, matching the
+DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R precedent.
+
+**What DH-EX-005 adds.** A clinician (the exact same `require_clinician` CLINICIAN-in-ACTIVE-
+PROVIDER-org boundary DH-EX-004 established, still never bypassable by platform admin) may issue an
+opaque, order-scoped bearer credential for a `LabOrder` currently `AWAITING_LAB_SELECTION` —
+`POST/DELETE /exchange/v1/organizations/{provider_id}/orders/{order_id}/patient-access`. The patient
+never gets an account, an `ExchangeIdentity`, or an OIDC login: possession of a 256-bit
+`secrets.token_urlsafe(32)` secret is the entire authorization mechanism, and only its SHA-256
+digest (`PatientAccessGrant.token_hash`) is ever persisted — the raw value exists only in the single
+issuance HTTP response. Three new, entirely separate, order-scoped patient endpoints —
+`GET /exchange/v1/patient/order`, `GET .../patient/order/lab-options`,
+`POST .../patient/order/selection` — are authenticated by this bearer secret alone via a dependency
+(`get_patient_access`) that never touches `token_validator`/OIDC and never accepts a client-supplied
+order/provider/patient id in path or body (structurally removes an entire IDOR class). Lab options
+are derived server-side from the order's own `LabOrder.items`, reusing DH-EX-003's whole-order
+eligibility machinery. Selection requires the patient to submit `expected_price_ids` — the exact
+current price ids they were shown — and `LabSelectionRepository.select()` was hardened to
+re-run the **full** DH-EX-003 marketplace-eligibility contract (ACTIVE organization, listed +
+accepting_orders, ACTIVE + synthetic catalog entries, one ACTIVE offering + one CURRENT DJF price
+per item) plus an exact price-id-set match, inside the same transaction that freezes the price
+snapshot, creates the `LabSelection`, and transitions the order to `SELECTED` — no TOCTOU window
+between what the patient saw and what gets frozen. A same-lab replay is a safe idempotent 200
+returning the original frozen record unconditionally, even after the lab's price has since changed
+(proven explicitly, see below) — a different-lab second selection is a clean 409, never a silent
+overwrite. Patient-made selections are never attributed to a fake `ExchangeIdentity` or misattributed
+to the clinician; `LabSelection.selected_via_patient_access_grant_id` (a new nullable FK to
+`PatientAccessGrant`) is the row's own authoritative provenance, per the ticket's explicit
+instruction not to invent a generic patient-action audit table.
+
+**Self-review found and fixed two real bugs before qualification, beyond the two structural review
+items below.** (1) A self-introduced copy/paste defect had left a stray `outcome` column (meant only
+for `ExchangeSecurityAuditEvent`) on the new `PatientAccessGrant` model — caught by the SQLite test
+suite itself (`NOT NULL constraint failed`), fixed by removing the column; the migration was never
+affected (it never had the column). (2) `PatientAccessGrant.expires_at`/`issued_at` compared directly
+against `utc_now()` raised `TypeError: can't compare offset-naive and offset-aware datetimes` on
+SQLite specifically (SQLite has no native `timestamptz` and returns naive datetimes on a fresh read,
+unlike PostgreSQL) — fixed with a small `_aware()` helper that re-attaches UTC tzinfo only when
+missing, a lossless no-op against the real PostgreSQL driver, verified genuinely as a no-op by the
+real-Postgres qualification below (every comparison exercised there against real `timestamptz`
+columns).
+
+**Two structural findings from this ticket's own self-review, fixed within approved architecture,
+no BLOCKER:** (1) `issue()` locked the `LabOrder` row `FOR UPDATE` to serialize concurrent grant
+issuance, but `revoke()` locked only the grant row — a concurrent issue()/revoke() pair for the same
+order could lock different rows and not serialize against each other, letting a clinician's "revoke"
+call return a false `no_active_grant` success while a brand-new live token silently existed. Fixed by
+locking the order row first in `revoke()` too, exactly like `issue()`. (2) The bounded
+`IntegrityError` retry loop in grant issuance caught *any* `IntegrityError` and blindly retried up to
+5 times assuming a `token_hash` collision — this is exactly what silently absorbed bug (1) above
+during debugging, misreporting a `NOT NULL` violation as "failed to generate a unique token after 5
+attempts." Fixed to re-query for a genuine `token_hash` collision before retrying, and re-raise
+immediately otherwise (matching `exchange/catalog.py`'s established `create_entry`/`create_offering`
+re-query pattern) — so the one invariant this loop exists to protect (the partial unique index) would
+now surface immediately and honestly if it ever actually fired.
+
+**Test coverage: 33 new DH-EX-005-specific tests in `test_exchange_patient_access.py`.** The exact
+"golden backend test" scenario from the ticket (DHealth Demo Clinic-equivalent synthetic fixtures,
+two labs at 1000/2000 and 1200/2300 DJF, full clinician→issue→patient-read→lab-options→select→
+receipt-survives-a-later-price-change journey); the "stale price golden negative" and "lab becomes
+unavailable negative" scenarios exactly as specified; patient auth negative controls (missing/
+malformed/unknown/expired/revoked token, OIDC token rejected by patient routes, patient token
+rejected by OIDC routes — all →401, generic, never distinguishing why); cross-order and cross-
+provider token-scope isolation (structurally impossible to even ask for another order — no such
+parameter exists on the patient routes); one-live-grant/no-silent-rotation/expired-grant-replacement/
+repeated-idempotent-revoke; issuance authorization (`ORG_ADMIN` alone refused, platform admin alone
+refused, issuance refused once the order is `SELECTED`); zero-eligible-labs → `200 {options: []}`,
+never an error; the patient order response's exclusion of every internal id, contact field, and
+result field (asserted directly against a forbidden-key set); `expected_price_ids` duplicate
+rejection and closed-schema (`extra=forbid`) rejection of any client-supplied order/lab/price
+identifier beyond what the schema declares; same-lab replay (plain, and **explicitly after an
+intervening price change** — the ticket's own separately-listed contract, proven by replaying with
+the original now-stale price id and asserting the original frozen amount, never a re-check); different
+-lab-second-selection 409 with zero mutation; lab-options/selection failing closed once `SELECTED`;
+issuance/revocation transactional audit (correct `event_type`/`resource_type`/`outcome`, raw token
+never present in any audit row, atomicity proven via a monkeypatched mid-transaction failure showing
+zero grant + zero audit rows survive); a monkeypatched mid-transaction selection failure proving zero
+`LabSelection`, zero frozen prices, and unchanged order status survive a partial-apply attempt (the
+"partial selection / mixed-price snapshot" class named explicitly by the ticket); and raw-token-
+never-stored (hash length, hash ≠ token, token not a substring of the hash). Full adapter suite:
+**532 passed / 39 skipped** (up from 499 at the start of this ticket), `ruff format`/`ruff check`
+clean on every changed file, CR-byte scan / `git diff --check` / secret-shaped-literal scan all clean
+across the full changed-file set.
+
+**Concurrency proof, two tiers, following this repo's own established discipline (SQLite for
+determinism, real PostgreSQL for the actual serialization guarantee).** SQLite: 10-way same-lab
+replay, 10-way two-lab race, and a 10-way grant-issuance race — all via **direct repository calls**
+(no test in this codebase, before or after this ticket, drives real concurrent threads through the
+full HTTP/TestClient stack; two earlier attempts at that were observed to reliably time out even with
+`BEGIN IMMEDIATE` + a 30s busy-timeout, and were rewritten to match this repo's actual established
+pattern before being kept). **Real PostgreSQL 18.6** (WSL2 `apt` install, scratch database
+`dhex005_qual`, fresh 0001→0008 upgrade): a 25-way concurrent grant-issuance race (exactly one
+`issued`, 24 `refused`, exactly one live row survives); a 25-way concurrent same-lab selection race
+(exactly one `created=True`, exactly one `LabSelection` row); a 25-way concurrent two-lab selection
+race (exactly one winner, zero mixed-price outcomes, zero raw `IntegrityError`); a price-update-vs-
+selection race and an offering-deactivation-vs-selection race, each proven to produce only one of
+their two allowed coherent outcomes, never a torn/mixed one. The partial unique index
+(`uq_exchange_patient_access_grants_one_live_per_order`, `UNIQUE (lab_order_id) WHERE revoked_at IS
+NULL`) was additionally proven directly at the raw-SQL level: two live-grant inserts for the same
+order in separate statements, the second rejected by the index itself (not application logic), a
+third *revoked* grant for the same order inserted successfully afterward (the constraint is correctly
+scoped to unrevoked rows only).
+
+**Migration 0008 (`0008_exchange_patient_access`, `down_revision = 0007_exchange_order_api`) —
+qualified against real PostgreSQL 18.6, not just SQLite.** Fresh `0001→0008` upgrade: clean. Schema
+parity between the SQLAlchemy model and the applied migration independently verified column-by-
+column: the partial unique index (exact `WHERE` clause), both `CHECK` constraints
+(`expires_at > issued_at`, `revoked_at IS NULL OR revoked_at >= issued_at`), the
+`selected_via_patient_access_grant_id` FK with `ON DELETE RESTRICT`, and — the one class of mistake
+purely-additive CHECK-widening migrations can make invisibly — that the recreated `event_type`/
+`resource_type` CHECK constraints on `exchange_security_audit_events` still contain **every** prior
+DH-EX-002/003/004 value, confirmed by direct `pg_get_constraintdef` inspection, not just "the new
+values are present." A real `0007→0008` upgrade over genuine pre-existing 0004–0007 data (an
+organization, identities, patient/practitioner references, a lab order, and audit rows using the
+*old* `event_type` values) left every row intact and readable afterward. Downgrade, both directions:
+a **compatible** downgrade (zero patient-access grant rows, zero patient-access audit rows) succeeds,
+drops the table cleanly, and re-upgrades to head with no data loss to the pre-existing rows. An
+**incompatible** downgrade — tested twice, once with a real live grant row present and once
+separately with only a real `patient_access_issued` audit row present (no grant row) — raises
+`DowngradeBlockedByPatientAccessHistory` before any DDL statement runs in both cases; `alembic
+current` independently re-checked to still read `0008_exchange_patient_access` afterward, and the
+table's own column count + constraint count confirmed byte-identical before and after the refused
+attempt. `EXPECTED_HEAD: 0008_exchange_patient_access` in `.github/workflows/ci.yml` independently
+grepped against migration 0008's own `revision =` string — byte-identical, and independently
+re-confirmed live by every `alembic current` output above.
+
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN**, stated again because it is exactly the kind of fact
+that is easy to let go stale. DH-EX-005 adds no OIDC-adjacent surface at all — the patient bearer-
+token path is deliberately, structurally separate from `token_validator`/OIDC and was never intended
+to touch a real IdP; only the pre-existing clinician-issuance/revocation endpoints reuse DH-EX-002's
+OIDC machinery unchanged, proven the same way DH-EX-004 was (a locally generated RSA keypair via
+`StaticKeySource`, never a real IdP).
+
+**Real facility:** untouched. **Pollers:** inactive. **No WhatsApp/SMS transport, Lab Portal, or
+result workflow was built** — the ticket's explicit boundary, honored: nothing in this ticket sends a
+message, nothing renders a patient-facing page, and no code from DH-EX-006 (lab acceptance/result
+entry) exists. No file under `openmrs-config/` or `openelis-config/` touched. `.github/workflows/
+ci.yml`'s complete diff against its prior state is exactly one line — `EXPECTED_HEAD:
+0007_exchange_order_api` → `EXPECTED_HEAD: 0008_exchange_patient_access` — no job removed, no test
+weakened, no guard disabled, no `continue-on-error` introduced (independently re-diffed, not recalled
+from memory of writing it).
+
+**Files changed:** `adapter/src/daher_adapter/config.py` (new bounded `exchange_patient_access_ttl_hours`
+setting, default 168h, bounded [1,720]), `adapter/src/daher_adapter/exchange/models.py`
+(`PatientAccessGrant` model, `LabSelection.selected_via_patient_access_grant_id`, widened audit CHECK
+constraints), `adapter/migrations/versions/0008_exchange_patient_access.py` (new),
+`adapter/src/daher_adapter/exchange/patient_access.py` (new — grant issuance/revocation/validation
+repository), `adapter/src/daher_adapter/exchange/selection.py` (rewritten — full DH-EX-003
+revalidation + price-consent contract at commit time), `adapter/src/daher_adapter/exchange/api.py`
+(patient auth dependency, provider issuance/revocation endpoints, three patient endpoints),
+`adapter/src/daher_adapter/app.py` (TTL setting wiring), `.github/workflows/ci.yml` (`EXPECTED_HEAD`
+bump), `adapter/tests/test_exchange_patient_access.py` (new, 33 tests), plus mechanical call-site
+updates in three pre-existing test files (`test_exchange_selection.py`,
+`test_exchange_catalog_dh_ex_003.py`, `test_exchange_results.py`) required by `select()`'s now-
+stricter, intentionally-tightened contract (new required `expected_price_ids` parameter, new
+directory-listing requirement) — the same class of "mechanical, not a design problem" fallout
+DH-EX-003's own signature-tightening produced.
+
+**What this state means, precisely.** DH-EX-005 is **implemented, self-reviewed, and qualified
+against both SQLite and real PostgreSQL 18.6** — it is **not committed, not pushed, not CI-qualified,
+and not independently reviewed** (no DH-EX-005R has run). It does **not** mean: a patient-facing UI
+exists; WhatsApp/SMS delivery of the access link exists; a Lab Portal exists; lab
+acceptance/processing/result entry exists; doctor follow-up action exists; real Keycloak deployment
+is qualified; production deployment exists; or any pilot has begun.
+
+**Next:** Liban's independent review of this implementation (the DH-EX-005R step, following the
+DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R precedent), then a combined commit/push/exact-SHA-CI
+ticket, then DH-EX-005D documentation closure, then DH-EX-006 — lab acceptance and result workflow —
+**not started.**
+
+---
+
+### DH-EX-005R · Independent patient-access/selection security/concurrency review + real
+PostgreSQL qualification · P0 · 🔨 REVIEWED + BLOCKER FIXED + PROVEN · ⏳ NOT COMMITTED, NOT PUSHED
+
+**Ticket:** DH-EX-005R, the DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R-equivalent independent
+review step for DH-EX-005. **Base:** `f3d8715b83c29297f1671174453a549d3be45a69` (DH-EX-004D's
+docs-closure commit) — independently re-confirmed via `git rev-parse HEAD`, `git diff --cached`
+confirmed empty. **Exact file set** independently re-inventoried via `git status --porcelain`,
+matches the DH-EX-005 handoff's own claimed set exactly: 5 modified source files, 3 new
+(`patient_access.py`, migration `0008`, `test_exchange_patient_access.py`), `ci.yml`, two docs
+files, and 3 pre-existing test files with additive call-site fixes — nothing else.
+
+**Test-count reconciliation (explicitly required by this ticket, fully resolved).** Committed
+DH-EX-004D baseline independently re-run from a clean `git worktree` at the exact base SHA:
+**495 passed / 39 skipped** (not merely trusted from the prior handoff). DH-EX-005's own claimed
+**532 passed / 39 skipped** independently re-confirmed fresh. The +37 delta is fully explained by
+function-level diffing, zero parametrization involved: **33 new test functions** in the new
+`test_exchange_patient_access.py`, plus a **net +4** in `test_exchange_selection.py` (6→10: one
+legitimate rename+refinement — `test_selecting_twice_for_the_same_order_is_refused` split into
+`test_selecting_twice_for_a_different_lab_is_refused` [still `pytest.raises`, now a more precise
+exception] and a new `test_selecting_same_lab_twice_is_a_safe_replay` — plus 3 more new negative
+controls). `test_exchange_catalog_dh_ex_003.py` and `test_exchange_results.py`: 0 test-count
+change, purely additive setup calls. 33 + 4 = 37 = 532 − 495, exact. No skip/xfail added anywhere
+(grepped). No `@pytest.mark.parametrize` anywhere in any of the four files (grepped).
+
+**Pre-existing test file diffs (Part B) — full `git diff` read, not just the stat.** No assertion
+removed, no expected-failure weakened, no skip/xfail added, no broad exception catching introduced,
+no negative control deleted, no fixture loosened. The `_listed_and_accepting()` addition makes every
+affected test **stricter** (labs must now be explicitly listed+accepting to be selectable, matching
+`select()`'s own tightened contract), not weaker. **PASS.**
+
+**CI workflow diff (Part C) — full diff read.** Exactly one line changed:
+`EXPECTED_HEAD: 0007_exchange_order_api` → `EXPECTED_HEAD: 0008_exchange_patient_access`. No job
+removed, no test-count-floor reduced, no `continue-on-error`, no branch-trigger/PostgreSQL/ruff/
+migration-check/secret-check weakening. **PASS.**
+
+**⚠️ ONE BLOCKER FOUND AND FIXED — Part U: selection never re-validated the patient access grant
+inside its own mutation transaction.** `LabSelectionRepository.select()` took an already-resolved
+`lab_order_id`/`patient_access_grant_id` from the FastAPI auth dependency's own short-lived,
+already-closed read (`get_patient_access` → `validate_token()`) and never re-checked the grant's
+live state before freezing prices and creating a `LabSelection`. **Proven exploitable
+deterministically, no race needed**: issue a grant → revoke it (fully committed) →
+`selections.select()` using the now-dead grant's captured ids **succeeded**, creating a real
+`LabSelection` authorized by a grant that no longer existed as valid. **Fixed**: `select()` now
+re-reads the exact `PatientAccessGrant` row by id inside its own transaction, immediately after
+acquiring the `LabOrder` `FOR UPDATE` lock (before any other selection logic), and verifies
+`grant.lab_order_id == lab_order_id` (Part F: cross-order provenance defense-in-depth), `revoked_at
+IS NULL`, and `expires_at > now`. Any failure raises a new `PatientAccessGrantInvalidated`, mapped
+to the identical generic 401 every other invalid-grant response uses (Part L). This single fix
+closes Part U, Part V (expiry-between-auth-and-commit — the same fresh re-check catches an
+already-expired grant too), and Part F (cross-order grant misuse) simultaneously. Proven: (1)
+deterministically on SQLite (revoke-then-select, no race); (2) a genuine concurrent-thread race at
+the HTTP layer (`test_selection_vs_revoke_race_only_two_coherent_outcomes`, stable across 5 runs);
+(3) **20 real-PostgreSQL concurrent races**, staggered to exercise both orderings, **10/10
+select-wins and 10/10 revoke-wins, zero corrupted/mixed outcomes**; (4) a real-Postgres 10-iteration
+issue-vs-revoke race (Part S) proving revoke never falsely reports success while a fresh grant
+silently survives; (5) a real-Postgres expiry-boundary control (Part V). Four new permanent SQLite
+regression tests committed to the suite; the three real-Postgres race scripts are not committed
+(matching this repo's established real-Postgres-qualification pattern).
+
+**Five additional fixes, all within approved architecture, no new BLOCKER:**
+1. **Part N (cache hardening) — real gap, fixed.** None of the four patient-sensitive responses
+   (issuance, `GET /order`, `GET /lab-options`, `POST /selection`) set `Cache-Control`. Added
+   `Cache-Control: no-store` to all four, verified by a new permanent test.
+2. **Part I (bearer input bounds) — real gap, fixed.** `get_patient_access` had no explicit length
+   bound on the `Authorization` header value before hashing/DB lookup. Added a 512-character bound
+   (`secrets.token_urlsafe(32)` produces exactly 43 chars), same generic 401 as every other invalid
+   case, verified by two new permanent tests (overlong token, near-bound token).
+3. **Part Y (result-data exposure) — test-coverage gap, fixed.** No test previously created a real
+   `LabResult` row (numeric + text) and proved it doesn't leak via `GET /patient/order` — the
+   response schema structurally has no such fields, but this was asserted only by absence, not by a
+   permanent negative control against real data. Added
+   `test_patient_order_response_never_leaks_a_real_lab_result_even_after_selection`, recursively
+   checking every nested key in the response body, plus a raw-string scan for the planted result
+   values.
+4. **Part AT (revoke audit atomicity) — test-coverage gap, fixed.** `test_issuance_audit_atomicity`
+   existed; no mirror for revocation. The code already wraps the grant mutation and the audit write
+   in the same transaction for both paths (verified by direct code inspection), but this was
+   untested for revoke specifically. Added `test_revocation_audit_atomicity`.
+5. **Part AU (token-collision retry) — re-verified, already fixed in the implementation session.**
+   Confirmed the retry loop now re-queries by `token_hash` before retrying and re-raises
+   immediately for anything else, bounded at 5 attempts. No further change needed.
+
+**Everything else verified PASS by direct code inspection, quoting the exact code, not re-trusting
+the implementation session's own claims:** Part D (model shape + DB invariants — independently
+re-confirmed against the same real-Postgres schema-parity evidence gathered during implementation);
+Part E (`selected_via_patient_access_grant_id` FK, `ON DELETE RESTRICT`, nullable for historical
+rows); Part G (`secrets.token_urlsafe(32)`, quoted); Part H (grepped the whole `adapter/src` tree
+and both state docs for `raw_token`/logging/prints — none found outside the one correct issuance
+response line); Part J (exact `token_hash ==` equality, no partial match, hash never in any response
+schema); Part K (`get_patient_access` never references `token_validator`); Part L (all four failure
+modes — missing/malformed/unknown/expired/revoked/overlong/mid-transaction-invalidated — return the
+byte-identical `{"detail": "invalid or missing credentials"}`); Part M (`_bounded_int` fails closed,
+[1,720], UTC-aware); Part O/P/Q (one-live-grant DB+app agreement, 409-not-silent-rotation, expired-
+grant retirement never resurrects/duplicates); Part R (no audit event is ever emitted for automatic
+expiry-retirement — only explicit `revoke()` calls produce a `patient_access_revoked` audit row, so
+the audit trail itself correctly distinguishes the two causes even though the `revoked_at` column
+name is shared; no redesign needed); Part AF (exactly one `LabSelection(` construction site in the
+whole `src` tree, inside `select()` itself — no legacy weaker path reachable); Part AM (lock-order
+analysis: `select()`/`issue()`/`revoke()` all lock `LabOrder` first; `catalog.set_price()`/
+`set_offering_active()`/`directory.upsert()` never reference `LabOrder` at all and only ever lock
+their own single row — no possible wait-for cycle, confirmed by direct code reading, not just
+empirical non-failure); Part AK (`set_price`'s atomic `UPDATE ... RETURNING` CAS + PostgreSQL READ
+COMMITTED per-statement snapshots is *why* the price race has only two outcomes, not merely that
+the test happened to pass); Part AR/AS (audit fields correct, quoted; patient selections write zero
+`ExchangeSecurityAuditEvent` rows, by design, matching the FK-provenance-only architecture); Parts
+W/X/Z/AA/AB (patient routes structurally accept no order/provider/patient id; response schemas
+field-audited against the forbidden list — none present; lab-options derives strictly from
+`order.items`; zero-eligible-labs returns `200 {options: []}`; the patient lab-options endpoint and
+the provider marketplace endpoint call the identical shared helper, not parallel implementations).
+
+**Real PostgreSQL 18.6 re-qualification this review pass** (scratch DBs `dhex005r_qual`, dropped
+after use): fresh `0001→0008` re-confirmed clean (unaffected by this review's code-only fixes); the
+BLOCKER-U fix's own three new race scripts (20-iteration selection-vs-revoke, 10-iteration
+issue-vs-revoke, expiry-boundary) all passed with zero corrupted outcomes, as detailed above.
+
+**Full regression, independently re-run after every fix in this pass:** `pip check` clean; `ruff
+check`/`ruff format --check` clean on `src`, `tests`, `migrations` (91 files); `pytest
+--collect-only` — **580 collected** (541 + 39, exact); full suite **541 passed / 39 skipped**;
+`git diff --check` clean; CR-byte scan clean on every changed/untracked file; secret-shaped-literal
+scan clean.
+
+**READY FOR COMMIT: YES**, conditional on Liban's own review of this report — every checklist item
+in the ticket's "READY FOR COMMIT RULE" is satisfied, the one BLOCKER found was fixed and proven
+(SQLite + real Postgres), all four MEDIUM/gap findings were closed, and no HIGH finding remains.
+
+**No WhatsApp/SMS/patient UI/Lab Portal/result workflow/connector code added this pass** (grepped
+the full diff). **Real Keycloak qualification remains NOT RUN** — no new OIDC-adjacent surface.
+
+**Files changed beyond DH-EX-005's original set:** `adapter/src/daher_adapter/exchange/selection.py`
+(grant re-validation inside the mutation transaction — the BLOCKER fix), `adapter/src/daher_adapter/
+exchange/api.py` (Cache-Control headers on 4 patient routes, bearer-length bound, `revoke`'s own
+`GrantOrderNotFound` handling, the new exception import), `adapter/src/daher_adapter/exchange/
+patient_access.py` (revoke() now locks `LabOrder` first matching `issue()`; the `IntegrityError`
+retry now re-queries for a genuine `token_hash` collision before retrying) — **all three of these
+were session-internal fixes made** ***before*** **this formal DH-EX-005R pass began** (found during
+the implementation session's own mandated self-review, already reflected in the DH-EX-005 entry
+above) — this review pass's own changes are confined to: `selection.py`'s grant-revalidation logic
+and its `PatientAccessGrantInvalidated` exception, `api.py`'s Cache-Control headers +
+bearer-length bound + the new exception's 401 mapping, and 7 new tests appended to
+`test_exchange_patient_access.py` (541 total vs. 532 before this review pass — wait, precisely:
+4 BLOCKER-U regression tests + 1 Cache-Control test + 2 bearer-bound tests + 1 result-leak test + 1
+revoke-audit-atomicity test = 9 new tests, 532 + 9 = 541, exact).
+
+**Next:** Liban's own review of this report. **DO NOT COMMIT. DO NOT PUSH** per this ticket's own
+standing instruction, even though READY FOR COMMIT = YES — stopping for Liban's sign-off. On
+approval: a combined DH-EX-005+DH-EX-005R commit/push/exact-SHA-CI ticket, then DH-EX-005D
+documentation closure, then DH-EX-006 — lab acceptance and result workflow — **not started.**

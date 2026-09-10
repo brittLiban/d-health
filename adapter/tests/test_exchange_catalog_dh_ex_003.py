@@ -615,6 +615,7 @@ def test_marketplace_price_change_never_rewrites_an_existing_order_snapshot(
     actually saw and agreed to."""
     from exchange_support import make_patient_reference, make_practitioner_reference
 
+    from daher_adapter.exchange.directory import LabDirectoryProfileRepository
     from daher_adapter.exchange.identity import (
         PatientReferenceRepository,
         PractitionerReferenceRepository,
@@ -630,6 +631,16 @@ def test_marketplace_price_change_never_rewrites_an_existing_order_snapshot(
         amount=Decimal("1000"),
         currency="DJF",
         expected_current_price_id=None,
+    )
+    directory = LabDirectoryProfileRepository(sessions, organizations)
+    directory.upsert(
+        lab_organization_id=lab.id,
+        public_address="X",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
     )
 
     provider = make_provider(organizations)
@@ -647,7 +658,12 @@ def test_marketplace_price_change_never_rewrites_an_existing_order_snapshot(
         practitioner_reference_id=practitioner.id,
         items=[OrderItemInput(catalog_entry_id=entry.id)],
     )
-    selections.select(lab_order_id=order_result.order.id, lab_organization_id=lab.id)
+    price_id = _current_price_id(sessions, offering.id)
+    selections.select(
+        lab_order_id=order_result.order.id,
+        lab_organization_id=lab.id,
+        expected_price_ids=frozenset({price_id}),
+    )
 
     selected_before = orders.get(order_result.order.id).items[0]
     assert selected_before.selected_price_amount == Decimal("1000")

@@ -26,6 +26,7 @@ per the anti-enumeration policy documented on ``authorization.py``.
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -74,6 +75,7 @@ from daher_adapter.exchange.membership import (
     OrganizationRoleAssignmentRepository,
 )
 from daher_adapter.exchange.models import (
+    LabOrderStatus,
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
@@ -81,12 +83,27 @@ from daher_adapter.exchange.models import (
 from daher_adapter.exchange.orders import (
     EmptyOrder,
     IdempotencyKeyConflict,
+    InvalidOrderTransition,
     LabOrderRecord,
     LabOrderRepository,
     OrderItemInput,
 )
+from daher_adapter.exchange.orders import OrderNotFound as LabOrderNotFound
 from daher_adapter.exchange.organizations import InvalidOrganizationType, OrganizationRepository
+from daher_adapter.exchange.patient_access import (
+    ActiveGrantAlreadyExists,
+    OrderNotIssuable,
+    PatientAccessGrantRepository,
+)
+from daher_adapter.exchange.patient_access import OrderNotFound as GrantOrderNotFound
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
+from daher_adapter.exchange.selection import (
+    DifferentLabAlreadySelected,
+    LabCannotFulfillOrder,
+    LabSelectionRepository,
+    PatientAccessGrantInvalidated,
+    StalePriceSelection,
+)
 
 # DH-EX-004R: the fixed, server-derived source-identity namespace for a DHealth-native ordering
 # clinician's `PractitionerReference` -- never a caller-supplied practitioner_reference_id (see
@@ -108,6 +125,10 @@ _CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM = "urn:dhealth:exchange-identity-
 _CANONICAL_UUID4_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
+
+# DH-EX-005R: `secrets.token_urlsafe(32)` produces exactly 43 characters -- generously bounded so
+# an attacker-controlled Authorization header cannot force unbounded hashing/DB-lookup work.
+_MAX_PATIENT_BEARER_TOKEN_LENGTH = 512
 
 
 class _InactiveMembershipReplay(Exception):
@@ -463,12 +484,102 @@ class LabOrderSummaryResponse(BaseModel):
     item_count: int
 
 
+# -- DH-EX-005: secure patient order access + patient lab selection ------------------------------
+
+
+class PatientAccessIssueResponse(BaseModel):
+    """The raw bearer secret appears here, and *only* here, in this whole API -- never again in
+    any subsequent response, log, or database row (only its SHA-256 digest is persisted). No
+    canonical patient-frontend URL exists in this repository yet, so this deliberately returns the
+    bare token + expiry rather than inventing a fabricated production hostname; a future
+    messaging/UI layer constructs the actual `#access=<token>` fragment URL from this."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    access_token: str
+    expires_at: datetime
+
+
+class PatientOrderItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+
+
+class PatientSelectionReceiptItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    selected_price_amount: Decimal
+    selected_price_currency: str
+
+
+class PatientSelectionReceiptResponse(BaseModel):
+    """Built entirely from the frozen `LabOrderItem` snapshots and the immutable `LabSelection`
+    row -- never from a live re-read of `LabPrice`, so a lab changing or deactivating afterward
+    can never alter what this receipt shows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    public_address: str | None
+    latitude: Decimal | None
+    longitude: Decimal | None
+    public_phone: str | None
+    selected_at: datetime
+    items: list[PatientSelectionReceiptItemResponse]
+    total_amount: Decimal
+    currency: str
+
+
+class PatientOrderResponse(BaseModel):
+    """The patient-facing order view -- deliberately excludes every internal identifier
+    (`PatientReference`/`PractitionerReference`/`ExchangeIdentity`/membership/audit ids), contact
+    data, and any result value. `selection` is `None` before a lab is chosen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    requested_tests: list[PatientOrderItemResponse]
+    ordering_provider_name: str
+    selection: PatientSelectionReceiptResponse | None
+
+
+class PatientSelectionRequest(BaseModel):
+    """No ``lab_order_id`` -- the bearer grant alone determines which order this request applies
+    to (see ``get_patient_access`` below); accepting one in the body would reopen exactly the IDOR
+    class this design otherwise removes structurally. ``expected_price_ids`` is the patient's
+    explicit consent to the *exact* current prices they were shown -- required, no default,
+    duplicates rejected before any comparison."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    expected_price_ids: list[uuid.UUID] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _no_duplicate_price_ids(self) -> "PatientSelectionRequest":
+        if len(set(self.expected_price_ids)) != len(self.expected_price_ids):
+            raise ValueError("expected_price_ids must not contain duplicates")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPatientAccess:
+    grant_id: uuid.UUID
+    lab_order_id: uuid.UUID
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
     token_validator: TokenValidator,
     audit_writer: ExchangeAuditWriter,
     platform_admin_role: str,
+    patient_access_ttl_hours: int = 168,
 ) -> APIRouter:
     identities = ExchangeIdentityRepository(session_factory)
     organizations = OrganizationRepository(session_factory)
@@ -481,6 +592,10 @@ def build_exchange_router(
     patients = PatientReferenceRepository(session_factory)
     practitioners = PractitionerReferenceRepository(session_factory)
     orders = LabOrderRepository(session_factory, organizations, catalog)
+    selections = LabSelectionRepository(session_factory, organizations)
+    patient_access = PatientAccessGrantRepository(
+        session_factory, ttl_hours=patient_access_ttl_hours
+    )
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -517,6 +632,45 @@ def build_exchange_router(
             subject=record.subject,
             platform_admin=token.has_role(platform_admin_role),
         )
+
+    def get_patient_access(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> AuthenticatedPatientAccess:
+        # DH-EX-005: deliberately does NOT call `token_validator` (the OIDC path) at all -- a
+        # completely separate authentication mechanism, per the ticket's explicit "must be
+        # separate from OIDC" instruction. An OIDC JWT presented here simply will not match any
+        # stored `token_hash` (a JWT is a three-part, dot-separated, ~200+ char structure; a SHA-256
+        # digest lookup of it just misses), so it fails closed the same generic way as any other
+        # unknown token, with no special-casing needed to keep the two paths from cross-
+        # contaminating. Every failure mode -- missing header, malformed scheme, unknown token,
+        # expired, revoked -- collapses to this same 401, never distinguishing *why* to an
+        # unauthenticated caller.
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing credentials"
+            )
+        scheme, _, raw_token = authorization.partition(" ")
+        raw_token = raw_token.strip()
+        # DH-EX-005R: a bound on the bearer value itself, not just a transport-layer header-size
+        # limit -- `secrets.token_urlsafe(32)` produces exactly 43 characters, so this is
+        # generously sized for any legitimate token while still refusing to feed an unbounded,
+        # attacker-controlled multi-megabyte string into hashing/DB lookup. This is DoS hardening,
+        # not secret validation by obscurity: the same generic 401 as every other malformed/
+        # unknown/expired/revoked token, never a distinct error revealing the bound exists.
+        if (
+            scheme.lower() != "bearer"
+            or not raw_token
+            or len(raw_token) > _MAX_PATIENT_BEARER_TOKEN_LENGTH
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing credentials"
+            )
+        grant = patient_access.validate_token(raw_token)
+        if grant is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing credentials"
+            )
+        return AuthenticatedPatientAccess(grant_id=grant.id, lab_order_id=grant.lab_order_id)
 
     def _audit_refused(
         principal: AuthenticatedPrincipal, organization_id: uuid.UUID | None
@@ -1116,16 +1270,10 @@ def build_exchange_router(
 
     # -- DH-EX-003: marketplace (read-only query, never mutates order state) --------------------
 
-    @router.post("/marketplace/lab-options", response_model=MarketplaceLabOptionsResponse)
-    def marketplace_lab_options(
-        body: MarketplaceLabOptionsRequest,
-        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
-    ) -> MarketplaceLabOptionsResponse:
-        _require_network_read_access(principal)
-
+    def _require_orderable_entries(catalog_entry_ids: list[uuid.UUID]) -> None:
         # Fail closed on the whole request rather than silently dropping one requested test --
         # every entry must exist, be ACTIVE, and (this pilot phase) be SYNTHETIC.
-        for entry_id in body.catalog_entry_ids:
+        for entry_id in catalog_entry_ids:
             try:
                 entry = catalog.get_entry(entry_id)
             except CatalogEntryNotFound as error:
@@ -1144,7 +1292,10 @@ def build_exchange_router(
                     detail=f"catalog entry {entry_id} is not a synthetic pilot-phase entry",
                 )
 
-        labs = catalog.find_whole_order_eligible_labs(body.catalog_entry_ids)
+    def _build_marketplace_response(
+        catalog_entry_ids: list[uuid.UUID],
+    ) -> MarketplaceLabOptionsResponse:
+        labs = catalog.find_whole_order_eligible_labs(catalog_entry_ids)
         options = [
             MarketplaceLabOption(
                 lab=MarketplaceLabIdentity(
@@ -1174,6 +1325,15 @@ def build_exchange_router(
             for lab in labs
         ]
         return MarketplaceLabOptionsResponse(as_of=datetime.now(UTC), options=options)
+
+    @router.post("/marketplace/lab-options", response_model=MarketplaceLabOptionsResponse)
+    def marketplace_lab_options(
+        body: MarketplaceLabOptionsRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MarketplaceLabOptionsResponse:
+        _require_network_read_access(principal)
+        _require_orderable_entries(body.catalog_entry_ids)
+        return _build_marketplace_response(body.catalog_entry_ids)
 
     # -- DH-EX-004: provider lab-order creation --------------------------------------------------
 
@@ -1302,6 +1462,216 @@ def build_exchange_router(
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return _to_order_response(order)
+
+    # -- DH-EX-005: provider-issued secure patient order access ----------------------------------
+
+    def _existing_order_for_provider_or_404(order_id: uuid.UUID, provider_id: uuid.UUID):
+        order = orders.get_for_organization(order_id, provider_id)
+        if order is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return order
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/patient-access",
+        response_model=PatientAccessIssueResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def issue_patient_access(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientAccessIssueResponse:
+        # Patient access is clinical order access -- the exact same CLINICIAN boundary as
+        # creating/reading the order itself, never platform-admin-or-ORG_ADMIN-alone.
+        response.headers["Cache-Control"] = "no-store"
+        _require_clinician(principal, provider_id)
+        _existing_order_for_provider_or_404(order_id, provider_id)
+
+        try:
+            with session_factory.begin() as session:
+                issued = patient_access.issue(lab_order_id=order_id, session=session)
+                security_audit.record(
+                    session,
+                    event_type="patient_access_issued",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=provider_id,
+                    outcome="created",
+                    resource_type="patient_access_grant",
+                    resource_id=issued.id,
+                )
+        except GrantOrderNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except OrderNotIssuable as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ActiveGrantAlreadyExists as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        return PatientAccessIssueResponse(
+            access_token=issued.raw_token, expires_at=issued.expires_at
+        )
+
+    @router.delete(
+        "/organizations/{provider_id}/orders/{order_id}/patient-access",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def revoke_patient_access(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> None:
+        _require_clinician(principal, provider_id)
+        _existing_order_for_provider_or_404(order_id, provider_id)
+
+        try:
+            with session_factory.begin() as session:
+                outcome, grant_id = patient_access.revoke(lab_order_id=order_id, session=session)
+                # Idempotent: revoking an order with no active grant is a safe no-op -- never a
+                # second `patient_access_revoked` audit row for the same underlying fact.
+                if outcome == "revoked":
+                    security_audit.record(
+                        session,
+                        event_type="patient_access_revoked",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="updated",
+                        resource_type="patient_access_grant",
+                        resource_id=grant_id,
+                    )
+        except GrantOrderNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        return None
+
+    # -- DH-EX-005: patient API -- order-scoped by the bearer grant alone, never a path/body id ----
+
+    def _patient_order_response(lab_order_id: uuid.UUID) -> PatientOrderResponse:
+        order = orders.get(lab_order_id)
+        provider = organizations.get(order.provider_organization_id)
+        selection_record = selections.get_for_order(lab_order_id)
+        selection_response: PatientSelectionReceiptResponse | None = None
+        if selection_record is not None:
+            lab = organizations.get(selection_record.lab_organization_id)
+            listing = directory.get_listing_for_lab(
+                selection_record.lab_organization_id, include_unlisted=True
+            )
+            total = sum(
+                (item.selected_price_amount for item in order.items if item.selected_price_amount),
+                start=Decimal("0"),
+            )
+            currency = next(
+                (
+                    item.selected_price_currency
+                    for item in order.items
+                    if item.selected_price_currency
+                ),
+                "DJF",
+            )
+            selection_response = PatientSelectionReceiptResponse(
+                lab_organization_id=lab.id,
+                lab_organization_name=lab.name,
+                public_address=listing.public_address if listing else None,
+                latitude=listing.latitude if listing else None,
+                longitude=listing.longitude if listing else None,
+                public_phone=listing.public_phone if listing else None,
+                selected_at=selection_record.selected_at,
+                items=[
+                    PatientSelectionReceiptItemResponse(
+                        catalog_code_snapshot=item.catalog_code_snapshot,
+                        catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                        selected_price_amount=item.selected_price_amount,
+                        selected_price_currency=item.selected_price_currency,
+                    )
+                    for item in order.items
+                    if item.selected_price_amount is not None
+                    and item.selected_price_currency is not None
+                ],
+                total_amount=total,
+                currency=currency,
+            )
+        return PatientOrderResponse(
+            status=order.status,
+            requested_tests=[
+                PatientOrderItemResponse(
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                )
+                for item in order.items
+            ],
+            ordering_provider_name=provider.name,
+            selection=selection_response,
+        )
+
+    @router.get("/patient/order", response_model=PatientOrderResponse)
+    def get_patient_order(
+        response: Response,
+        access: Annotated[AuthenticatedPatientAccess, Depends(get_patient_access)],
+    ) -> PatientOrderResponse:
+        response.headers["Cache-Control"] = "no-store"
+        return _patient_order_response(access.lab_order_id)
+
+    @router.get("/patient/order/lab-options", response_model=MarketplaceLabOptionsResponse)
+    def get_patient_lab_options(
+        response: Response,
+        access: Annotated[AuthenticatedPatientAccess, Depends(get_patient_access)],
+    ) -> MarketplaceLabOptionsResponse:
+        response.headers["Cache-Control"] = "no-store"
+        order = orders.get(access.lab_order_id)
+        if order.status != LabOrderStatus.AWAITING_LAB_SELECTION.value:
+            # Fails closed for every later status too (ACCEPTED/IN_PROGRESS/COMPLETED/REJECTED/
+            # CANCELLED) -- no selection is possible once the order has moved past this stage, and
+            # a SELECTED order's real answer lives in the frozen receipt, not a fresh marketplace
+            # read.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="order is not awaiting lab selection",
+            )
+        # The exact requested catalog set is derived from the order itself -- the patient grant
+        # can never be used to browse the network or query an arbitrary test set.
+        entry_ids = [item.catalog_entry_id for item in order.items]
+        _require_orderable_entries(entry_ids)
+        return _build_marketplace_response(entry_ids)
+
+    @router.post("/patient/order/selection", response_model=PatientOrderResponse)
+    def create_patient_selection(
+        body: PatientSelectionRequest,
+        response: Response,
+        access: Annotated[AuthenticatedPatientAccess, Depends(get_patient_access)],
+    ) -> PatientOrderResponse:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            _record, created = selections.select(
+                lab_order_id=access.lab_order_id,
+                lab_organization_id=body.lab_organization_id,
+                expected_price_ids=frozenset(body.expected_price_ids),
+                patient_access_grant_id=access.grant_id,
+            )
+        except LabOrderNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidOrderTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except DifferentLabAlreadySelected as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LabCannotFulfillOrder as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except StalePriceSelection as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except PatientAccessGrantInvalidated as error:
+            # Discovered *inside* the mutation transaction, after the `get_patient_access`
+            # dependency's own (already-closed) check passed -- same generic 401 as every other
+            # invalid-grant response, never distinguishing "it was fine a moment ago" from any
+            # other unauthenticated-caller-facing failure mode.
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing credentials"
+            ) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _patient_order_response(access.lab_order_id)
 
     return router
 

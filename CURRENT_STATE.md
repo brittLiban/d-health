@@ -1409,3 +1409,77 @@ that is easy to let go stale; DH-EX-004 added no new authentication surface.
 clinician creates order → `AWAITING_LAB_SELECTION` → patient receives/uses scoped secure access →
 patient sees eligible labs/current prices → patient chooses one lab → selected lab + price
 snapshot become durable → order transitions to `SELECTED` — **not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-005, append-only — the "NEXT: DH-EX-005 ... not started"
+line above is superseded, not retracted).** DH-EX-005 (patient secure link + lab selection) is now
+**implemented, self-reviewed, and qualified against both SQLite and real PostgreSQL 18.6**. Still
+**not committed, not pushed**, and — unlike DH-EX-004 at the equivalent point — **no DH-EX-005R
+independent review has run yet either**; this ticket's own self-review is documented but is not a
+substitute for that separate step. Full detail is in PROJECT_STATE.md's DH-EX-005 entry; the
+load-bearing facts:
+
+- A clinician (same CLINICIAN-in-ACTIVE-PROVIDER-org boundary as DH-EX-004, still no platform-admin
+  bypass) issues/revokes an opaque, order-scoped 256-bit bearer secret for a `LabOrder`
+  `AWAITING_LAB_SELECTION`. Only its SHA-256 digest is ever persisted. Three entirely separate patient
+  endpoints (`GET .../patient/order`, `GET .../patient/order/lab-options`,
+  `POST .../patient/order/selection`) are authenticated by that secret alone — never OIDC, never a
+  client-supplied order/provider/patient id (an entire IDOR class removed structurally).
+  `LabSelectionRepository.select()` now re-runs the *full* DH-EX-003 marketplace-eligibility contract
+  plus an exact price-id-set consent check inside the same transaction that freezes prices, creates
+  the `LabSelection`, and transitions the order to `SELECTED` — no TOCTOU window. Patient selections
+  carry their own provenance via `LabSelection.selected_via_patient_access_grant_id`, never a fake
+  `ExchangeIdentity`.
+- Self-review found and fixed two real bugs (a stray `outcome` column left on the new model by a
+  copy/paste slip; a SQLite-only naive/aware `datetime` comparison `TypeError`) and two structural
+  issues within approved architecture (`revoke()` now locks the order row first, exactly like
+  `issue()`, closing a race where a revoke could falsely report success while a fresh grant silently
+  survived; the grant-issuance retry loop now re-queries for a genuine `token_hash` collision instead
+  of blindly retrying and misreporting any `IntegrityError`).
+- 33 new tests in `test_exchange_patient_access.py`, including the ticket's exact golden/stale-price/
+  lab-unavailable scenarios and same-lab-replay-after-a-price-change (proven to return the original
+  frozen amount, never re-check). Full adapter suite: **532 passed / 39 skipped** (was 499 before this
+  ticket), `ruff` clean, CR-byte/whitespace/secret scans clean.
+- Real PostgreSQL 18.6 (scratch DB `dhex005_qual`): fresh `0001→0008` clean; schema-parity verified
+  column-by-column including the partial unique index and that the recreated audit CHECK constraints
+  still contain every prior DH-EX-002/003/004 value; `0007→0008` upgrade over genuine pre-existing
+  data left every row intact; compatible downgrade + clean re-upgrade; incompatible downgrade
+  (proven twice — real grant row, and separately a real audit-row-only trigger) refuses before any
+  DDL in both cases, schema/data confirmed byte-identical afterward. 25-way grant-issuance race,
+  25-way same-lab and two-lab selection races, and price-update/offering-deactivation two-outcome-
+  only races all proven directly against real PostgreSQL.
+
+**NEXT: Liban's independent review of DH-EX-005 (the DH-EX-005R step), then a combined
+commit/push/exact-SHA-CI ticket, then DH-EX-005D documentation closure, then DH-EX-006 — lab
+acceptance and result workflow — not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-005R, append-only — the "NEXT: Liban's independent review"
+line above is superseded, not retracted).** DH-EX-005R (the independent review) has now run. Still
+**not committed, not pushed**. Full detail is in PROJECT_STATE.md's DH-EX-005R entry; the
+load-bearing facts:
+
+- **One BLOCKER found and fixed**: `LabSelectionRepository.select()` never re-validated the patient
+  access grant inside its own mutation transaction — a grant revoked moments after the FastAPI auth
+  dependency's own (already-closed) check could still authorize a real `LabSelection`. Proven
+  exploitable deterministically (no race needed) before the fix; fixed by re-reading the exact grant
+  row inside the transaction, right after locking the order, and verifying it's still bound to this
+  order, unrevoked, and unexpired. Proven closed via SQLite (deterministic + a genuine concurrent-
+  thread race) and **20 real-PostgreSQL races** (staggered to hit both orderings, 10/10 each way,
+  zero corrupted outcomes), plus a real-Postgres issue-vs-revoke race and expiry-boundary control.
+- Four smaller gaps closed: missing `Cache-Control: no-store` on all four patient-sensitive
+  responses; no explicit length bound on the bearer token before hashing; no permanent negative
+  control proving a real `LabResult` row never leaks through the patient order response; no
+  audit-atomicity test for revocation (issuance had one, revoke didn't — the code was already
+  correct, just untested for that path).
+- Test-count delta from DH-EX-005's own 495→532 claim independently reconciled exactly: 33 new test
+  functions in the new file + a net 4 new in `test_exchange_selection.py` (one legitimate rename,
+  zero weakening) = 37, zero parametrization involved. Pre-existing baseline (495/39) independently
+  re-run from a clean `git worktree` at the exact base commit to confirm it, not just trusted.
+- Full regression after every fix: **541 passed / 39 skipped** (532 + 9 new tests from this review
+  pass), `ruff`/`pip check`/`git diff --check`/secret-scan all clean. CI workflow diff confirmed to
+  be exactly the one `EXPECTED_HEAD` line, nothing else.
+- **READY FOR COMMIT: YES** per the ticket's own checklist, but the ticket explicitly says stop for
+  Liban's sign-off regardless — not committed, not pushed.
+
+**NEXT: Liban's own sign-off on this review, then a combined DH-EX-005+DH-EX-005R
+commit/push/exact-SHA-CI ticket, then DH-EX-005D documentation closure, then DH-EX-006 — lab
+acceptance and result workflow — not started.**

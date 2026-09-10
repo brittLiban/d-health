@@ -68,6 +68,19 @@ def _positive_int(environment: Mapping[str, str], name: str, default: int) -> in
     return value
 
 
+def _bounded_int(
+    environment: Mapping[str, str], name: str, default: int, *, minimum: int, maximum: int
+) -> int:
+    raw = environment.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be an integer") from error
+    if not (minimum <= value <= maximum):
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def _positive_float(environment: Mapping[str, str], name: str, default: float) -> float:
     raw = environment.get(name, str(default))
     try:
@@ -114,6 +127,11 @@ class Settings:
     # sharing one file would force a reader to distinguish two unrelated shapes by inspection.
     # `None` resolves to a sibling file next to `audit_path` (see `resolved_exchange_audit_path`).
     exchange_audit_path: Path | None = None
+    # DH-EX-005: the opaque patient order-access grant's technical TTL -- an access-security
+    # default, not a clinical policy. 168h (7 days) is a conservative MVP default; bounded to
+    # [1, 720] hours (1 hour .. 30 days) so a misconfigured value cannot silently produce an
+    # unbounded-lifetime or effectively-instant-expiry grant.
+    exchange_patient_access_ttl_hours: int = 168
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -152,6 +170,9 @@ class Settings:
                 Path(env["EXCHANGE_AUDIT_PATH"])
                 if env.get("EXCHANGE_AUDIT_PATH", "").strip()
                 else None
+            ),
+            exchange_patient_access_ttl_hours=_bounded_int(
+                env, "EXCHANGE_PATIENT_ACCESS_TTL_HOURS", 168, minimum=1, maximum=720
             ),
         )
 
