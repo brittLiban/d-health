@@ -959,11 +959,26 @@ organization creation, and membership/role management — no lab-order API, no p
 no patient-link API. **Real Keycloak qualification was NOT run** (registry unreachable in the
 qualification sandbox) and remains a deployment/pilot gate, not closed by this status.
 
-Still not built, no connector wiring changed: any HTTP API beyond the five `/exchange/v1` routes
-above, the Provider Portal, the Lab Portal, patient-link UI, lab directory/pricing, and
-WhatsApp/SMS integration — none of this is equivalent to a completed Exchange MVP. No file under
-`openmrs-config/` or `openelis-config/` has changed, and the connector Keycloak realm
-(`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
-(DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
-PROJECT_STATE.md's DH-EX-001 and DH-EX-002 FINAL CLOSURE entries. Next: DH-EX-003 (lab directory,
-test offerings, pricing) — not started.
+**DH-EX-003 (lab directory, synthetic test catalog, lab offerings, DJF pricing, whole-order lab
+eligibility) is also committed and exact-SHA CI qualified** (2026-09-09/10; qualified at commit
+`33c5edb9ed76ac6bc0f22b1663de3b868dce2364`, per DH-EX-003R's independent marketplace/security/
+data-integrity review, CI run `34432960783`, all required jobs green). Qualified: a `LabDirectoryProfile`
+per LAB organization (`listed`/`accepting_orders` both default `false`), a synthetic-only DHealth
+test catalog HTTP API (a client cannot submit `is_synthetic=false`; ordinary network reads expose
+ACTIVE+SYNTHETIC entries only), lab offering administration with anti-enumeration cross-tenant
+refusal, DJF-only current pricing with optimistic concurrency (CAS) and immutable price history, and
+the whole-order eligibility query that answers "for this exact requested set of tests, which
+participating labs can fulfil the **entire** order, and what does each currently charge?" — never a
+partial-lab result, and (DH-EX-003R's fix) evaluated under PostgreSQL `REPEATABLE READ` so its
+multi-pass query observes one coherent snapshot. DH-EX-002's transactional security-audit pattern
+was generalized, not replaced, to cover these new mutation types. This is a read-only backend query
+and admin API — it does not create a `LabSelection`, does not freeze a `LabOrderItem` price, and
+there is no patient-facing marketplace UI yet.
+
+Still not built, no connector wiring changed: lab-order creation, patient selection, the Provider
+Portal, the Lab Portal, patient-link UI, and WhatsApp/SMS integration — none of this is equivalent
+to a completed Exchange MVP. No file under `openmrs-config/` or `openelis-config/` has changed, and
+the connector Keycloak realm (`daher-realm.json`) is untouched. Full audit, gap analysis, and the
+proposed ticket sequence (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/
+closure detail: PROJECT_STATE.md's DH-EX-001, DH-EX-002, and DH-EX-003 FINAL CLOSURE entries. Next:
+DH-EX-004 (Provider lab-order creation) — not started.

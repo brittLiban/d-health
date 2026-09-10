@@ -1280,3 +1280,27 @@ PROJECT_STATE.md's DH-EX-003R entry; the load-bearing facts:
 
 **NEXT: Liban's review of DH-EX-003+DH-EX-003R, then a combined commit/push/exact-SHA-CI ticket,
 then DH-EX-004 — lab order creation.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-003 FINAL CLOSURE, append-only — the "NEXT: Liban's review"
+line above is superseded, not retracted).** DH-EX-003 + DH-EX-003R were committed together
+(`33c5edb9ed76ac6bc0f22b1663de3b868dce2364`, parent `a76455db8677815c4a32deee4fce592c7761dafb`),
+pushed, and exact-SHA CI qualified (run `34432960783`, all 9 required jobs green, adapter
+`441 passed / 39 skipped` confirmed independently in CI's own logs, migration head confirmed
+`0006_exchange_lab_directory` against CI's real `postgres:16-alpine` service). Full account:
+PROJECT_STATE.md's **DH-EX-003 · FINAL CLOSURE** entry.
+
+**DH-EX-001, DH-EX-002, and DH-EX-003 are all closed.** The DHealth Exchange currently has: the core
+domain/persistence layer (DH-EX-001); organization identity, OIDC validation, memberships, tenant
+roles, the platform-admin boundary, and a transactionally-authoritative security-mutation audit
+(DH-EX-002); a lab directory, a synthetic-only pilot test catalog, lab offering administration, DJF
+current pricing with CAS and immutable history, and whole-order lab eligibility — all evaluated
+under PostgreSQL `REPEATABLE READ` for snapshot coherence (DH-EX-003). It does **not** yet have: lab
+order HTTP creation, patient reference/selection linkage to an order, a Provider Portal order
+workflow, a Lab Portal result workflow, a patient secure link, or WhatsApp/SMS integration. The
+marketplace query is read-only and does not yet produce a permanently frozen patient quote.
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN** — stated plainly here again because it is exactly
+the kind of fact that is easy to let go stale; DH-EX-003 added no new authentication surface.
+
+**NEXT: DH-EX-004 — Provider lab-order creation** (exact patient reference, exact practitioner
+reference, exact DHealth catalog tests, provider-scoped idempotency key, resulting in
+`AWAITING_LAB_SELECTION`) — **not started.**

@@ -8,15 +8,20 @@ OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built a
 **first reference connector track** rather than the product's definition. Nothing below is deleted
 or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
-[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 and DH-EX-002 FINAL CLOSURE entries for what
-exists so far. The Exchange **core domain/persistence layer** (DH-EX-001) and the **organization
-onboarding, OIDC authentication, and multi-tenant authorization boundary** (DH-EX-002) are both
-committed and CI-qualified — secure multi-organization identity and tenant isolation now exist, with
-a transactionally-authoritative security-mutation audit. Real Keycloak integration remains a
-deployment/pilot qualification gate, not yet run. The Provider Portal, Lab Portal, patient secure
-link, lab directory/pricing, and WhatsApp/SMS integration are **still under construction, not yet
-built** — this is the foundation those are built on, not the MVP itself. OpenMRS/OpenELIS remain
-supported, running exactly as built, as the first reference connector track.
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001, DH-EX-002, and DH-EX-003 FINAL CLOSURE entries
+for what exists so far. The Exchange **core domain/persistence layer** (DH-EX-001), the
+**organization onboarding, OIDC authentication, and multi-tenant authorization boundary**
+(DH-EX-002), and the **lab directory, synthetic test catalog, lab offerings, DJF pricing, and
+whole-order lab eligibility backend** (DH-EX-003) are all committed and CI-qualified — DHealth's
+backend can now identify which participating labs can fulfil an entire requested (synthetic,
+pilot-phase) set of tests and return each one's current DJF pricing, with secure multi-organization
+identity, tenant isolation, and a transactionally-authoritative security-mutation audit throughout.
+Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. Lab-order
+creation, patient selection, the Provider Portal, Lab Portal, patient secure link, and WhatsApp/SMS
+integration are **still under construction, not yet built** — this is the backend foundation those
+are built on, not a patient-facing marketplace and not the MVP itself; no order can yet be submitted
+end-to-end. OpenMRS/OpenELIS remain supported, running exactly as built, as the first reference
+connector track.
 
 ---
 

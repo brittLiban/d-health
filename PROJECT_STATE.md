@@ -7613,3 +7613,120 @@ closing instruction, independent of the READY FOR COMMIT verdict above.**
 commit/push/exact-SHA-CI ticket, following the established DH-EX-001+DH-EX-001R→DH-EX-001C /
 DH-EX-002+DH-EX-002R→DH-EX-002C pattern. After that: DH-EX-004 (lab order creation) — **not
 started.**
+
+### DH-EX-003 · FINAL CLOSURE — lab marketplace directory, synthetic test catalog, offerings,
+DJF pricing, whole-order eligibility · P0 · ✅ CLOSED / QUALIFIED
+
+**Ticket:** DH-EX-003 (+ DH-EX-003R independent marketplace/security/data-integrity review,
+combined into one commit, following the DH-EX-001+DH-EX-001R→DH-EX-001C /
+DH-EX-002+DH-EX-002R→DH-EX-002C pattern).
+
+**Implementation + review commit:** `33c5edb9ed76ac6bc0f22b1663de3b868dce2364`.
+**Parent:** `a76455db8677815c4a32deee4fce592c7761dafb` (DH-EX-002D's docs-closure commit) —
+confirmed exact via `git rev-parse HEAD^` immediately after commit.
+**Exact-SHA CI:** run `34432960783`, `head_sha` confirmed exactly
+`33c5edb9ed76ac6bc0f22b1663de3b868dce2364` via `gh run view --json headSha`, all 9 required jobs
+`success` (provisioning, static checks, compose interpolates and parses, adapter, seed +
+form-safety suites, OpenMRS narrow TestOrder module, openelis order-correlation patch, oauth2login
+patched identity tests, ui). Adapter CI's own raw log: `441 passed, 39 skipped, 1 warning in
+18.12s`; `alembic current` = `alembic heads` = `expected head` = `0006_exchange_lab_directory`, all
+three read directly from CI's log, not recalled from a prior claim. Exactly 18 files committed
+(13 modified + 5 new), staged by explicit path, independently confirmed against the DH-EX-003R
+review's own file list before commit.
+
+**What DH-EX-003 established.** A `LabDirectoryProfile` one-to-one with a LAB organization
+(`listed`/`accepting_orders` both default `false` — never auto-visible; `public_address` required
+non-blank after trimming; latitude/longitude both-or-neither with range CHECK constraints); a
+synthetic-only DHealth test catalog HTTP API (`POST /catalog/tests` is platform-admin only, has no
+`is_synthetic` request field at all, and hardcodes `is_synthetic=True` server-side — a client
+cannot submit `is_synthetic=false` through this API by any means; ordinary network reads expose
+ACTIVE+SYNTHETIC entries only, platform admin sees the unfiltered inspection view); lab offering
+administration (LAB `ORG_ADMIN` manages only their own lab, cross-tenant mutation is 404 not 403,
+`LAB_TECH` and PROVIDER `ORG_ADMIN` are both refused mutation, insert-first-wins replay semantics,
+no silent reactivation of an inactive offering); DJF-only current pricing with optimistic
+concurrency (`expected_current_price_id` CAS token) and immutable price history (superseded rows
+are never mutated); and the whole-order eligibility query answering "for this exact requested set
+of tests, which participating labs can fulfil the **entire** order, and what does each currently
+charge?" — never a partial-lab result. DH-EX-002's transactional security-audit pattern was
+generalized (nullable `organization_id` for platform-level mutations, polymorphic
+`resource_type`/`resource_id`), not replaced, to cover these six new mutation event types, all now
+proven by a positive HTTP test.
+
+**DH-EX-003R's review — the blocker the handoff itself asked to be checked, found and fixed before
+this commit, not after.** An ACTIVE membership inside a **deactivated** organization previously
+retained standing, indefinite access to browse the catalog/directory/marketplace, because
+`require_any_active_membership` (the gate for these non-org-scoped network reads) checked
+membership status only, never the membership's own organization status. Fixed before any of this
+was committed, together with four HIGH findings (a real mixed-currency-total gap in the
+whole-order query's pass-3 line fetch; `GET /catalog/tests` returning every row unfiltered to any
+network member with no platform-admin distinction; the three-pass eligibility query's snapshot
+coherence under PostgreSQL READ COMMITTED, closed by running the whole read under `REPEATABLE READ`
+— proven both by confirming `SHOW transaction_isolation` actually reports `repeatable read` and by
+a 600+-read concurrent-mutation stress test with zero inconsistent results; and migration `0006`'s
+downgrade, which could previously hit a raw `NotNullViolation` mid-migration, now runs an explicit
+pre-DDL check and refuses cleanly with `DowngradeBlockedByAuditHistory` rather than destroying audit
+history or fabricating ownership to force compatibility) and three MEDIUM/LOW findings (a
+whitespace-only `public_address` could pass validation; `LabPriceSetRequest.amount` had no
+`max_digits`/`decimal_places` matching the DB's `Numeric(12, 2)` column; two disclosed audit-
+coverage gaps for `lab_directory_profile_updated`/`lab_offering_status_changed` closed with positive
+tests). Full account: PROJECT_STATE.md's DH-EX-003R entry above — this closure entry alone gives an
+accurate picture without requiring cross-referencing the working DH-EX-003/DH-EX-003R entries.
+
+**Migration `0006_exchange_lab_directory`, purely additive on `0005_exchange_org_auth`, and
+CONDITIONALLY reversible — stated precisely, not as a bare "downgrade works".** `alembic upgrade
+head` from `0005` reaches `0006` cleanly; `0006 → 0005` succeeds cleanly and re-upgrades cleanly
+**only while no DH-EX-003 platform-level audit history exists that cannot fit `0005`'s narrower
+shape** (a NULL `organization_id`, a DH-EX-003 `event_type`, or an `'updated'`/`'unchanged'`
+`outcome`). Once such a row exists — for example, one `catalog_entry_created` audit row from a
+platform-level catalog mutation, which by definition has no owning organization —
+`downgrade()` detects this **before any DDL** and refuses with an explicit
+`DowngradeBlockedByAuditHistory` message rather than deleting the audit row, fabricating a
+placeholder organization, or silently rewriting audit ownership to force the schema to narrow. This
+was independently re-qualified against real PostgreSQL 18.6 immediately before this commit: (a)
+fresh `0001 → 0006`; (b) `0005 → 0006` upgrade; (c) compatible `0006 → 0005` downgrade
+(no incompatible rows) succeeds, re-upgrade succeeds; (d) a database reseeded with one
+DH-EX-003-shaped audit row refuses the downgrade immediately, and `alembic current`/a direct
+row-count and schema query afterward confirm the database is still exactly `0006`, byte-for-byte
+unchanged (transactional DDL — the refusal happens before any `ALTER`/`DROP` runs). This is an
+intentional fail-safe, not a migration defect, and not equivalent to "downgrade is unconditionally
+safe."
+
+**Real PostgreSQL qualification, local vs. CI, kept distinct — never conflated.** Local independent
+qualification ran against **PostgreSQL 18.6** (WSL2 `apt`-installed sandbox, not Docker, matching
+every prior ticket in this sequence): migration fresh/upgrade/both downgrade states, catalog-entry
+and lab-offering 25-way creation concurrency (exactly 1 `created`, 1 row, 0 errors each), price
+same-value 25-way concurrency (exactly 1 `created`, 1 current row, 0 errors) and stale-conflict
+25-way concurrency (exactly 1 winner, 24 controlled conflicts, 1 current row), the exact whole-order
+eligibility scenario, the REPEATABLE READ isolation-override proof and its 600+-read concurrent
+stress test, and audit-atomicity failure injection — all re-run and passing immediately before this
+commit. **CI's own PostgreSQL service is `postgres:16-alpine`** (per `.github/workflows/ci.yml`),
+independently confirmed via CI's own migration-head check reaching `0006_exchange_lab_directory`
+and its own `441 passed / 39 skipped` pytest line — not claimed byte-identical to the local
+PostgreSQL 18.6 qualification, matching every prior ticket's same caveat.
+
+**REAL KEYCLOAK QUALIFICATION = NOT RUN.** DH-EX-003 added no new authentication surface — it
+reuses DH-EX-002's existing OIDC/`AuthenticatedPrincipal` machinery unchanged. Every claim about
+network-read/tenant/role authorization in this and the DH-EX-003R entry is proven against a
+**locally generated RSA keypair** via `StaticKeySource`, never a real IdP. This remains a
+deployment/pilot gate, not closed by this status, exactly as recorded for DH-EX-001 and DH-EX-002.
+
+**Real facility:** untouched. **Pollers:** inactive. **Connector realm (`daher-realm.json`,
+`reconcile-sso.sh`) not touched by DH-EX-003/DH-EX-003R.** No file under `openmrs-config/` or
+`openelis-config/` touched.
+
+**What this closure means, precisely.** DH-EX-003 closes the lab marketplace **backend/API
+foundation** — directory visibility, a synthetic pilot test catalog, lab offering administration,
+DJF current pricing with CAS and immutable history, and whole-order eligibility. It does **not**
+mean: lab-order creation exists; patient selection exists; a Provider Portal order workflow exists;
+a Lab Portal exists; a patient secure link exists; a patient-facing marketplace UI exists; WhatsApp/
+SMS integration exists; a results workflow exists; real Keycloak deployment is qualified; real lab
+directory data or real prices exist; production deployment exists; or any pilot has begun. The
+marketplace endpoint is read-only by construction and does not yet produce a permanently frozen
+patient quote — it does not write `LabSelection` and does not freeze a `LabOrderItem` price. See
+`docs/ARCHITECTURE.md` §17 for the architecture and `DECISIONS.md`'s ADR-042 for the underlying
+product-pivot decision, unchanged in substance by this closure.
+
+**Next:** DH-EX-004 — Provider lab-order creation: an authenticated clinician in a provider
+organization creating a DHealth lab order for an exact patient reference, an exact practitioner
+reference, exact DHealth catalog tests, and a provider-scoped idempotency key, resulting in
+`AWAITING_LAB_SELECTION` — **not started.**
