@@ -9091,3 +9091,131 @@ evidence correction); then DH-EX-008 or whatever the next item in the DH-EX-001�
 (DH-PIVOT-001, 2026-09-08) is — not started as of this pass.
 
 **Next:** DH-EX-007 — lab result submission and delivery — **not started.**
+
+---
+
+### DH-MVP-001 · Formalize DHealth MVP 1.0 product contract · P0 · ✅ DOCUMENTED (product/ADR only, no code)
+
+**Ticket:** DH-MVP-001 — documentation/architecture-decision ticket only, per its own explicit
+scope. No application behavior, API, migration, deployment, or test change is in this ticket.
+
+**HEAD audited:** `4e12dcfb4cc9b447496783fff1eb24eaf21711a5` (DH-EX-007D2's correction commit),
+confirmed current via `git fetch`/`git log origin/master -1` at the start of this ticket — matching
+the ticket's own expected starting SHA. Its own CI (run `34656877245`) was already independently
+confirmed green (9/9 jobs) at the end of the DH-EX-007D2 ticket.
+
+**What this ticket found, before writing anything.** ADR-042 (2026-09-08) already made the
+load-bearing architecture call for the pivot away from a maternity-first product — Option C hybrid
+data boundary, connector-agnostic Exchange core, patient result-release policy — and none of that
+was wrong or stale. What was genuinely missing: a named product family (README/ARCHITECTURE
+describe "Provider/Lab portals" and "a connector" in the abstract, but no document names DHealth
+Clinic/Lab/Patient/Connect or states their individual MVP scope); an explicit statement that DHealth
+MVP 1.0 is not primarily a price-comparison marketplace (nothing previously said this, and nothing
+previously said the opposite either — genuinely open, not a correction of a wrong claim); and the
+four product laws (no forced marketplace, no double entry, faster than what it replaces, no
+digital-literacy requirement), none of which existed anywhere in the repository before this ticket.
+No direct factual conflict was found between ADR-042/README/ARCHITECTURE/PROJECT_STATE/
+CURRENT_STATE — the gap was omission (a product family and its laws that had never been named), not
+contradiction, with one partial exception: DH-EX-005's implemented price-consent selection contract
+was never reconciled against the (previously unstated) "no forced marketplace" direction — recorded
+as an explicit open conflict in ADR-043, not resolved by it.
+
+**Current implemented Exchange capability, restated precisely for this ticket's own product-gap
+analysis** (full detail: `docs/MVP-1.0.md` §8): DH-EX-001 through DH-EX-007 implement, and CI has
+independently confirmed green for, the backend path from provider order creation through patient
+price-consent lab selection, lab accept/reject/start-processing, result entry, automatic
+PostgreSQL-proven completion, provider result retrieval, and terminal doctor review. **Found NOT
+BUILT by direct code inspection during this ticket, beyond what earlier tickets had already
+recorded:** no HTTP route exists anywhere to create or look up a `PatientReference` (order creation
+requires one to already exist — confirmed by reading `create_lab_order`, api.py:1530, which only
+calls `patients.get_for_organization`, never a create path); no provider/facility-assigned-lab
+route exists (only patient self-selection, DH-EX-005) — confirmed by the full route inventory in
+`api.py`. Both are recorded as concrete MVP gaps in `docs/MVP-1.0.md` §10, not asserted from
+memory.
+
+**ADR created:** **ADR-043** — "DHealth MVP 1.0: interoperable diagnostic network with native
+applications and connector support" (`DECISIONS.md`, appended after ADR-042, next unused number
+confirmed by scanning every `## ADR-NNN` header in the file — highest existing was ADR-042). It
+extends ADR-042 without retracting it: incorporates the five-surface product family (Exchange/
+Clinic/Lab/Patient/Connect), the golden journey, the four laws, the DH-EX-005 conflict (recorded as
+`OPEN DECISION`, not resolved — two acceptable interim launch options named, no code changed), the
+`ResultDelivery`-semantics-undefined note, and the result-validation/release product gap. Points to
+`docs/MVP-1.0.md` for full elaboration rather than duplicating it.
+
+**Document created:** `docs/MVP-1.0.md` — the authoritative, standalone MVP 1.0 product contract,
+written to be readable by an engineer, a future coding agent, a clinical stakeholder, or a pilot
+facility without first reconstructing this repository's history. Uses a fixed evidence vocabulary
+(`CURRENT`/`DECIDED`/`TARGET`/`PROPOSED PILOT`/`NOT BUILT`/`OPEN DECISION`) throughout, per this
+ticket's own evidence-discipline instruction. Contains: product statement; problem statement; the
+five-surface product family with an explicit "none of Clinic/Lab/Patient/Connect exists as a named
+built product yet" statement; the golden journey; the native/integrated/transitional-pilot facility
+model; the four laws (prominently boxed); the assisted-digital patient strategy (one-order-many-
+doors, human-assisted workfow as a feature, patient identity safety, language/localization); a
+per-golden-journey-step CURRENT-vs-MVP table (§8, the table this entry's "found NOT BUILT" paragraph
+above summarizes); the full out-of-scope list; 14 named known gaps; a proposed (not secured) pilot
+shape; proposed (not current) success metrics; the safety/privacy boundaries (unchanged from
+ADR-042/AGENTS.md, restated for a reader who has not read those files); the roadmap relationship to
+the preserved maternity/OpenMRS/OpenELIS stack and a possible later "DHealth Hospital" tier (named,
+not scoped or started); and the 15-item follow-up backlog reproduced below.
+
+**Files changed:** `DECISIONS.md` (ADR-043 appended, nothing edited or removed), `docs/MVP-1.0.md`
+(new), `PROJECT_STATE.md` (this entry). `README.md` received one minimal addition (a link to
+`docs/MVP-1.0.md` in its "Where to look" table) — reviewed and judged genuinely needed so a reader
+of the repository's primary index can find the new product contract; no other line in `README.md`
+was changed. `docs/ARCHITECTURE.md` and `CURRENT_STATE.md` were reviewed and judged to need no
+change for this ticket — no factual claim in either file directly contradicts ADR-043, and this
+ticket's own scope instruction reserves the full repo-wide terminology/framing sweep for a future
+`DH-DOC-001` ticket rather than performing it here.
+
+**No code, test, migration, workflow, deployment, Keycloak, Compose, Caddy, patient-communication,
+connector, result-validation, or price-selection change was made.** No PROJECT_STATE/CURRENT_STATE/
+DECISIONS.md historical entry was edited or deleted — this entry and ADR-043 are both purely
+additive.
+
+**Follow-up backlog** (also recorded in `docs/MVP-1.0.md` §15; preserved here per this ticket's own
+instruction to keep it in both places):
+
+1. DH-EX-007A — result numeric/API precision parity with PostgreSQL. **Concretely evidenced by this
+   ticket**, not merely carried forward: `LabResultSubmitRequest.numeric_value`/
+   `reference_range_low`/`reference_range_high` (api.py:647-650) have no `max_digits`/
+   `decimal_places` constraint, unlike `LabPriceRequest.amount` (api.py:366, DH-EX-003R's own fix)
+   which does mirror its database column exactly — `LabResult`'s three `Numeric(18, 4)` columns
+   (models.py:474-477) can silently receive a value the API should have rejected with a 422.
+2. Exchange deployment/auth wiring.
+3. Real Keycloak qualification for the Exchange's authorization boundaries.
+4. Patient reviewed/result-ready disposition.
+5. Result/PHI read-access audit.
+6. Identity-first-seen audit consistency.
+7. `ResultDelivery` semantics decision.
+8. The current pytest collection warning present across every DH-EX-* CI run on record.
+9. Exchange API modularization (`api.py` now exceeds 2,200 lines across seven tickets).
+10. Full deployed synthetic golden journey demonstrated end to end against real infrastructure.
+11. Patient-selection/price-contract decision for a price-free launch UX (ADR-043's DH-EX-005
+    conflict).
+12. Lab result validation/release workflow.
+13. Assisted-digital/print/QR patient workflow.
+14. Provider UX speed/order-set requirements (Law 3 targets).
+15. DHealth Connect no-double-entry integration contract.
+
+None of these 15 items has an implementation design attached — per this ticket's own instruction,
+this is a backlog of named future tickets, not implementation detail decided in advance.
+
+**Static/document verification performed:** `git diff --check` clean on all changed files; CR-byte
+scan clean; `git status --short` confirms only the four intended files changed; every relative link
+added (`docs/MVP-1.0.md`'s link to `../DECISIONS.md`'s ADR-043, `README.md`'s link to
+`docs/MVP-1.0.md`) resolves to a file that exists, checked directly.
+
+**What was NOT proven by this ticket** (it is a documentation ticket and claims none of this):
+whether the four product laws are achievable in practice; whether any facility will actually pilot
+DHealth; whether the `<20s`/`<10s` speed targets are realistic; whether patients in Djibouti will
+accept an assisted-digital flow; the DH-EX-005 price-contract conflict's resolution; the
+`ResultDelivery` semantics decision; the result validation/release workflow's design; any of the 15
+follow-up items' implementation.
+
+**Next:** the DH-EX-005 price-contract `OPEN DECISION` and the result-validation/release workflow
+are the two items most likely to block a real golden-journey demonstration and are natural
+candidates for the next ticket, but this ticket does not choose one — that choice belongs to
+whoever prioritizes the backlog above. `DH-DOC-001` (repo-wide terminology/framing sweep, deferred
+by this ticket's own scope) remains open whenever it is picked up.
+
+**READY FOR REVIEW: YES.**

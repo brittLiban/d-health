@@ -4798,3 +4798,141 @@ pushing", 2026-09-01). The work itself is unaffected; only the "not committed" c
 component reuse table, gap analysis, and proposed ticket sequence DH-EX-001 through DH-EX-010.
 DH-EX-001 (this same date) implements the Exchange core domain/persistence foundation described
 above; see its own entry in PROJECT_STATE.md for build/test status.
+
+---
+
+## ADR-043 — DHealth MVP 1.0: interoperable diagnostic network with native applications and
+connector support
+
+**Date:** 2026-09-12 · **Status:** ACCEPTED (product direction), NOT YET IMPLEMENTED beyond what
+ADR-042 and DH-EX-001 through DH-EX-007 already built · **Decided by:** Liban (DH-MVP-001 ticket)
+
+**Relationship to ADR-042.** ADR-042 (2026-09-08) is not superseded or retracted. It made the
+load-bearing architecture call — Option C hybrid data boundary, a connector-agnostic Exchange core,
+OpenMRS/OpenELIS as the first reference connector track — and that call stands unchanged. This
+entry extends it on exactly the points that were genuinely still open or under-specified when
+ADR-042 was written: what DHealth's product *family* is named and shaped, what the MVP explicitly
+does and does not require on day one, and four product laws that constrain every future
+implementation ticket. Everything ADR-042 already decided (the data boundary, the patient
+result-release policy, the WhatsApp/SMS priority note, the "connector-track work preserved, not
+discarded" statement) is incorporated by reference, not restated or altered here.
+
+**Full elaboration:** [`docs/MVP-1.0.md`](docs/MVP-1.0.md). This ADR entry is the decision
+record; that document is the long-form specification meant to be read on its own by an engineer,
+a future coding agent, a clinical stakeholder, or a pilot facility without requiring them to
+reconstruct this history first. Where the two differ in emphasis, this entry is authoritative on
+the decision; the document is authoritative on the detail.
+
+### The decision
+
+**DHealth MVP 1.0 is an interoperable diagnostic network, not a single application.** It consists
+of five product surfaces: **DHealth Exchange** (the shared network backbone — organization
+boundaries, orders, assignments, result exchange, audit, workflow state; not a longitudinal
+national EMR), **DHealth Clinic** (native provider software for facilities without an adequate
+existing system), **DHealth Lab** (native laboratory software for labs without an adequate LIS),
+**DHealth Patient** (the patient interaction layer, designed assisted-digital from day one), and
+**DHealth Connect** (the integration layer for organizations that already run an EMR/LIS). Full
+scope and boundaries for each surface are in `docs/MVP-1.0.md` §3.
+
+**Naming status.** DHealth Clinic, DHealth Lab, DHealth Patient, and DHealth Connect are product
+names introduced by this ADR. None of the four exists today as a named, separately-built
+application. What exists is the DHealth Exchange backend (DH-EX-001 through DH-EX-007) — a shared
+API surface that already implements most of the *backend* behavior DHealth Clinic's and DHealth
+Lab's MVP purpose require (order creation/read, work queue, accept/reject/start-processing, result
+submission, completion, review), reached today only by direct API call, with no dedicated frontend,
+no branded product, and no OpenMRS/OpenELIS-independent UI anywhere in this repository. OpenMRS and
+OpenELIS (ADR-042) remain the first reference *connector* track under DHealth Connect's model, not
+an instance of DHealth Clinic/Lab.
+
+**The MVP golden journey** (provider identifies/registers patient → clinician creates lab order →
+lab is assigned/selected → lab receives and accepts the order → sample/specimen workflow →
+processing → result entered → result validated/released → ordering provider receives result →
+clinician reviews → patient receives an appropriate status/follow-up communication) is the
+product's definition of success, not a feature count. Full diagram: `docs/MVP-1.0.md` §4.
+
+### Four non-negotiable product laws
+
+These bind every future DHealth implementation ticket the way AGENTS.md's clinical-content rules
+already do. A ticket that would violate one of these needs a superseding ADR, not a quiet
+exception.
+
+1. **No forced marketplace.** Day-one DHealth is a connected diagnostic workflow, not a
+   price-shopping product. Price comparison, cheapest-price lab ranking, and broader
+   marketplace/discovery are not required patient-facing features for launch. Doctor/facility-
+   assigned lab workflows are valid; patient lab choice may still exist where appropriate.
+2. **No double entry.** A DHealth production workflow must not require staff to manually maintain
+   the same clinical transaction in DHealth and another production clinical system. Native model:
+   the facility has no adequate system, so DHealth Clinic/Lab is the authoritative workflow system.
+   Integrated model: the facility has an existing EMR/LIS, so DHealth Connect keeps staff in that
+   system as much as practicable. A transitional pilot exception — DHealth handling a clearly
+   isolated workflow the incumbent system does not already own, while integration is not yet built
+   — is permitted, but must never be documented as the intended production architecture.
+3. **Faster than what it replaces.** DHealth cannot win by merely being digital. High-frequency
+   tasks must be extremely low-friction. Initial design *targets* (not proven performance): a
+   common provider lab order in approximately under 20 seconds, common lab order acceptance in
+   approximately under 10 seconds, minimal navigation for routine actions, remembered defaults,
+   order sets/favorites, no duplicate demographic requests, and no interoperability jargon in
+   normal clinical UX. These are targets to validate with real users, not claims about current
+   software.
+4. **No digital-literacy requirement for care.** A patient must never need a smartphone, app
+   installation, WhatsApp navigation skill, strong literacy, or familiarity with digital interfaces
+   to complete a DHealth-supported care journey. DHealth Patient is designed assisted-digital:
+   simple mobile web, large obvious actions, minimal text, print, QR/order reference, clinic/lab
+   reception assistance, SMS, WhatsApp, and — in a later validated phase — audio/voice, are all
+   different access methods to **one** canonical order (`docs/MVP-1.0.md` §7's "one order, many
+   doors" invariant), never separate clinical records. Human-assisted workflow (a receptionist
+   printing an order, a lab tech scanning it, staff verifying identity) is a designed feature, not
+   a failure mode to engineer away.
+
+### Existing-contract conflict recorded, not resolved
+
+**DH-EX-005's patient lab-selection contract requires the patient's exact current-price consent
+(`expected_price_ids`) and freezes the selected price at selection time** — confirmed present in
+`adapter/src/daher_adapter/exchange/selection.py` and `api.py`'s `PatientSelectionRequest`. Law 1
+("no forced marketplace") must not be read as silently reinterpreting that existing, implemented,
+tested API as "price-free selection." It is not reinterpreted here. **If MVP 1.0 launches with
+patient-selected labs but without displaying/consenting to price, DH-EX-005's selection contract
+must be deliberately redesigned in a later ticket** — that redesign is not performed by this ADR
+and its shape is not decided here. Until that decision is made, the acceptable launch options are
+(a) a provider/facility-assigned lab workflow that never routes through patient price-selection at
+all, or (b) a patient-selection flow that continues to honestly satisfy the existing price-consent
+contract as built. This is recorded as **OPEN DECISION**, not resolved.
+
+### Other semantics explicitly left open by this ADR
+
+- **`ResultDelivery.status` meaning.** The model (`PENDING`/`DELIVERED`/`FAILED`) exists and no code
+  path advances it past `PENDING` today. Candidate meanings for `DELIVERED` — available to
+  provider, sent to connector, received by connector, presented to a user, acknowledged by a user —
+  are named in `docs/MVP-1.0.md` §10 but **none is chosen**. A future ticket must decide before any
+  delivery mechanism is implemented.
+- **Result validation/release.** DH-EX-007 implements `RESULT ENTERED` → automatic `COMPLETED`
+  (every ordered item has a result). DHealth Lab's MVP direction distinguishes `RESULT ENTERED`
+  from a separate `RESULT VALIDATED / RELEASED` step. **No such separate authorization step exists
+  in the current implementation** — recorded as a product gap, not silently assumed to exist. Exact
+  roles and semantics must come from real laboratory workflow input, not be invented here.
+- **Patient result-communication content policy** for SMS/WhatsApp/lock-screen notifications/voice
+  calls/shared family phones. ADR-042 already decided the patient does not automatically receive
+  detailed numeric results; this ADR does not add or relax that boundary, and does not decide the
+  sensitive-content policy for each channel — that is a separate future privacy/product decision.
+- **Proxy/family authorization.** Not defined here. A future family/helper access workflow requires
+  its own explicit security/privacy decision before any code exists for it.
+- **Patient identity/matching policy for Djibouti**, beyond what ADR-042 and DH-EX-004 already
+  established (source-system + source-identity reference only, never a national identifier, never
+  fuzzy-matched into an automatic merge). Search may tolerate spelling/transliteration variance as
+  a *discovery* aid; it must never silently merge or auto-identify a patient. The full national-
+  identifier and matching-workflow question remains undecided.
+
+### What leaves the MVP critical path, again — not the codebase
+
+Consistent with ADR-042's own framing: nothing already built is deleted or judged wrong for having
+been built. The existing Exchange pricing/marketplace implementation (DH-EX-003) is not removed —
+it is implemented infrastructure whose *patient-facing* use is not required for launch and may
+matter again in a later product phase. The maternity/OpenMRS/OpenELIS stack (ADR-001 through
+ADR-041) remains a preserved clinical-stack implementation, reference connector infrastructure, and
+reusable deployment/security/backup/interoperability evidence — it is no longer the definition of
+the DHealth MVP, and historical documentation describing it as the product stays historical
+evidence, not something rewritten to look as though the current vision always existed.
+
+**Full audit, gap analysis, product-family detail, golden-journey diagram, pilot shape, success
+metrics, and the complete out-of-scope/known-gaps/follow-up lists:** `docs/MVP-1.0.md`. Ticket and
+follow-up-backlog record: `PROJECT_STATE.md`'s DH-MVP-001 entry.

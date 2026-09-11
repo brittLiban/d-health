@@ -124,6 +124,7 @@ language, not a localisation afterthought.
 | File | What it is |
 |---|---|
 | [`CURRENT_STATE.md`](CURRENT_STATE.md) | What actually works vs. what is merely written. Start here. |
+| [`docs/MVP-1.0.md`](docs/MVP-1.0.md) | **The DHealth MVP 1.0 product contract** — product family, golden journey, the four product laws, current-vs-MVP gaps (ADR-043) |
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
 | [`DECISIONS.md`](DECISIONS.md) | Architecture decision records — why things are the way they are |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order |
