@@ -18,16 +18,19 @@ from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
     PractitionerReferenceRepository,
 )
+from daher_adapter.exchange.lab_workflow import LabOrderNotAssigned, LabWorkflowRepository
 from daher_adapter.exchange.models import DoctorReviewStatus, LabPrice, ResultDeliveryStatus
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.results import (
     DoctorReviewRepository,
     DuplicateResult,
+    InvalidResultSubmissionState,
     LabResultRepository,
-    NoLabSelected,
+    OrderItemNotFound,
     ResultDeliveryRepository,
-    WrongLabForResult,
+    ReviewAlreadyFinalized,
+    ReviewNotAllowedYet,
 )
 from daher_adapter.exchange.selection import LabSelectionRepository
 
@@ -40,6 +43,7 @@ class Repos:
     practitioners: PractitionerReferenceRepository
     orders: LabOrderRepository
     selections: LabSelectionRepository
+    workflow: LabWorkflowRepository
     results: LabResultRepository
     deliveries: ResultDeliveryRepository
     reviews: DoctorReviewRepository
@@ -56,6 +60,7 @@ def _build(sessions: sessionmaker[Session]) -> Repos:
         practitioners=PractitionerReferenceRepository(sessions),
         orders=LabOrderRepository(sessions, organizations, catalog),
         selections=LabSelectionRepository(sessions, organizations),
+        workflow=LabWorkflowRepository(sessions, organizations),
         results=LabResultRepository(sessions),
         deliveries=ResultDeliveryRepository(sessions),
         reviews=DoctorReviewRepository(sessions),
@@ -73,10 +78,18 @@ def _current_price_id(sessions: sessionmaker[Session], offering_id) -> object:
 
 
 def _create_and_select(
-    repos: Repos, sessions: sessionmaker[Session], *, lab_id, key: str = "req-1"
+    repos: Repos,
+    sessions: sessionmaker[Session],
+    *,
+    lab_id,
+    key: str = "req-1",
+    advance_to_in_progress: bool = True,
 ):
     """Creates one priced offering, a one-item order against it, and immediately selects
-    `lab_id`. Returns (refreshed order, ordering practitioner record)."""
+    `lab_id`. By default also drives the order through ACCEPTED -> IN_PROGRESS via the exact
+    DH-EX-006 workflow repository, since DH-EX-007 requires IN_PROGRESS before any result may be
+    recorded -- a test that wants an earlier status passes `advance_to_in_progress=False` and
+    stops at SELECTED. Returns (refreshed order, ordering practitioner record)."""
     repos.directory.upsert(
         lab_organization_id=lab_id,
         public_address="Test Lab Address",
@@ -107,6 +120,59 @@ def _create_and_select(
     repos.selections.select(
         lab_order_id=order.id, lab_organization_id=lab_id, expected_price_ids=frozenset({price_id})
     )
+    if advance_to_in_progress:
+        repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
+        repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
+    return repos.orders.get(order.id), practitioner
+
+
+def _create_and_select_two_items(
+    repos: Repos, sessions: sessionmaker[Session], *, lab_id, key: str
+):
+    """Same shape as `_create_and_select`, but a two-item order -- needed by any test that wants
+    to observe an IN_PROGRESS order after one result has already been recorded (a one-item order
+    completes, and leaves COMPLETED, the instant its only result is recorded)."""
+    repos.directory.upsert(
+        lab_organization_id=lab_id,
+        public_address="Test Lab Address",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    entry_1, offering_1 = make_priced_offering(
+        repos.catalog, lab_organization_id=lab_id, amount=Decimal("100"), code=f"DH-{key}-1"
+    )
+    entry_2, offering_2 = make_priced_offering(
+        repos.catalog, lab_organization_id=lab_id, amount=Decimal("200"), code=f"DH-{key}-2"
+    )
+    provider = make_provider(repos.organizations, name=f"Clinic-{key}")
+    patient = make_patient_reference(
+        repos.patients, provider_org_id=provider.id, source_identity_value=key
+    )
+    practitioner = make_practitioner_reference(
+        repos.practitioners, provider_org_id=provider.id, source_identity_value=f"doc-{key}"
+    )
+    order = repos.orders.create(
+        idempotency_key=key,
+        provider_organization_id=provider.id,
+        patient_reference_id=patient.id,
+        practitioner_reference_id=practitioner.id,
+        items=[
+            OrderItemInput(catalog_entry_id=entry_1.id),
+            OrderItemInput(catalog_entry_id=entry_2.id),
+        ],
+    ).order
+    price_1 = _current_price_id(sessions, offering_1.id)
+    price_2 = _current_price_id(sessions, offering_2.id)
+    repos.selections.select(
+        lab_order_id=order.id,
+        lab_organization_id=lab_id,
+        expected_price_ids=frozenset({price_1, price_2}),
+    )
+    repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
+    repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 
 
@@ -116,12 +182,18 @@ def test_result_binds_to_the_correct_order_item_and_lab(sessions: sessionmaker[S
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     item_id = order.items[0].id
 
-    recorded = repos.results.record_numeric(
-        lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("13.5"), unit="g/dL"
+    outcome = repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        value=Decimal("13.5"),
+        unit="g/dL",
     )
 
-    assert recorded.lab_order_item_id == item_id
-    assert recorded.lab_organization_id == lab.id
+    assert outcome.result.lab_order_item_id == item_id
+    assert outcome.result.lab_organization_id == lab.id
+    assert outcome.order_completed is True  # single-item order: this was the last result
+    assert outcome.order_status == "COMPLETED"
     assert repos.results.get_for_item(item_id) is not None
 
 
@@ -134,9 +206,12 @@ def test_result_from_a_different_lab_than_selected_fails_closed(
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab_selected.id)
     item_id = order.items[0].id
 
-    with pytest.raises(WrongLabForResult):
+    with pytest.raises(LabOrderNotAssigned):
         repos.results.record_numeric(
-            lab_order_item_id=item_id, lab_organization_id=lab_impostor.id, value=Decimal("13.5")
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab_impostor.id,
+            value=Decimal("13.5"),
         )
 
 
@@ -155,25 +230,148 @@ def test_result_before_any_lab_selected_fails_closed(sessions: sessionmaker[Sess
         items=[OrderItemInput(catalog_entry_id=entry.id)],
     ).order
 
-    with pytest.raises(NoLabSelected):
+    with pytest.raises(LabOrderNotAssigned):
         repos.results.record_numeric(
-            lab_order_item_id=order.items[0].id, lab_organization_id=lab.id, value=Decimal("1")
+            order_id=order.id,
+            lab_order_item_id=order.items[0].id,
+            lab_organization_id=lab.id,
+            value=Decimal("1"),
+        )
+
+
+def test_result_before_in_progress_fails_closed(sessions: sessionmaker[Session]) -> None:
+    """SELECTED (not yet ACCEPTED/IN_PROGRESS) is a real, distinct refusal from "no selection at
+    all" -- the assignment exists and is correct, but the lifecycle gate is what refuses."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab.id, advance_to_in_progress=False
+    )
+    assert order.status == "SELECTED"
+
+    with pytest.raises(InvalidResultSubmissionState):
+        repos.results.record_numeric(
+            order_id=order.id,
+            lab_order_item_id=order.items[0].id,
+            lab_organization_id=lab.id,
+            value=Decimal("1"),
+        )
+
+
+def test_result_for_item_belonging_to_a_different_order_fails_closed(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order_a, _p = _create_and_select(repos, sessions, lab_id=lab.id, key="order-a")
+    order_b, _p2 = _create_and_select(repos, sessions, lab_id=lab.id, key="order-b")
+
+    with pytest.raises(OrderItemNotFound):
+        repos.results.record_numeric(
+            order_id=order_a.id,
+            lab_order_item_id=order_b.items[0].id,
+            lab_organization_id=lab.id,
+            value=Decimal("1"),
         )
 
 
 def test_duplicate_result_for_the_same_item_refused(sessions: sessionmaker[Session]) -> None:
+    """Uses a two-item order so the order is still IN_PROGRESS (not COMPLETED) after the first
+    result -- proving DuplicateResult itself, distinct from the order-level state gate a
+    one-item order's second attempt would hit instead (see the lifecycle-ordering test below)."""
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
-    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
+    order, _practitioner = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key="dup-1")
     item_id = order.items[0].id
     repos.results.record_numeric(
-        lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
+        order_id=order.id, lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
     )
 
     with pytest.raises(DuplicateResult):
         repos.results.record_numeric(
-            lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("2")
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            value=Decimal("2"),
         )
+
+
+def test_duplicate_result_does_not_change_the_first_value(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key="dup-2")
+    item_id = order.items[0].id
+    repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0000"),
+    )
+
+    with pytest.raises(DuplicateResult):
+        repos.results.record_numeric(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            value=Decimal("999"),
+        )
+
+    stored = repos.results.get_for_item(item_id)
+    assert stored.numeric_value == Decimal("1.0000")
+
+
+def test_second_submission_on_a_completed_one_item_order_hits_the_state_gate_first(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The ticket's required check sequence puts the IN_PROGRESS lifecycle check (step 4) before
+    the item-ownership/duplicate checks (steps 5-6) -- so once a one-item order's sole result
+    completes it, a resubmission attempt raises InvalidResultSubmissionState, not DuplicateResult.
+    Both are controlled conflicts; this test pins down which one, deliberately, since the two are
+    easy to confuse."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="single-dup")
+    item_id = order.items[0].id
+    outcome = repos.results.record_numeric(
+        order_id=order.id, lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
+    )
+    assert outcome.order_status == "COMPLETED"
+
+    with pytest.raises(InvalidResultSubmissionState):
+        repos.results.record_numeric(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            value=Decimal("2"),
+        )
+
+
+def test_partial_results_keep_a_multi_item_order_in_progress(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select_two_items(
+        repos, sessions, lab_id=lab.id, key="multi-partial"
+    )
+
+    first = repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
+    )
+    assert first.order_completed is False
+    assert first.order_status == "IN_PROGRESS"
+
+    second = repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=order.items[1].id,
+        lab_organization_id=lab.id,
+        value=Decimal("2"),
+    )
+    assert second.order_completed is True
+    assert second.order_status == "COMPLETED"
 
 
 def test_result_completion_does_not_automatically_deliver(sessions: sessionmaker[Session]) -> None:
@@ -181,7 +379,10 @@ def test_result_completion_does_not_automatically_deliver(sessions: sessionmaker
     lab = make_lab(repos.organizations)
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     repos.results.record_numeric(
-        lab_order_item_id=order.items[0].id, lab_organization_id=lab.id, value=Decimal("1")
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
     )
 
     delivery = repos.deliveries.get_for_order(order.id)
@@ -215,10 +416,28 @@ def test_doctor_review_remains_pending_until_explicit_action(
     assert review.reviewed_at is None
 
 
+def test_doctor_review_before_completion_fails_closed(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
+    assert order.status == "IN_PROGRESS"  # single item, no result recorded yet -- not COMPLETED
+
+    with pytest.raises(ReviewNotAllowedYet):
+        repos.reviews.mark_no_follow_up_required(
+            order.id, reviewed_by_practitioner_reference_id=practitioner.id
+        )
+
+
 def test_doctor_review_no_follow_up_required_explicit(sessions: sessionmaker[Session]) -> None:
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
     order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
+    repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
+    )
 
     reviewed = repos.reviews.mark_no_follow_up_required(
         order.id, reviewed_by_practitioner_reference_id=practitioner.id
@@ -233,9 +452,40 @@ def test_doctor_review_follow_up_required_explicit(sessions: sessionmaker[Sessio
     repos = _build(sessions)
     lab = make_lab(repos.organizations)
     order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
+    repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
+    )
 
     reviewed = repos.reviews.mark_follow_up_required(
         order.id, reviewed_by_practitioner_reference_id=practitioner.id
     )
 
     assert reviewed.status == DoctorReviewStatus.FOLLOW_UP_REQUIRED.value
+
+
+def test_second_terminal_review_is_a_controlled_conflict_not_a_silent_overwrite(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
+    repos.results.record_numeric(
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
+    )
+    repos.reviews.mark_no_follow_up_required(
+        order.id, reviewed_by_practitioner_reference_id=practitioner.id
+    )
+
+    with pytest.raises(ReviewAlreadyFinalized):
+        repos.reviews.mark_follow_up_required(
+            order.id, reviewed_by_practitioner_reference_id=practitioner.id
+        )
+
+    unchanged = repos.reviews.get_for_order(order.id)
+    assert unchanged.status == DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED.value

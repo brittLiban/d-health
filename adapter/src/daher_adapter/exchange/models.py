@@ -743,7 +743,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_directory_profile_updated', 'lab_offering_created', "
             "'lab_offering_status_changed', 'lab_price_changed', "
             "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
-            "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started'"
+            "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
+            "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

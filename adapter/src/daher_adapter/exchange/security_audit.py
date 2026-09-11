@@ -41,6 +41,11 @@ SecurityEventType = Literal[
     "lab_order_accepted",
     "lab_order_rejected",
     "lab_order_processing_started",
+    # DH-EX-007 lab result recording, order completion, and doctor review. All three reference a
+    # LabOrder id (`resource_type="lab_order"`) -- audit stays order-centric, never per-item.
+    "lab_result_recorded",
+    "lab_order_completed",
+    "doctor_review_recorded",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
