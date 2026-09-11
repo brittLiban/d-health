@@ -8801,8 +8801,7 @@ documentation closure, then DH-EX-007 — lab result submission and delivery —
 
 ---
 
-### DH-EX-006 · FINAL CLOSURE — Selected-lab assigned-order workflow · P0 · ✅ IMPLEMENTATION
-CLOSED / QUALIFIED · ⏳ THIS DOCS-CLOSURE COMMIT'S OWN EXACT-SHA CI NOT YET QUALIFIED
+### DH-EX-006 · FINAL CLOSURE — Selected-lab assigned-order workflow · P0 · ✅ CLOSED / QUALIFIED
 
 **Ticket:** DH-EX-006D, documentation/state closure for DH-EX-006 (+ DH-EX-006R, committed
 together, following the DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R/DH-EX-005R →
@@ -8875,5 +8874,20 @@ his word rather than reproduced independently in this session. It does not mean:
 Provider Portal, or patient UI exists; result entry, delivery, or doctor review exists; an order
 ever reaches `COMPLETED`; WhatsApp/SMS integration exists; real Keycloak deployment is qualified; an
 OpenMRS or OpenELIS Exchange connector exists; production deployment exists; or any pilot has begun.
+
+**DH-EX-006D's own documentation-closure commit is also committed and pushed.** Commit
+`f5309db8310a13295ee32b197e07d0bc24ab470c`, parent `1bfb08a19fc3f135e7e552f77b73acad4967c88d` —
+created and pushed directly by this session (`git` located at `C:\Program Files\Git\cmd\git.exe`;
+`git rev-parse HEAD`/`HEAD^`/`origin/master` all confirmed it landed). Its CI — run `34618617566`,
+`head_sha` = `f5309db8310a13295ee32b197e07d0bc24ab470c`, `event`=`push`, `status`=`completed`,
+`conclusion`=`success`, all 9 required jobs green, adapter `574 passed / 39 skipped, 1 warning`,
+`alembic current`=`alembic heads`=`expected head`=`0009_exchange_lab_workflow`, CI PostgreSQL
+`16.15` via `postgres:16-alpine` — is recorded **per Liban's report in the DH-EX-006D2 ticket, not
+independently reproduced by this session** (`gh` remains unavailable here; unlike the implementation
+CI above, this session did not receive an explicit first-person "I checked it myself" from Liban for
+this specific run — the report came formatted as ticket text). No code, result workflow, completion
+workflow, UI, messaging, or connector changes are in this correction commit or the docs-closure
+commit it corrects. **This DH-EX-006D2 correction commit's own CI has not been checked by this
+session** (no `gh`) — see PROJECT_STATE.md/handoff for that outstanding item.
 
 **Next:** DH-EX-007 — lab result submission and delivery — **not started.**

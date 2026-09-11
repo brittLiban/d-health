@@ -1605,4 +1605,16 @@ selection-time prices are never rewritten. It does **not** yet have: result subm
 (`FOLLOW_UP_REQUIRED`/`NO_FOLLOW_UP_REQUIRED`), WhatsApp/SMS transport, or any Provider/Lab/Patient
 portal UI. **REAL KEYCLOAK QUALIFICATION remains NOT RUN.**
 
+**CORRECTION appended 2026-09-11 (DH-EX-006D2, append-only — the parenthetical above, "This
+DH-EX-006D documentation-closure pass itself is not yet committed, pushed, or CI-qualified," is
+superseded, not retracted; it was true when written).** DH-EX-006D's own documentation-closure
+commit `f5309db8310a13295ee32b197e07d0bc24ab470c` (parent
+`1bfb08a19fc3f135e7e552f77b73acad4967c88d`) is committed and pushed to `origin/master` — confirmed
+directly by this session via `git`. Its CI — run `34618617566`, all 9 required jobs green, adapter
+`574 passed / 39 skipped, 1 warning`, migration head `0009_exchange_lab_workflow`, CI PostgreSQL
+`16.15` via `postgres:16-alpine` — is recorded **per Liban's report in the DH-EX-006D2 ticket, not
+independently reproduced by this session** (`gh` remains unavailable here). This DH-EX-006D2
+correction commit's own CI has likewise not been checked by this session. Full detail:
+PROJECT_STATE.md's **DH-EX-006 · FINAL CLOSURE** entry.
+
 **NEXT: DH-EX-007 — lab result submission and delivery — not started.**
