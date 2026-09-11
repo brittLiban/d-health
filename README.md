@@ -8,26 +8,41 @@ OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built a
 **first reference connector track** rather than the product's definition. Nothing below is deleted
 or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
-[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-006 FINAL CLOSURE entries for what
-exists so far. The Exchange **core domain/persistence layer** (DH-EX-001), the **organization
-onboarding, OIDC authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab
-directory, synthetic test catalog, lab offerings, DJF pricing, and whole-order lab eligibility
-backend** (DH-EX-003), **DHealth-native Provider lab-order creation** (DH-EX-004), **secure
-patient order access + patient lab selection** (DH-EX-005), and the **selected lab's own assigned
-work queue and accept/reject/start-processing workflow** (DH-EX-006) are all committed, pushed, and
-CI-qualified — DHealth's backend can now carry an authenticated clinician's provider-scoped lab order (exact
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-007 entries for what exists so far.
+The Exchange **core domain/persistence layer** (DH-EX-001), the **organization onboarding, OIDC
+authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab directory,
+synthetic test catalog, lab offerings, DJF pricing, and whole-order lab eligibility backend**
+(DH-EX-003), **DHealth-native Provider lab-order creation** (DH-EX-004), **secure patient order
+access + patient lab selection** (DH-EX-005), and the **selected lab's own assigned work queue and
+accept/reject/start-processing workflow** (DH-EX-006) are all committed, pushed, and CI-qualified —
+DHealth's backend can now carry an authenticated clinician's provider-scoped lab order (exact
 patient reference, exact synthetic DHealth tests, canonical idempotency key) from
 `AWAITING_LAB_SELECTION` through an opaque, order-scoped patient bearer grant, a patient's
 exact-price-consent lab choice, an immutable frozen price snapshot, to `SELECTED`, and into the
 selected lab's own work queue, where a `LAB_TECH` may accept, reject, or start processing an
 accepted order (`SELECTED`→`ACCEPTED`/`REJECTED`, `ACCEPTED`→`IN_PROGRESS`) — with secure
 multi-organization identity, tenant isolation, patient/OIDC auth kept structurally separate, and a
-transactionally-authoritative security-mutation audit throughout. Real Keycloak integration remains
-a deployment/pilot qualification gate, not yet run. The Provider Portal, Lab
-Portal, and WhatsApp/SMS integration are **still under construction, not yet built** — this is the
-backend foundation those are built on, not a patient-facing marketplace and not the MVP itself; no
-result is ever produced or delivered, and the order never reaches `COMPLETED`. OpenMRS/OpenELIS
-remain supported, running exactly as built, as the first reference connector track.
+transactionally-authoritative security-mutation audit throughout.
+
+**DH-EX-007 (lab result submission and completion) is also committed and pushed to
+`origin/master`** (merged via PR #1; migration head `0010_exchange_results_workflow`). The
+selected lab's `LAB_TECH` records one immutable result per ordered item once the order is
+`IN_PROGRESS`; the order becomes `COMPLETED` only once PostgreSQL proves every item has a result;
+the ordering provider can then retrieve the completed results and record a terminal review
+disposition (`no-follow-up-required` / `follow-up-required`). The patient-facing path still never
+returns a result value — it remains coarse-status-only. `ResultDelivery` stays `PENDING`: no
+delivery mechanism, message, or notification exists yet for either the provider or the patient.
+Per commit `30c5212`'s own message: 605 passed / 42 skipped locally, real-PostgreSQL
+result-concurrency qualification passed; this has **not been independently re-run or verified
+against GitHub Actions in this documentation-closure session** (no `gh` CLI reachable in this
+environment, and the repository is private to unauthenticated web access) — see
+`PROJECT_STATE.md`'s DH-EX-007 entry for the exact evidence boundary.
+
+Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
+Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —
+this is the backend foundation those are built on, not a patient-facing marketplace and not the MVP
+itself. OpenMRS/OpenELIS remain supported, running exactly as built, as the first reference
+connector track.
 
 ---
 

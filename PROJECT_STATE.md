@@ -8890,4 +8890,129 @@ workflow, UI, messaging, or connector changes are in this correction commit or t
 commit it corrects. **This DH-EX-006D2 correction commit's own CI has not been checked by this
 session** (no `gh`) — see PROJECT_STATE.md/handoff for that outstanding item.
 
+---
+
+### DH-EX-007 · Lab result submission, order completion, provider result retrieval, doctor review · P0 · ✅ WRITTEN + TESTED-PER-COMMIT-MESSAGE / ⏳ CI NOT INDEPENDENTLY VERIFIED
+
+**Ticket:** DH-EX-007D, documentation closure, auditing `master` as it actually stands — not a
+build ticket. This entry did not exist before this pass; DH-EX-007 itself was implemented, committed,
+and pushed in a separate session with no corresponding `PROJECT_STATE.md` entry written at the time.
+This entry is written now (2026-09-12), from direct inspection of the commits and the code they
+produced, not as a contemporaneous record of the implementing session's own reasoning.
+
+**Commits, confirmed via `git log`/`git show` in this session:**
+- `30c52125d182209c4f025332087a446a58e3f8c1` — `feat(DH-EX-007): complete lab result workflow`.
+  9 files changed: `adapter/migrations/versions/0010_exchange_results_workflow.py` (new),
+  `adapter/src/daher_adapter/exchange/api.py` (+331), `adapter/src/daher_adapter/exchange/models.py`
+  (+3/-1), `adapter/src/daher_adapter/exchange/results.py` (rewritten, +346/-80 net),
+  `adapter/src/daher_adapter/exchange/security_audit.py` (+5),
+  `adapter/tests/integration/test_dhex007_postgres_qualification.py` (new, 347 lines),
+  `adapter/tests/test_exchange_patient_access.py` (+14/-... ), `adapter/tests/test_exchange_results.py`
+  (+282/-...), `adapter/tests/test_exchange_results_api.py` (new, 991 lines).
+- `053004a78f91689ff8274fc2153c58f0d3689999` — `ci(DH-EX-007): advance expected migration head`.
+  One-line `.github/workflows/ci.yml` change: `EXPECTED_HEAD` `0009_exchange_lab_workflow` →
+  `0010_exchange_results_workflow`. Commit message states no production code, tests, migration
+  contents, documentation, or workflow triggers changed — confirmed by `git show --stat`, which
+  shows only the one CI file touched.
+- Both merged into `origin/master` via **PR #1**, at merge commit `d3a72d5c42d3151d39637831a87e541ee4dfc562`.
+  `git diff HEAD origin/master` between the pre-merge branch tip and the merge commit is empty —
+  the merge introduced no additional changes.
+
+**What DH-EX-007 established, confirmed by direct code reading in this session (not reproduced
+here from the commit message alone):**
+- `POST /organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/result` (api.py:1997) —
+  `_require_lab_tech` gate (identical function used by DH-EX-006), records one `NUMERIC` or `TEXT`
+  result via `results.record_numeric`/`results.record_text`, both invoked inside one
+  `session_factory.begin()` block alongside the `lab_result_recorded` (and, when applicable,
+  `lab_order_completed`) security-audit rows — one transaction, atomic together.
+- Order completion is not application-level counting: the commit message states it is proven by a
+  PostgreSQL-level check that every ordered item has a result before the status write to
+  `COMPLETED`; this session read `results.py`'s rewritten completion logic and confirms the
+  transition is driven by `outcome.order_completed`, computed inside `record_numeric`/`record_text`
+  themselves, not by the API layer re-deriving it.
+- `GET /organizations/{provider_id}/orders/{order_id}/results` (api.py:2077) — `_require_clinician`
+  gate (identical function used by DH-EX-004), returns `409` (not `404`) for a real, owned order
+  that is not yet `COMPLETED` — deliberately distinguishing "not ready yet" from "not yours," per an
+  explicit code comment — and only returns result values once `COMPLETED`.
+- `POST /organizations/{provider_id}/orders/{order_id}/review/no-follow-up-required` and
+  `.../review/follow-up-required` (api.py:2187, 2200) — `_require_clinician`-gated, resolve a fresh
+  practitioner binding via the same `practitioners.get_or_create` pattern DH-EX-004 uses for the
+  ordering clinician (the *reviewing* clinician may differ from whoever placed the order), and write
+  a `doctor_review_recorded` audit row in the same transaction as the review mutation.
+- Patient path unchanged: `PatientOrderResponse` (api.py:557, `extra="forbid"`) has no result field
+  and its own docstring states it deliberately excludes any result value; the only three
+  `/patient/*` routes are DH-EX-005's unchanged `GET /patient/order`,
+  `GET /patient/order/lab-options`, `POST /patient/order/selection` (api.py:1777/1785/1807) — no
+  patient route was added or changed by DH-EX-007, confirmed by the route inventory above.
+- `ResultDelivery` is untouched: grepped, no `ResultDelivery` write appears anywhere in the DH-EX-007
+  diff; it stays `PENDING` with no code path that ever advances it.
+- No WhatsApp/SMS, connector (`openmrs-config/`, `openelis-config/`), or UI code exists anywhere in
+  the diff — confirmed by `git show --stat` (9 files, all under `adapter/`) and by inspecting the
+  repository's `ui/` directory, which is the pre-existing OpenMRS "Terminer l'admission" module
+  frontend (confirmed by `vite.devOpenmrsProxy.ts`), unrelated to any Exchange Provider/Lab Portal —
+  no such portal exists anywhere in this repository as of this audit.
+- Migration `0010_exchange_results_workflow.py` exists on disk as the tenth file in
+  `adapter/migrations/versions/`, immediately following `0009_exchange_lab_workflow.py`.
+  `.github/workflows/ci.yml`'s `EXPECTED_HEAD` reads `0010_exchange_results_workflow` — the two
+  agree, confirming internal consistency of the migration-history guard, though this by itself does
+  not prove CI has run (see evidence boundary below).
+
+**Per commit `30c5212`'s own message (recorded here as the implementing session's claim, not
+independently reproduced):** independent DH-EX-007R-equivalent review found 0 BLOCKER and 1 HIGH
+(API max-length validation for `numeric_unit`/`text_value` widened to match `LabResult` database
+bounds — fixed in the same commit). Local qualification: 605 passed / 42 skipped / 1 pre-existing
+warning; fresh migration reaches `0010_exchange_results_workflow`; real-PostgreSQL
+result-concurrency qualification passed. The commit itself names one open, non-blocking evidence
+gap: audit row counts were not directly observed through an API-over-live-PostgreSQL concurrency
+harness during the final-two-results race. **REAL KEYCLOAK NOT RUN. Manual live/browser demo NOT
+RUN** — both stated directly in the commit message.
+
+**Evidence boundary for this DH-EX-007D pass, stated precisely.** This session independently
+confirmed: the commits exist with the stated diffs; the code described above exists exactly as
+described on `master`'s HEAD; the migration file and `EXPECTED_HEAD` agree. This session did
+**not** independently confirm: the 605/42/1 test-count claim (no Python interpreter was reachable
+in this environment — `python`/`python3`/`py` all resolved to the Windows Store stub, not a real
+interpreter, so the suite could not be re-run); the real-PostgreSQL concurrency qualification claim;
+or any GitHub Actions run for `30c5212`, `053004a`, or merge commit `d3a72d5c` — `gh` is not
+reachable on `PATH` in this environment (searched `C:\Program Files`, `C:\Program Files (x86)`,
+`%LOCALAPPDATA%\Programs`, and a full filesystem search under `/`, which found nothing), and the
+repository is private to unauthenticated access (`WebFetch` returned 404 for both
+`api.github.com/repos/brittLiban/d-health/...` and `github.com/brittLiban/d-health`). **No
+first-person "Liban checked the real run" confirmation was given for either commit at the time of
+this pass** — unlike DH-EX-006's closure entries, which record such confirmation explicitly, this
+is recorded as a genuinely open item, not resolved either way.
+
+**Classification, per the evidence above:** result submission, automatic completion, provider
+result retrieval, and doctor review are **WRITTEN** (confirmed present in code) and **TESTED
+per the implementing commit's own message** (not independently re-run this session). They are
+**not CI-QUALIFIED** — no GitHub Actions run for either DH-EX-007 commit has been independently
+observed by any session, in contrast to DH-EX-001 through DH-EX-006, each of which has an
+independently- or Liban-confirmed exact-SHA CI run on record above. Nothing in this ticket has been
+**RUNTIME-QUALIFIED** (no manual/browser demonstration; no real Keycloak). WhatsApp/SMS integration,
+any Provider/Lab/patient-facing UI, `ResultDelivery` transport, and any OpenMRS/OpenELIS Exchange
+connector wiring remain **NOT WRITTEN** — none of these existed before DH-EX-007 and none were added
+by it.
+
+**Follow-ups recorded, deliberately not fixed by this documentation-closure ticket** (per
+DH-EX-007D's own scope — documentation only, no code/behavior changes):
+1. **Exact-SHA CI for `30c5212`/`053004a`/`d3a72d5c` is unverified.** Needs either `gh` made
+   reachable in a future session's environment, or Liban's direct confirmation of the GitHub Actions
+   run for the merge commit, recorded the way DH-EX-006's closure entries did.
+2. **The commit's own named gap:** audit row counts unobserved through an API-over-live-PostgreSQL
+   concurrency harness during the final-two-results race. Carried forward as-is; not a blocker per
+   the implementing commit's own framing, but not closed either.
+3. **No `PROJECT_STATE.md` entry was written contemporaneously with DH-EX-007's implementation** —
+   this is itself a process gap worth naming: the DH-EX-001 through DH-EX-006 pattern of an
+   entry-per-ticket (implementation → *R review → FINAL CLOSURE) was not followed for DH-EX-007. This
+   entry reconstructs the record after the fact from commits and code; it is not a substitute for
+   the review/closure discipline the prior six tickets each went through, and no independent
+   DH-EX-007R-equivalent review by a separate session is on record.
+
+**Real facility:** untouched. **Pollers:** inactive. **No connector, UI, or messaging code changed.**
+
+**Next:** exact-SHA CI confirmation for DH-EX-007 (item 1 above); then, if the project continues the
+established per-ticket review pattern, a proper DH-EX-007R independent review; then DH-EX-008 or
+whatever the next item in the DH-EX-001–DH-EX-010 sequence (DH-PIVOT-001, 2026-09-08) is — not
+started as of this pass.
+
 **Next:** DH-EX-007 — lab result submission and delivery — **not started.**

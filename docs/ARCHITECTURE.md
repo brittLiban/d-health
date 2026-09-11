@@ -1027,10 +1027,31 @@ of the assignment. Each mutation locks the order `FOR UPDATE`, checks assignment
 evaluating replay-vs-conflict, mutates, and writes its security-audit row inside one transaction.
 There is no `/complete` route and no path to `COMPLETED` anywhere in this work — DH-EX-007's scope.
 
+**DH-EX-007 (lab result submission, order completion, provider result retrieval, and doctor
+review) is also committed and pushed to `origin/master`** (commit `30c5212`, CI migration guard
+advanced to `0010_exchange_results_workflow` in a follow-up commit `053004a`; both merged via PR #1
+— see `PROJECT_STATE.md`'s DH-EX-007 entry for the full evidence boundary, including that neither
+commit's GitHub Actions run has been independently checked in this documentation-closure session).
+Established: the selected lab's `LAB_TECH` (same `require_lab_tech` boundary as DH-EX-006) records
+one immutable result per ordered item, only once the order is `IN_PROGRESS`; result mutations
+serialize at the `LabOrder` aggregate; the order transitions to `COMPLETED` only once PostgreSQL
+proves every item now has a result — no application-level counting. The ordering provider (same
+`require_clinician` boundary as DH-EX-004) can then retrieve the completed results, and record one
+of two terminal review dispositions (`no-follow-up-required` / `follow-up-required`) via a fresh
+practitioner binding resolved the same way DH-EX-004 resolves the ordering clinician. The
+patient-facing path is unchanged from DH-EX-005 — `PatientOrderResponse` still excludes every
+result value by construction (`extra="forbid"`, no result field defined), and no new patient route
+was added. `ResultDelivery` stays `PENDING`: this ticket adds no delivery mechanism, message, or
+notification for either the provider or the patient. Migration `0010_exchange_results_workflow` is
+the ninth Exchange migration; `EXPECTED_HEAD` in `.github/workflows/ci.yml` agrees with it. Per the
+implementation commit's own message: 605 passed / 42 skipped locally, real-PostgreSQL
+result-concurrency qualification passed, one HIGH finding from the ticket's own independent review
+fixed (API max-length validation widened to match the `LabResult` database bounds); real Keycloak
+and a manual live/browser demonstration were explicitly not run.
+
 Still not built, no connector wiring changed: the Provider Portal, the Lab Portal, patient UI, and
 WhatsApp/SMS integration — none of this is equivalent to a completed Exchange MVP. No file under
 `openmrs-config/` or `openelis-config/` has changed, and the connector Keycloak realm
 (`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
-PROJECT_STATE.md's DH-EX-001 through DH-EX-006 FINAL CLOSURE entries. Next: DH-EX-007 (lab result
-submission and delivery) — not started.
+PROJECT_STATE.md's DH-EX-001 through DH-EX-007 entries.

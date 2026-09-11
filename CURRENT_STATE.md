@@ -1618,3 +1618,62 @@ correction commit's own CI has likewise not been checked by this session. Full d
 PROJECT_STATE.md's **DH-EX-006 · FINAL CLOSURE** entry.
 
 **NEXT: DH-EX-007 — lab result submission and delivery — not started.**
+
+**CORRECTION appended 2026-09-12 (DH-EX-007D, append-only — the "NEXT ... not started" line above
+is superseded, not retracted; it was true when written).** DH-EX-007 (lab result submission, order
+completion, provider result retrieval, and doctor review) has since been implemented, committed,
+and pushed to `origin/master`: commit `30c5212` (feature implementation) followed by `053004a`
+(CI-only, advancing `EXPECTED_HEAD` to `0010_exchange_results_workflow`), both merged into
+`origin/master` via PR #1 at merge commit `d3a72d5c`. This documentation-closure pass (DH-EX-007D)
+audited `d3a72d5c` directly.
+
+**What DH-EX-007 established, per commit `30c5212`'s own message and direct code inspection of
+`adapter/src/daher_adapter/exchange/{api.py,results.py,models.py}`:** the selected lab's
+`LAB_TECH` (`require_lab_tech`, same boundary as DH-EX-006) submits exactly one immutable result
+per ordered item once the order is `IN_PROGRESS`; result mutations serialize at the `LabOrder`
+aggregate; the order transitions to `COMPLETED` only once PostgreSQL proves every item now has a
+result. The ordering provider (`require_clinician`, same boundary as DH-EX-004) retrieves completed
+results only after the order is `COMPLETED` (409 otherwise, never a bare 404 that would misrepresent
+a real, owned, not-yet-ready order) and records a terminal review disposition
+(`no-follow-up-required` / `follow-up-required`) through two new routes. `ResultDelivery` stays
+`PENDING` — no delivery, message, or notification code was added. The patient-facing path is
+unchanged: `PatientOrderResponse` (api.py, `extra="forbid"`) defines no result field, and the only
+`/patient/*` routes remain the three from DH-EX-005 (`GET /patient/order`,
+`GET /patient/order/lab-options`, `POST /patient/order/selection`) — no patient route returns a
+result value. Migration `0010_exchange_results_workflow` is the tenth adapter migration and the
+ninth Exchange one; `EXPECTED_HEAD` in `.github/workflows/ci.yml` was independently confirmed to
+read `0010_exchange_results_workflow`, matching the migration chain on disk.
+
+**Evidence boundary, stated precisely — this documentation-closure session's own verification, not
+a re-statement of the commit's claims as fact.** Confirmed by this session via direct code/file
+inspection: the routes, models, migration, and patient-response schema described above all exist as
+described on `origin/master`'s HEAD. **Not confirmed by this session:** the commit message's own
+"605 passed / 42 skipped / 1 pre-existing warning" and "real PostgreSQL result-concurrency
+qualification passed" — no Python interpreter was reachable in this environment, so the suite was
+not re-run; these are recorded as the implementing session's claim only. **CI for both `30c5212`
+and `053004a` (and therefore for merge commit `d3a72d5c`) is NOT PROVEN in this session** — `gh` is
+not reachable on `PATH` (searched `C:\Program Files`, `C:\Program Files (x86)`,
+`%LOCALAPPDATA%\Programs`, and a full filesystem search), and the repository is private to
+unauthenticated web access (`api.github.com` and `github.com` both returned 404 for this repo to an
+unauthenticated `WebFetch`). Unlike DH-EX-006's closure entries, no first-person "Liban checked the
+real run" confirmation was given for `30c5212`/`053004a` at the time of this pass either — this is
+an open item, not a claim resolved one way or the other. **REAL KEYCLOAK QUALIFICATION remains NOT
+RUN** — DH-EX-007 reuses DH-EX-004/006's existing `require_clinician`/`require_lab_tech` machinery
+and adds no new authentication surface. **Manual live/browser demonstration NOT RUN.** The
+implementing commit also names one gap it did not close: audit row counts were not directly
+observed through an API-over-live-PostgreSQL concurrency harness during the final-two-results race
+(SQLite/direct-repository concurrency proofs were run instead, per this ticket's own precedent from
+DH-EX-005R/DH-EX-006R).
+
+**What this does not mean:** no Provider Portal, Lab Portal, or patient UI exists; no WhatsApp/SMS
+or any other result-delivery transport exists (`ResultDelivery` rows stay `PENDING` indefinitely
+under current code); no OpenMRS or OpenELIS Exchange connector exists (no file under
+`openmrs-config/` or `openelis-config/` changed); no production deployment exists; no pilot has
+begun. Real facility: untouched. Pollers: inactive, unrelated to this ticket.
+
+**Classification for this ticket's surfaces, per the evidence above:** result submission, automatic
+completion, provider result retrieval, and doctor review are **WRITTEN** (confirmed present in code
+on `origin/master`) and **TESTED per the implementing commit's own message** (not independently
+re-run this session) — they are **not CI-QUALIFIED**, because no GitHub Actions run for either
+commit has been independently observed by any session, unlike DH-EX-001 through DH-EX-006 which
+each have an independently- or Liban-confirmed exact-SHA CI run on record.
