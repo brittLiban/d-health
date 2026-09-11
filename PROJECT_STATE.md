@@ -8798,3 +8798,82 @@ ticket most needed to verify were already correct as implemented.
 standing instruction, even though READY FOR COMMIT = YES — stopping for Liban's sign-off. On
 approval: a combined DH-EX-006+DH-EX-006R commit/push/exact-SHA-CI ticket, then DH-EX-006D
 documentation closure, then DH-EX-007 — lab result submission and delivery — **not started.**
+
+---
+
+### DH-EX-006 · FINAL CLOSURE — Selected-lab assigned-order workflow · P0 · ✅ IMPLEMENTATION
+CLOSED / QUALIFIED · ⏳ THIS DOCS-CLOSURE COMMIT'S OWN EXACT-SHA CI NOT YET QUALIFIED
+
+**Ticket:** DH-EX-006D, documentation/state closure for DH-EX-006 (+ DH-EX-006R, committed
+together, following the DH-EX-001R/DH-EX-002R/DH-EX-003R/DH-EX-004R/DH-EX-005R →
+DH-EX-001D/.../DH-EX-005D pattern). This entry corrects the "DO NOT COMMIT. DO NOT PUSH"
+instruction immediately above: Liban's sign-off was given after that review pass, and the combined
+implementation+review commit below already landed.
+
+**Implementation + review commit:** `1bfb08a19fc3f135e7e552f77b73acad4967c88d`.
+**Parent:** `fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f` (DH-EX-005D's docs-closure commit).
+**Verification method.** The commit SHA, parent, author, and full message were first read, earlier
+in this documentation-closure effort, by decompressing `.git/objects/1b/fb08a19...` directly (zlib
+inflate via PowerShell/.NET) — at that point this session's environment had no `git` executable
+reachable on `PATH` (a filesystem search under `C:\Program Files`, `C:\Program Files (x86)`, and
+`%LOCALAPPDATA%\Programs` found none). `git` was subsequently located at
+`C:\Program Files\Git\cmd\git.exe` and used directly to re-confirm the same facts:
+`git rev-parse HEAD` = `1bfb08a19fc3f135e7e552f77b73acad4967c88d`, `git rev-parse HEAD^` =
+`fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f`, `git rev-parse origin/master` =
+`1bfb08a19fc3f135e7e552f77b73acad4967c88d` (already pushed, matching `.git/logs/HEAD`'s
+`commit: feat(DH-EX-006): add selected lab workflow` — directly following DH-EX-005D's docs-closure
+commit, matching the DH-EX-001 through DH-EX-005 pattern of one `feat` commit per ticket plus one
+`docs` closure commit). **`gh` remains unavailable in this environment**, which is why exact-SHA CI
+below is recorded on Liban's word rather than reproduced via `gh run view`. **This entry is that
+docs-closure record for DH-EX-006.**
+
+**What DH-EX-006 established**, per the commit's own message and the pre-commit DH-EX-006/
+DH-EX-006R entries above (unchanged by this closure pass): a `LAB_TECH` in an ACTIVE lab
+organization (`require_lab_tech`, mirroring `require_clinician` — no platform-admin or
+`ORG_ADMIN`-alone bypass) can list/read the orders assigned to their lab and move one through
+exactly three transitions: `SELECTED`→`ACCEPTED`, `SELECTED`→`REJECTED`, `ACCEPTED`→`IN_PROGRESS`.
+Assignment ownership is `LabSelection` alone, never re-derived from DH-EX-003 marketplace
+eligibility, so a lab that later becomes unlisted, stops accepting orders, deactivates an offering,
+or changes its price still owns and can work an order a patient already assigned it. Frozen
+selection-time prices are never rewritten. Each mutation locks the order `FOR UPDATE`, checks
+assignment ownership *before* evaluating replay-vs-conflict, mutates, and writes its security-audit
+row inside one transaction. No `/complete` route, no path to `COMPLETED`, zero `LabResult` rows,
+`DoctorReview`/`ResultDelivery` untouched. Migration `0009_exchange_lab_workflow` is purely
+additive (widens only the `exchange_security_audit_events.event_type` CHECK for
+`lab_order_accepted`/`lab_order_rejected`/`lab_order_processing_started`; no new table or column)
+and refuses to downgrade past real workflow-audit history before any DDL
+(`DowngradeBlockedByLabWorkflowHistory`). Per the commit message: 574 passed / 39 skipped (613
+collected); real PostgreSQL 18.6 qualification covering a fresh `0001→0009` upgrade, compatible
+downgrade/re-upgrade, incompatible-downgrade refusal against a full realistic clinical chain, and
+25-way same-action concurrency plus accept-vs-reject/accept-vs-start races all converging to exactly
+one real transition.
+
+**Exact-SHA CI, confirmed by Liban directly — not independently re-run by this session (`gh` is
+unavailable here, unlike every prior `*D`/FINAL CLOSURE entry, which confirmed CI itself via
+`gh run view --json headSha`).** Run `34537938219`, `head_sha` =
+`1bfb08a19fc3f135e7e552f77b73acad4967c88d`, `event` = `push`, `status` = `completed`, `conclusion`
+= `success`, all 9 required jobs green (OpenMRS narrow TestOrder module, adapter, seed +
+form-safety suites, static checks, ui, openelis order-correlation patch, compose interpolates and
+parses, oauth2login patched identity tests, provisioning). Adapter: `574 passed / 39 skipped, 1
+warning`; `alembic current` = `alembic heads` = `expected head` = `0009_exchange_lab_workflow`; CI's
+own PostgreSQL runtime `16.15` via `postgres:16-alpine`. This closure entry records that result on
+Liban's word, checked by him against the actual GitHub Actions run — it is not a claim this session
+independently reproduced.
+
+**REAL KEYCLOAK QUALIFICATION remains NOT RUN** — DH-EX-006 added no new authentication surface,
+only an authorization check reusing DH-EX-002's existing OIDC machinery.
+
+**Real facility:** untouched. **Pollers:** inactive. **No result submission, `COMPLETED` workflow,
+WhatsApp/SMS, patient UI, Lab Portal UI, Provider Portal UI, connector change, or real facility
+change was added by DH-EX-006 or this closure pass.**
+
+**What this closure means, precisely.** This entry records that the DH-EX-006 implementation and
+its independent review (DH-EX-006R) are committed and pushed to `origin/master` at the SHA above,
+following Liban's sign-off — verified directly from local `.git` metadata — and that exact-SHA CI
+qualification is confirmed by Liban's own check of the real GitHub Actions run, recorded here on
+his word rather than reproduced independently in this session. It does not mean: a Lab Portal,
+Provider Portal, or patient UI exists; result entry, delivery, or doctor review exists; an order
+ever reaches `COMPLETED`; WhatsApp/SMS integration exists; real Keycloak deployment is qualified; an
+OpenMRS or OpenELIS Exchange connector exists; production deployment exists; or any pilot has begun.
+
+**Next:** DH-EX-007 — lab result submission and delivery — **not started.**

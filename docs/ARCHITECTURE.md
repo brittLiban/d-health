@@ -1010,10 +1010,27 @@ transaction began, letting a grant revoked in that gap still authorize a selecti
 proven via 20 real-PostgreSQL selection-vs-revoke races. It does **not** mean a selected lab can see
 or act on its order, and no result is ever produced or delivered — those remain later work.
 
-Still not built, no connector wiring changed: the Provider Portal, the Lab Portal, and WhatsApp/SMS
-integration — none of this is equivalent to a completed Exchange MVP. No file under
+**DH-EX-006 (selected-lab assigned-order workflow) is also committed, pushed to `origin/master`, and
+exact-SHA CI qualified** (commit `1bfb08a19fc3f135e7e552f77b73acad4967c88d`, parent
+`fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f`, per DH-EX-006R's independent review; CI run
+`34537938219`, all 9 required jobs green, adapter `574 passed / 39 skipped`, migration head
+`0009_exchange_lab_workflow` — confirmed by Liban directly against the real GitHub Actions run; see
+PROJECT_STATE.md's DH-EX-006 · FINAL CLOSURE entry). Established: a `LAB_TECH`
+in an ACTIVE lab organization (`require_lab_tech`, mirroring `require_clinician`, no
+platform-admin/`ORG_ADMIN`-alone bypass) can list/read the orders assigned to their lab and move one
+through `SELECTED`→`ACCEPTED`, `SELECTED`→`REJECTED`, or `ACCEPTED`→`IN_PROGRESS`. Assignment
+ownership is `LabSelection` alone, never re-derived from DH-EX-003 marketplace eligibility (listing/
+accepting/offering-active/price), so a lab that later becomes unlisted, stops accepting, deactivates
+an offering, or changes its price still owns and can work an order a patient already assigned it;
+frozen selection-time prices are never rewritten, and patient-grant revocation/expiry is independent
+of the assignment. Each mutation locks the order `FOR UPDATE`, checks assignment ownership *before*
+evaluating replay-vs-conflict, mutates, and writes its security-audit row inside one transaction.
+There is no `/complete` route and no path to `COMPLETED` anywhere in this work — DH-EX-007's scope.
+
+Still not built, no connector wiring changed: the Provider Portal, the Lab Portal, patient UI, and
+WhatsApp/SMS integration — none of this is equivalent to a completed Exchange MVP. No file under
 `openmrs-config/` or `openelis-config/` has changed, and the connector Keycloak realm
 (`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
-PROJECT_STATE.md's DH-EX-001 through DH-EX-005 FINAL CLOSURE entries. Next: DH-EX-006 (selected-lab
-workflow) — not started.
+PROJECT_STATE.md's DH-EX-001 through DH-EX-006 FINAL CLOSURE entries. Next: DH-EX-007 (lab result
+submission and delivery) — not started.

@@ -1577,3 +1577,32 @@ load-bearing facts:
 **NEXT: Liban's own sign-off on this review, then a combined DH-EX-006+DH-EX-006R
 commit/push/exact-SHA-CI ticket, then DH-EX-006D documentation closure, then DH-EX-007 — lab result
 submission and delivery — not started.**
+
+**CORRECTION appended 2026-09-10 (DH-EX-006 FINAL CLOSURE, append-only — the "NEXT: Liban's own
+sign-off" line above is superseded, not retracted).** DH-EX-006 + DH-EX-006R were committed together
+(`1bfb08a19fc3f135e7e552f77b73acad4967c88d`, parent
+`fcb6c6fd7dcbfda363da1ce84706ca19fdb3310f`) and pushed to `origin/master`, following Liban's
+sign-off — first read from `.git` object files directly (no `git` binary reachable at that point),
+then re-confirmed with real `git` once `C:\Program Files\Git\cmd\git.exe` was located:
+`git rev-parse HEAD`/`HEAD^`/`origin/master` all match. **Exact-SHA CI qualification is confirmed by
+Liban directly** (run `34537938219`, `head_sha` = `1bfb08a19fc3f135e7e552f77b73acad4967c88d`,
+`event`=`push`, `status`=`completed`, `conclusion`=`success`, all 9 required jobs green, adapter
+`574 passed / 39 skipped`, migration current/heads/expected all `0009_exchange_lab_workflow`, CI
+PostgreSQL `16.15` via `postgres:16-alpine`) — checked by him against the real GitHub Actions run
+and recorded here on his word, not independently reproduced by this session (`gh` remains
+unavailable here). Full detail: PROJECT_STATE.md's **DH-EX-006 · FINAL CLOSURE** entry.
+
+**DH-EX-001 through DH-EX-006 are implementation-closed: committed, pushed to `origin/master`, and
+CI-qualified.** (This DH-EX-006D documentation-closure pass itself is not yet committed, pushed, or
+CI-qualified — see PROJECT_STATE.md's DH-EX-006 · FINAL CLOSURE entry.)
+The DHealth Exchange backend can now carry an authenticated clinician-created lab order from
+`AWAITING_LAB_SELECTION` through secure patient lab selection (`SELECTED`) and into the selected
+laboratory's own assigned work queue, where a `LAB_TECH` may accept (`ACCEPTED`), reject
+(`REJECTED`), or start processing an accepted order (`IN_PROGRESS`). Assignment is `LabSelection`
+alone, independent of later marketplace changes (listing/accepting/offering/price); frozen
+selection-time prices are never rewritten. It does **not** yet have: result submission,
+`IN_PROGRESS`→`COMPLETED` semantics, provider result delivery/review, doctor follow-up disposition
+(`FOLLOW_UP_REQUIRED`/`NO_FOLLOW_UP_REQUIRED`), WhatsApp/SMS transport, or any Provider/Lab/Patient
+portal UI. **REAL KEYCLOAK QUALIFICATION remains NOT RUN.**
+
+**NEXT: DH-EX-007 — lab result submission and delivery — not started.**
