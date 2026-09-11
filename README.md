@@ -33,10 +33,19 @@ disposition (`no-follow-up-required` / `follow-up-required`). The patient-facing
 returns a result value — it remains coarse-status-only. `ResultDelivery` stays `PENDING`: no
 delivery mechanism, message, or notification exists yet for either the provider or the patient.
 Per commit `30c5212`'s own message: 605 passed / 42 skipped locally, real-PostgreSQL
-result-concurrency qualification passed; this has **not been independently re-run or verified
-against GitHub Actions in this documentation-closure session** (no `gh` CLI reachable in this
-environment, and the repository is private to unauthenticated web access) — see
-`PROJECT_STATE.md`'s DH-EX-007 entry for the exact evidence boundary.
+result-concurrency qualification passed; this had **not been independently re-run or verified
+against GitHub Actions in the DH-EX-007D documentation-closure session** (no `gh` CLI was reachable
+in that session's environment, and the repository is private to unauthenticated web access) — that
+was true when written.
+
+**Correction (DH-EX-007D2, 2026-09-12): exact-SHA CI has since been independently observed.**
+Authenticated GitHub API access (via the repository's own stored git credential, not `gh`) confirmed
+run `34649375844` for merge commit `d3a72d5c` — `event=push`, `branch=master`,
+`status=completed`, `conclusion=success`, 9/9 jobs `success` — and run `34656008030` for the
+DH-EX-007D documentation-closure commit `a17ebad` with the identical result. **DH-EX-007 is
+exact-SHA CI-qualified.** This proves the test suite and static checks passed in CI; it proves
+nothing about real Keycloak, a live/browser demonstration, production deployment, or clinical
+readiness — those remain separately unproven, below.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —

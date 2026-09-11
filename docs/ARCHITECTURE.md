@@ -1028,11 +1028,13 @@ evaluating replay-vs-conflict, mutates, and writes its security-audit row inside
 There is no `/complete` route and no path to `COMPLETED` anywhere in this work — DH-EX-007's scope.
 
 **DH-EX-007 (lab result submission, order completion, provider result retrieval, and doctor
-review) is also committed and pushed to `origin/master`** (commit `30c5212`, CI migration guard
-advanced to `0010_exchange_results_workflow` in a follow-up commit `053004a`; both merged via PR #1
-— see `PROJECT_STATE.md`'s DH-EX-007 entry for the full evidence boundary, including that neither
-commit's GitHub Actions run has been independently checked in this documentation-closure session).
-Established: the selected lab's `LAB_TECH` (same `require_lab_tech` boundary as DH-EX-006) records
+review) is also committed, pushed to `origin/master`, and exact-SHA CI-qualified** (commit
+`30c5212`, CI migration guard advanced to `0010_exchange_results_workflow` in a follow-up commit
+`053004a`; both merged via PR #1 at merge commit `d3a72d5c`, CI run `34649375844` — `event=push`,
+`branch=master`, `head_sha=d3a72d5c`, `status=completed`, `conclusion=success`, 9/9 jobs
+`success`, independently confirmed via authenticated GitHub API in the DH-EX-007D2 pass, 2026-09-12,
+after the original DH-EX-007D pass had recorded this as unverified — see `PROJECT_STATE.md`'s
+DH-EX-007 entry for the full evidence boundary and that correction). Established: the selected lab's `LAB_TECH` (same `require_lab_tech` boundary as DH-EX-006) records
 one immutable result per ordered item, only once the order is `IN_PROGRESS`; result mutations
 serialize at the `LabOrder` aggregate; the order transitions to `COMPLETED` only once PostgreSQL
 proves every item now has a result — no application-level counting. The ordering provider (same

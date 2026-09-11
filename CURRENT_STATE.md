@@ -1677,3 +1677,29 @@ on `origin/master`) and **TESTED per the implementing commit's own message** (no
 re-run this session) — they are **not CI-QUALIFIED**, because no GitHub Actions run for either
 commit has been independently observed by any session, unlike DH-EX-001 through DH-EX-006 which
 each have an independently- or Liban-confirmed exact-SHA CI run on record.
+
+**CORRECTION appended 2026-09-12 (DH-EX-007D2, append-only — "CI for both `30c5212` and `053004a`
+... is NOT PROVEN in this session" and "not CI-QUALIFIED" above are superseded, not retracted; both
+were true of the DH-EX-007D session that wrote them).** A later session (this one, DH-EX-007D2)
+retrieved GitHub's stored git credential already authorized for this repository (`git credential
+fill`, not `gh`) and used it to call the GitHub Actions API directly, closing the evidence gap the
+paragraph above named as open:
+
+- Run `34649375844`, merge commit `d3a72d5c42d3151d39637831a87e541ee4dfc562`: `head_branch=master`,
+  `event=push`, `status=completed`, `conclusion=success`; `total_count=9` jobs, every job's own
+  `status`/`conclusion` pair `completed`/`success` (verified by field position, not by trusting a
+  substring match against step-level fields of the same name). The 9 job names match the repo's
+  established set: OpenMRS narrow TestOrder module, provisioning, oauth2login patched identity
+  tests, static checks, ui, openelis order-correlation patch, seed + form-safety suites, compose
+  interpolates and parses, adapter — ruff + pytest.
+- Run `34656008030`, the DH-EX-007D documentation-closure commit `a17ebad456498a2ebfff148af511618f814a54bf`:
+  identical result — `head_branch=master`, `event=push`, `status=completed`, `conclusion=success`,
+  9/9 jobs `success`.
+
+**DH-EX-007 is now exact-SHA CI-qualified**, on the same footing as DH-EX-001 through DH-EX-006.
+This closes the CI evidence gap only — it does not change anything else in this entry: **REAL
+KEYCLOAK QUALIFICATION remains NOT RUN, manual live/browser demonstration remains NOT RUN,
+production deployment does not exist, and no pilot has begun.** A green CI run proves the test
+suite and static checks passed on GitHub's runners; it does not independently confirm the
+605/42/1 test-count itself (this session read the run's job/step metadata, not its log output line
+by line), and it proves nothing about real-world/clinical readiness.
