@@ -1432,6 +1432,7 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
     all, per ADR-042's patient result-release policy."""
     from decimal import Decimal as D
 
+    from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
     from daher_adapter.exchange.results import LabResultRepository
 
     private_key, _ = keypair
@@ -1467,8 +1468,16 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
         order = session.get(LabOrder, order_id)
         item_ids = [item.id for item in order.items]
 
+    # DH-EX-007: a result may only be recorded once the selected lab is IN_PROGRESS -- drive the
+    # order there via the exact DH-EX-006 workflow repository before inserting the results this
+    # test needs to prove never leak to the patient.
+    workflow = LabWorkflowRepository(sessions, organizations)
+    workflow.accept(order_id=order_id, lab_organization_id=lab.id)
+    workflow.start_processing(order_id=order_id, lab_organization_id=lab.id)
+
     results = LabResultRepository(sessions)
     results.record_numeric(
+        order_id=order_id,
         lab_order_item_id=item_ids[0],
         lab_organization_id=lab.id,
         value=D("999.5"),
@@ -1477,7 +1486,10 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
         reference_range_high=D("100"),
     )
     results.record_text(
-        lab_order_item_id=item_ids[1], lab_organization_id=lab.id, value="Positive -- urgent"
+        order_id=order_id,
+        lab_order_item_id=item_ids[1],
+        lab_organization_id=lab.id,
+        value="Positive -- urgent",
     )
 
     body = client.get("/exchange/v1/patient/order", headers=_auth(access_token)).json()

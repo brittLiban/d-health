@@ -81,6 +81,7 @@ from daher_adapter.exchange.membership import (
     OrganizationRoleAssignmentRepository,
 )
 from daher_adapter.exchange.models import (
+    DoctorReviewStatus,
     LabOrderStatus,
     OrganizationMembershipStatus,
     OrganizationRole,
@@ -102,6 +103,18 @@ from daher_adapter.exchange.patient_access import (
     PatientAccessGrantRepository,
 )
 from daher_adapter.exchange.patient_access import OrderNotFound as GrantOrderNotFound
+from daher_adapter.exchange.results import (
+    DoctorReviewRecord,
+    DoctorReviewRepository,
+    DuplicateResult,
+    InvalidResultSubmissionState,
+    LabResultRepository,
+    OrderItemNotFound,
+    ResultSubmissionOutcome,
+    ReviewAlreadyFinalized,
+    ReviewNotAllowedYet,
+    ReviewNotFound,
+)
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 from daher_adapter.exchange.selection import (
     DifferentLabAlreadySelected,
@@ -610,6 +623,104 @@ class LabWorkflowOrderResponse(BaseModel):
     requested_tests: list[LabWorkflowOrderItemResponse]
 
 
+# -- DH-EX-007: lab result recording, order completion, provider result access, doctor review ----
+
+
+class LabResultSubmitRequest(BaseModel):
+    """No ``order_id``/``item_id`` (both come from the path), no ``lab_organization_id`` (comes
+    from the authenticated principal via ``_require_lab_tech``). Exactly one of the NUMERIC or
+    TEXT value shapes must be present, matching ``LabResult``'s own DB CHECK constraint -- this
+    validator exists so a malformed request is refused at the API boundary with a clear 422,
+    never reaching the repository layer to fail there instead. ``numeric_unit``/``text_value``
+    carry ``max_length`` matching ``LabResult.numeric_unit`` (``String(32)``) and
+    ``LabResult.text_value`` (``String(2048)``) exactly -- without it, an oversized value passes
+    this model and reaches PostgreSQL's real ``VARCHAR(n)`` column, which raises a
+    ``StringDataRightTruncation`` translated by SQLAlchemy to ``DataError``, not
+    ``IntegrityError`` -- the one exception type `_submit_in_session` translates to a controlled
+    ``DuplicateResult`` conflict. Uncaught, that reaches the caller as a raw 500, invisible to the
+    SQLite-backed test suite (SQLite does not enforce ``VARCHAR`` length), and reproduced live
+    against real PostgreSQL during review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result_type: Literal["NUMERIC", "TEXT"]
+    numeric_value: Decimal | None = None
+    numeric_unit: str | None = Field(default=None, max_length=32)
+    reference_range_low: Decimal | None = None
+    reference_range_high: Decimal | None = None
+    text_value: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _value_matches_declared_type(self) -> "LabResultSubmitRequest":
+        if self.result_type == "NUMERIC":
+            if self.numeric_value is None:
+                raise ValueError("numeric_value is required when result_type is 'NUMERIC'")
+            if self.text_value is not None:
+                raise ValueError("text_value must not be set when result_type is 'NUMERIC'")
+        else:
+            if self.text_value is None or not self.text_value.strip():
+                raise ValueError("text_value is required when result_type is 'TEXT'")
+            if (
+                self.numeric_value is not None
+                or self.numeric_unit is not None
+                or self.reference_range_low is not None
+                or self.reference_range_high is not None
+            ):
+                raise ValueError("numeric fields must not be set when result_type is 'TEXT'")
+        return self
+
+
+class LabResultSubmitResponse(BaseModel):
+    """Deliberately narrow -- confirms the mutation and the order's resulting status, nothing
+    more. No internal auth/security-audit fields, no patient token/grant data, no re-statement of
+    frozen catalog/price snapshots the caller already has from the work-queue read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    item_id: uuid.UUID
+    result_id: uuid.UUID
+    result_type: str
+    completed_at: datetime
+    order_status: str
+
+
+class ProviderResultItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    result_type: str
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+    completed_at: datetime
+
+
+class ProviderOrderResultsResponse(BaseModel):
+    """Available only once ``LabOrder.status == COMPLETED`` -- ``get_lab_order_results`` refuses
+    with a 409 before this is ever built for an order still in progress, so this shape never has
+    to represent a partial-results state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    order_status: str
+    results: list[ProviderResultItemResponse]
+
+
+class DoctorReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    status: str
+    reviewed_at: datetime | None
+    reviewed_by_practitioner_reference_id: uuid.UUID | None
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -634,6 +745,8 @@ def build_exchange_router(
         session_factory, ttl_hours=patient_access_ttl_hours
     )
     lab_workflow = LabWorkflowRepository(session_factory, organizations)
+    results = LabResultRepository(session_factory)
+    reviews = DoctorReviewRepository(session_factory)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -1878,6 +1991,224 @@ def build_exchange_router(
         except InvalidLabWorkflowTransition as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         return _lab_workflow_order_response(record)
+
+    # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/result",
+        response_model=LabResultSubmitResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def submit_lab_result(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        body: LabResultSubmitRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabResultSubmitResponse:
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                outcome: ResultSubmissionOutcome
+                if body.result_type == "NUMERIC":
+                    outcome = results.record_numeric(
+                        order_id=order_id,
+                        lab_order_item_id=item_id,
+                        lab_organization_id=lab_id,
+                        value=body.numeric_value,
+                        unit=body.numeric_unit,
+                        reference_range_low=body.reference_range_low,
+                        reference_range_high=body.reference_range_high,
+                        session=session,
+                    )
+                else:
+                    outcome = results.record_text(
+                        order_id=order_id,
+                        lab_order_item_id=item_id,
+                        lab_organization_id=lab_id,
+                        value=body.text_value or "",
+                        session=session,
+                    )
+                # `lab_result_recorded` and (if this was the order's last missing item)
+                # `lab_order_completed` commit or roll back together with the result insert and
+                # the order's own status write -- both audit rows are added to the identical
+                # `session` this transaction already owns, never a separate commit.
+                security_audit.record(
+                    session,
+                    event_type="lab_result_recorded",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+                if outcome.order_completed:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_completed",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except DuplicateResult as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        return LabResultSubmitResponse(
+            order_id=order_id,
+            item_id=item_id,
+            result_id=outcome.result.id,
+            result_type=outcome.result.result_type,
+            completed_at=outcome.result.completed_at,
+            order_status=outcome.order_status,
+        )
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/results",
+        response_model=ProviderOrderResultsResponse,
+    )
+    def get_lab_order_results(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ProviderOrderResultsResponse:
+        _require_clinician(principal, provider_id)
+        order = _existing_order_for_provider_or_404(order_id, provider_id)
+        if order.status != LabOrderStatus.COMPLETED.value:
+            # The order genuinely exists and genuinely belongs to this provider -- a bare 404
+            # here would misrepresent that fact (matching ticket guidance: distinguish "not
+            # ready yet" from "not yours"). No partial/clinical result value is ever included.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"order results are not yet available -- order is {order.status!r}, "
+                f"not 'COMPLETED'",
+            )
+        item_by_id = {item.id: item for item in order.items}
+        return ProviderOrderResultsResponse(
+            order_id=order.id,
+            order_status=order.status,
+            results=[
+                ProviderResultItemResponse(
+                    item_id=record.lab_order_item_id,
+                    catalog_code_snapshot=item_by_id[
+                        record.lab_order_item_id
+                    ].catalog_code_snapshot,
+                    catalog_display_name_snapshot=item_by_id[
+                        record.lab_order_item_id
+                    ].catalog_display_name_snapshot,
+                    result_type=record.result_type,
+                    numeric_value=record.numeric_value,
+                    numeric_unit=record.numeric_unit,
+                    reference_range_low=record.reference_range_low,
+                    reference_range_high=record.reference_range_high,
+                    text_value=record.text_value,
+                    completed_at=record.completed_at,
+                )
+                for record in results.list_for_order(order_id)
+                if record.lab_order_item_id in item_by_id
+            ],
+        )
+
+    def _doctor_review_response(
+        order_id: uuid.UUID, record: DoctorReviewRecord
+    ) -> DoctorReviewResponse:
+        return DoctorReviewResponse(
+            order_id=order_id,
+            status=record.status,
+            reviewed_at=record.reviewed_at,
+            reviewed_by_practitioner_reference_id=record.reviewed_by_practitioner_reference_id,
+        )
+
+    def _submit_doctor_review(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: AuthenticatedPrincipal,
+        target_status: DoctorReviewStatus,
+    ) -> DoctorReviewResponse:
+        _require_clinician(principal, provider_id)
+        order = _existing_order_for_provider_or_404(order_id, provider_id)
+        identity = identities.get(principal.identity_id)
+        try:
+            with session_factory.begin() as session:
+                # Exact same DH-EX-004 identity-backed binding used for the ordering clinician --
+                # the *reviewing* clinician may be a different person than whoever created the
+                # order, so this is resolved fresh here, never carried over from order creation.
+                practitioner = practitioners.get_or_create(
+                    source_organization_id=provider_id,
+                    source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+                    source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+                    source_identity_value=str(principal.identity_id),
+                    display_name=identity.display_name,
+                    session=session,
+                )
+                if target_status == DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED:
+                    record = reviews.mark_no_follow_up_required(
+                        order.id,
+                        reviewed_by_practitioner_reference_id=practitioner.id,
+                        session=session,
+                    )
+                else:
+                    record = reviews.mark_follow_up_required(
+                        order.id,
+                        reviewed_by_practitioner_reference_id=practitioner.id,
+                        session=session,
+                    )
+                security_audit.record(
+                    session,
+                    event_type="doctor_review_recorded",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=provider_id,
+                    outcome="updated",
+                    resource_type="lab_order",
+                    resource_id=order.id,
+                )
+        except ReviewNotAllowedYet as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ReviewAlreadyFinalized as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ReviewNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+
+        return _doctor_review_response(order.id, record)
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/review/no-follow-up-required",
+        response_model=DoctorReviewResponse,
+    )
+    def review_no_follow_up_required(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> DoctorReviewResponse:
+        return _submit_doctor_review(
+            provider_id, order_id, principal, DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/review/follow-up-required",
+        response_model=DoctorReviewResponse,
+    )
+    def review_follow_up_required(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> DoctorReviewResponse:
+        return _submit_doctor_review(
+            provider_id, order_id, principal, DoctorReviewStatus.FOLLOW_UP_REQUIRED
+        )
 
     return router
 
