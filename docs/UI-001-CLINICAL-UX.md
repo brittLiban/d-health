@@ -18,6 +18,13 @@ table.
 > to the clinical lead and Liban (`AGENTS.md`, `docs/CLINICAL-SIGNOFF.md`). Where this document
 > needs one of those to be concrete, it says so and leaves the value blank rather than guessing.
 
+> **Scope note added 2026-09-12 (DH-DOC-001).** This document predates ADR-042's 2026-09-08
+> product pivot and describes the earlier **maternity/OpenMRS clinical UI track** exclusively — it
+> is not, and is not being converted into, the authoritative DHealth MVP 1.0 Clinic/Lab/Patient UX
+> specification (that is `docs/MVP-1.0.md`, which has no UI implementation detail of its own yet).
+> Its data-contract mapping, design-system research, and the BFF/identity decision it fed (ADR-027)
+> remain valid, reusable evidence for the maternity/reference-connector track and are not discarded.
+
 ---
 
 ## 0. Audit findings (read this before anything else)

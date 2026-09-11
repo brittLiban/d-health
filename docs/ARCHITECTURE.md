@@ -1,5 +1,14 @@
 # Daher Health — v1 Pilot Architecture
 
+> **Reading this document today (2026-09-12 or later)?** This document has two parts, on two
+> different tracks. **§§1–16 below** describe the maternity/birth-centre clinical stack
+> (OpenMRS + OpenELIS + Keycloak + the adapter) — real, running, historically-and-currently accurate
+> architecture for that system, now the **first reference connector track** under DHealth Connect's
+> model. **§17** describes the DHealth Exchange, added 2026-09-08 (ADR-042). Neither section is
+> DHealth's current overall product definition — that is `DECISIONS.md`'s **ADR-043** and
+> **`docs/MVP-1.0.md`**, which this document does not duplicate. Start there, then come here for
+> the topology/versions/build-order detail of whichever track your ticket touches.
+
 **Status:** DH-003's maternity foundation, build steps 1 and 3, the Keycloak provider, adapter
 safety skeleton, local backup path, PostgreSQL tenant isolation, DH-021's generated keystore,
 DH-016's reverse proxy, and DH-008's fail-closed SSO plumbing are built and runtime-verified. A

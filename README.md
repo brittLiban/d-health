@@ -1,5 +1,16 @@
 # Daher Health
 
+**DHealth is an interoperable diagnostic network** for providers, laboratories, and patients.
+Facilities may run DHealth's own native software or integrate their existing EMR/LIS through a
+connector — never both maintained by hand for the same transaction. Full product definition,
+the five product surfaces, the golden journey, and four non-negotiable product laws (no forced
+marketplace, no double entry, faster than what it replaces, no digital-literacy requirement for
+care): **[`docs/MVP-1.0.md`](docs/MVP-1.0.md)**, decided in `DECISIONS.md`'s **ADR-043**. This
+section gives the short version and points to current evidence; it does not duplicate that
+document.
+
+### Current: the DHealth Exchange backend
+
 **DHealth is a digital lab order + result exchange** connecting doctors/clinics, patients, and
 independent laboratories — reachable through DHealth's own Provider/Lab portals or through an
 existing EMR/LIS via a connector (DECISIONS.md's ADR-042, 2026-09-08). This is a **pivot in
@@ -53,7 +64,23 @@ this is the backend foundation those are built on, not a patient-facing marketpl
 itself. OpenMRS/OpenELIS remain supported, running exactly as built, as the first reference
 connector track.
 
+### Intended: DHealth Clinic / DHealth Lab / DHealth Patient / DHealth Connect
+
+`docs/MVP-1.0.md` names four more product surfaces beyond the Exchange backend above: **DHealth
+Clinic** (native provider software), **DHealth Lab** (native laboratory software), **DHealth
+Patient** (the assisted-digital patient layer), and **DHealth Connect** (the EMR/LIS integration
+layer). **None of the four is built as a named application today.** The Exchange backend above
+already implements much of what a future DHealth Clinic/Lab would call over HTTP; DHealth Patient
+and DHealth Connect have no code of their own yet. Full current-vs-MVP gap table:
+`docs/MVP-1.0.md` §8.
+
 ---
+
+### Reference connector track: OpenMRS + OpenELIS (maternity/birth-centre stack)
+
+The remainder of this README describes the pre-pivot maternity/birth-centre system in detail. It
+is real, running, historical-and-current infrastructure — the first reference connector track
+under DHealth Connect's model (ADR-042) — not the definition of DHealth's overall product.
 
 A health information system for a birth delivery centre and its laboratory in Djibouti.
 OpenMRS (patient records, maternity care) + OpenELIS (laboratory) + Keycloak (one login for both)
@@ -121,20 +148,24 @@ language, not a localisation afterthought.
 
 ## Where to look
 
+Documentation hierarchy for a new reader or agent — read roughly top to bottom, then dive into a
+component doc only once you're touching that component:
+
 | File | What it is |
 |---|---|
-| [`CURRENT_STATE.md`](CURRENT_STATE.md) | What actually works vs. what is merely written. Start here. |
+| [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo — read first |
 | [`docs/MVP-1.0.md`](docs/MVP-1.0.md) | **The DHealth MVP 1.0 product contract** — product family, golden journey, the four product laws, current-vs-MVP gaps (ADR-043) |
-| [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
 | [`DECISIONS.md`](DECISIONS.md) | Architecture decision records — why things are the way they are |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order |
-| [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks |
+| [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
+| [`CURRENT_STATE.md`](CURRENT_STATE.md) | What actually works vs. what is merely written |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order (maternity/connector-track detail, plus §17 for the Exchange) |
+| [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks (maternity/connector-track component) |
 | [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
 | [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |
-| [`docs/CLINICAL-SIGNOFF.md`](docs/CLINICAL-SIGNOFF.md) | The clinical lead's handover sheet. Inventories what this stack can already order; **nothing is pre-selected** |
-| [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md) | How the adapter will learn an order exists, written **before** any transport code (ADR-005 required it) |
+| [`docs/CLINICAL-SIGNOFF.md`](docs/CLINICAL-SIGNOFF.md) | The clinical lead's handover sheet for the maternity/connector-track stack. Inventories what it can already order; **nothing is pre-selected** |
+| [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md) | How the adapter will learn an order exists, written **before** any transport code (ADR-005 required it) — maternity/connector-track component |
+| [`docs/UI-001-CLINICAL-UX.md`](docs/UI-001-CLINICAL-UX.md) | Earlier maternity/OpenMRS clinical-UI research — historical/component-specific, not the DHealth Clinic/Lab/Patient UX specification |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI — gates 678 tests plus Ruff, compose parsing, image pinning, secret and link checks |
-| [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for anyone (human or AI) working in this repo |
 
 ---
 

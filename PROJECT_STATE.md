@@ -1,5 +1,17 @@
 # Project State — Daher Health
 
+> **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
+> **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
+> primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
+> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-001 and
+> DH-DOC-001) — that is where current handoff state and the active backlog live, not the header
+> below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
+> (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
+> below remain accurate, unmodified history for the maternity/reference-connector track's own state
+> as of 2026-08-21; they are not rewritten here, only superseded in priority by later entries.
+
+---
+
 **Updated:** 2026-08-21 · **Phase:** provisioning control plane works end to end on a stand-in;
 DH-011 transport is **blocked on BLOCKER-6** (target ingestion path — a human decision), not the
 unblocked critical path this line claimed until now (stale since BLOCKER-6 was raised 2026-08-16,
@@ -9217,5 +9229,127 @@ are the two items most likely to block a real golden-journey demonstration and a
 candidates for the next ticket, but this ticket does not choose one — that choice belongs to
 whoever prioritizes the backlog above. `DH-DOC-001` (repo-wide terminology/framing sweep, deferred
 by this ticket's own scope) remains open whenever it is picked up.
+
+**READY FOR REVIEW: YES.**
+
+---
+
+### DH-DOC-001 · Align repository-wide current framing with ADR-043 / DHealth MVP 1.0 · P0 · ✅ DONE (documentation only, no code)
+
+**Ticket:** DH-DOC-001, deferred by DH-MVP-001's own scope note above, now performed. Documentation
+only — no product behavior, API, migration, deployment, or test change.
+
+**HEAD audited:** `0f259ee4628f27eeefae55d1f8f25968190cecbc` (DH-MVP-001's commit), confirmed
+current via `git fetch`/`git log origin/master -1` — matching the ticket's expected starting SHA
+exactly. Its own CI (run `34658152609`) was already independently confirmed green (9/9 jobs) at
+the end of the DH-MVP-001 ticket.
+
+**Current authoritative product direction, restated without embellishment:** ADR-043 (extending,
+not retracting, ADR-042) — DHealth is an interoperable diagnostic network of five surfaces
+(Exchange/Clinic/Lab/Patient/Connect), bound by four laws (no forced marketplace, no double entry,
+faster than what it replaces, no digital-literacy requirement for care), with the maternity/
+OpenMRS/OpenELIS stack preserved as the first reference connector track, not the product
+definition. Full text: `docs/MVP-1.0.md`.
+
+**Framing-drift inventory.** Searched every top-level and `docs/` markdown file for the patterns
+this ticket named (maternity-first product claims, MVP-equals-OpenMRS framing, undated pilot
+targets presented as current, "go-live"/"clinically live" scope leakage, marketplace-mandatory
+claims, forced-OpenMRS-adoption claims). Findings, classified per the ticket's own four categories:
+
+- **CURRENT ENTRY-POINT DRIFT (corrected):** `AGENTS.md` and `CLAUDE.md` opened by defining the
+  entire repository as one birth-centre HIS, with no mention of ADR-043/`docs/MVP-1.0.md` and no
+  distinction between rules binding the Exchange vs. the maternity track. `README.md`'s Exchange
+  intro (added at DH-EX-*/DH-MVP-001) did not yet name the four DHealth Clinic/Lab/Patient/Connect
+  surfaces or point a first-screen reader to the four laws. `docs/ARCHITECTURE.md`'s opening
+  "v1 Pilot Architecture" status block had no note directing a post-pivot reader to ADR-043 first.
+  `CURRENT_STATE.md` and `PROJECT_STATE.md` each still opened with their pre-pivot (2026-08-17/
+  2026-08-21) maternity-only header as the first thing a reader sees, with no pointer to the
+  current product definition or to where the newest ticket entries actually live.
+- **HISTORICAL RECORD (left unchanged):** every dated ticket entry, ADR body, and "Assessed"/
+  "Updated" header's own prose in `PROJECT_STATE.md`, `CURRENT_STATE.md`, and `DECISIONS.md` — none
+  of it was edited, only preceded by a new pointer note or (in `AGENTS.md`/`CLAUDE.md`) annotated
+  inline with a track label. The "1 September 2026" pilot-target mentions throughout
+  `PROJECT_STATE.md`/`CURRENT_STATE.md`/`DECISIONS.md`/`docs/ARCHITECTURE.md` (dozens of them) were
+  **not** touched — they are accurate historical record of a decision made on a specific date, and
+  today (2026-09-12) is after that date regardless of what any document says, so no rewrite was
+  needed there. Only `AGENTS.md`/`CLAUDE.md`'s own *forward-looking* restatement of "the 1 September
+  target" needed a "now historical" qualifier, since those two files are read as current instruction
+  on every session, not as a dated log entry.
+- **COMPONENT-SPECIFIC DOCUMENTATION (left unchanged, already clearly scoped):**
+  `backup/README.md`, `docs/CLINICAL-SIGNOFF.md`, `docs/WATERMARK-DESIGN.md`, `docs/DH-011H*.md`,
+  `docs/DH-011I-LOINC-COMPATIBILITY.md`, `keycloak/realm-config/README.md` — each is scoped by its
+  own filename/opening line to a specific maternity/connector-track component and makes no claim
+  about DHealth's overall product. Confirmed by reading each file's opening lines; none needed a
+  scope label added.
+- **AMBIGUOUS, resolved by adding a scope label without rewriting content:**
+  `docs/UI-001-CLINICAL-UX.md` — a 2026-08-21/22 maternity/OpenMRS clinical-UX research document
+  that a reader could mistake for the current DHealth Clinic/Lab/Patient UX spec now that those
+  names exist. Added one scope-note paragraph; the document's own content (data-contract mapping,
+  BFF/identity decision evidence) is unchanged.
+- **Checked and found NOT present anywhere:** a claim that price comparison is mandatory for MVP
+  launch (the repo's many "marketplace" mentions are all internal-engineering references to the
+  DH-EX-003 lab-directory/eligibility backend, not a product claim that consumer price comparison
+  is required); a claim that OpenMRS/OpenELIS must be adopted by every participating facility (no
+  such claim exists — searched "every facility"/"all facilities"/"must use OpenMRS", all hits were
+  about `provisioning/`'s per-facility isolation model, unrelated); "go-live" terminology that
+  implies current Exchange clinical readiness (every "go-live" hit is a maternity-track-specific
+  reference — bed counts, WhatsApp credentials, the pilot VM — not the Exchange).
+
+**Files changed:** `AGENTS.md`, `CLAUDE.md`, `README.md`, `docs/ARCHITECTURE.md`,
+`CURRENT_STATE.md`, `PROJECT_STATE.md` (this entry), `docs/UI-001-CLINICAL-UX.md`. `DECISIONS.md`
+was read and judged to need no change — its opening is already a neutral append-only-ADR-log header
+with no product-definition claim to correct.
+
+**`AGENTS.md` now distinguishes global DHealth rules from maternity/reference-connector-track
+rules, precisely:** three new opening sections ("DHealth today," "Existing maternity/OpenMRS/
+OpenELIS stack," "Exchange safety") orient the reader before any rule text. Every subsequent
+section header is now suffixed **GLOBAL** (The rule that matters most, Working rules, Evidence
+discipline, Non-negotiables from the project brief) or **maternity / reference-connector track**
+(Pinned P0 items, Pilot-ready ≠ clinically live). Within "Always `Human Decision Required: Yes`,"
+each of the five existing bullets is now labeled GLOBAL or maternity-track inline, and a new
+paragraph points to ADR-043/`docs/MVP-1.0.md` §4/§10 for the Exchange track's own open-decision
+catalog (DH-EX-005 conflict, ResultDelivery semantics, validation/release, proxy authorization,
+patient-matching) rather than repeating it. The Pinned P0 section gained one clarifying sentence:
+these four remain maternity-track-specific and are not superseded by being off the Exchange
+critical path; the Exchange's own non-negotiables are ADR-043's four laws, a parallel list, not a
+replacement. **No existing rule, pinned P0 item, or non-negotiable was deleted, weakened, or marked
+obsolete** — every original sentence survives; only labels and short cross-references were added.
+
+**Documentation hierarchy now works as:** `AGENTS.md`/`CLAUDE.md` (read first) → `docs/MVP-1.0.md`/
+ADR-043 (current product contract) → `DECISIONS.md` → `PROJECT_STATE.md` → `CURRENT_STATE.md` →
+`docs/ARCHITECTURE.md` → component-specific docs (`backup/`, `docs/CLINICAL-SIGNOFF.md`,
+`docs/WATERMARK-DESIGN.md`, `docs/UI-001-CLINICAL-UX.md`, etc.) once that component is being
+touched. `README.md`'s "Where to look" table was reordered to match this exact sequence and gained
+one new row (`docs/UI-001-CLINICAL-UX.md`, labeled historical/component-specific).
+
+**Four product laws discoverability:** named in full in `docs/MVP-1.0.md` §6 (the source of truth,
+not duplicated verbatim elsewhere) and in `DECISIONS.md`'s ADR-043; discoverable without reading
+conversation history from `AGENTS.md`'s "DHealth today" section and its Pinned-P0-section
+cross-reference, from `CLAUDE.md`'s new "Four DHealth product laws" list (full one-line-each text,
+since `CLAUDE.md` is the automatic-context file every session already loads), and from `README.md`'s
+opening paragraph and "Intended: DHealth Clinic / DHealth Lab / DHealth Patient / DHealth Connect"
+section.
+
+**Static/document verification performed:** `git diff --check` clean on every changed file; the
+relative-link check was replicated by hand against CI's own regex (`.github/workflows/ci.yml`'s
+"Relative documentation links resolve" step: `\]\((?!https?:|mailto:)([^)#]+)`, resolved against
+each file's own directory) across all seven changed files plus `docs/MVP-1.0.md` — zero broken
+links; CR-byte scan clean; a secret-shaped-literal scan of the diff found nothing; `git status
+--short` confirms only the seven intended files plus `docs/MVP-1.0.md` (already committed in
+DH-MVP-001) are touched.
+
+**No product law was altered, no safety rule was deleted, no maternity-track rule was incorrectly
+globalized or removed, no past date was presented as an active future milestone, and no aspirational
+product name (DHealth Clinic/Lab/Patient/Connect) was described as built** — each is explicitly
+labeled NOT BUILT everywhere it is introduced, per this ticket's own instruction.
+
+**What remains NOT proven / out of scope for this ticket, unchanged:** everything DH-MVP-001 already
+recorded as unproven (the four laws' real-world achievability, any facility's pilot participation,
+the speed targets, the DH-EX-005 price-contract resolution, ResultDelivery semantics, the
+validation/release workflow) — this ticket is a pure framing/navigation correction and resolves
+none of it.
+
+**Next:** whoever picks up the DH-MVP-001 backlog (§15/`docs/MVP-1.0.md`) works from `AGENTS.md` →
+`docs/MVP-1.0.md` going forward; no further documentation-framing ticket is implied by this one.
 
 **READY FOR REVIEW: YES.**

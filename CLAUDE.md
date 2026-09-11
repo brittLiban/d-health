@@ -1,11 +1,16 @@
 # Daher Health
 
-Real clinical software: a health information system for a birth delivery centre and its
-laboratory in Djibouti. Used by midwives, doctors, and lab technicians on real patients.
+**DHealth is an interoperable diagnostic network** (providers, laboratories, patients — native
+apps or an existing EMR/LIS connector). Current product contract: `DECISIONS.md`'s **ADR-043** and
+**`docs/MVP-1.0.md`**. This repo's oldest, largest body of work is real clinical software for a
+birth delivery centre and its laboratory in Djibouti (OpenMRS/OpenELIS), used by midwives, doctors,
+and lab technicians on real patients — preserved as the first reference connector track, not
+discarded, still fully bound by every rule below wherever it's touched.
 
-**→ Read [AGENTS.md](AGENTS.md) before doing anything.** Then `DECISIONS.md` (recorded decisions —
-follow them, don't re-litigate) and `PROJECT_STATE.md` (tickets, blockers, where we are).
-`CURRENT_STATE.md` is the honest read of what actually works versus what is merely written.
+**→ Read [AGENTS.md](AGENTS.md) before doing anything.** Then `docs/MVP-1.0.md`/ADR-043 if your
+ticket touches the Exchange, `DECISIONS.md` (recorded decisions — follow them, don't re-litigate),
+and `PROJECT_STATE.md` (tickets, blockers, where we are). `CURRENT_STATE.md` is the honest read of
+what actually works versus what is merely written.
 
 This file exists so the rules below are in context automatically. It is a summary, not the
 source — `AGENTS.md` governs.
@@ -30,7 +35,16 @@ to a different unblocked ticket):
 - **Any gap that "obviously should" be filled a particular way** — that instinct is the failure
   mode being guarded against, not a green light
 
-## Pinned P0 — immune to deadline pressure
+## Four DHealth product laws — Exchange track (ADR-043)
+
+1. **No forced marketplace** — day-one DHealth is a connected workflow, not price-shopping.
+2. **No double entry** — integrate the existing system or use DHealth natively, never both by hand.
+3. **Faster than what it replaces** — routine actions must be low-friction, validated targets not
+   current claims.
+4. **No digital-literacy requirement for care** — assisted-digital, non-smartphone paths always
+   exist. Full detail: `docs/MVP-1.0.md` §6.
+
+## Pinned P0 — maternity/reference-connector track — immune to deadline pressure
 
 1. Backup **plus a performed restore drill**. "The script exists" is not done.
 2. WhatsApp stays `BLOCKED`, not `DONE`, until real credentials run the flow. A mock is never done.
@@ -48,8 +62,10 @@ to a different unblocked ticket):
 - Never commit secrets. Pin every image; never fabricate a digest you have not pulled.
 - Distinguish **written** from **verified** from **demonstrated**. Report faithfully.
 
-## Pilot-ready ≠ clinically live
+## Pilot-ready ≠ clinically live — maternity/reference-connector track
 
-Target is **pilot-ready** (1 Sept 2026). Clinically live additionally requires the clinical lead's
-sign-off on the order set and partograph fields. Nobody treats pilot-ready as authorization to use
-this on real patients. Say "pilot-ready", never "launched" or "in production".
+Target was **pilot-ready** (1 Sept 2026, now a past date — see `PROJECT_STATE.md`/`CURRENT_STATE.md`
+for whether it was met). Clinically live additionally requires the clinical lead's sign-off on the
+order set and partograph fields. Nobody treats pilot-ready as authorization to use this on real
+patients. Say "pilot-ready", never "launched" or "in production". The Exchange track has no
+equivalent pilot-ready declaration yet — no real-patient pilot exists on either track.
