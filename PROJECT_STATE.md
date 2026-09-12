@@ -9551,6 +9551,13 @@ follow-up item is prioritized next — this ticket does not choose one.
 **READY FOR REVIEW: YES**, pending the exact-SHA CI result recorded immediately below in this
 entry once pushed.
 
+**CORRECTION appended 2026-09-12 (DH-EX-008R, append-only — completing this entry, not retracting
+it):** the exact-SHA CI result above was never appended. Recorded now, verified fresh via `gh run
+view` rather than copied from an earlier note: commit `869072a37f9581f95beaab78b5746d10238d463e`,
+GitHub Actions run
+[34661317861](https://github.com/brittLiban/d-health/actions/runs/34661317861) — **success**, all
+9 jobs green.
+
 ---
 
 ### DH-EX-008 · Wire DHealth Exchange into the real Docker/Keycloak/Caddy deployment · P0 · ⚠️ WIRED AND STATICALLY VERIFIED — LIVE KEYCLOAK/CADDY QUALIFICATION BLOCKED, DH-EX-008R STILL REQUIRED
@@ -9840,3 +9847,196 @@ step), `adapter — ruff + pytest`, and `compose interpolates and parses` (inclu
 `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET=ci-dummy` throwaway value). No failures; only pre-existing
 Node.js/setup-java deprecation annotations unrelated to this ticket. Verified via `gh run view`
 directly against the GitHub API, not inferred from a badge or copied from a prior ticket's result.
+
+---
+
+### DH-EX-008R · Qualify the real Keycloak → JWKS → Exchange authentication path · P0 · 🚫 BLOCKED — RUNTIME QUALIFICATION NOT POSSIBLE IN AVAILABLE ENVIRONMENT
+
+**Ticket:** DH-EX-008R. Prove the one claim DH-EX-008 left open: that a token actually issued by a
+real Keycloak instance validates through Keycloak's real JWKS in the deployed Exchange, and that
+Exchange authorization then behaves correctly (platform-admin, organization membership, negative
+controls). Explicitly a qualification/review ticket — no new Exchange functionality.
+
+**Starting state:** HEAD `a36c436137317534a855f8e8c84938ef1696dd59`, matching the ticket's stated
+SHA exactly (confirmed via `git fetch`/`git log`, not trusted blindly). CI for that commit:
+**success**, run `34668301935`.
+
+**Environment gate — re-tested directly, per this ticket's own explicit instruction, not answered
+from memory of DH-EX-008's earlier finding:** the pinned `quay.io/keycloak/keycloak:26.7.1` image
+remains impossible to pull in this session's WSL2 sandbox. **7 real pull attempts**, not 2:
+- 2 attempts against the sandbox's default DNS path (`10.255.255.254`, WSL2's NAT DNS proxy) —
+  identical failures to DH-EX-008's finding (`dial tcp: lookup cdn01.quay.io ... i/o timeout`, then
+  a `TLS handshake timeout` to the same host).
+- Diagnosed further rather than stopping there: `getent ahostsv4 cdn01.quay.io` and
+  `python3 socket.getaddrinfo(...)` **both resolved the hostname successfully** to real Akamai IPs;
+  `curl https://quay.io` returned `200`; `curl https://cdn01.quay.io/` directly returned `403`
+  (an authorization rejection, not a connectivity failure) in under 8 seconds. This **isolates the
+  problem to dockerd's own sustained multi-layer blob-pull behavior specifically**, not to DNS or
+  general network reachability, which both work.
+- Configured `/etc/docker/daemon.json` with explicit public DNS (`8.8.8.8`, `1.1.1.1`) and
+  `max-concurrent-downloads: 1`, restarted the daemon, retried: one attempt got further than any
+  prior one (one blob layer, `15f6d5518935`, completed) before failing on a different layer with a
+  `TLS handshake timeout` directly against `quay.io` (no longer even the CDN host).
+- Replaced `/etc/resolv.conf` entirely with static public DNS servers (bypassing the WSL2 NAT DNS
+  proxy for all resolution, not just Docker's), restarted Docker, retried **5 more times in a loop**:
+  every attempt failed, each time on a **different** one of the same 4 large blob layers, always
+  either a DNS timeout to `cdn01.quay.io` or a TLS handshake timeout to `quay.io`/`cdn01.quay.io` —
+  only the single smallest layer ever completed, across all 7 attempts total.
+- **Conclusion: reproducible and structural, not flaky.** Retrying further, or tuning DNS/
+  concurrency further, is very unlikely to change the outcome — the pattern (same 4 large layers,
+  different one failing each time, general connectivity otherwise fine) is consistent with this
+  sandbox's network path being unable to sustain the large, long-lived HTTPS transfers these
+  specific blobs require, not with a simple resolver problem.
+- **All sandbox configuration changes reverted** before proceeding: `/etc/docker/daemon.json`
+  removed, the `[network]` stanza removed from `/etc/wsl.conf`, and `wsl --shutdown` performed to
+  force WSL2's own DNS auto-generation to regenerate `/etc/resolv.conf` exactly as it was
+  originally (`nameserver 10.255.255.254`, WSL-generated header comment intact — confirmed by
+  re-reading the file after restart). Environment sanity re-verified post-restart:
+  `docker compose config -q` and the adapter's `test_exchange_app_wiring.py` suite (9/9) both still
+  pass, so nothing was left broken by these attempts.
+- Per this ticket's own explicit rule (**"If container images remain impossible to obtain: record
+  the exact network failure; do not fake runtime qualification; do not mark DH-EX-008R
+  complete"**), Phases 1 through 9 (all of which depend on Phase 1's real Keycloak boot) **cannot be
+  attempted** in this environment. No live Keycloak, no real token, no real JWKS validation, no
+  live Caddy path was fabricated or approximated to substitute for this.
+- **Considered and deliberately NOT pursued:** running the qualification inside a GitHub Actions
+  workflow instead, since GitHub's runners plausibly have reliable registry access this sandbox
+  lacks. Not attempted — this repository's CI has never booted the real Compose stack anywhere
+  (confirmed again this session, as it was at DH-EX-008: zero `docker compose up` in
+  `.github/workflows/ci.yml`), which reads as a deliberate architectural choice, not an oversight.
+  Adding a new container-integration CI workflow to close a qualification ticket is exactly the
+  "any gap that 'obviously should' be filled a particular way" instinct `AGENTS.md`/`CLAUDE.md`
+  name as the failure mode to guard against, not a decision to make unilaterally mid-ticket. Left as
+  the first of three options below, per `Human Decision Required: Yes`.
+
+**What this ticket completed anyway — statically confirmed, not "not attempted":**
+
+**AUTH TOPOLOGY (real, rendered `docker compose config` output against this session's dev `.env`,
+not template text):**
+- `EXCHANGE_OIDC_ISSUER = https://id.localhost:8443/realms/dhealth-exchange`
+- `EXCHANGE_OIDC_JWKS_URL = http://keycloak.openelis.org:8080/realms/dhealth-exchange/protocol/openid-connect/certs`
+- `EXCHANGE_OIDC_AUDIENCE = dhealth-exchange-api`
+- `KC_HOSTNAME = https://id.localhost:8443` — confirmed to equal `EXCHANGE_OIDC_ISSUER`'s host
+  exactly, by construction (both derive from the same `KEYCLOAK_PUBLIC_URL`), reconfirming
+  DH-EX-008's interpolation design still resolves correctly after the sandbox network changes above.
+- Caddy route (`caddy/Caddyfile`, committed text, not template-rendered — Caddy resolves
+  `{$BASE_DOMAIN}` inside its own container): `exchange.{$BASE_DOMAIN}` → for this session's
+  `BASE_DOMAIN=localhost`, that is `exchange.localhost`, proxying only `/exchange/v1/*` to
+  `adapter:8000` with a catch-all 404 (unchanged from DH-EX-008; re-read directly, not assumed).
+- Platform-admin realm role name: `dhealth-platform-admin`, matching `Settings.
+  exchange_platform_admin_role`'s default exactly (also re-confirmed by direct read of both files).
+
+**PRODUCTION TOKEN-ISSUANCE STATE (re-read directly from `keycloak/realm-config/
+dhealth-exchange-realm.json` fresh this session, not cited from DH-EX-008's entry — "do not
+assume," per this ticket's own instruction):**
+- `"users": []` — no committed users.
+- `"standardFlowEnabled": true`, `"implicitFlowEnabled": false` — authorization-code flow is
+  enabled at the client level, but requires a real interactive user login, and there are none.
+- `"directAccessGrantsEnabled": false` — no resource-owner-password-credentials grant.
+- `"serviceAccountsEnabled": false` — no client-credentials grant.
+- `"publicClient": false`, `"bearerOnly": false` — a confidential, non-bearer-only client.
+- Audience mapper `exchange-api-audience`: `included.client.audience: "dhealth-exchange-api"`,
+  `access.token.claim: "true"`, `id.token.claim: "false"` — stamps the audience into access tokens
+  only.
+- **Confirmed again, byte-for-byte: no grant type in the committed realm can issue a token to
+  anything today.** This is a structural fact of the already-committed file, unrelated to whether
+  Keycloak can be booted in this sandbox — it would block a "positive real-token" qualification
+  even in an environment that *could* pull the images, exactly as `keycloak/realm-config/
+  README.md`'s "The DHealth Exchange realm" section (added by DH-EX-008) already states.
+
+**FRESH VS EXISTING KEYCLOAK DATABASE — settled by reasoning from already-verified evidence, not
+left unproven:** Does a deployment that ran *before* DH-EX-008 (Keycloak DB already populated with
+`daher`, never had `dhealth-exchange`) acquire the new realm on upgrade-and-restart? The `keycloak`
+service's `command: ["start", "--import-realm", "--optimized=false"]` is unconditional — it runs on
+every start, not only a first-ever boot. Whether that scan is real on a *subsequent* restart against
+an *existing* database is not assumed here: `keycloak/realm-config/README.md`'s own DH-007
+verification record (a real, previously-performed observation against a real running Keycloak,
+unrelated to this sandbox's current network problem) states that restarting only Keycloak against
+an existing database produced the log sequence `Realm 'daher' already exists. Import skipped`
+followed by `Import finished successfully` — direct proof that the import mechanism re-scans and
+re-evaluates every file in the mounted directory on every restart, skipping only the realms it finds
+already present, per-realm. `dhealth-exchange-realm.json` is mounted from the same bind-mounted
+host directory (`./keycloak/realm-config:/opt/keycloak/data/import:ro` — a live bind mount, not a
+pre-baked volume, so a file added to the host directory by a `git pull` is visible to the container
+the next time it starts) and is processed by the identical import codepath as `daher-realm.json` —
+Keycloak's importer does not special-case which realm file it is. **Conclusion: an existing
+deployment upgrading past DH-EX-008 and restarting Keycloak will acquire the `dhealth-exchange`
+realm automatically, with no additional manual step required.** This closes acceptance criterion 24
+via a disciplined extension of previously-verified evidence for an architecturally identical
+mechanism — explicitly distinguished from the issuer-emission question below, which is a genuinely
+different mechanism (hostname computation, not directory-scanning) with no prior direct evidence.
+
+**Acceptance criteria, in three buckets (not one undifferentiated "not qualified"), so a future
+attempt in a working environment knows exactly what is still needed:**
+
+*Statically confirmed this ticket (criteria effectively answered without a live boot):*
+- #23 existing `daher` realm remains unaffected — realm files are independent, per-realm
+  `IGNORE_EXISTING`, confirmed by direct read of both realm files and `reconcile-sso.sh` (still
+  hardcoded to `realm=daher`, untouched by DH-EX-008 or this ticket).
+- #24 fresh/existing Keycloak DB behavior — settled above, by reasoned extension of real DH-007
+  evidence.
+- #25 no test principal/secret committed — none created (no live boot occurred).
+- Auth topology values (#6, #7 preconditions) — confirmed as rendered by real `docker compose
+  config` output, restated above rather than re-derived from documentation.
+
+*Runtime-unproven, and specifically why (all require a real Keycloak boot this environment cannot
+perform):* #1–5, #8–22, #26 (Caddy end-to-end). Most load-bearing among these: **whether Keycloak's
+real emitted `iss` claim actually equals `EXCHANGE_OIDC_ISSUER` as derived** — DH-EX-008's entry
+already flagged this as the single highest-risk assumption in the whole design (`KC_HOSTNAME_STRICT:
+"false"` plus `KC_PROXY_HEADERS: xforwarded` could in principle cause request-derived issuer
+computation instead of the fixed-URL behavior assumed); this ticket could not move that from
+"reasoned from Keycloak's documented behavior" to "observed against a real token," because Phase 1
+never became reachable.
+
+*Not attempted, and why:* the ephemeral qualification-client strategy (Phases 2–3), first-seen
+identity persistence (Phase 4), platform-admin/organization-authorization negative controls
+(Phases 5–6), JWKS cache/outage behavior under a real key (Phase 7), and the live Caddy path
+(Phase 9) all have Phase 1 (real Keycloak boot) as their hard precondition, which the environment
+gate above closes off entirely for this session.
+
+**Human Decision Required: Yes.** Three options for how a real Keycloak boot could actually happen,
+presented without a ranked recommendation — this is a genuine infrastructure/process choice, not an
+engineering default to pick unilaterally:
+1. Run the qualification as a dedicated (likely `workflow_dispatch`-triggered, not on every push)
+   GitHub Actions job, since GitHub's runners plausibly have registry access this sandbox lacks —
+   would be the first `docker compose up` this repository's CI has ever performed.
+2. Run it from a different, non-sandboxed host with confirmed registry access (a real workstation
+   or a cloud VM), manually, following this ticket's Phase 1–9 script.
+3. Pre-seed the pinned image digests as a local tarball (`docker save`/`docker load`) from an
+   environment that can pull them, then run the qualification in this sandbox against the
+   pre-seeded images — avoids the network problem entirely without changing CI, at the cost of a
+   manual, repeatable-but-not-automated seeding step.
+
+**Files changed:** `PROJECT_STATE.md` only (this entry, plus the DH-EX-007A append-only correction
+above it). No source, config, Compose, Caddy, or realm file changed — this was a qualification
+attempt, not an implementation ticket, and nothing needed fixing in the reachable parts.
+
+**Tests/checks re-run to confirm nothing was left broken by the sandbox network experimentation:**
+`docker compose config -q` (passes); `adapter/tests/test_exchange_app_wiring.py` (9/9, unchanged
+from DH-EX-008's closure); `/etc/resolv.conf` and `/etc/wsl.conf` confirmed restored to their
+original, WSL-generated state.
+
+**Real facility:** untouched. **No migration. No clinical semantics touched.** No test
+principal, organization, or secret was created in any Keycloak instance (none was reachable).
+
+**What remains NOT proven:** everything in the "runtime-unproven" and "not attempted" buckets
+above — restated together here per this ticket's own report structure: correct issuer/audience/
+signature validation against a real running Keycloak and a real minted token; first-seen identity
+persistence; platform-admin role honoring and its correct non-propagation to organization access;
+DB-membership authorization negative controls; all token negative controls (wrong issuer, wrong
+audience, expired, unknown key, malformed, missing header, broken JWKS URL) against the real
+validator; JWKS cache/outage/rotation behavior; the live Caddy end-to-end path. None of these were
+approximated, mocked, or assumed proven — they are listed here specifically so DH-EX-008R's next
+attempt does not need to re-derive this list.
+
+**Next:** whichever of the three Human-Decision options above is chosen determines how DH-EX-008R's
+real qualification actually gets performed; this entry is the complete starting point for that
+attempt (topology values, realm state, and the fresh/existing DB answer are already settled and do
+not need to be re-derived).
+
+**DH-EX-008R QUALIFIED: NO.**
+
+**READY FOR REVIEW: YES** — this is a complete, honest, blocked-with-evidence outcome, not
+unfinished work: the environment gate was re-tested directly and thoroughly (7 attempts, isolated
+diagnosis, reverted cleanly), everything answerable without a live boot was answered, and the
+remaining gap is precisely scoped for whoever picks up DH-EX-008R next in a working environment.
