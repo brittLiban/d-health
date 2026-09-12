@@ -10624,3 +10624,264 @@ retracting it):** Pushed as commit `4a730b07663bca5e7c4b15e6e4e04d4b571ac07e`. C
 **success**, all 9 jobs green, in particular `static checks` (8s — the `EXPECTED_HEAD:
 0012_exchange_provider_assign` migration-chain check) and `adapter — ruff + pytest` (2m8s — the full
 682-passed/50-skipped suite plus lint).
+
+**Follow-up closure commit:** `4c6ea7cc06e55a98d10075e9deb096f6402bb090` (phantom-test-name fix,
+strengthened patient-price-path regression citation, explicit "all 30 criteria met" disclosure). CI
+run `34704870655`: **success**, all 9 jobs green.
+
+---
+
+### DH-EX-010A · Allow patient access after lab assignment without restoring lab-choice authority · P0 · ✅ BUILT, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED
+
+**Ticket:** DH-EX-010A. DH-EX-010 made provider-assigned labs the valid price-free launch path, but
+in doing so exposed a launch-blocking gap this ticket exists to close: `PatientAccessGrantRepository.
+issue()` permitted a fresh grant only while `LabOrder.status == AWAITING_LAB_SELECTION`, and provider
+assignment immediately transitions past it — a clinician who assigns a lab *before* issuing the
+patient's link could never issue one afterward. Fix this without weakening DH-EX-005's patient
+lab-selection security, and without silently restoring lab-choice authority to a link issued to read
+an already-settled order.
+
+**Starting HEAD/CI:** `4c6ea7cc06e55a98d10075e9deb096f6402bb090` — fetched and audited fresh
+(matched the ticket's own stated expectation exactly; Rule Zero satisfied trivially this time). CI
+run `34704870655`: success, all 9 jobs green.
+
+**Reproduced pre-fix timing hole:** a new test (`test_reproduction_issuing_access_after_provider_
+assignment_was_refused_pre_fix` in `test_exchange_provider_assignment_api.py`) was written and run
+*before* any fix — create order → provider assigns lab → attempt to issue patient access → observed
+`409 {"detail": "LabOrder ... is in status 'SELECTED' -- a fresh selection-capable patient access
+grant may only be issued while AWAITING_LAB_SELECTION"}`. Fixed afterward; the same test now asserts
+and passes the corrected behavior (`201`, `access_mode: "ORDER_READ"`). Negative control #2 below
+re-reproduces this exact 409 by reverting only the issuance gate, isolating the fix from every other
+change in this ticket.
+
+**Chosen access-mode model:** a closed `PatientAccessMode` enum (`LAB_SELECTION` | `ORDER_READ`)
+persisted directly on `PatientAccessGrant.access_mode` (new column, `String(16)`, `NOT NULL`, DB
+`CHECK` constraint), decided once inside the locked issuance mutation and never re-derived later
+from mutable `LabOrder` state. No equivalent existing mechanism was found during the fresh audit
+(`LabOrder.status` alone conflates "no lab chosen yet" with "lab chosen, but order has since moved
+past SELECTED" — exactly the ambiguity this ticket's own "fast-lab race" requirement forbids relying
+on). The raw bearer secret carries no capability information — `access_mode` lives only in the
+database row, read by `validate_token()`, never encoded into the token itself.
+
+**Migration/backfill behavior:** `0013_exchange_access_mode` (25 characters, respecting DH-EX-009's
+`alembic_version` `VARCHAR(32)` discovery). Adds the column via a `server_default='LAB_SELECTION'`
+at `ALTER TABLE` time (backfilling every pre-existing row, all of which were in fact only ever issued
+while a lab could still be chosen — a truthful backfill, not a guess), then drops the server default
+immediately so every future insert must go through the application's own explicit mode decision.
+Unlike `0006`–`0012`'s CHECK-widening pattern, `downgrade()` carries **no** "real usage exists,
+refuse to downgrade" guard: dropping a whole column can never hit the DDL failure that motivated
+those guards (re-narrowing a CHECK against existing incompatible rows). Verified directly against
+real PostgreSQL: `alembic upgrade head` ran clean through 0013; `\d exchange_patient_access_grants`
+confirmed the column, its `NOT NULL`, its dropped default, and its CHECK constraint; `alembic
+downgrade -1` against a database already containing real `ORDER_READ` rows succeeded cleanly (column
+dropped, no error); a subsequent `alembic upgrade head` re-added the column and confirmed the
+documented, honest information loss — all 25 surviving rows read back as `LAB_SELECTION` (the
+`ORDER_READ` distinction genuinely lost across the round trip, exactly as the migration's own
+docstring states, not silently wrong). CI's `EXPECTED_HEAD` bumped to `0013_exchange_access_mode`.
+
+**Issuance rules (`PatientAccessGrantRepository._issue_in_session`):** with the `LabOrder` row
+locked, existence of a canonical `LabSelection` — not `order.status == SELECTED` specifically — is
+the signal: if a `LabSelection` already exists (patient-selected or provider-assigned, either
+provenance), issue `ORDER_READ`; else if the order is still `AWAITING_LAB_SELECTION`, issue
+`LAB_SELECTION`; else (e.g. `CANCELLED`/`REJECTED` reached directly from `AWAITING_LAB_SELECTION`
+with no lab ever chosen — structurally permitted by `orders.py`'s transition map but not reachable
+through any HTTP route today) fail closed with `OrderNotIssuable`, never guessing a capability the
+order's state cannot support. This fail-closed branch has no HTTP path to exercise it, so it is
+proven directly against the repository (`test_issuance_fails_closed_for_cancelled_order_with_no_
+selection`, `test_exchange_access_mode.py`) — matching this suite's own established convention for
+defensive branches with no reachable route (DH-EX-010's own repository-only tests for the identical
+reason).
+
+**Capability enforcement:** `AuthenticatedPatientAccess` now carries `access_mode`, read verbatim
+from the grant row on every request (never recomputed from current order state, so an
+already-delivered `LAB_SELECTION` link keeps meaning that even after a later provider assignment).
+Two independent layers, deliberately: (1) a route-level `_require_lab_selection_capability` helper
+in `api.py`, called at the top of `GET /patient/order/lab-options` and `POST /patient/order/
+selection`, before any marketplace/selection logic executes; (2) a domain-level check inside
+`select()` itself (`PatientAccessGrantLacksSelectionAuthority`, a distinct exception from
+`PatientAccessGrantInvalidated` — 403 "alive but never authorized this" vs. 401 "dead credential" —
+mapped in `api.py`), matching DH-EX-010's own "tenant check inside the locked mutation, not only at
+the HTTP layer" discipline, so a future direct repository caller cannot bypass the capability
+boundary by skipping the route. `GET /patient/order` accepts both modes unchanged. Negative control
+#1 (below) proves the route layer is load-bearing; a dedicated repository-level test
+(`test_select_refuses_order_read_grant_bypassing_the_route_layer`) proves the domain layer
+independently and in isolation — see that test's own evidence below, since neither half of control
+#1 actually exercises the domain check on its own (self-review finding: an earlier version of this
+entry claimed control #1 proved both layers, which was wrong — 1a targets an endpoint with no domain
+layer at all, and 1b removes both layers simultaneously, so neither isolates the domain check by
+itself).
+
+**Provider-assigned launch-journey evidence:** `test_provider_assigned_launch_journey`
+(`test_exchange_access_mode.py`) proves the ticket's own named primary acceptance journey end to
+end: create/bind patient → create order → provider assigns lab → issue patient access (`201`,
+`ORDER_READ`) → patient `GET /patient/order` shows the assigned lab, `assignment_source: "PROVIDER"`,
+`total_amount`/`currency` both `null` (never `0 DJF`) → patient refused `403` on both lab-choice
+endpoints.
+
+**Fast-lab/later-state evidence:** `test_lab_can_accept_before_patient_link_issuance_read_link_
+still_issuable` proves a lab accepting the order (`status` moves to `ACCEPTED`, past `SELECTED`)
+*before* the clinician gets around to issuing the patient's link does not make a read link
+unissuable — issuance still succeeds (`ORDER_READ`) because it keys off `LabSelection` existence,
+never `status == SELECTED` specifically. Negative control #4 (below) proves the alternative (keying
+off status, or guessing on absence) is unsafe.
+
+**Patient-selected replacement-link evidence:** the pre-existing DH-EX-005 test asserting a 409 on
+revoke-then-reissue after a patient selection (`test_issuance_refused_when_order_not_awaiting_
+selection`) was **intentionally rewritten**, not quietly edited — renamed to
+`test_reissuance_after_patient_selection_succeeds_as_order_read_replacement_link` — because that 409
+*was* the timing hole for the patient-selection path, the direct sibling of the provider-assignment
+reproduction above. It now asserts `201`/`ORDER_READ`, that the replacement preserves the exact
+frozen historical receipt, and that the replacement is refused `403` on both lab-choice endpoints. A
+second, independent test (`test_expired_grant_replacement_after_selection_is_order_read`) proves the
+same for **expiry**-driven replacement, not just explicit revoke.
+
+**Existing-link-after-provider-assignment evidence:** DH-EX-010's own `test_patient_response_shows_
+null_price_not_zero_for_provider_assignment` (grant issued *before* assignment, still `LAB_SELECTION`
+mode) already proved the link remains readable after a later provider assignment; re-run unmodified,
+still green. `test_patient_selection_after_provider_assignment_same_lab_is_conflict` (same file)
+proves that pre-issued `LAB_SELECTION` link still cannot override the assignment — refused `409` via
+DH-EX-010's own `LabAlreadyAssignedByProvider` domain guard (the capability check does not even fire
+here, since the grant's mode is legitimately `LAB_SELECTION`; the *provenance* guard is what blocks
+it, unchanged by this ticket).
+
+**Domain-layer capability check evidence (self-review addition):** the fresh-eyes review that found
+the control-1 overclaim above also found the underlying gap it was covering for — the domain-layer
+check inside `select()` had zero test coverage; every HTTP-reachable path is refused at the route
+layer first, so `select()`'s own `PatientAccessGrantLacksSelectionAuthority` branch was never
+executed by any test, the same "implemented, untested, coverage gap masked by a second layer"
+pattern DH-EX-010's own criterion-10 self-review found. Closed by
+`test_select_refuses_order_read_grant_bypassing_the_route_layer`, which calls
+`LabSelectionRepository.select()` directly (bypassing the route entirely, matching
+`test_grant_bound_to_a_different_order_cannot_authorize_this_orders_selection`'s established
+route-bypass pattern) — deliberately using a *patient-selected* order with an `ORDER_READ`
+replacement grant naming the *same* lab the patient already chose, the one scenario where
+`select()`'s other two guards (`DifferentLabAlreadySelected`, `LabAlreadyAssignedByProvider`) do not
+also fire, so the test isolates the capability check rather than being coincidentally saved by an
+unrelated guard. Verified both directions: with the check present, the call raises
+`PatientAccessGrantLacksSelectionAuthority`; with the check temporarily disabled (verify-control,
+restored and `diff`-verified afterward, not counted among the six required negative controls), the
+call raised nothing at all and returned the existing selection successfully — the unmasked version
+of negative control #1b's vulnerability, isolated to the domain layer alone.
+
+**Authorization evidence:** `test_cross_provider_clinician_cannot_issue_access_for_another_
+providers_order` and `test_lab_tech_cannot_issue_provider_patient_access` (the latter using a
+LAB_TECH role genuinely held at the assigned lab itself, proving that standing there grants nothing
+at the provider) both refused (`403`/`404`). `test_one_live_grant_enforced_for_order_read_
+reissuance` confirms the one-live-grant rule is unaffected by mode — a second issuance attempt
+without revoking is still `409` even for `ORDER_READ`.
+
+**Audit atomicity:** `test_order_read_issuance_audit_atomicity` — the mirror of DH-EX-005's existing
+`test_issuance_audit_atomicity`, specifically for the new `ORDER_READ` path (provider-assigned order,
+audit write forced to fail) — confirms zero new grant rows, zero new audit rows. Negative control #6
+(below) proves this rollback is load-bearing, not incidental.
+
+**Raw-secret safety:** unchanged from DH-EX-005 — no new token/secret handling was touched by this
+ticket; `access_mode` is derived server-side and never encoded into or decoded from the bearer
+secret. All pre-existing raw-secret-safety tests (`test_raw_token_never_stored`,
+`test_issuance_and_revocation_audit`'s own token-absence assertions) re-run unmodified, still green.
+
+**Concurrency evidence:** the genuinely new race this ticket introduces — `assign_by_provider()`
+racing `issue()` for the same order, both locking the same `LabOrder` row —
+`test_concurrent_assignment_and_issuance_race_yields_one_coherent_mode` (SQLite, dedicated
+`BEGIN IMMEDIATE` engine, real threads, run 5 consecutive times with zero failures) asserts internal
+coherence rather than a predetermined winner: if `issue()` observed no selection (`LAB_SELECTION`),
+the concurrent assignment must have observed `created=True`; if `issue()` observed an existing
+selection (`ORDER_READ`), the persisted grant's `access_mode` must agree. The one-live-grant SQLite
+proof (`test_grant_issuance_concurrency`) and DH-EX-010's own concurrency tests are unaffected and
+re-run unmodified.
+
+**Negative controls (all six required, each executed against the real running code, restored, and
+`diff`-verified byte-identical against a scratchpad backup afterward):**
+
+1. **Capability check removed.** Two parts. (a) Removed `_require_lab_selection_capability` from
+   `GET /patient/order/lab-options` alone: `test_provider_assigned_launch_journey`'s exact `assert
+   lab_options.status_code == 403` failed, observing `409` instead — the masking the ticket's own
+   text warns about ("the current order status probably makes selection fail anyway") is real: an
+   `ORDER_READ` grant only ever exists once a `LabSelection` exists, so the pre-existing status check
+   already refuses with `409` regardless; only an *exact*-code assertion catches the substitution.
+   (b) Removed the check from **both** layers (route in `api.py` *and* the domain check inside
+   `select()`) for `POST /patient/order/selection`: `test_expired_grant_replacement_after_selection_
+   is_order_read` and `test_reissuance_after_patient_selection_succeeds_as_order_read_replacement_
+   link` both failed loudly — `200`, not `403` — a genuine successful lab-choice action accepted on a
+   read-only credential.
+2. **Issuance reverted to AWAITING-only.** Restored the exact pre-fix gate.
+   `test_reproduction_issuing_access_after_provider_assignment_was_refused_pre_fix` failed,
+   reproducing the identical `409` from before any code was written.
+3. **Every issuance treated as `LAB_SELECTION`.** Removed the `existing_selection` branch entirely.
+   Both replacement-link tests failed: `assert 'LAB_SELECTION' == 'ORDER_READ'`.
+4. **Canonical-`LabSelection` requirement removed.** Replaced the fail-closed `else` branch with a
+   default to `ORDER_READ`. `test_issuance_fails_closed_for_cancelled_order_with_no_selection`
+   failed: `DID NOT RAISE OrderNotIssuable` — a `CANCELLED` order with no lab ever chosen would have
+   silently received a read grant.
+5. **One-live-grant protection bypassed.** Short-circuited the `existing is not None` branch.
+   `test_reissuing_with_active_grant_is_refused` failed — not with a clean `409`, but with a raw,
+   unhandled `sqlalchemy.exc.IntegrityError` (the database's own partial unique index is the last
+   line of defense, but the controlled application-level UX is gone; an unhandled 500 is a real
+   regression, not merely "the DB still protects it").
+6. **Audit failure rollback bypassed.** Wrapped the `security_audit.record(...)` call in
+   `issue_patient_access` with a `try/except RuntimeError: pass`. Both `test_order_read_issuance_
+   audit_atomicity` and DH-EX-005's own `test_issuance_audit_atomicity` failed: `DID NOT RAISE
+   RuntimeError` — the grant would have silently persisted despite the "failed" audit write.
+
+**Real PostgreSQL evidence:** disposable scratch role/database (`dhex010a`/`dhex010a_qual`),
+`alembic upgrade head` (clean through `0013`), the assign-vs-issue race
+(`tests/integration/test_dhex010a_postgres_qualification.py`, gated on `DHEX010A_PG_*` env vars,
+`skipif`-excluded from CI) run 5 consecutive times per invocation across 5 separate invocations (25
+total race resolutions), zero failures, every resolution internally coherent. Migration round-trip
+(upgrade → downgrade → upgrade) verified against the same live database, including the documented
+information-loss behavior confirmed by direct query (see "Migration/backfill behavior" above).
+Scratch role/database dropped afterward.
+
+**Regression suites:** all pre-existing DH-EX-005 patient-access/selection tests
+(`test_exchange_patient_access.py`, `test_exchange_selection.py`) green, one test intentionally
+rewritten (see "Patient-selected replacement-link evidence" above) rather than quietly edited. All
+pre-existing DH-EX-010 provider-assignment tests (`test_exchange_provider_assignment.py`,
+`test_exchange_provider_assignment_api.py`) green, plus one new reproduction test added there.
+DH-EX-006/DH-EX-007 lab-workflow and audit-atomicity suites unaffected, re-run green.
+
+**Files changed:** `models.py` (new `PatientAccessMode` enum, `access_mode` column + CHECK
+constraint on `PatientAccessGrant`), `patient_access.py` (issuance-rule rewrite, `IssuedGrant`/
+`GrantRecord` gain `access_mode`), `selection.py` (new `PatientAccessGrantLacksSelectionAuthority`
+exception + domain-layer check inside `select()`), `api.py` (`AuthenticatedPatientAccess` gains
+`access_mode`, new `_require_lab_selection_capability` helper applied to both lab-choice endpoints,
+`PatientAccessIssueResponse` gains `access_mode`), `migrations/versions/0013_exchange_access_mode.py`
+(new), `.github/workflows/ci.yml` (`EXPECTED_HEAD` bump), `test_exchange_patient_access.py` (one test
+intentionally rewritten), `test_exchange_provider_assignment_api.py` (+1 reproduction test),
+`test_exchange_access_mode.py` (new, 10 tests), `tests/integration/test_dhex010a_postgres_
+qualification.py` (new, 1 real-Postgres test), `PROJECT_STATE.md`.
+
+**Exact migration head:** `0013_exchange_access_mode`.
+
+**Full tests/lint:** `693 passed, 51 skipped, 1 pre-existing warning` (up from `682 passed, 50
+skipped` at DH-EX-010's handoff: +11 new passing tests — 1 reproduction test in
+`test_exchange_provider_assignment_api.py`, plus 10 in the new `test_exchange_access_mode.py` file
+(8 covering the primary journey/fast-lab/replacement/authorization/audit/fail-closed scenarios, the
+concurrency test, and the self-review-added domain-layer capability test); +1 new skipped
+real-Postgres qualification file; the renamed `test_exchange_patient_access.py` test is net zero).
+`ruff check` and `ruff format --check` both clean across `src tests migrations scripts`.
+
+**Real facility:** untouched. **Clinical semantics:** none touched — no partograph, no order set, no
+alerting, no diagnosis. **Patient data to third parties:** none.
+
+**What remains NOT built by this ticket:** specimen/sample collection, result validation/release,
+`ResultDelivery` semantics, SMS, WhatsApp, print/QR UI, DHealth Patient frontend, proxy/family
+access, raw result delivery, patient result interpretation, Clinic frontend, Lab frontend, DHealth
+Connect, real Keycloak runtime qualification (still blocked, DH-EX-008R), lab reassignment after
+rejection — all explicitly out of scope. Per the ticket's own documentation-precision instruction,
+stated exactly as required: **patient order access can be issued after lab assignment.** This does
+**not** mean DHealth Patient is built — there is still no patient frontend, print flow, QR flow,
+SMS, WhatsApp, or voice channel; the access *credential* beneath those future channels is what this
+ticket fixes, nothing above it.
+
+**Next:** DH-EX-008R remains blocked pending its own Human Decision (unchanged). Per this ticket's
+own explicit final instruction, specimen/sample workflow is the next candidate ticket but **is not
+started here** — "Stop after DH-EX-010A. Do not begin specimen/sample workflow."
+
+**DH-EX-010A QUALIFIED: YES** — real PostgreSQL (including the genuinely new assign-vs-issue race),
+all six required negative controls, the full authorization matrix, a real migration round-trip
+verified live, and exact-SHA CI (recorded below once pushed).
+
+**Acceptance-criterion disclosure:** all of this ticket's stated requirements are met; no acceptance
+criterion is unmet or deferred.
+
+**READY FOR REVIEW: YES**

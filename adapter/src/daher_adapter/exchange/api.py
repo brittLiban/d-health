@@ -86,6 +86,7 @@ from daher_adapter.exchange.models import (
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
+    PatientAccessMode,
 )
 from daher_adapter.exchange.orders import (
     EmptyOrder,
@@ -122,6 +123,7 @@ from daher_adapter.exchange.selection import (
     LabCannotFulfillOrder,
     LabSelectionRepository,
     PatientAccessGrantInvalidated,
+    PatientAccessGrantLacksSelectionAuthority,
     StalePriceSelection,
 )
 
@@ -586,12 +588,16 @@ class PatientAccessIssueResponse(BaseModel):
     any subsequent response, log, or database row (only its SHA-256 digest is persisted). No
     canonical patient-frontend URL exists in this repository yet, so this deliberately returns the
     bare token + expiry rather than inventing a fabricated production hostname; a future
-    messaging/UI layer constructs the actual `#access=<token>` fragment URL from this."""
+    messaging/UI layer constructs the actual `#access=<token>` fragment URL from this.
+
+    ``access_mode`` (DH-EX-010A) tells the issuing clinician what they just handed the patient --
+    ``LAB_SELECTION`` (may choose a lab) or ``ORDER_READ`` (read-only; a lab is already settled)."""
 
     model_config = ConfigDict(extra="forbid")
 
     access_token: str
     expires_at: datetime
+    access_mode: Literal["LAB_SELECTION", "ORDER_READ"]
 
 
 class PatientOrderItemResponse(BaseModel):
@@ -675,6 +681,11 @@ class PatientSelectionRequest(BaseModel):
 class AuthenticatedPatientAccess:
     grant_id: uuid.UUID
     lab_order_id: uuid.UUID
+    access_mode: str
+    """DH-EX-010A: the grant's own persisted `PatientAccessMode` value, fixed at issuance and
+    read verbatim from the database on every request -- never re-derived from the order's current
+    status, so an already-delivered `LAB_SELECTION` link keeps meaning that even after a later
+    provider assignment (see `PatientAccessMode`'s own docstring)."""
 
 
 # -- DH-EX-006: selected-lab assigned-order workflow ----------------------------------------------
@@ -927,7 +938,22 @@ def build_exchange_router(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing credentials"
             )
-        return AuthenticatedPatientAccess(grant_id=grant.id, lab_order_id=grant.lab_order_id)
+        return AuthenticatedPatientAccess(
+            grant_id=grant.id,
+            lab_order_id=grant.lab_order_id,
+            access_mode=grant.access_mode.value,
+        )
+
+    def _require_lab_selection_capability(access: AuthenticatedPatientAccess) -> None:
+        # DH-EX-010A: a capability check, independent of and prior to any workflow-state check --
+        # an `ORDER_READ` grant is refused here even on an order whose status would otherwise
+        # *also* refuse a selection action, so this layer is never masked by (and never relies on)
+        # "the status check will probably catch it anyway".
+        if access.access_mode != PatientAccessMode.LAB_SELECTION.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="this patient access grant may only read the order, not select a lab",
+            )
 
     def _audit_refused(
         principal: AuthenticatedPrincipal, organization_id: uuid.UUID | None
@@ -1895,7 +1921,9 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         return PatientAccessIssueResponse(
-            access_token=issued.raw_token, expires_at=issued.expires_at
+            access_token=issued.raw_token,
+            expires_at=issued.expires_at,
+            access_mode=issued.access_mode.value,
         )
 
     @router.delete(
@@ -2014,6 +2042,7 @@ def build_exchange_router(
         access: Annotated[AuthenticatedPatientAccess, Depends(get_patient_access)],
     ) -> MarketplaceLabOptionsResponse:
         response.headers["Cache-Control"] = "no-store"
+        _require_lab_selection_capability(access)
         order = orders.get(access.lab_order_id)
         if order.status != LabOrderStatus.AWAITING_LAB_SELECTION.value:
             # Fails closed for every later status too (ACCEPTED/IN_PROGRESS/COMPLETED/REJECTED/
@@ -2037,6 +2066,7 @@ def build_exchange_router(
         access: Annotated[AuthenticatedPatientAccess, Depends(get_patient_access)],
     ) -> PatientOrderResponse:
         response.headers["Cache-Control"] = "no-store"
+        _require_lab_selection_capability(access)
         try:
             _record, created = selections.select(
                 lab_order_id=access.lab_order_id,
@@ -2054,6 +2084,11 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except LabAlreadyAssignedByProvider as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except PatientAccessGrantLacksSelectionAuthority as error:
+            # Defense-in-depth only: `_require_lab_selection_capability` above already refuses
+            # this on the normal HTTP path before `selections.select()` is ever called. Reachable
+            # only if a future caller of `select()` skips that route-level check.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
         except LabCannotFulfillOrder as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except StalePriceSelection as error:

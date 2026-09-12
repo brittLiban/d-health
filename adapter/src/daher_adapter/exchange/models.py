@@ -60,6 +60,7 @@ __all__ = [
     "OrganizationStatus",
     "OrganizationType",
     "PatientAccessGrant",
+    "PatientAccessMode",
     "PatientReference",
     "PractitionerReference",
     "ResultDelivery",
@@ -795,6 +796,31 @@ class ExchangeSecurityAuditEvent(Base):
 # --- DH-EX-005: opaque, order-scoped patient access -----------------------------------------
 
 
+class PatientAccessMode(StrEnum):
+    """DH-EX-010A: a closed, persisted statement of what a ``PatientAccessGrant`` actually
+    authorizes -- an explicit capability, never inferred later from mutable ``LabOrder`` state
+    alone (a grant issued while a lab could still be chosen must keep meaning that, even after a
+    provider assigns a lab minutes later; re-deriving "can this grant choose a lab?" from current
+    order status on every read would silently downgrade an already-issued, already-delivered
+    link). Decided once, inside the locked issuance mutation (see
+    ``PatientAccessGrantRepository._issue_in_session``), and never changed afterward.
+
+    ``LAB_SELECTION``: the order has no canonical ``LabSelection`` yet and is still
+    ``AWAITING_LAB_SELECTION`` -- this grant may read the order, browse eligible lab options, and
+    select a lab (DH-EX-005's full patient marketplace workflow).
+
+    ``ORDER_READ``: the order already has a canonical ``LabSelection`` (patient-selected or
+    provider-assigned, DH-EX-010 -- the selection row itself, not price presence, is what proves a
+    destination lab exists). This grant may only read the order; it can never select or replace a
+    lab, regardless of who made the original choice or what the order's current downstream status
+    is (ACCEPTED/IN_PROGRESS/COMPLETED/REJECTED all still carry the same canonical
+    ``LabSelection`` row a lab-choice action would need to exist -- see
+    ``exchange/patient_access.py``'s issuance-rule docstring for why status is not the gate)."""
+
+    LAB_SELECTION = "LAB_SELECTION"
+    ORDER_READ = "ORDER_READ"
+
+
 class PatientAccessGrant(Base):
     """DH-EX-005: an opaque, high-entropy bearer credential scoping a patient's access to
     exactly one ``LabOrder`` -- never a patient account, never an ``ExchangeIdentity``, never
@@ -821,6 +847,10 @@ class PatientAccessGrant(Base):
             "revoked_at IS NULL OR revoked_at >= issued_at",
             name="ck_exchange_patient_access_grants_revoked_after_issue",
         ),
+        CheckConstraint(
+            "access_mode IN ('LAB_SELECTION', 'ORDER_READ')",
+            name="ck_exchange_patient_access_grants_access_mode",
+        ),
         Index(
             "uq_exchange_patient_access_grants_one_live_per_order",
             "lab_order_id",
@@ -840,3 +870,6 @@ class PatientAccessGrant(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=PatientAccessMode.LAB_SELECTION.value
+    )

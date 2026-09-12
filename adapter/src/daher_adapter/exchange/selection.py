@@ -1,4 +1,4 @@
-"""DH-EX-001 / DH-EX-005 / DH-EX-010: selecting one destination lab for an order.
+"""DH-EX-001 / DH-EX-005 / DH-EX-010 / DH-EX-010A: selecting one destination lab for an order.
 
 **DH-EX-010 addition.** ``select()`` below is DH-EX-005's *patient* price-consent workflow --
 unchanged by this addition except for one new guard (see its own docstring). ``assign_by_provider``
@@ -59,6 +59,7 @@ from daher_adapter.exchange.models import (
     OrganizationStatus,
     OrganizationType,
     PatientAccessGrant,
+    PatientAccessMode,
     TestCatalogEntry,
 )
 from daher_adapter.exchange.orders import InvalidOrderTransition, OrderNotFound
@@ -99,6 +100,24 @@ class LabAlreadyAssignedByProvider(RuntimeError):
     doing so would retroactively fabricate patient price consent for a routing decision the
     patient never made, and DH-EX-010's provider-assignment path never wrote a price to consent
     to in the first place."""
+
+
+class PatientAccessGrantLacksSelectionAuthority(RuntimeError):
+    """DH-EX-010A: the grant authorizing this call is real, unrevoked, and unexpired, but its
+    persisted ``access_mode`` is ``ORDER_READ``, not ``LAB_SELECTION`` -- it was issued to read an
+    order that already had a canonical ``LabSelection`` (a replacement link, or a link issued after
+    provider assignment), and never carried lab-choice authority to begin with. Deliberately a
+    distinct exception from `PatientAccessGrantInvalidated`: that one means "this grant is dead"
+    (401, an authentication failure); this one means "this grant is alive but was never allowed to
+    do this" (403, an authorization/capability failure) -- collapsing the two into one response
+    would misrepresent a live, legitimately-read-only credential as an unauthenticated one.
+
+    This is a second, independent enforcement layer -- the FastAPI route layer
+    (`exchange/api.py`'s `_require_lab_selection_capability`) already refuses an `ORDER_READ` grant
+    before this method is ever called for the normal HTTP path; this check exists for the same
+    reason `assign_by_provider`'s tenant check lives *inside* its own locked mutation rather than
+    only in a pre-route read: a future caller of this repository method directly must not be able
+    to bypass the capability boundary just because it skipped the HTTP layer."""
 
 
 class PatientAccessGrantInvalidated(RuntimeError):
@@ -178,6 +197,14 @@ class LabSelectionRepository:
                     raise PatientAccessGrantInvalidated(
                         f"patient access grant {patient_access_grant_id} is no longer valid for "
                         f"LabOrder {lab_order_id}"
+                    )
+                # DH-EX-010A: a live, correctly-scoped grant can still lack lab-choice authority
+                # (`ORDER_READ` -- see `PatientAccessGrantLacksSelectionAuthority`'s own docstring
+                # for why this is a distinct, non-401 failure from the checks just above).
+                if grant.access_mode != PatientAccessMode.LAB_SELECTION.value:
+                    raise PatientAccessGrantLacksSelectionAuthority(
+                        f"patient access grant {patient_access_grant_id} is {grant.access_mode!r} "
+                        f"and may not select or replace a lab for LabOrder {lab_order_id}"
                     )
 
             existing_selection = session.scalar(

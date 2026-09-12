@@ -1899,12 +1899,22 @@ def test_raw_token_never_stored(
     assert len(grant.token_hash) == 64  # SHA-256 hex digest
 
 
-# -- issuance status gate ------------------------------------------------------------------------
+# -- issuance status gate / DH-EX-010A access-mode gate --------------------------------------------
 
 
-def test_issuance_refused_when_order_not_awaiting_selection(
+def test_reissuance_after_patient_selection_succeeds_as_order_read_replacement_link(
     client: TestClient, keypair, organizations, catalog, directory, patients
 ) -> None:
+    """DH-EX-010A intentionally changes this test's outcome from a prior version of this suite,
+    where re-issuing a grant for a now-SELECTED order was refused with 409 -- issuance was gated to
+    `AWAITING_LAB_SELECTION` only, full stop. That gate is exactly the launch-blocking timing hole
+    this ticket exists to close for the *provider*-assignment case (see
+    `test_exchange_provider_assignment_api.py`'s reproduction test); this is its patient-selection-
+    path sibling, proving the same fix's "replacement link" case: once a canonical `LabSelection`
+    exists (patient-made or provider-made), revoke-then-reissue must succeed as a **read-only**
+    `ORDER_READ` link -- never a fresh selection-capable grant -- and that replacement must show the
+    exact same frozen historical receipt the original grant would have, never a fresh marketplace
+    read or a second chance to choose a lab."""
     private_key, _ = keypair
     provider, token, order_id, entry_ids = _create_order_awaiting_selection(
         client,
@@ -1933,8 +1943,8 @@ def test_issuance_refused_when_order_not_awaiting_selection(
         json={"lab_organization_id": str(lab.id), "expected_price_ids": [price_id]},
     )
     assert selection.status_code == 201
-    # Revoking the now-SELECTED order's grant then re-issuing must be refused -- issuance is
-    # gated to AWAITING_LAB_SELECTION only, never SELECTED (no rollback/reselection workflow).
+    original_total = selection.json()["selection"]["total_amount"]
+
     client.delete(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
         headers=_auth(token),
@@ -1943,7 +1953,30 @@ def test_issuance_refused_when_order_not_awaiting_selection(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
         headers=_auth(token),
     )
-    assert reissue.status_code == 409
+    assert reissue.status_code == 201, reissue.text
+    assert reissue.json()["access_mode"] == "ORDER_READ"
+    replacement_token = reissue.json()["access_token"]
+
+    # Read-only: the replacement link still shows the patient's own real, historical receipt --
+    # never null/zero, never a fresh price it didn't consent to.
+    receipt = client.get("/exchange/v1/patient/order", headers=_auth(replacement_token))
+    assert receipt.status_code == 200
+    assert receipt.json()["selection"]["assignment_source"] == "PATIENT"
+    assert receipt.json()["selection"]["total_amount"] == original_total
+
+    # But it may never select or replace a lab -- the capability check, not the (already-passing,
+    # since the order is SELECTED either way) workflow-status check.
+    lab_options_attempt = client.get(
+        "/exchange/v1/patient/order/lab-options", headers=_auth(replacement_token)
+    )
+    assert lab_options_attempt.status_code == 403
+
+    reselection_attempt = client.post(
+        "/exchange/v1/patient/order/selection",
+        headers=_auth(replacement_token),
+        json={"lab_organization_id": str(lab.id), "expected_price_ids": [price_id]},
+    )
+    assert reselection_attempt.status_code == 403
 
 
 # -- selection transaction atomicity --------------------------------------------------------------

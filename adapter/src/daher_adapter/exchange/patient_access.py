@@ -35,7 +35,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.exchange.models import LabOrder, LabOrderStatus, PatientAccessGrant
+from daher_adapter.exchange.models import (
+    LabOrder,
+    LabOrderStatus,
+    LabSelection,
+    PatientAccessGrant,
+    PatientAccessMode,
+)
 from daher_adapter.models import utc_now
 
 
@@ -61,8 +67,13 @@ class OrderNotFound(RuntimeError):
 
 
 class OrderNotIssuable(RuntimeError):
-    """The order's current status does not permit issuing a fresh, selection-capable patient
-    access grant (DH-EX-005 MVP scope: only `AWAITING_LAB_SELECTION`)."""
+    """DH-EX-010A: no truthful ``PatientAccessMode`` exists for this order's current state. The
+    order has no canonical ``LabSelection`` (so ``ORDER_READ`` would have nothing to authorize
+    reading a settled destination for) *and* is not ``AWAITING_LAB_SELECTION`` either (so
+    ``LAB_SELECTION`` would be false -- there is no lab left to choose). This is a fail-closed
+    branch, not a guess: an order in this shape (e.g. ``CANCELLED``/``REJECTED`` reached directly
+    from ``AWAITING_LAB_SELECTION`` with no lab ever chosen) has no access grant that could
+    describe it honestly, so none is issued."""
 
 
 class ActiveGrantAlreadyExists(RuntimeError):
@@ -80,6 +91,7 @@ class IssuedGrant:
     logged, never present on any other record type in this module."""
     issued_at: datetime
     expires_at: datetime
+    access_mode: PatientAccessMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +101,7 @@ class GrantRecord:
     issued_at: datetime
     expires_at: datetime
     revoked_at: datetime | None
+    access_mode: PatientAccessMode
 
 
 class PatientAccessGrantRepository:
@@ -118,11 +131,30 @@ class PatientAccessGrantRepository:
         )
         if order is None:
             raise OrderNotFound(str(lab_order_id))
-        if order.status != LabOrderStatus.AWAITING_LAB_SELECTION.value:
+
+        # DH-EX-010A: decided once, here, inside the same lock that serializes against a
+        # concurrent `assign_by_provider`/`select()` for this order -- whichever of "issue a
+        # grant" or "create the canonical LabSelection" commits first is what the other observes,
+        # so this decision is always made against a fully-resolved, race-free view of whether a
+        # destination lab has been chosen. The *existence* of a canonical LabSelection -- not
+        # `order.status == SELECTED` specifically -- is the signal: a lab may have already been
+        # accepted, started, or even completed by the time a clinician gets around to issuing the
+        # patient's link (DH-EX-010A's "fast-lab race" requirement), and every one of those later
+        # statuses still carries the same LabSelection row a lab-choice action would need to exist.
+        existing_selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == lab_order_id)
+        )
+        if existing_selection is not None:
+            access_mode = PatientAccessMode.ORDER_READ
+        elif order.status == LabOrderStatus.AWAITING_LAB_SELECTION.value:
+            access_mode = PatientAccessMode.LAB_SELECTION
+        else:
+            # No lab has ever been chosen, and none can be chosen from here (e.g. CANCELLED or
+            # REJECTED reached directly from AWAITING_LAB_SELECTION with no selection ever made) --
+            # fail closed rather than guess at a capability this order's state cannot support.
             raise OrderNotIssuable(
-                f"LabOrder {lab_order_id} is in status {order.status!r} -- a fresh "
-                f"selection-capable patient access grant may only be issued while "
-                f"AWAITING_LAB_SELECTION"
+                f"LabOrder {lab_order_id} is in status {order.status!r} with no lab ever "
+                f"selected -- no truthful patient access mode exists for this order"
             )
 
         now = utc_now()
@@ -152,6 +184,7 @@ class PatientAccessGrantRepository:
                 token_hash=token_hash,
                 issued_at=now,
                 expires_at=expires_at,
+                access_mode=access_mode.value,
             )
             try:
                 with session.begin_nested():
@@ -163,6 +196,7 @@ class PatientAccessGrantRepository:
                     raw_token=raw_token,
                     issued_at=now,
                     expires_at=expires_at,
+                    access_mode=access_mode,
                 )
             except IntegrityError as error:
                 # Re-query rather than parse the driver's error message (matching
@@ -254,4 +288,5 @@ def _to_record(grant: PatientAccessGrant) -> GrantRecord:
         issued_at=grant.issued_at,
         expires_at=grant.expires_at,
         revoked_at=grant.revoked_at,
+        access_mode=PatientAccessMode(grant.access_mode),
     )

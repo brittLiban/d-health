@@ -622,3 +622,36 @@ def test_provider_assignment_after_patient_selection_preserves_patient_receipt(
     assert selection["assignment_source"] == "PATIENT"
     assert selection["total_amount"] == "750.00"
     assert selection["currency"] == "DJF"
+
+
+# -- DH-EX-010A: the timing hole this ticket exists to close ---------------------------------------
+
+
+def test_reproduction_issuing_access_after_provider_assignment_was_refused_pre_fix(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    """DH-EX-010A's own reproduction requirement: before this ticket's fix, a clinician who
+    assigned a lab *before* issuing the patient's access link could never issue one afterward --
+    ``patient_access.issue()`` only permitted a fresh grant while
+    ``LabOrder.status == AWAITING_LAB_SELECTION``, and provider assignment immediately transitions
+    past it. This test's assertion is the fixed, correct behavior (``201``, ``ORDER_READ``); run
+    against pre-fix code it observably fails with ``409`` -- see this ticket's negative control #2
+    (reverting issuance to AWAITING-only) for the executed proof."""
+    private_key, _ = keypair
+    provider, order_id, entry_id, clinician_token = _create_order(
+        client, private_key, organizations, catalog, patients, name="TimingHole"
+    )
+    lab = _referral_lab(organizations, directory, catalog, name="TimingHoleLab", entry_id=entry_id)
+
+    assign_response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
+    assert assign_response.status_code == 201, assign_response.text
+
+    access_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
+        headers=_auth(clinician_token),
+    )
+    assert access_response.status_code == 201, (
+        "DH-EX-010A: issuing patient access after a provider assignment must now succeed -- "
+        f"got {access_response.status_code}: {access_response.text}"
+    )
+    assert access_response.json()["access_mode"] == "ORDER_READ"
