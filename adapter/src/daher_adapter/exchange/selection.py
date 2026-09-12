@@ -1,4 +1,16 @@
-"""DH-EX-001 / DH-EX-005: selecting one destination lab for an order.
+"""DH-EX-001 / DH-EX-005 / DH-EX-010: selecting one destination lab for an order.
+
+**DH-EX-010 addition.** ``select()`` below is DH-EX-005's *patient* price-consent workflow --
+unchanged by this addition except for one new guard (see its own docstring). ``assign_by_provider``
+is a second, wholly separate workflow: ADR-043's pre-authorized launch option (a), a provider
+routing an order to a known lab with no price marketplace/consent step at all. Both share the same
+canonical ``LabSelection`` row -- one order, one destination lab, one row -- distinguished only by
+``selected_via_patient_access_grant_id`` (non-``NULL`` = patient-driven, ``NULL`` = provider-driven
+or legacy). This is a deliberate two-named-methods design, not one method with a boolean like
+``require_price=``: the two are different security/product policies, and keeping them as separate,
+independently auditable, independently testable methods is this package's established discipline
+for exactly this situation (see e.g. `PatientReferenceRepository.get_or_create` vs.
+`get_or_create_with_outcome` for the same "add a new policy, don't overload the old one" pattern).
 
 MVP scope is one lab per order (DH-PIVOT-001's approved architecture). Selecting a lab freezes a
 per-item price snapshot onto ``LabOrderItem`` at the moment of selection and never re-reads
@@ -77,6 +89,16 @@ class StalePriceSelection(RuntimeError):
 class DifferentLabAlreadySelected(RuntimeError):
     """This order already has a LabSelection for a different lab -- there is no reselection
     workflow in this MVP; changing an already-made selection requires an explicit future policy."""
+
+
+class LabAlreadyAssignedByProvider(RuntimeError):
+    """DH-EX-010: a patient's ``select()`` call named the *same* lab an order was already routed
+    to by a non-patient-driven provider assignment (``LabSelection.
+    selected_via_patient_access_grant_id IS NULL``). Refused rather than silently returning that
+    existing selection as though the patient had just consented to its (nonexistent) price --
+    doing so would retroactively fabricate patient price consent for a routing decision the
+    patient never made, and DH-EX-010's provider-assignment path never wrote a price to consent
+    to in the first place."""
 
 
 class PatientAccessGrantInvalidated(RuntimeError):
@@ -166,6 +188,23 @@ class LabSelectionRepository:
                     raise DifferentLabAlreadySelected(
                         f"LabOrder {lab_order_id} already has a selection for a different lab"
                     )
+                # DH-EX-010: a *patient* call (``patient_access_grant_id`` given) naming the same
+                # lab a non-patient-driven provider assignment already routed this order to must
+                # never be treated as successful patient price consent -- that assignment never
+                # wrote a price to consent to, and this method must not fabricate one now.
+                # ``patient_access_grant_id is None`` (internal/legacy callers, and every
+                # pre-DH-EX-010 test) is unaffected: this check only ever fires for the new
+                # patient-vs-provider interaction this ticket introduces.
+                if (
+                    patient_access_grant_id is not None
+                    and existing_selection.selected_via_patient_access_grant_id is None
+                ):
+                    raise LabAlreadyAssignedByProvider(
+                        f"LabOrder {lab_order_id} was already routed to lab "
+                        f"{lab_organization_id} by the ordering provider -- a patient selection "
+                        f"cannot retroactively supply price consent for a routing decision the "
+                        f"patient did not make"
+                    )
                 # Same-lab replay: the historical frozen snapshot wins, unconditionally -- never
                 # re-validate eligibility or re-compare price ids against whatever is current now.
                 return _to_selection_record(existing_selection), False
@@ -246,6 +285,157 @@ class LabSelectionRepository:
             order.status = LabOrderStatus.SELECTED.value
             session.flush()
             return _to_selection_record(lab_selection), True
+
+    def assign_by_provider(
+        self,
+        *,
+        lab_order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        provider_organization_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> tuple[LabSelectionRecord, bool]:
+        """DH-EX-010: routes an order to a known lab with no price marketplace/consent step at
+        all -- ADR-043's pre-authorized launch option (a) ("a provider/facility-assigned lab
+        workflow that never routes through patient price-selection"). Deliberately a *separate*
+        named method from ``select()``, not a boolean flag added to it (e.g. ``require_price=``):
+        patient price-consent and provider clinical routing are different security/product
+        policies, and this module's own docstring's discipline is to keep such policies as
+        separate, independently auditable methods rather than one method whose behavior depends
+        on a combination of booleans.
+
+        Revalidates lab eligibility fresh at assignment time, never trusting whatever was true
+        when the order was created: an ACTIVE ``LAB`` organization, an operational directory
+        profile with ``accepting_orders=True``, and an ACTIVE+SYNTHETIC catalog entry with an
+        ACTIVE ``LabOffering`` for every requested item. ``listed`` is deliberately **not**
+        checked -- an unlisted lab remains a valid, private provider-referral destination; only
+        `select()`'s own patient-marketplace path requires `listed=True`. This query never joins
+        ``LabPrice`` and this method never writes a price snapshot: ``LabOrderItem.
+        selected_price_amount``/``selected_price_currency`` stay ``NULL`` for every item, meaning
+        "price was not part of this transaction," never "the test costs zero" -- see
+        `exchange/api.py`'s `_patient_order_response` for how the patient-facing API represents
+        that honestly rather than as an implied `0 DJF`.
+
+        Enforces the calling provider's own tenant boundary *inside* this locked mutation, not
+        only via a pre-route read: an order that exists but belongs to a different provider is
+        indistinguishable from one that does not exist at all (`OrderNotFound`), matching
+        `LabOrderRepository.get_for_organization`'s anti-enumeration convention -- a future caller
+        of this repository method directly (bypassing the HTTP route's own tenant pre-check)
+        cannot accidentally assign a different provider's order.
+
+        Returns ``(record, created)``. ``created=False`` means this order already has a
+        ``LabSelection`` for this *same* lab -- whether that prior selection was itself an
+        earlier provider assignment (a genuine idempotent replay: no second mutation, no second
+        audit row) or a patient's own legitimate DH-EX-005 selection (preserved exactly as it
+        was: this branch never mutates anything, so its price snapshots and
+        `PatientAccessGrant` provenance are untouched). A different lab already selected raises
+        `DifferentLabAlreadySelected`, the same exception `select()` raises for the identical
+        conflict -- there is no reassignment policy in this MVP for either workflow."""
+        if session is not None:
+            return self._assign_by_provider_in_session(
+                session,
+                lab_order_id=lab_order_id,
+                lab_organization_id=lab_organization_id,
+                provider_organization_id=provider_organization_id,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._assign_by_provider_in_session(
+                owned_session,
+                lab_order_id=lab_order_id,
+                lab_organization_id=lab_organization_id,
+                provider_organization_id=provider_organization_id,
+            )
+
+    def _assign_by_provider_in_session(
+        self,
+        session: Session,
+        *,
+        lab_order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        provider_organization_id: uuid.UUID,
+    ) -> tuple[LabSelectionRecord, bool]:
+        order = session.scalar(
+            select(LabOrder).where(LabOrder.id == lab_order_id).with_for_update()
+        )
+        if order is None or order.provider_organization_id != provider_organization_id:
+            # Cross-provider order ids look exactly like nonexistent ones -- anti-enumeration,
+            # matching `LabOrderRepository.get_for_organization`'s convention.
+            raise OrderNotFound(str(lab_order_id))
+
+        existing_selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == lab_order_id)
+        )
+        if existing_selection is not None:
+            if existing_selection.lab_organization_id != lab_organization_id:
+                raise DifferentLabAlreadySelected(
+                    f"LabOrder {lab_order_id} already has a selection for a different lab"
+                )
+            # Same lab already assigned/selected, regardless of who did it first -- preserved
+            # exactly as-is: no mutation, no audit, no price population. This is what keeps a
+            # patient's own prior DH-EX-005 selection (its frozen prices, its grant provenance)
+            # completely untouched by a later provider assignment naming the same lab.
+            return _to_selection_record(existing_selection), False
+
+        if order.status != LabOrderStatus.AWAITING_LAB_SELECTION.value:
+            raise InvalidOrderTransition(
+                f"cannot assign a lab for LabOrder {lab_order_id} in status {order.status!r} -- "
+                f"only an order still AWAITING_LAB_SELECTION may be assigned"
+            )
+
+        required_entry_ids = frozenset(item.catalog_entry_id for item in order.items)
+        required_count = len(required_entry_ids)
+
+        organization = session.get(Organization, lab_organization_id)
+        if (
+            organization is None
+            or organization.status != OrganizationStatus.ACTIVE.value
+            or organization.org_type != OrganizationType.LAB.value
+        ):
+            raise LabCannotFulfillOrder(
+                f"lab {lab_organization_id} is not an ACTIVE LAB organization"
+            )
+        profile = session.scalar(
+            select(LabDirectoryProfile).where(
+                LabDirectoryProfile.lab_organization_id == lab_organization_id
+            )
+        )
+        # `listed` is deliberately NOT checked here -- see this method's own docstring.
+        if profile is None or not profile.accepting_orders:
+            raise LabCannotFulfillOrder(
+                f"lab {lab_organization_id} is not currently accepting orders"
+            )
+
+        # Deliberately no `LabPrice` join anywhere in this query, unlike `select()`'s equivalent
+        # eligibility check -- ADR-043 Law 1: price must never be a prerequisite for
+        # provider-assigned routing. DH-EX-010's negative control proves the no-price acceptance
+        # test fails if a price join is added back here.
+        offering_rows = session.execute(
+            select(LabOffering, TestCatalogEntry)
+            .join(TestCatalogEntry, TestCatalogEntry.id == LabOffering.catalog_entry_id)
+            .where(
+                LabOffering.lab_organization_id == lab_organization_id,
+                LabOffering.catalog_entry_id.in_(required_entry_ids),
+                LabOffering.active.is_(True),
+                TestCatalogEntry.active.is_(True),
+                TestCatalogEntry.is_synthetic.is_(True),
+            )
+        ).all()
+        found_entry_ids = frozenset(entry.id for _offering, entry in offering_rows)
+        if len(offering_rows) != required_count or found_entry_ids != required_entry_ids:
+            raise LabCannotFulfillOrder(
+                f"lab {lab_organization_id} does not have an active offering for every "
+                f"requested item -- refusing partial assignment"
+            )
+
+        lab_selection = LabSelection(
+            lab_order_id=lab_order_id,
+            lab_organization_id=lab_organization_id,
+            selected_at=utc_now(),
+            selected_via_patient_access_grant_id=None,
+        )
+        session.add(lab_selection)
+        order.status = LabOrderStatus.SELECTED.value
+        session.flush()
+        return _to_selection_record(lab_selection), True
 
     def get_for_order(self, lab_order_id: uuid.UUID) -> LabSelectionRecord | None:
         with self._sessions() as session:

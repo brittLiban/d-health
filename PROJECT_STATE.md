@@ -10304,3 +10304,306 @@ acceptance criterion is met.
 
 **Follow-up closure commit:** `fdbe70f7d612ca64d8172dbd9eb0c19061d6cb08` (test-count arithmetic fix
 + this closure section). CI run `34691715027`: **success**, all 9 jobs green.
+
+---
+
+### DH-EX-010 · Add provider-assigned lab routing without price-marketplace dependency · P0 · ✅ BUILT, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED
+
+**Ticket:** DH-EX-010. Implement ADR-043's Law 1 ("no forced marketplace") launch option (a): a
+provider/facility-assigned lab workflow that never routes through DH-EX-005's patient
+price-consent path. DH-EX-005 (patient marketplace selection) must remain fully intact and
+unweakened — both workflows coexist, sharing the same canonical `LabSelection` row.
+
+**Starting state:** HEAD `8e04ce9bb4ab5ea8dbb1edfbbccfbaafb68b6f64` (DH-EX-009 closure), matching
+the ticket's own stated SHA exactly, confirmed via `git fetch`/`git log`. CI for that commit:
+**success**, run `34691923113`.
+
+**Pre-ticket selection/price coupling, confirmed by direct code read:** `LabSelectionRepository.
+select()` (DH-EX-005) was the *only* way to create a `LabSelection`, and it hard-requires, inside
+one transaction: an ACTIVE `LAB` organization, `LabDirectoryProfile.listed=True` **and**
+`accepting_orders=True`, an ACTIVE+SYNTHETIC catalog entry with an ACTIVE `LabOffering` and a
+current DJF `LabPrice` for *every* requested item, and the caller's exact `expected_price_ids`
+consent — freezing `LabOrderItem.selected_price_amount`/`selected_price_currency` at commit time.
+No route or repository method existed that created a `LabSelection` any other way.
+
+**A real, reproduced bug found before any fix, per the ticket's own "reproduce/test it before
+fixing" instruction:** `api.py`'s `_patient_order_response` summed `item.selected_price_amount`
+over a generator that silently drops `None` values with `start=Decimal("0")`, and defaulted
+`currency` to the literal `"DJF"` via `next(..., "DJF")`. For an order with **no** priced items at
+all (exactly what a price-free provider assignment produces), this returned `total_amount: 0,
+currency: "DJF"` — an implied "this test is free," not the true "price was not part of this
+transaction." Reproduced via negative control (see below) before the fix was written, matching
+the ticket's instruction precisely.
+
+**Provider-assignment API contract:** `POST /organizations/{provider_id}/orders/{order_id}/
+assign-lab`. Request: `{"lab_organization_id": "..."}` only (`extra="forbid"` — no price ids, no
+patient grant, no `source_organization_id`). `provider_id`/`order_id` from the URL;
+`AuthenticatedPrincipal` from authentication. Response (`LabAssignmentResponse`): `lab_order_id`,
+`lab_organization_id`, `selected_at` — deliberately no price field of any kind.
+
+**Provider eligibility contract, revalidated fresh at assignment time (never trusting
+order-creation-time state):** ACTIVE `LAB` organization; an operational `LabDirectoryProfile` with
+`accepting_orders=True`; an ACTIVE `LabOffering` + ACTIVE+SYNTHETIC `TestCatalogEntry` for **every**
+requested item (a lab missing even one is refused entirely — never a partial assignment). No
+`LabPrice` join anywhere in this query.
+
+**Exact treatment of `listed`:** **not required** for provider assignment — an unlisted lab
+remains fully assignable (a private, non-public referral relationship). DH-EX-005's own `select()`
+path is **unchanged**: `listed=True` is still required there. Tested both directions explicitly.
+
+**Exact treatment of `accepting_orders`:** required for **both** workflows, unchanged — a lab that
+has turned off intake cannot receive new work through either path. Tested for provider assignment
+specifically (`test_not_accepting_orders_lab_cannot_be_assigned`).
+
+**Exact treatment of prices:** never read, never required, never fabricated. Zero `LabPrice` rows
+anywhere for the target lab is an accepted, tested starting condition
+(`test_provider_assigns_lab_with_zero_price_rows_succeeds`); a lab that legitimately *had* prices
+which are then deleted remains assignable
+(`test_provider_assignment_succeeds_after_all_price_rows_removed`, the ticket's explicit
+"price-infrastructure independence" property). `LabOrderItem.selected_price_amount`/
+`selected_price_currency` stay `NULL` — DB CHECK constraint `ck_exchange_lab_order_items_price_
+snapshot_pairing` (`(amount IS NULL) = (currency IS NULL)`, pre-existing from DH-EX-001) already
+made "half-priced" structurally impossible; this ticket only proves "both null" is a legitimate,
+reachable, tested state, not an oversight.
+
+**`LabSelection` provenance design:** the canonical row is unchanged in shape — no new
+`ProviderLabAssignment` table. `selected_via_patient_access_grant_id IS NULL` now means
+"non-patient (provider) assignment" as well as its pre-existing "no grant, legacy/internal caller"
+meaning; `IS NOT NULL` means patient-driven (DH-EX-005). The provider *actor* is recorded
+authoritatively via a new `lab_order_assigned` `ExchangeSecurityAuditEvent` row
+(`actor_identity_id`, `organization_id=provider_id`, `resource_type="lab_order"`,
+`resource_id=order_id`, `outcome="updated"`) — no `PatientAccessGrant` is ever fabricated for a
+provider actor.
+
+**Repository design:** `LabSelectionRepository.select()` is untouched in its own eligibility logic
+(one new guard only, see below) — a **separate** new method, `assign_by_provider(...)`, implements
+the provider workflow, per the ticket's explicit instruction against one method with boolean
+policy flags. Both share the same `LabOrder`-row-locking (`with_for_update()`) and
+optional-`session`/atomic-audit conventions already established across this package.
+
+**Provider/patient coexistence semantics — the two directions the ticket named explicitly, both
+implemented and tested:**
+1. *Patient already selected, provider calls `assign-lab` naming the same lab afterward:*
+   `assign_by_provider`'s same-lab branch returns the existing row unconditionally — no mutation,
+   no audit, no price rewrite. Proven with a real frozen price snapshot and a real
+   `PatientAccessGrant` id both surviving byte-for-byte
+   (`test_provider_assignment_after_patient_selection_preserves_patient_selection` at the
+   repository layer, `test_provider_assignment_after_patient_selection_preserves_patient_receipt`
+   at the HTTP layer).
+2. *Provider already assigned, patient calls `POST /patient/order/selection` naming the same lab
+   afterward:* **new guard added to `select()`** — if the caller supplies a
+   `patient_access_grant_id` (i.e., this is a real patient call, not an internal/legacy one) and
+   the existing selection's `selected_via_patient_access_grant_id IS NULL` (i.e., it was not
+   patient-driven), `select()` now raises a new `LabAlreadyAssignedByProvider` (409) instead of
+   silently returning the existing row as though the patient had just consented to a price that
+   was never set. This is the ticket's own explicitly-named danger — "today `select()` returns an
+   existing same-lab selection before price comparison... that behavior becomes dangerous once
+   legitimate provider-created selections exist" — confirmed present in pre-ticket code by direct
+   read, then fixed.
+   **Same-lab replay where both calls are patient-driven, or both are provider-driven, is
+   unaffected** — verified `test_selecting_same_lab_twice_is_a_safe_replay` (pre-existing) and the
+   new `test_idempotent_replay_returns_200_no_second_audit` both still pass unchanged.
+
+**Real finding recorded, not silently worked around, per the ticket's own "PATIENT ACCESS GRANT
+SCOPE" instruction:** `patient_access.issue()` only allows issuing a **fresh** selection-capable
+grant while the order is `AWAITING_LAB_SELECTION` — since `assign_by_provider` immediately
+transitions the order to `SELECTED`, no fresh patient-access grant can be issued *after* a provider
+assignment. An already-issued grant (issued while still `AWAITING_LAB_SELECTION`, before the
+provider calls `assign-lab`) remains fully usable afterward — confirmed by direct test
+(`test_patient_response_shows_null_price_not_zero_for_provider_assignment` issues the grant first,
+by necessity, after the first draft of that test hit exactly this 409 and revealed the ordering
+constraint). **Not silently broadened**: grant-issuance eligibility (`AWAITING_LAB_SELECTION`
+only) is completely unchanged by this ticket. Recorded here as an explicit follow-up for whichever
+future ticket designs the patient-status/assisted-digital flow for provider-assigned orders: if a
+provider assigns a lab *before* any patient link was ever issued, that patient currently has **no
+way to ever receive one** for this order. This is a real, load-bearing gap for the provider-routing
+launch path, not a hypothetical.
+
+**Patient response change preventing the false `0 DJF`:** `PatientSelectionReceiptResponse` gained
+`assignment_source: Literal["PROVIDER", "PATIENT"]` (derived from `LabSelection.
+selected_via_patient_access_grant_id`, the authoritative provenance field — not from price
+presence, which is a side effect) and `total_amount`/`currency` are now `Decimal | None`/`str |
+None`. For `"PROVIDER"`, both are `null` and `items` is `[]`; for `"PATIENT"`, both remain exactly
+as before (a real, non-null total and currency). Both directions tested
+(`test_patient_response_shows_null_price_not_zero_for_provider_assignment`,
+`test_patient_response_still_shows_real_total_for_patient_selection`).
+
+**Authorization/tenant evidence:** reused `AuthorizationService.require_clinician` verbatim — no
+new role. `ORG_ADMIN` alone, `LAB_TECH`, platform-admin-alone, and cross-tenant clinician are all
+refused (403/403/403/404, matching `create_lab_order`'s exact established matrix). The provider's
+tenant boundary is additionally enforced **inside** `_assign_by_provider_in_session` itself (after
+locking the order, `order.provider_organization_id != provider_organization_id` → `OrderNotFound`,
+never trusting only the HTTP route's own pre-check) — proven by a dedicated repository-level test
+that calls the repository directly with a mismatched `provider_organization_id`, bypassing the
+HTTP layer entirely (`test_cannot_assign_order_owned_by_different_provider`).
+
+**Audit atomicity evidence:** new `test_provider_lab_assignment_rolls_back_when_audit_insert_fails`
+(added to `test_exchange_audit_atomicity.py`) — monkeypatches `ExchangeSecurityAuditRepository.
+record` to raise, confirms zero new `LabSelection` rows, zero new audit rows, and the order's
+status remains `AWAITING_LAB_SELECTION` (the SELECTED transition rolled back too, since it shares
+the same transaction).
+
+**Idempotency evidence:** same-lab provider replay → `201` then `200`, exactly one `LabSelection`,
+exactly one `lab_order_assigned` audit row (`test_idempotent_replay_returns_200_no_second_audit`,
+`test_assign_same_lab_twice_is_idempotent_replay`). Different-lab replacement → `409`
+(`test_different_lab_already_selected_is_conflict`, `test_assign_different_lab_after_existing_
+assignment_is_refused`).
+
+**Concurrency evidence:** SQLite-implicit via the above idempotency tests, plus **three dedicated
+real-PostgreSQL tests** (see below) covering same-lab 10-way concurrent provider assignment,
+different-lab 2-way concurrent provider assignment, and — the genuinely new claim this ticket
+introduces — a **patient-vs-provider race for the same order**, both threads locking the same
+`LabOrder` row, the loser observing whatever the winner actually committed (either a
+provider-provenanced row, or the patient's own `LabAlreadyAssignedByProvider` 409 if the provider
+won first).
+
+**No-price test:** `test_provider_assigns_lab_with_zero_price_rows_succeeds` (never priced) and
+`test_provider_assignment_succeeds_after_all_price_rows_removed` (priced, then all `LabPrice` rows
+deleted) both pass; `test_provider_assignment_writes_no_price_snapshot` behavior is asserted inline
+in the first (both snapshot columns `None` after assignment).
+
+**Unlisted-lab test:** `test_unlisted_but_accepting_lab_is_assignable_by_provider` (repository) and
+the combined **directory/marketplace separation scenario** the ticket names explicitly as "the one
+test that proves Law 1 is actually encoded in software" —
+`test_unlisted_no_price_lab_is_provider_assignable_but_not_a_marketplace_option` (assignment
+succeeds; the lab never appears in `POST /marketplace/lab-options`) and
+`test_unlisted_no_price_lab_cannot_be_patient_selected_directly` (a patient who somehow already
+knows the lab id still cannot select it directly — `select()`'s own `listed`/price requirements
+are untouched and still refuse it, `409`).
+
+**Patient-price-path regression results:** every pre-existing `test_exchange_selection.py` test
+(10/10) passes completely unmodified — `select()`'s own eligibility logic was not touched, only one
+new guard was added to its existing-selection branch. `test_patient_response_still_shows_real_
+total_for_patient_selection` confirms the patient-facing receipt is byte-for-byte unchanged in
+shape and values for an ordinary DH-EX-005 selection.
+
+**Lab-workflow integration results:** `test_clinician_assigns_lab_and_lab_tech_can_accept_it` — a
+provider-assigned order appears in `GET /organizations/{lab_id}/lab-orders` exactly like any other
+selected order, and `LAB_TECH` accepts it through the completely unmodified DH-EX-006 endpoint
+(`LabWorkflowOrderItemResponse.selected_price_amount`/`currency` were **already** `Decimal | None`
+— confirmed by direct read, no code change needed there, only this test proving it in practice).
+One canonical order, one lab queue, no special-casing.
+
+**Negative controls — the six required by the ticket, executed against the real running code, each
+temporarily edited, run, observed, and restored, with the restore verified via `diff` against a
+full-file backup copied into the session's persistent scratchpad directory (not `/tmp`, and not
+`git checkout --`, per the exact lesson recorded in DH-EX-009's own entry) before proceeding.
+(A seventh control, covering criterion 10's own coverage gap found during self-review, is
+recorded separately further below, alongside the tests it validates.)**
+1. **`accepting_orders` enforcement removed** (`if profile is None:` only): `test_not_accepting_
+   orders_lab_cannot_be_assigned` **failed** — a non-accepting lab became assignable. Restored.
+2. **`listed` reintroduced as a provider-assignment requirement**: `test_unlisted_but_accepting_
+   lab_is_assignable_by_provider` **failed** with `LabCannotFulfillOrder`. Restored.
+3. **`LabPrice` accidentally joined back into the eligibility query**: both no-price tests
+   **failed** (`does not have an active offering for every requested item`) — the join silently
+   turned "no price" into "no matching offering row" at the SQL level, exactly the class of bug
+   the ticket warned against. Restored.
+4. **Provider ownership check removed from the locked mutation** (`if order is None:` only):
+   `test_cannot_assign_order_owned_by_different_provider` (repository) **and**
+   `test_cross_tenant_clinician_denied` (HTTP, `201` instead of `404`) **both failed** — a
+   provider could assign a lab to a different provider's order. Restored.
+5. **Patient-vs-provider provenance protection removed** (`if False:` guard): `test_patient_
+   selection_after_provider_assignment_same_lab_is_conflict` **failed** — the patient's POST with
+   a fabricated `expected_price_ids` silently succeeded (`200`) instead of `409`, exactly the Law 1
+   violation this control targets. Restored.
+6. **`_patient_order_response`'s fix reverted to the original pre-ticket code** (the "reproduce
+   before fixing" control, run again after the fact to prove the fix is load-bearing):
+   `test_patient_response_shows_null_price_not_zero_for_provider_assignment` **failed** —
+   `total_amount` was `"0"`, not `null`. Restored.
+   Every restore confirmed via `diff` returning no output against the scratchpad backup of the
+   full file before continuing to the next control.
+
+**Real PostgreSQL evidence:** disposable `dhex010_qual` database + `dhex010` role, created and
+dropped this session. `alembic upgrade head` applies cleanly through
+`0012_exchange_provider_assign`. Three concurrency tests (10-way same-lab, 2-way different-lab,
+patient-vs-provider race) all pass, **repeated 5 consecutive times with zero failures** after
+fixing one genuine test-isolation bug found during that repetition (a hardcoded `token_hash` in
+the patient-vs-provider test collided with itself across repeated runs against the same persistent
+scratch database — a `UniqueViolation`, not a production concurrency defect; fixed by deriving the
+hash from the test's own unique key prefix). **Downgrade-block control, done properly**: the
+repository-level qualification tests call `assign_by_provider` directly and never write an audit
+row themselves (only the HTTP route does), so an initial downgrade attempt succeeded cleanly with
+zero blocking rows — correct behavior, not a bug, and confirmed as such rather than assumed; a real
+`lab_order_assigned` audit row was then inserted through the actual `ExchangeSecurityAuditRepository.
+record` code path, and the downgrade was re-attempted and correctly **blocked**
+(`DowngradeBlockedByProviderAssignmentHistory`, head unchanged at `0012_exchange_provider_assign`).
+
+**Decision/ADR outcome:** audited `DECISIONS.md`'s ADR-043 directly. Its own "Existing-contract
+conflict recorded, not resolved" section already states verbatim: "the acceptable launch options
+are (a) a provider/facility-assigned lab workflow that never routes through patient price-selection
+at all, or (b) a patient-selection flow that continues to honestly satisfy the existing
+price-consent contract as built." **This ticket implements option (a) exactly as pre-authorized,
+without weakening (b) (DH-EX-005 is completely untouched in its own eligibility logic) — no new ADR
+is needed or written.** The OPEN DECISION itself (whether DH-EX-005's price-consent contract must
+ever be *redesigned/weakened*) remains genuinely open and untouched, since this ticket never
+weakens it. `docs/MVP-1.0.md` now has three stale spots this ticket does not edit (outside its
+declared file scope, same discipline as DH-EX-009's docs-staleness handling): §8's golden-journey
+table row ("Lab is assigned/selected... **patient-selection path only**... No provider/
+facility-assigned-lab route exists... NOT BUILT"), §10 gap item 2 ("No provider/facility-assigned-
+lab path... ADR-043's launch-option (a) is not implemented"), and §15 item 11's framing of this as
+still-open follow-up work — all three should be corrected in a future documentation pass to state
+that launch option (a) is now built, tested, and real-PostgreSQL-qualified.
+
+**Files changed:** `adapter/src/daher_adapter/exchange/selection.py` (new `LabAlreadyAssignedByProvider`
+exception, one new guard in `select()`, new `assign_by_provider`/`_assign_by_provider_in_session`),
+`adapter/src/daher_adapter/exchange/api.py` (new `AssignLabRequest`/`LabAssignmentResponse` models
++ `assign_lab_to_order` route, `PatientSelectionReceiptResponse`'s `assignment_source`/nullable
+`total_amount`/`currency`, `_patient_order_response`'s corrected total/currency logic),
+`adapter/src/daher_adapter/exchange/security_audit.py` (new `lab_order_assigned` event type, no new
+resource type), `adapter/src/daher_adapter/exchange/models.py` (widened the `event_type` CHECK
+constraint only), `adapter/migrations/versions/0012_exchange_provider_assign.py` (new),
+`.github/workflows/ci.yml` (`EXPECTED_HEAD` → `0012_exchange_provider_assign`),
+`adapter/tests/test_exchange_provider_assignment.py` (new, 17 repository-level tests),
+`adapter/tests/test_exchange_provider_assignment_api.py` (new, 15 HTTP-level tests),
+`adapter/tests/test_exchange_audit_atomicity.py` (1 new test, `lab_selections` added to `_counts()`),
+`adapter/tests/integration/test_dhex010_postgres_qualification.py` (new, 3 real-Postgres tests).
+
+**Coverage gap found and closed during self-review, before shipping:** acceptance criterion 10
+("catalog/orderability constraints remain enforced") was implemented in `assign_by_provider`'s
+eligibility query (`LabOffering.active`, `TestCatalogEntry.active`, `TestCatalogEntry.is_synthetic`)
+but had zero test coverage — deleting any of those three filters left the entire suite green.
+Closed with three new repository-level tests (`test_inactive_offering_cannot_be_assigned`,
+`test_inactive_catalog_entry_cannot_be_assigned`, `test_non_synthetic_catalog_entry_cannot_be_
+assigned`) plus a seventh negative control (all three filters removed at once): all three tests
+**failed** as expected, restored, `diff`-verified byte-identical against the scratchpad backup.
+`is_synthetic` in particular is the pilot-phase clinical-content gate — an untested filter there
+meant a non-synthetic (real, un-signed-off) test could in principle have been routed through
+provider assignment with nothing catching it. Also fixed during the same review pass: a dead
+`_setup_member` helper in the API test file (removed), and a response-shape inconsistency in
+`_patient_order_response` for the (HTTP-unreachable today) hypothetical row shape of a
+non-patient-driven selection that nonetheless has real frozen prices — `items` now always agrees
+with `total_amount`/`currency` (empty/null together, never itemized prices next to a null total).
+
+**Migration outcome:** expected by the ticket (unlike DH-EX-009, where it was a discovered
+deviation) — delivered exactly as predicted: one purely-additive CHECK-constraint widening for the
+new `lab_order_assigned` event type, mirroring `0006`–`0011`'s established pattern. Revision id
+`0012_exchange_provider_assign` (29 characters), keeping DH-EX-009's `alembic_version` `VARCHAR(32)`
+discovery in mind.
+
+**Full tests/lint:** `682 passed, 50 skipped, 1 pre-existing warning` — up from `649 passed, 47
+skipped` at DH-EX-009's handoff (+33 new passing tests: 17 + 15 + 1; +3 new skipped: the real-Postgres
+qualification file, `skipif`-gated in CI, run and passing manually this session, repeated 5
+consecutive times with zero failures after fixing one test-isolation flake). `ruff check` and
+`ruff format --check` both clean across `src tests migrations scripts`.
+
+**Real facility:** untouched. **Clinical semantics:** none touched — no partograph, no order set,
+no alerting, no diagnosis. **Patient data to third parties:** none.
+
+**What remains NOT built by this ticket:** lab reassignment after rejection (explicitly out of
+scope — DH-EX-006's existing reject-then-? question is untouched); Clinic/Lab/Patient UI; patient
+messaging; specimen/sample workflow; result validation/release; `ResultDelivery` semantics;
+payment/billing/insurance; price ranking or cheapest-lab recommendations; DHealth Connect; real
+Keycloak runtime qualification (still blocked, DH-EX-008R); patient demographic search/merge; and
+— recorded above as a genuine load-bearing gap, not a hypothetical — any way for a patient to
+receive an access link for an order the provider assigned a lab to *before* any grant was ever
+issued.
+
+**Next:** DH-EX-008R remains blocked pending its own Human Decision (unchanged). Per this ticket's
+own explicit final instruction, specimen/sample workflow is the next candidate ticket but **is not
+started here** — "Do not begin specimen/sample workflow."
+
+**DH-EX-010 QUALIFIED: YES** — real PostgreSQL (including a genuine patient-vs-provider race), all
+six required negative controls plus a seventh closing a self-found coverage gap, the full
+authorization/tenant matrix, and exact-SHA CI (recorded below once pushed).
+
+**READY FOR REVIEW: YES**

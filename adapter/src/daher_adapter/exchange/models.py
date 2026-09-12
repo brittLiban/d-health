@@ -745,7 +745,7 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
             "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
             "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
-            "'patient_reference_bound'"
+            "'patient_reference_bound', 'lab_order_assigned'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

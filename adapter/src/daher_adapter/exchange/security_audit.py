@@ -49,6 +49,12 @@ SecurityEventType = Literal[
     # DH-EX-009 provider-scoped patient-reference binding. Deliberately not "patient_created" --
     # Exchange binds a source-owned identity, it does not create a longitudinal patient record.
     "patient_reference_bound",
+    # DH-EX-010 provider/facility-assigned lab routing (ADR-043 launch option (a)). Deliberately
+    # not "lab_selected" -- that name is DH-EX-005's patient price-consent workflow; this is a
+    # distinct clinical routing decision with no price/consent step, and reuses the existing
+    # "lab_order" resource_type since it mutates the LabOrder's own selection, same as
+    # lab_order_accepted/rejected/processing_started above.
+    "lab_order_assigned",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[

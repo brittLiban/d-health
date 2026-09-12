@@ -118,6 +118,7 @@ from daher_adapter.exchange.results import (
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 from daher_adapter.exchange.selection import (
     DifferentLabAlreadySelected,
+    LabAlreadyAssignedByProvider,
     LabCannotFulfillOrder,
     LabSelectionRepository,
     PatientAccessGrantInvalidated,
@@ -553,6 +554,30 @@ class LabOrderSummaryResponse(BaseModel):
     item_count: int
 
 
+# -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) ---------------
+
+
+class AssignLabRequest(BaseModel):
+    """Deliberately nothing else in this body -- no price ids, no patient access grant, no
+    ``source_organization_id``. ``provider_id``/``order_id`` come from the URL; the acting
+    clinician comes from authentication."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+
+
+class LabAssignmentResponse(BaseModel):
+    """Deliberately minimal, and deliberately excludes any price field -- provider assignment
+    never selects or freezes a price, so there is nothing honest to report here about one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_order_id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    selected_at: datetime
+
+
 # -- DH-EX-005: secure patient order access + patient lab selection ------------------------------
 
 
@@ -588,7 +613,16 @@ class PatientSelectionReceiptItemResponse(BaseModel):
 class PatientSelectionReceiptResponse(BaseModel):
     """Built entirely from the frozen `LabOrderItem` snapshots and the immutable `LabSelection`
     row -- never from a live re-read of `LabPrice`, so a lab changing or deactivating afterward
-    can never alter what this receipt shows."""
+    can never alter what this receipt shows.
+
+    DH-EX-010: ``assignment_source`` names which workflow produced this selection --
+    ``"PATIENT"`` when `LabSelection.selected_via_patient_access_grant_id` is set (DH-EX-005's
+    price-consent path), ``"PROVIDER"`` when it is not (ADR-043 launch option (a), no price
+    step). ``total_amount``/``currency`` are nullable specifically for the ``"PROVIDER"`` case,
+    where every item's price snapshot is genuinely `NULL` -- meaning "price was not part of this
+    transaction," which this response must represent honestly as `null`, never as an implied
+    `0 DJF` (a real bug this ticket found and fixed: summing an all-`None` generator with
+    `start=Decimal("0")` silently produced exactly that)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -599,9 +633,10 @@ class PatientSelectionReceiptResponse(BaseModel):
     longitude: Decimal | None
     public_phone: str | None
     selected_at: datetime
+    assignment_source: Literal["PROVIDER", "PATIENT"]
     items: list[PatientSelectionReceiptItemResponse]
-    total_amount: Decimal
-    currency: str
+    total_amount: Decimal | None
+    currency: str | None
 
 
 class PatientOrderResponse(BaseModel):
@@ -1753,6 +1788,66 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return _to_order_response(order)
 
+    # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/assign-lab",
+        response_model=LabAssignmentResponse,
+    )
+    def assign_lab_to_order(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        body: AssignLabRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabAssignmentResponse:
+        # CLINICIAN specifically -- the same gate and reasoning as `create_lab_order`: routing an
+        # order to a lab is part of the same clinical ordering authority, not a separate
+        # receptionist/dispatcher role this ticket invents.
+        _require_clinician(principal, provider_id)
+
+        # The provider's own tenant boundary is re-verified *inside* `assign_by_provider` itself
+        # (against the locked order row), not only here -- see that method's own docstring for
+        # why a pre-route read alone is not enough.
+        try:
+            with session_factory.begin() as session:
+                record, created = selections.assign_by_provider(
+                    lab_order_id=order_id,
+                    lab_organization_id=body.lab_organization_id,
+                    provider_organization_id=provider_id,
+                    session=session,
+                )
+                # Idempotent replay (already assigned to this same lab, by either workflow): no
+                # mutation happened, so no second authoritative audit row -- matching DH-EX-006's
+                # accept/reject/start-processing convention for this exact situation.
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_assigned",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidOrderTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except DifferentLabAlreadySelected as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LabCannotFulfillOrder as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return LabAssignmentResponse(
+            lab_order_id=order_id,
+            lab_organization_id=record.lab_organization_id,
+            selected_at=record.selected_at,
+        )
+
     # -- DH-EX-005: provider-issued secure patient order access ----------------------------------
 
     def _existing_order_for_provider_or_404(order_id: uuid.UUID, provider_id: uuid.UUID):
@@ -1848,18 +1943,29 @@ def build_exchange_router(
             listing = directory.get_listing_for_lab(
                 selection_record.lab_organization_id, include_unlisted=True
             )
-            total = sum(
-                (item.selected_price_amount for item in order.items if item.selected_price_amount),
-                start=Decimal("0"),
-            )
-            currency = next(
-                (
-                    item.selected_price_currency
-                    for item in order.items
-                    if item.selected_price_currency
-                ),
-                "DJF",
-            )
+            # DH-EX-010: provenance -- not price presence -- is the authoritative signal for
+            # which workflow produced this selection. A provider assignment never writes a price
+            # snapshot, so `total_amount`/`currency` must stay `null`, never an implied `0 DJF`.
+            is_patient_driven = selection_record.selected_via_patient_access_grant_id is not None
+            priced_items = [
+                item
+                for item in order.items
+                if item.selected_price_amount is not None
+                and item.selected_price_currency is not None
+            ]
+            if is_patient_driven:
+                total = sum(
+                    (item.selected_price_amount for item in priced_items), start=Decimal("0")
+                )
+                currency = priced_items[0].selected_price_currency if priced_items else None
+            else:
+                # A non-patient-driven selection reports no items either, even on the
+                # (HTTP-unreachable today) legacy/internal-caller row shape that has real frozen
+                # prices but no grant -- `items`/`total_amount`/`currency` must agree with each
+                # other, never itemized prices next to a null total.
+                total = None
+                currency = None
+                priced_items = []
             selection_response = PatientSelectionReceiptResponse(
                 lab_organization_id=lab.id,
                 lab_organization_name=lab.name,
@@ -1868,6 +1974,7 @@ def build_exchange_router(
                 longitude=listing.longitude if listing else None,
                 public_phone=listing.public_phone if listing else None,
                 selected_at=selection_record.selected_at,
+                assignment_source="PATIENT" if is_patient_driven else "PROVIDER",
                 items=[
                     PatientSelectionReceiptItemResponse(
                         catalog_code_snapshot=item.catalog_code_snapshot,
@@ -1875,9 +1982,7 @@ def build_exchange_router(
                         selected_price_amount=item.selected_price_amount,
                         selected_price_currency=item.selected_price_currency,
                     )
-                    for item in order.items
-                    if item.selected_price_amount is not None
-                    and item.selected_price_currency is not None
+                    for item in priced_items
                 ],
                 total_amount=total,
                 currency=currency,
@@ -1946,6 +2051,8 @@ def build_exchange_router(
         except InvalidOrderTransition as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except DifferentLabAlreadySelected as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LabAlreadyAssignedByProvider as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except LabCannotFulfillOrder as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
