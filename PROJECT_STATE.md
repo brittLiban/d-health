@@ -10293,3 +10293,14 @@ at the same time) — a sandbox network condition, not a CI or code problem; a s
 succeeded without any code or config change. A `git config http.postBuffer 524288000` set locally
 during that troubleshooting was unset afterward (`git config --local --unset http.postBuffer`) since
 it was not asked for and the default was already sufficient once the network recovered.
+
+**Acceptance-criterion disclosure:** this ticket's own "migration head unchanged" acceptance
+criterion is **NOT MET** — the migration head moved from `0010_exchange_results_workflow` to
+`0011_exchange_patient_ref_bind`. Recorded here by name, not only as a file-scope deviation above:
+the closed `event_type`/`resource_type` CHECK constraints made any new audit event type
+unsatisfiable without a migration on current master, and the ticket's own Rule Zero ("current
+master wins over any assumption") governs over the criterion as originally written. Every other
+acceptance criterion is met.
+
+**Follow-up closure commit:** `fdbe70f7d612ca64d8172dbd9eb0c19061d6cb08` (test-count arithmetic fix
++ this closure section). CI run `34691715027`: **success**, all 9 jobs green.
