@@ -9353,3 +9353,200 @@ none of it.
 `docs/MVP-1.0.md` going forward; no further documentation-framing ticket is implied by this one.
 
 **READY FOR REVIEW: YES.**
+
+---
+
+### DH-EX-007A · Align result Decimal API validation with PostgreSQL `NUMERIC(18,4)` · P0 · ✅ FIXED, TESTED AGAINST REAL POSTGRESQL
+
+**Ticket:** DH-EX-007A, closing item 1 of `docs/MVP-1.0.md` §15 / DH-EX-007's own follow-up list.
+Representation-validation only, no clinical semantics — no sign rule, no range-ordering rule, no
+unit requirement was added, per this ticket's own explicit boundary.
+
+**HEAD audited:** `e77568964bfde9e47558e535bf7ed696cd76f788` (DH-DOC-001's commit), confirmed
+current via `git fetch`/`git log origin/master -1` — matching the ticket's expected starting SHA
+exactly. Its own CI (run `34659751868`) was already independently confirmed green (9/9 jobs) at
+the end of DH-DOC-001.
+
+**Environment note, materially different from every prior ticket this session:** WSL2 Ubuntu
+(previously stopped, per this repo's own DH-EX-001R precedent) was started and found to already
+hold a working Python 3.14.4 venv (`~/dh-adapter-venv`, matching `adapter/requirements-dev.txt`
+exactly — `pip check` clean) and a running PostgreSQL 18.6 server, both left over from an earlier
+session's own qualification work. This ticket used that real environment throughout — every test
+run, lint pass, and PostgreSQL reproduction below is a real execution, not a static-analysis
+substitute. The repository is mounted at `/mnt/c/Users/liban/Documents/d-health` and was confirmed
+at the same HEAD as this session's own Windows-side checkout before any work began.
+
+**Current DB contract, confirmed by reading `models.py` directly (unchanged by this ticket):**
+`LabResult.numeric_value`, `.reference_range_low`, `.reference_range_high` are all
+`Mapped[Decimal | None] = mapped_column(Numeric(18, 4))` (models.py:474-477) — 18 total digits, 4
+after the decimal point, 14 before.
+
+**Current API contract before this ticket, confirmed by reading `api.py` directly:**
+`LabResultSubmitRequest.numeric_value`/`.reference_range_low`/`.reference_range_high` were plain
+`Decimal | None = None` — no `max_digits`/`decimal_places` — unlike `LabPriceSetRequest.amount`
+(api.py:366, DH-EX-003R's own prior fix for the identical class of gap), which already mirrors its
+`Numeric(12, 2)` column exactly.
+
+**Production call-path audit:** grepped the entire `adapter/` tree for `record_numeric`/
+`record_text`/`LabResultRepository(`. Reachable only from: `api.py`'s one HTTP route (the
+production path), `results.py` itself (the definition), and three test files (fixture setup only —
+confirmed by reading each call site, e.g. `test_exchange_patient_access.py`'s use is building a
+`COMPLETED`-order fixture for an unrelated test). **No other production code bypasses the HTTP
+API.** Per this ticket's own instruction, API-boundary validation plus PostgreSQL regression
+evidence is therefore sufficient — no shared repository-level validator was added, and none is
+needed.
+
+**Gap reproduced live, before any fix, against a real, unmodified PostgreSQL 18.6 database
+through the real, unmodified production HTTP API** (a disposable scratch database/role created and
+destroyed for this purpose, never a facility database): driving a real order through
+`AWAITING_LAB_SELECTION` → `SELECTED` → `ACCEPTED` → `IN_PROGRESS` via the actual API endpoints,
+then submitting `numeric_value="1.23456"` returned **`201 Created`**, and a direct read of the
+database afterward showed the stored value as **`1.2346`** — PostgreSQL silently rounded it, no
+error, no warning, a different clinical value than the one the caller sent. Submitting
+`numeric_value="123456789012345.6789"` (15 integer digits) on a second item of the same order
+returned **`500 Internal Server Error`** with no detail body — confirmed at the SQLAlchemy layer
+separately: `psycopg.errors.NumericValueOutOfRange` ("numeric field overflow ... must round to an
+absolute value less than 10^14"), translated to `sqlalchemy.exc.DataError`, uncaught by
+`_submit_in_session` (which only translates `IntegrityError`). Both failure modes match the
+ticket's own predicted consequences exactly, now with the exact sent/stored values and exact
+exception class recorded rather than assumed.
+
+**Pydantic 2.13.4's actual `max_digits`/`decimal_places` semantics, verified directly, not copied
+from the ticket's example:** trailing zeros beyond the declared scale are accepted when they carry
+no additional significant digits (`1.10000` → accepted, matching `NUMERIC`'s own lossless
+normalization at that scale); a genuinely significant excess digit is rejected (`1.00001`,
+`1.99995` → `decimal_max_places`); the exact boundary `99999999999999.9999` (14 integer + 4
+decimal = 18 total) is accepted; `100000000000000.0000` (15 integer digits) is refused for
+`decimal_whole_digits`; scientific notation (`1E+2`, `1.5E-2`) normalizes and validates correctly;
+`nan`/`inf` are already rejected (`finite_number`) independent of this change; negative magnitudes
+are unaffected (no sign rule exists or was added). A bare JSON *number* (not a string) for a value
+near the top of the representable range can lose precision at the JSON/float64 boundary before
+Pydantic ever sees it (e.g. the float literal `99999999999999.9999` parses to `100000000000000.0`
+and is then correctly rejected) — this is inherent to JSON/float64, not introduced or worsened by
+this fix, and every test in this repository (old and new) already sends Decimal values as JSON
+strings; recorded as a documentation note for future API consumers, not a code change.
+
+**Implementation:** `adapter/src/daher_adapter/exchange/api.py` —
+`LabResultSubmitRequest.numeric_value`/`.reference_range_low`/`.reference_range_high` changed from
+bare `Decimal | None = None` to `Field(default=None, max_digits=18, decimal_places=4)`, mirroring
+`LabPriceSetRequest.amount`'s exact precedent syntax. Docstring extended with the live reproduction
+evidence above. No other line in `api.py` changed. No migration, no model change, no database
+column change — the database's `Numeric(18, 4)` remains the single authoritative representation
+this ticket aligns the API to, not the reverse.
+
+**Test matrix added, `adapter/tests/test_exchange_results_api.py`:**
+`test_decimal_field_accepts_representable_boundary_values` (parametrized across all three Decimal
+fields: integer, negative integer, ordinary decimal, exactly four fractional digits, the maximum
+representable magnitude and its negative, and a trailing-zero case);
+`test_decimal_field_rejects_too_many_fractional_digits` (parametrized across all three fields, `422`
++ asserts the exact `decimal_max_places` error type); `test_decimal_field_rejects_too_many_total_digits`
+(parametrized across all three fields, `422` + asserts `decimal_max_digits`/`decimal_whole_digits`);
+`test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation` (a rejected over-scale
+request on a one-item order creates zero `LabResult` rows, zero `lab_result_recorded`/
+`lab_order_completed` audit events, leaves `LabOrder.status` at `IN_PROGRESS`, and a subsequent
+well-formed submission for the identical item still succeeds and completes the order — no partial
+state was left behind); `test_text_result_flow_unaffected_by_decimal_hardening` (a `TEXT` result,
+whose validator already forces all three Decimal fields to `None`, is unaffected).
+
+**Test matrix added, `adapter/tests/integration/test_dhex007_postgres_qualification.py`:** the
+three pre-existing concurrency tests in this file drive `LabResultRepository` directly, entirely
+below the FastAPI/Pydantic layer — they prove nothing about the HTTP boundary. Added a real
+`api_client` fixture (`build_exchange_router` — the identical production wiring
+`test_exchange_results_api.py` uses — over this file's own real-Postgres `sessions` fixture,
+`raise_server_exceptions=False`) and three new tests that exercise the actual HTTP endpoint against
+real PostgreSQL: `test_over_scale_decimal_rejected_before_reaching_real_postgres` and
+`test_over_precision_decimal_rejected_before_reaching_real_postgres` (the exact two pre-fix
+reproductions above, now asserting `422` and zero persisted rows) and
+`test_boundary_valid_decimal_persists_exactly_in_real_postgres` (`99999999999999.9999` reaches
+`COMPLETED` and reads back byte-identical from the real database). This is genuine API-over-live-
+PostgreSQL evidence, not repository-level evidence relabeled — the distinction this ticket's own
+instructions required not to blur.
+
+**Negative controls, both performed against the real code and real PostgreSQL, both restored
+immediately after, diff confirmed byte-identical to the pre-control state via `diff`:**
+1. **Precision control** — `max_digits=18` removed from all three fields (kept `decimal_places=4`).
+   The three `test_decimal_field_rejects_too_many_total_digits` parametrizations failed exactly as
+   expected (`201` instead of the expected `422`, order reached `COMPLETED`), and
+   `test_over_precision_decimal_rejected_before_reaching_real_postgres` failed by **reproducing the
+   original raw `500 Internal Server Error`** against real PostgreSQL — the control did not just
+   fail an assertion, it reproduced the exact original bug.
+2. **Scale control** — `decimal_places=4` removed from all three fields (kept `max_digits=18`). The
+   three `test_decimal_field_rejects_too_many_fractional_digits` parametrizations failed exactly as
+   expected (`201` instead of `422`), and `test_over_scale_decimal_rejected_before_reaching_real_postgres`
+   failed by reproducing the original silent rounding — a direct database read after the control
+   run confirmed the stored value was `1.2346` for a sent `1.23456`, identical to the pre-fix
+   reproduction.
+
+**Audit side effects, proven directly (not asserted from reasoning):** the audit table was queried
+directly after the live pre-fix reproduction's three requests (one over-scale acceptance, one
+over-precision failure) — exactly one `lab_result_recorded` row existed, corresponding to the one
+request that actually succeeded; the two problem requests left zero audit rows between them. The
+permanent regression test `test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation`
+makes this a standing, automated assertion rather than a one-time observation.
+
+**Full test/lint/migration results, all real executions in the WSL2 environment described above:**
+- `pip check`: clean.
+- `ruff check src tests migrations scripts`: clean (two `E501` line-length violations introduced by
+  this ticket's own new tests were found and fixed before this result).
+- `ruff format --check src tests migrations scripts`: clean (`ruff format` applied once to the two
+  new/changed test files; re-checked clean afterward).
+- Full adapter suite (`PYTHONPATH=src python -m pytest -q`, SQLite-backed, matching CI's own
+  invocation exactly): **616 passed / 45 skipped / 1 warning** (up from 605 passed / 42 skipped / 1
+  warning at DH-EX-007's own handoff — +11 new non-Postgres tests, +3 new Postgres-only tests
+  correctly skipped in this SQLite-only run). The one warning is the same pre-existing
+  `PytestCollectionWarning` about `TestCatalogEntry` in `models.py` already carried in the
+  follow-up backlog (`docs/MVP-1.0.md` §15 item 8) — confirmed unchanged, not newly introduced by
+  this ticket.
+- Real-PostgreSQL qualification (`DHEX007_PG_*` env vars against a disposable scratch database,
+  migrated fresh to `0010_exchange_results_workflow`): all 6 tests in
+  `test_dhex007_postgres_qualification.py` passed, including the 3 new ones above and the 3
+  pre-existing concurrency tests (no regression).
+- Migration check: fresh `alembic upgrade head` against an empty scratch database reached
+  `0010_exchange_results_workflow` cleanly; `alembic current` == `alembic heads` ==
+  `EXPECTED_HEAD` (unchanged — this ticket added no migration).
+- `git diff --check`: clean. Diff scope confirmed via `git status --short`: exactly
+  `adapter/src/daher_adapter/exchange/api.py`,
+  `adapter/tests/test_exchange_results_api.py`, and
+  `adapter/tests/integration/test_dhex007_postgres_qualification.py` — no migration, no model
+  change, no unrelated file. The scratch database, role, and a throwaway reproduction script used
+  only for the initial live characterization were all deleted afterward and never committed.
+
+**Independent review pass (self-performed within this ticket, no separate reviewing session —
+recorded as such rather than implied otherwise), findings by severity:**
+- **BLOCKER: none.**
+- **HIGH: none.**
+- **MEDIUM: none.**
+- **LOW (1, documented, not fixed — does not require a code change):** a numeric value sent as a
+  bare JSON number rather than a JSON string can lose precision at the JSON/float64 boundary before
+  Pydantic ever sees it, for values near the top of the representable range. Not caused or worsened
+  by this fix (it is inherent to JSON/float64, and the existing test suite — old and new — already
+  sends every Decimal value as a JSON string, the correct pattern for a clinical API). No API
+  documentation currently states "send Decimal fields as JSON strings" explicitly; worth adding if
+  a future ticket writes a formal API reference, not a defect to fix here.
+- Explicitly checked and found clean: raw 500 is not reachable for either targeted case anymore
+  (verified live against real PostgreSQL both before and after the fix); no accidental clinical
+  validation was added (no sign, unit, or range-ordering rule); no unintended result-workflow
+  change (the diff touches only the three `Field(...)` declarations and the docstring); no
+  SQLite-only evidence was substituted for real-PostgreSQL evidence anywhere in this entry.
+
+**Real facility:** untouched. **Pollers:** inactive, unrelated to this ticket. **No clinical
+semantics, sign rule, range-ordering rule, or unit requirement was added or implied.**
+
+**What remains NOT proven / explicitly out of scope, per this ticket's own boundary:**
+`reference_range_low > reference_range_high` is not validated (unchanged); no unit requirement
+exists (unchanged); result validation/release workflow, `ResultDelivery` semantics, patient result
+communication, PHI read audit, identity-first-seen audit, the `PatientReference` API gap, the
+provider-assigned-lab gap, the DH-EX-005 price-consent conflict, Exchange deployment/auth wiring,
+Keycloak, Caddy, and API modularization are all untouched, exactly as instructed. The pre-existing
+pytest collection warning (§15 item 8) remains open, unaffected by this ticket.
+
+**Files changed:** `adapter/src/daher_adapter/exchange/api.py`,
+`adapter/tests/test_exchange_results_api.py`,
+`adapter/tests/integration/test_dhex007_postgres_qualification.py`, `PROJECT_STATE.md` (this
+entry).
+
+**Next:** exact-SHA CI confirmation for this commit (below); then whichever DH-MVP-001/DH-EX
+follow-up item is prioritized next — this ticket does not choose one.
+
+**READY FOR REVIEW: YES**, pending the exact-SHA CI result recorded immediately below in this
+entry once pushed.

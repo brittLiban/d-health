@@ -473,6 +473,189 @@ def test_oversized_result_fields_are_refused_at_the_api_boundary_not_the_db(
     assert good.status_code == 201, good.text
 
 
+# -- DH-EX-007A: numeric_value/reference_range_low/reference_range_high must exactly match
+# LabResult's Numeric(18, 4) database columns -- the same class of gap
+# test_oversized_result_fields_are_refused_at_the_api_boundary_not_the_db above already closed for
+# numeric_unit/text_value. Reproduced live against real PostgreSQL before this fix (recorded in
+# PROJECT_STATE.md's DH-EX-007A entry): an over-scale value (1.23456) reached the database and was
+# **silently rounded to 1.2346**, returning 201 -- no error, a different clinical value stored than
+# the one sent. An over-precision value (123456789012345.6789, 15 integer digits) raised
+# psycopg.errors.NumericValueOutOfRange, translated by SQLAlchemy to DataError -- uncaught by
+# `_submit_in_session`, reaching the caller as a raw HTTP 500. SQLite (this file's default engine)
+# enforces neither, so these tests exist to prove the *API boundary* itself refuses both shapes
+# before either reaches a database of any kind. ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["numeric_value", "reference_range_low", "reference_range_high"],
+)
+def test_decimal_field_accepts_representable_boundary_values(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, field: str
+) -> None:
+    """Every value `NUMERIC(18, 4)` can represent losslessly must still be accepted, on each of
+    the three Decimal fields independently -- a constraint applied to one field but accidentally
+    omitted from another must fail this parametrization."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name=f"DecimalBoundary{field}",
+        test_count=7,
+    )
+    item_ids = _order_item_ids(sessions, order_id)
+
+    valid_values = [
+        "1",  # integer
+        "-1",  # negative integer -- no sign rule exists or is added by this ticket
+        "13.5",  # ordinary decimal
+        "1.2345",  # exactly four fractional digits
+        "99999999999999.9999",  # the maximum representable positive magnitude (18 total digits)
+        "-99999999999999.9999",  # the equivalent negative magnitude
+        "1.10000",  # trailing zeros beyond scale 4 -- losslessly reduces to 1.1, must be accepted
+    ]
+    for item_id, value in zip(item_ids, valid_values, strict=True):
+        body: dict[str, str] = {"result_type": "NUMERIC", "numeric_value": "1.0"}
+        body[field] = value
+        response = client.post(
+            f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+            headers=_auth(lab_tech_token),
+            json=body,
+        )
+        assert response.status_code == 201, (value, response.text)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["numeric_value", "reference_range_low", "reference_range_high"],
+)
+def test_decimal_field_rejects_too_many_fractional_digits(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, field: str
+) -> None:
+    """A genuinely significant fifth decimal digit (not just a trailing zero -- see the boundary
+    test above) must be refused with 422, on each of the three Decimal fields independently,
+    before the endpoint's transaction ever opens."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name=f"TooManyDp{field}"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    body: dict[str, str] = {"result_type": "NUMERIC", "numeric_value": "1.0"}
+    body[field] = "1.23456"
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json=body,
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["type"] == "decimal_max_places"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["numeric_value", "reference_range_low", "reference_range_high"],
+)
+def test_decimal_field_rejects_too_many_total_digits(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, field: str
+) -> None:
+    """A value exceeding NUMERIC(18, 4)'s 18-total/14-integer-digit representable domain must be
+    refused with 422 -- the exact class that reached real PostgreSQL as a raw, uncontrolled 500
+    before this fix -- on each of the three Decimal fields independently."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name=f"TooManyTotal{field}",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    body: dict[str, str] = {"result_type": "NUMERIC", "numeric_value": "1.0"}
+    body[field] = "123456789012345.6789"  # 15 integer digits, 19 total -- exceeds both limits
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json=body,
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["type"] in ("decimal_max_digits", "decimal_whole_digits")
+
+
+def test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A 422 from Pydantic happens before the endpoint's transaction ever opens -- prove that
+    directly: no ``LabResult`` row, no ``lab_result_recorded``/``lab_order_completed`` audit event,
+    and no ``LabOrder.status`` change, for an over-scale request on a one-item order (so a real
+    completion would otherwise have been triggered by a successful submission)."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="RejectedNoSideEffect",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1.23456"},
+    )
+    assert response.status_code == 422, response.text
+
+    with sessions() as session:
+        stored = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item_id))
+        assert stored is None
+        order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"
+
+    assert _audit_events(sessions, "lab_result_recorded") == []
+    assert _audit_events(sessions, "lab_order_completed") == []
+
+    # No partial state was left behind -- a subsequent well-formed submission for the same item
+    # still succeeds and completes this one-item order.
+    good = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1.2345"},
+    )
+    assert good.status_code == 201, good.text
+    assert good.json()["order_status"] == "COMPLETED"
+
+
+def test_text_result_flow_unaffected_by_decimal_hardening(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """The Decimal `max_digits`/`decimal_places` constraints apply only to the three Decimal
+    fields -- a TEXT result (which must leave all three `None`, per the existing
+    `_value_matches_declared_type` validator) must continue to work exactly as before."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="TextUnaffected"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "TEXT", "text_value": "Negative"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["result_type"] == "TEXT"
+
+
 def test_duplicate_result_on_still_in_progress_order_refused(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:

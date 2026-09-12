@@ -639,15 +639,36 @@ class LabResultSubmitRequest(BaseModel):
     ``IntegrityError`` -- the one exception type `_submit_in_session` translates to a controlled
     ``DuplicateResult`` conflict. Uncaught, that reaches the caller as a raw 500, invisible to the
     SQLite-backed test suite (SQLite does not enforce ``VARCHAR`` length), and reproduced live
-    against real PostgreSQL during review."""
+    against real PostgreSQL during review.
+
+    ``numeric_value``/``reference_range_low``/``reference_range_high``'s ``max_digits``/
+    ``decimal_places`` mirror ``LabResult``'s three ``Numeric(18, 4)`` columns exactly --
+    DH-EX-007A, following the identical class of gap ``LabPriceSetRequest.amount`` already closed
+    for DH-EX-003R (this docstring's own precedent). Reproduced live against a real, unmodified
+    PostgreSQL 18.6 database before this fix: an over-scale value (``1.23456``) reached the
+    database, which **silently rounded it to ``1.2346``** and returned `201` -- the caller believes
+    one clinical value was recorded while a different one was actually stored, with no error at
+    all. An over-precision value (``123456789012345.6789``, 15 integer digits) raised
+    ``psycopg.errors.NumericValueOutOfRange`` ("numeric field overflow ... must round to an
+    absolute value less than 10^14"), translated by SQLAlchemy to ``DataError`` -- uncaught by
+    `_submit_in_session` (which only translates ``IntegrityError``), reaching the caller as a raw,
+    unfiltered HTTP 500. Both now fail the same, clean way: 422, at the schema boundary, before any
+    application code runs or any database write is attempted. Verified directly against Pydantic
+    2.13.4's actual behavior (not assumed): trailing zeros beyond four decimal places (e.g.
+    ``1.10000``) are accepted, matching `NUMERIC(18,4)`'s own lossless normalization; a genuinely
+    significant fifth decimal digit (e.g. ``1.00001``) is rejected; the boundary value
+    ``99999999999999.9999`` (14 integer digits + 4 decimal digits = 18 total) is accepted, and
+    ``100000000000000.0000`` (15 integer digits) is refused for `decimal_whole_digits`, exactly
+    matching `NUMERIC(18,4)`'s own representable domain. No sign, unit, or reference-range-ordering
+    rule is added or implied by this constraint -- representation only, not clinical validation."""
 
     model_config = ConfigDict(extra="forbid")
 
     result_type: Literal["NUMERIC", "TEXT"]
-    numeric_value: Decimal | None = None
+    numeric_value: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
     numeric_unit: str | None = Field(default=None, max_length=32)
-    reference_range_low: Decimal | None = None
-    reference_range_high: Decimal | None = None
+    reference_range_low: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    reference_range_high: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
     text_value: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
