@@ -10212,11 +10212,17 @@ migration filename attempted, `0011_exchange_patient_reference_binding` (39 char
 shortening the revision id to `0011_exchange_patient_ref_bind` (30 characters); documented in the
 migration file's own docstring.
 
-**Full tests/lint:** `649 passed, 47 skipped, 1 pre-existing warning` (up from 646 before this
-ticket's final coverage-gap tests were added — 3 new: the owned-session repository test, the
-INACTIVE-membership test, the INACTIVE-organization test; the other 24 new tests, the 2 audit-atomicity
-tests, and the 2 real-Postgres tests were already counted in that 646). `ruff check` and
-`ruff format --check` both clean across `src tests migrations scripts`.
+**Full tests/lint:** `649 passed, 47 skipped, 1 pre-existing warning` — up from `622 passed, 45
+skipped` at DH-EX-008R's handoff. **27 new passing tests**: 24 in the new
+`test_exchange_patient_references_api.py`, 2 audit-failure-injection tests added to
+`test_exchange_audit_atomicity.py`, and 1 owned-session repository test added to
+`test_exchange_identity.py` (the coverage-gap test added during this ticket's own final review
+pass). **2 new skipped tests**: the real-Postgres qualification file
+(`test_dhex009_postgres_qualification.py`), `skipif`-gated exactly like every prior
+`test_dhex0*R_postgres_qualification.py` file and never run in CI — both were run manually against
+a disposable PostgreSQL database this session (see "Real PostgreSQL evidence" above) and PASSED,
+which is why they count as evidence despite not appearing in the CI-run passed count. `ruff check`
+and `ruff format --check` both clean across `src tests migrations scripts`.
 
 **Recorded, not fixed — a LOW-severity scope decision, not an oversight:** `bind_patient_reference`
 does not validate that `provider_id` is a `PROVIDER`-type organization (only that the caller holds
@@ -10275,3 +10281,15 @@ work is the next candidate ticket but **is not started here** — "Stop after DH
 authorization matrix, and exact-SHA CI (recorded below once pushed).
 
 **READY FOR REVIEW: YES**
+
+**CLOSURE appended 2026-09-12 (same session, append-only — completing this entry, not retracting
+it):** Pushed as commit `61dc09a5d00896fbc0d0597c3a18ba28ab9f6a16`. CI run
+`34691419181`: **success**, all 9 jobs green, in particular `static checks` (8s — the
+`EXPECTED_HEAD: 0011_exchange_patient_ref_bind` migration-chain check) and `adapter — ruff + pytest`
+(1m51s — the full 649-passed/47-skipped suite plus lint). The push itself required 5 retries against
+a badly degraded sandbox network this session (`HTTP 408`, `curl 52 Empty reply from server`,
+`curl 56 Recv failure: Connection reset by peer` — a plain 351-byte GitHub download took 31 seconds
+at the same time) — a sandbox network condition, not a CI or code problem; a spaced retry loop
+succeeded without any code or config change. A `git config http.postBuffer 524288000` set locally
+during that troubleshooting was unset afterward (`git config --local --unset http.postBuffer`) since
+it was not asked for and the default was already sufficient once the network recovered.
