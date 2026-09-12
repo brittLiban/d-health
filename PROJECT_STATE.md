@@ -9827,4 +9827,16 @@ inability to issue any token today), not merely assumed from the ticket's origin
 
 **READY FOR REVIEW: YES**, with real multi-container Keycloak/Caddy qualification explicitly
 flagged as not performed in this sandbox (network limitation, not a design gap) and reserved for
-DH-EX-008R, pending the exact-SHA CI result recorded immediately below in this entry once pushed.
+DH-EX-008R.
+
+**Exact-SHA CI confirmation:** commit `fb5c227a25465e47d645d5fc80beb6f918a29698`, pushed to
+`origin/master`. GitHub Actions run
+[34668114713](https://github.com/brittLiban/d-health/actions/runs/34668114713): **success**, all 9
+jobs green — `oauth2login`, `OpenMRS narrow TestOrder module`, `provisioning — ruff + pytest`
+(confirms the `secrets.py`/`facility_env.py` fix in CI's own properly pinned environment, not just
+this session's ad-hoc venv workaround), `ui`, `openelis order-correlation patch`,
+`seed + form-safety suites`, `static checks` (includes the new Exchange deployment wiring invariants
+step), `adapter — ruff + pytest`, and `compose interpolates and parses` (includes the new
+`KEYCLOAK_EXCHANGE_API_CLIENT_SECRET=ci-dummy` throwaway value). No failures; only pre-existing
+Node.js/setup-java deprecation annotations unrelated to this ticket. Verified via `gh run view`
+directly against the GitHub API, not inferred from a badge or copied from a prior ticket's result.
