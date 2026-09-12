@@ -440,6 +440,56 @@ class MarketplaceLabOptionsResponse(BaseModel):
     options: list[MarketplaceLabOption]
 
 
+# -- DH-EX-009: provider-scoped patient-reference binding ------------------------------------------
+
+
+class PatientReferenceBindRequest(BaseModel):
+    """Source-owned reference information only -- deliberately no ``source_organization_id`` field:
+    it comes from the URL's authorized ``provider_id``, never trusted from the request body (a
+    caller could otherwise bind a reference under an organization it has no relationship to simply
+    by naming it in JSON). No demographic-matching input either (no national ID, no DOB) -- the
+    authoritative identifier at this layer is the exact ``source_system``/
+    ``source_identity_system``/``source_identity_value`` tuple the source application already
+    assigned; DHealth Exchange never decides two records "probably" belong to the same person."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_system: str = Field(min_length=1, max_length=64)
+    source_identity_system: str = Field(min_length=1, max_length=256)
+    source_identity_value: str = Field(min_length=1, max_length=256)
+    display_name: str | None = Field(default=None, max_length=256)
+    contact_channel_type: str | None = Field(default=None, max_length=32)
+    contact_value: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def _validate_identity_not_blank(self) -> "PatientReferenceBindRequest":
+        # DH-EX-007A/DH-EX-003R lesson applied here too: `min_length=1` alone accepts a single
+        # space. These three fields are the exact identity this binding creates -- a whitespace-
+        # only value is not a real source identity, and must never reach the repository as one.
+        for name, value in (
+            ("source_system", self.source_system),
+            ("source_identity_system", self.source_identity_system),
+            ("source_identity_value", self.source_identity_value),
+        ):
+            if not value.strip():
+                raise ValueError(f"{name} must not be blank")
+        return self
+
+
+class PatientReferenceResponse(BaseModel):
+    """Deliberately minimal -- DH-EX-009's explicit data-minimization instruction: only what a
+    caller needs to bind a future Exchange transaction (an order). No ``display_name``/contact
+    snapshot, no ``created_at`` -- this is not a patient-profile representation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    source_organization_id: uuid.UUID
+    source_system: str
+    source_identity_system: str
+    source_identity_value: str
+
+
 # -- DH-EX-004: provider lab-order creation -------------------------------------------------------
 
 
@@ -1524,6 +1574,56 @@ def build_exchange_router(
         _require_network_read_access(principal)
         _require_orderable_entries(body.catalog_entry_ids)
         return _build_marketplace_response(body.catalog_entry_ids)
+
+    # -- DH-EX-009: provider-scoped patient-reference binding ------------------------------------
+
+    @router.post(
+        "/organizations/{provider_id}/patient-references",
+        response_model=PatientReferenceResponse,
+    )
+    def bind_patient_reference(
+        provider_id: uuid.UUID,
+        body: PatientReferenceBindRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientReferenceResponse:
+        # CLINICIAN specifically, same gate and same reasoning as `create_lab_order` below --
+        # binding the patient a clinician is about to order for is part of that same clinical
+        # ordering authority, not a separate receptionist/integration role this ticket invents.
+        _require_clinician(principal, provider_id)
+
+        # Exact-identity, insert-first-wins binding, and its authoritative audit event, commit or
+        # roll back together in one transaction -- the same pattern `create_lab_order` already
+        # establishes for its own practitioner-reference get/create and order-creation audit.
+        with session_factory.begin() as session:
+            record, created = patients.get_or_create_with_outcome(
+                source_organization_id=provider_id,
+                source_system=body.source_system,
+                source_identity_system=body.source_identity_system,
+                source_identity_value=body.source_identity_value,
+                display_name=body.display_name,
+                contact_channel_type=body.contact_channel_type,
+                contact_value=body.contact_value,
+                session=session,
+            )
+            security_audit.record(
+                session,
+                event_type="patient_reference_bound",
+                actor_identity_id=principal.identity_id,
+                organization_id=provider_id,
+                outcome="created" if created else "returned_existing",
+                resource_type="patient_reference",
+                resource_id=record.id,
+            )
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return PatientReferenceResponse(
+            id=record.id,
+            source_organization_id=record.source_organization_id,
+            source_system=record.source_system,
+            source_identity_system=record.source_identity_system,
+            source_identity_value=record.source_identity_value,
+        )
 
     # -- DH-EX-004: provider lab-order creation --------------------------------------------------
 

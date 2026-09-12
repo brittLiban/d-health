@@ -33,6 +33,7 @@ from daher_adapter.exchange.models import (
     Organization,
     OrganizationMembership,
     OrganizationRoleAssignment,
+    PatientReference,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
@@ -79,6 +80,9 @@ def _counts(sessions: sessionmaker[Session]) -> dict[str, int]:
             ),
             "security_audit_events": session.scalar(
                 select(func.count()).select_from(ExchangeSecurityAuditEvent)
+            ),
+            "patient_references": session.scalar(
+                select(func.count()).select_from(PatientReference)
             ),
         }
 
@@ -211,4 +215,128 @@ def test_membership_create_with_roles_rolls_back_everything_on_late_audit_failur
         "including the earlier membership_created audit insert, must have rolled back too"
     )
     assert after["role_assignments"] == before["role_assignments"]
+    assert after["security_audit_events"] == before["security_audit_events"]
+
+
+# -- DH-EX-009: patient-reference binding: audit-insert failure on a NEW reference -----------------
+
+
+def test_new_patient_reference_bind_rolls_back_when_audit_insert_fails(
+    client: TestClient,
+    keypair,
+    organizations: OrganizationRepository,
+    sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exchange_support import make_provider
+
+    org = make_provider(organizations, name="AuditFailBindOrg")
+    private_key, _ = keypair
+    clinician_token = make_token(private_key, subject="clinician-audit-fail")
+    me = client.get("/exchange/v1/me", headers=_auth(clinician_token))
+    clinician_identity_id = me.json()["identity_id"]
+
+    from daher_adapter.exchange.membership import (
+        ExchangeIdentityRepository,
+        OrganizationMembershipRepository,
+        OrganizationRoleAssignmentRepository,
+    )
+    from daher_adapter.exchange.models import OrganizationRole
+
+    identities_repo = ExchangeIdentityRepository(sessions)
+    memberships_repo = OrganizationMembershipRepository(sessions)
+    roles_repo = OrganizationRoleAssignmentRepository(sessions)
+    identity, _ = identities_repo.get_or_create(issuer=ISSUER, subject="clinician-audit-fail")
+    assert str(identity.id) == clinician_identity_id
+    membership, _ = memberships_repo.create(organization_id=org.id, identity_id=identity.id)
+    roles_repo.assign(membership_id=membership.id, role=OrganizationRole.CLINICIAN)
+
+    before = _counts(sessions)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("simulated audit-insert failure")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit-insert failure"):
+        client.post(
+            f"/exchange/v1/organizations/{org.id}/patient-references",
+            headers=_auth(clinician_token),
+            json={
+                "source_system": "dhealth_provider_portal",
+                "source_identity_system": "urn:daher-health:provider-portal-patient-id",
+                "source_identity_value": "AUDIT-FAIL-1",
+            },
+        )
+
+    after = _counts(sessions)
+    assert after["patient_references"] == before["patient_references"], (
+        "a newly-created PatientReference must not survive an audit-insert failure -- the bind "
+        "and its authoritative audit event commit or roll back together"
+    )
+    assert after["security_audit_events"] == before["security_audit_events"]
+
+
+def test_existing_patient_reference_replay_rolls_back_cleanly_when_audit_insert_fails(
+    client: TestClient,
+    keypair,
+    organizations: OrganizationRepository,
+    sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotent-replay path also audits (outcome=`returned_existing`), so it also runs
+    inside the same outer transaction -- an audit failure here must roll back cleanly too (no new
+    audit row), and, since no mutation was ever attempted for an existing reference, the
+    pre-existing row itself must be completely unaffected either way."""
+    from exchange_support import make_provider
+
+    org = make_provider(organizations, name="AuditFailReplayOrg")
+    private_key, _ = keypair
+    clinician_token = make_token(private_key, subject="clinician-audit-fail-2")
+    me = client.get("/exchange/v1/me", headers=_auth(clinician_token))
+    clinician_identity_id = me.json()["identity_id"]
+
+    from daher_adapter.exchange.membership import (
+        ExchangeIdentityRepository,
+        OrganizationMembershipRepository,
+        OrganizationRoleAssignmentRepository,
+    )
+    from daher_adapter.exchange.models import OrganizationRole
+
+    identities_repo = ExchangeIdentityRepository(sessions)
+    memberships_repo = OrganizationMembershipRepository(sessions)
+    roles_repo = OrganizationRoleAssignmentRepository(sessions)
+    identity, _ = identities_repo.get_or_create(issuer=ISSUER, subject="clinician-audit-fail-2")
+    assert str(identity.id) == clinician_identity_id
+    membership, _ = memberships_repo.create(organization_id=org.id, identity_id=identity.id)
+    roles_repo.assign(membership_id=membership.id, role=OrganizationRole.CLINICIAN)
+
+    bind_body = {
+        "source_system": "dhealth_provider_portal",
+        "source_identity_system": "urn:daher-health:provider-portal-patient-id",
+        "source_identity_value": "AUDIT-FAIL-2",
+    }
+    first = client.post(
+        f"/exchange/v1/organizations/{org.id}/patient-references",
+        headers=_auth(clinician_token),
+        json=bind_body,
+    )
+    assert first.status_code == 201, first.text
+
+    before = _counts(sessions)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("simulated audit-insert failure on replay")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit-insert failure on replay"):
+        client.post(
+            f"/exchange/v1/organizations/{org.id}/patient-references",
+            headers=_auth(clinician_token),
+            json=bind_body,
+        )
+
+    after = _counts(sessions)
+    assert after["patient_references"] == before["patient_references"] == 1
     assert after["security_audit_events"] == before["security_audit_events"]

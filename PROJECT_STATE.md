@@ -10040,3 +10040,238 @@ not need to be re-derived).
 unfinished work: the environment gate was re-tested directly and thoroughly (7 attempts, isolated
 diagnosis, reverted cleanly), everything answerable without a live boot was answered, and the
 remaining gap is precisely scoped for whoever picks up DH-EX-008R next in a working environment.
+
+---
+
+### DH-EX-009 · Add provider-scoped patient-reference binding API · P0 · ✅ BUILT, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED
+
+**Ticket:** DH-EX-009. Close the golden-journey gap `docs/MVP-1.0.md` §8/§10 both already named:
+`POST /organizations/{provider_id}/orders` requires a pre-existing `patient_reference_id`, but no
+HTTP route let an authorized provider create one — `PatientReferenceRepository.get_or_create`
+already existed at the repository layer (DH-EX-001) but was never exposed over the Exchange API.
+Explicitly **not** a patient-registry ticket: DHealth Exchange stays transaction-scoped
+infrastructure; only exact source-identity binding, never fuzzy/demographic matching, is in scope.
+
+**Starting state:** HEAD `46da2487f1babc389577259721433fd2cd6be77e` (DH-EX-008R), matching the
+ticket's own stated SHA, confirmed via `git fetch`/`git log`, not trusted blindly. CI for that
+commit: **success**, run `34688172958`.
+
+**Pre-ticket gap, confirmed by direct code read, not assumed:** `create_lab_order` (api.py, DH-EX-004)
+only ever called `patients.get_for_organization(...)` and 404'd if the reference did not already
+exist — no code path anywhere in `api.py` ever called `PatientReferenceRepository.get_or_create`.
+Grepping the whole router confirmed zero routes under `/patient-references` or any patient-creation
+path existed before this ticket.
+
+**Model / uniqueness contract, confirmed not assumed:** `PatientReference`
+(`exchange/models.py`) was already exactly the ticket predicted —
+`(source_organization_id, source_system, source_identity_system, source_identity_value)` unique
+(`uq_exchange_patient_references_source_identity`), organization-scoped per the DH-EX-001R finding
+recorded in the model's own docstring. This ticket did not change that constraint or the model's
+column shapes — see "Deviation from the ticket's own prediction" below for the one model change
+that *was* required, which is unrelated to this uniqueness key.
+
+**Authorization choice — reused, not invented:** `AuthorizationService.require_clinician`
+(`authorization.py`), the exact gate `create_lab_order` already uses. Audited its semantics
+directly before reuse: `platform_admin` does **not** bypass it (network administration is not
+clinical access — deliberate, unlike most other `require_*` methods), `ORG_ADMIN` alone is
+insufficient, a nonexistent organization 404s for everyone, and a non-member (non-platform-admin)
+also 404s (anti-enumeration — indistinguishable from "org doesn't exist"). No new role was invented;
+no Human Decision was needed because the existing gate's semantics already answered every
+authorization question the ticket asked.
+
+**Endpoint contract:** `POST /exchange/v1/organizations/{provider_id}/patient-references` →
+`PatientReferenceBindRequest` (source-owned fields only — `source_system`, `source_identity_system`,
+`source_identity_value`, optional `display_name`/`contact_channel_type`/`contact_value`;
+`model_config = ConfigDict(extra="forbid")` so a forged `source_organization_id` in the body 422s the
+whole request rather than being silently ignored — `source_organization_id` comes from the URL only).
+Response (`PatientReferenceResponse`) is deliberately minimal: id + source identity binding only, no
+`display_name`/contact snapshot, no `created_at` — not a patient-profile representation.
+
+**Transaction / audit design:** `bind_patient_reference` wraps the bind and its audit event in one
+`with session_factory.begin() as session:` block — the same shape `create_lab_order` already
+established. Extended `PatientReferenceRepository` with a new method,
+`get_or_create_with_outcome(..., session: Session | None = None)`, rather than changing
+`get_or_create`'s existing signature/return type (which ~15 existing call sites already treat as a
+bare `PatientReferenceRecord`). When given a caller-owned `session`, the insert-or-fetch runs inside
+a SAVEPOINT (`session.begin_nested()`) — the same optional-session/SAVEPOINT pattern
+`PractitionerReferenceRepository.get_or_create` already established for order creation — so a
+duplicate-key race unwinds only to that savepoint, never poisoning the caller's outer transaction,
+and the bind + `security_audit.record(...)` commit or roll back together as one database transaction.
+When called without a `session` (no caller in this ticket does), it owns and commits its own
+transaction, preserving the option for a future non-HTTP caller.
+
+**Idempotency behavior:** same provider + same exact 3-tuple → same `PatientReference` id, every
+time, `201` on first creation and `200` on every replay (`test_idempotent_repeat_returns_same_reference_and_no_duplicate`).
+A replay with **changed** `display_name`/`contact_channel_type`/`contact_value` returns the existing
+row **unchanged** — verified all three snapshot fields, not just `display_name`
+(`test_repeat_with_changed_display_name_does_not_rewrite_existing_snapshot`) — this is identity
+binding, not a demographic-update API.
+
+**Concurrency evidence — both layers:**
+- SQLite, HTTP-level idempotent-repeat test above (sequential, not concurrent, but confirms the
+  outcome contract).
+- **Real PostgreSQL, genuinely concurrent:** 10 threads, `threading.Barrier(10)`, identical exact
+  identity, against a disposable `dhex009_qual` database with migrations applied through
+  `0011_exchange_patient_ref_bind` (`tests/integration/test_dhex009_postgres_qualification.py::test_ten_concurrent_identical_binds_yield_exactly_one_reference`).
+  **Observed:** exactly one `created=True`, nine `created=False`, all ten resolve to the same UUID,
+  and a `COUNT(*)` against the real table confirms exactly one row — PASSED.
+- **Repository-level owned-session coverage gap closed:** the API always passes its own `session=`,
+  so before this ticket's final pass, `get_or_create_with_outcome`'s *owned*-session branch (the one
+  that opens and commits its own transaction) had **zero test coverage in CI** — the only test that
+  exercised it (the real-Postgres file above) is `skipif`-gated and never runs in CI. Added
+  `test_get_or_create_with_outcome_owned_session_created_then_replay` to
+  `tests/test_exchange_identity.py` (SQLite, always runs) specifically to close this gap — created,
+  then replay, then `patients.get(id)` all pass.
+
+**Cross-organization collision evidence:** `test_cross_organization_same_raw_identity_yields_distinct_references`
+(SQLite, HTTP-level) and `test_cross_organization_same_raw_identity_yields_distinct_references_under_real_postgres`
+(real PostgreSQL) both confirm two provider organizations binding the identical raw
+`(source_system, source_identity_system, source_identity_value)` string get two different
+`PatientReference` ids — the organization boundary is part of the identity, not silently merged.
+
+**Validation matrix (representation validation, DH-EX-007A lesson applied):** every bounded field's
+API `Field(max_length=N)` mirrors its DB column width exactly — `source_system` (64),
+`source_identity_system` (256), `source_identity_value` (256), `display_name` (256),
+`contact_channel_type` (32), `contact_value` (256) — each independently tested oversized-by-one and
+confirmed `422` with **zero** rows written (`_reference_count(sessions) == 0` asserted in every
+oversized test). The three required identity fields additionally reject blank/whitespace-only via a
+`@model_validator(mode="after")` (DH-EX-003R lesson: `min_length=1` alone accepts a single space) and
+empty string, both `422`, both zero-write.
+
+**Negative controls — all four required, executed against the real running code (not narrated),
+each temporarily edited, run, observed, and restored, with the restore verified by
+`grep -c 'NEGATIVE CONTROL'` returning `0` across every touched file before proceeding:**
+
+1. **Authorization removed** (`_require_clinician(principal, provider_id)` call commented out in
+   `bind_patient_reference`): re-ran the six authorization/anti-enumeration tests
+   (`test_org_admin_without_clinician_role_denied`, `test_lab_tech_cannot_bind_provider_patient`,
+   `test_platform_admin_alone_denied`, `test_inactive_clinician_membership_denied`,
+   `test_inactive_provider_organization_denied`, `test_cross_tenant_clinician_denied`) — **all six
+   failed**, every one now returning `201` where it previously asserted `403`/`404`. Restored;
+   full suite back to green.
+2. **Max-length validation removed** (`source_identity_value`'s `max_length=256` dropped):
+   `test_oversized_source_identity_value_rejected` **failed** — a 257-character value that should
+   422 was instead accepted with `201` and written to SQLite (SQLite does not enforce `VARCHAR`
+   width, so this is exactly the DH-EX-007A-class danger: without API-boundary validation, the
+   oversized value would reach a real PostgreSQL `VARCHAR(256)` column and either truncate or
+   error there instead of failing cleanly at the API). Restored.
+3. **Organization scope removed from uniqueness** (`PatientReference`'s `UniqueConstraint` narrowed
+   to `(source_system, source_identity_system, source_identity_value)`, org column dropped):
+   re-ran both cross-organization tests (SQLite HTTP-level and the repository-level
+   `test_no_source_identity_collision_across_organizations_patient`) — **both failed**, the second
+   organization's insert raising an unhandled `sqlite3.IntegrityError: UNIQUE constraint failed`
+   because the org-scoped fallback `SELECT` in `_get_or_create_with_outcome_in_session`/
+   `get_or_create` can no longer find a matching row for its own organization once the DB-level key
+   is narrower than the code assumes — demonstrating the danger is a hard failure, not a silent
+   merge, but a failure nonetheless where success is required. Restored (verified against `git diff`
+   producing the exact intended two-line CHECK-constraint-widening diff before proceeding, after an
+   accidental `git checkout --` first wiped this ticket's own legitimate model changes too — caught
+   immediately via `git diff --stat` showing an empty diff, and both CHECK-constraint widenings were
+   re-applied and re-verified byte-for-byte against the intended text before continuing).
+4. **Insert-first-wins replaced with naive SELECT-then-INSERT** (in
+   `_get_or_create_with_outcome_in_session`, no `try/except IntegrityError`, no SAVEPOINT): re-ran
+   the real-PostgreSQL 10-thread concurrency test — **failed**, with **9 of 10** concurrent callers
+   raising an unhandled `psycopg.errors.UniqueViolation` (`duplicate key value violates unique
+   constraint "uq_exchange_patient_references_source_identity"`), proving real PostgreSQL's
+   row-locking genuinely exposes the SELECT-then-INSERT race the insert-first-wins pattern exists to
+   prevent — this was not a SQLite-only theoretical concern. Restored (this file's restore also hit
+   the `/tmp`-does-not-persist-across-WSL-invocations issue already on record in this session's own
+   memory — the backup copy was gone by the time the negative control needed reverting; recovered by
+   re-editing the method back to its exact intended `try/except IntegrityError` shape directly and
+   confirming the resulting `git diff` against `origin/master` was exactly the intended
+   `get_or_create_with_outcome` addition, byte-for-byte, with no leftover control code).
+
+**Real PostgreSQL evidence, summarized (disposable `dhex009_qual` database + `dhex009` role,
+created and dropped this session, never a real facility database):** `alembic upgrade head` applies
+cleanly through `0011_exchange_patient_ref_bind`; both qualification tests pass on the restored code
+(concurrency: exactly one row from 10 concurrent identical binds; cross-org: two distinct rows for
+identical raw identity strings under two different organizations); negative controls 3 and 4 above
+were also executed and observed against this same real database, not merely against SQLite.
+
+**Order-integration evidence:** `test_bound_reference_works_with_order_creation` — bind via the new
+endpoint, then use the returned id directly in `POST .../orders` (DH-EX-004) with no special-case
+bypass — `201`. `test_cross_org_bound_reference_cannot_be_used_for_another_providers_order` — a
+reference bound under Provider A cannot be used in Provider B's order, `404`, the same
+anti-enumerating failure DH-EX-004 already established for other cross-org id reuse.
+
+**Deviation from the ticket's own prediction — a migration WAS required, flagged explicitly, not
+buried:** the ticket stated "No migration expected. No model change expected unless current master
+proves otherwise." Direct audit of `ExchangeSecurityAuditEvent`'s two CHECK constraints
+(`ck_exchange_security_audit_events_event_type`, `ck_exchange_security_audit_events_resource_type`)
+showed both are closed enumerations that did **not** already contain `patient_reference_bound` /
+`patient_reference` — writing this ticket's audit event would have violated them. This is exactly
+the same class of gap DH-EX-004 through DH-EX-007 each independently hit and each fixed with a
+purely additive CHECK-constraint-widening migration; `0011_exchange_patient_ref_bind.py` follows that
+identical established pattern (mirrors `0010_exchange_results_workflow.py`'s exact structure,
+including a `downgrade()` that queries for real rows using the new values and refuses via a named
+exception class rather than attempting a destructive DDL). **New discovery this ticket, worth
+recording for whoever writes `0012`:** `alembic_version.version_num` is `VARCHAR(32)` — the first
+migration filename attempted, `0011_exchange_patient_reference_binding` (39 characters), failed
+`alembic upgrade head` against real PostgreSQL with
+`psycopg.errors.StringDataRightTruncation: value too long for type character varying(32)`. Fixed by
+shortening the revision id to `0011_exchange_patient_ref_bind` (30 characters); documented in the
+migration file's own docstring.
+
+**Full tests/lint:** `649 passed, 47 skipped, 1 pre-existing warning` (up from 646 before this
+ticket's final coverage-gap tests were added — 3 new: the owned-session repository test, the
+INACTIVE-membership test, the INACTIVE-organization test; the other 24 new tests, the 2 audit-atomicity
+tests, and the 2 real-Postgres tests were already counted in that 646). `ruff check` and
+`ruff format --check` both clean across `src tests migrations scripts`.
+
+**Recorded, not fixed — a LOW-severity scope decision, not an oversight:** `bind_patient_reference`
+does not validate that `provider_id` is a `PROVIDER`-type organization (only that the caller holds
+CLINICIAN there). A CLINICIAN membership granted on a `LAB`-type organization can bind a patient
+reference there — an unusable-but-harmless row, since `create_lab_order` (DH-EX-004) already
+enforces organization-type correctness downstream and would refuse to place an order for that
+organization regardless. Left unfixed deliberately: it is outside this ticket's 21 acceptance
+criteria, and adding it now would be exactly the "any gap that 'obviously should' be filled a
+particular way" instinct `AGENTS.md`/`CLAUDE.md` name as the failure mode to guard against.
+
+**`docs/MVP-1.0.md` now stale in two places, not edited by this ticket (outside its declared file
+scope — `identity.py`, `api.py`, tests, `PROJECT_STATE.md`; no migration or docs were predicted, and
+the migration was already a discovered deviation, not license to also sweep docs):** §8's golden-
+journey table row "Provider identifies/registers patient" (`NOT BUILT (registration) / partial
+(reference binding)`) and §10 gap item 1 ("No patient lookup/registration API... there is no route
+to create or find one") both describe the pre-DH-EX-009 state and should be corrected in a future
+documentation pass to read: provider-scoped `PatientReference` **binding** is now built, tested, and
+real-PostgreSQL-qualified via `POST /organizations/{provider_id}/patient-references`; full patient
+**registration/demographic search** (DHealth Clinic's own product surface) remains **NOT BUILT** —
+this ticket closes one specific hole, not the general one. §15 item 6 (identity-first-seen audit
+consistency) is now partially addressed for the new binding path specifically (every bind through
+this endpoint is audited via `patient_reference_bound`) but the underlying `get_or_create` call
+sites elsewhere (e.g. inside order creation's practitioner-reference resolution) were not
+re-audited by this ticket and that item should stay open until they are.
+
+**Files changed:** `adapter/src/daher_adapter/exchange/identity.py` (new
+`get_or_create_with_outcome` + private session helper), `adapter/src/daher_adapter/exchange/api.py`
+(new request/response models + `bind_patient_reference` route), `adapter/src/daher_adapter/exchange/security_audit.py`
+(widened `SecurityEventType`/`SecurityResourceType` Literals), `adapter/src/daher_adapter/exchange/models.py`
+(widened the two `ExchangeSecurityAuditEvent` CHECK constraints — see deviation note above),
+`adapter/migrations/versions/0011_exchange_patient_ref_bind.py` (new), `.github/workflows/ci.yml`
+(`EXPECTED_HEAD` → `0011_exchange_patient_ref_bind`), `adapter/tests/test_exchange_patient_references_api.py`
+(new, 24 tests), `adapter/tests/test_exchange_audit_atomicity.py` (2 new audit-failure-injection
+tests), `adapter/tests/test_exchange_identity.py` (1 new owned-session repository test),
+`adapter/tests/integration/test_dhex009_postgres_qualification.py` (new, 2 real-Postgres tests).
+
+**Real facility:** untouched. **Clinical semantics:** none touched — no partograph, no order set, no
+alerting. **Patient data to third parties:** none — this ticket adds no outbound transport.
+
+**What remains NOT built by this ticket, restated explicitly per its own instruction:** DHealth
+Clinic's own patient registration/demographic-search product (a separate frontend/database this
+ticket does not touch); fuzzy/demographic patient matching of any kind; patient merge; a national
+patient identifier; proxy/family authorization; provider-assigned lab (explicitly deferred to the
+next ticket); specimen/sample workflow; result validation/release; patient communication/notification
+transport; `ResultDelivery` semantics; real Keycloak runtime qualification (still blocked per
+DH-EX-008R); DHealth Connect; any UI/login surface. **Explicit correction, per the ticket's own
+instruction: do not write "Patient registration is built." Provider-scoped `PatientReference`
+binding is built and real-PostgreSQL-qualified; DHealth Clinic's actual patient
+registration/demographic-search product remains NOT BUILT.**
+
+**Next:** DH-EX-008R remains blocked pending a Human Decision on real Keycloak infrastructure
+(unchanged by this ticket). Per this ticket's own explicit final instruction, provider-assigned lab
+work is the next candidate ticket but **is not started here** — "Stop after DH-EX-009."
+
+**DH-EX-009 QUALIFIED: YES** — real PostgreSQL, all four required negative controls, full
+authorization matrix, and exact-SHA CI (recorded below once pushed).
+
+**READY FOR REVIEW: YES**

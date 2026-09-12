@@ -46,6 +46,9 @@ SecurityEventType = Literal[
     "lab_result_recorded",
     "lab_order_completed",
     "doctor_review_recorded",
+    # DH-EX-009 provider-scoped patient-reference binding. Deliberately not "patient_created" --
+    # Exchange binds a source-owned identity, it does not create a longitudinal patient record.
+    "patient_reference_bound",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
@@ -55,6 +58,7 @@ SecurityResourceType = Literal[
     "lab_price",
     "lab_order",
     "patient_access_grant",
+    "patient_reference",
 ]
 
 

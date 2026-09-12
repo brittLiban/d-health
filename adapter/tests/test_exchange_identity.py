@@ -119,6 +119,36 @@ def test_no_source_identity_collision_across_organizations_patient(
     assert replay_a.id == from_a.id
 
 
+def test_get_or_create_with_outcome_owned_session_created_then_replay(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-009: the API always passes its own ``session=``, so this is the only place in the
+    suite that exercises ``get_or_create_with_outcome``'s *owned*-session branch (the one that
+    opens and commits its own transaction) -- without this test that branch, including its
+    ``commit()``, would never run in CI."""
+    organizations = OrganizationRepository(sessions)
+    patients = PatientReferenceRepository(sessions)
+    provider = make_provider(organizations)
+
+    first, first_created = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="P-1",
+    )
+    assert first_created is True
+
+    second, second_created = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="P-1",
+    )
+    assert second_created is False
+    assert second.id == first.id
+    assert patients.get(first.id).id == first.id
+
+
 def test_no_source_identity_collision_across_organizations_practitioner(
     sessions: sessionmaker[Session],
 ) -> None:

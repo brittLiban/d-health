@@ -95,6 +95,97 @@ class PatientReferenceRepository:
                     raise
                 return _to_patient_record(existing)
 
+    def get_or_create_with_outcome(
+        self,
+        *,
+        source_organization_id: uuid.UUID,
+        source_system: str,
+        source_identity_system: str,
+        source_identity_value: str,
+        display_name: str | None = None,
+        contact_channel_type: str | None = None,
+        contact_value: str | None = None,
+        session: Session | None = None,
+    ) -> tuple[PatientReferenceRecord, bool]:
+        """DH-EX-009: same exact-identity, insert-first-wins semantics as ``get_or_create`` above,
+        but exposes the created/existing outcome the provider-scoped binding API needs for its
+        201-vs-200 response and audit `outcome`, and accepts an optional caller-owned ``session``
+        so the bind and its authoritative audit event commit atomically -- the same optional-
+        session/SAVEPOINT pattern already established by
+        ``PractitionerReferenceRepository.get_or_create``. Deliberately a separate method rather
+        than changing ``get_or_create``'s return type: many existing callers already treat that
+        method's return value as a bare ``PatientReferenceRecord``, and this ticket's own
+        instruction is to preserve that.
+
+        A replay with the exact same identity tuple but different ``display_name``/contact fields
+        returns the existing row **unchanged** -- this is identity binding, not a patient-
+        demographic update API; the new snapshot values are silently discarded, never applied,
+        exactly like ``get_or_create``'s existing behavior for the same case."""
+        _require_identity(source_system, source_identity_system, source_identity_value)
+        if session is not None:
+            return self._get_or_create_with_outcome_in_session(
+                session,
+                source_organization_id=source_organization_id,
+                source_system=source_system,
+                source_identity_system=source_identity_system,
+                source_identity_value=source_identity_value,
+                display_name=display_name,
+                contact_channel_type=contact_channel_type,
+                contact_value=contact_value,
+            )
+        with self._sessions() as owned_session:
+            record, created = self._get_or_create_with_outcome_in_session(
+                owned_session,
+                source_organization_id=source_organization_id,
+                source_system=source_system,
+                source_identity_system=source_identity_system,
+                source_identity_value=source_identity_value,
+                display_name=display_name,
+                contact_channel_type=contact_channel_type,
+                contact_value=contact_value,
+            )
+            owned_session.commit()
+            return record, created
+
+    def _get_or_create_with_outcome_in_session(
+        self,
+        session: Session,
+        *,
+        source_organization_id: uuid.UUID,
+        source_system: str,
+        source_identity_system: str,
+        source_identity_value: str,
+        display_name: str | None,
+        contact_channel_type: str | None,
+        contact_value: str | None,
+    ) -> tuple[PatientReferenceRecord, bool]:
+        reference = PatientReference(
+            source_organization_id=source_organization_id,
+            source_system=source_system,
+            source_identity_system=source_identity_system,
+            source_identity_value=source_identity_value,
+            display_name=display_name,
+            contact_channel_type=contact_channel_type,
+            contact_value=contact_value,
+        )
+        try:
+            with session.begin_nested():
+                session.add(reference)
+                session.flush()
+            return _to_patient_record(reference), True
+        except IntegrityError:
+            existing = session.scalar(
+                select(PatientReference).where(
+                    PatientReference.source_organization_id == source_organization_id,
+                    PatientReference.source_system == source_system,
+                    PatientReference.source_identity_system == source_identity_system,
+                    PatientReference.source_identity_value == source_identity_value,
+                )
+            )
+            if existing is None:
+                raise
+            return _to_patient_record(existing), False
+
     def get(self, reference_id: uuid.UUID) -> PatientReferenceRecord:
         with self._sessions() as session:
             reference = session.get(PatientReference, reference_id)

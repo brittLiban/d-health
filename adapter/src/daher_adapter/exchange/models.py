@@ -744,7 +744,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_offering_status_changed', 'lab_price_changed', "
             "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
             "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
-            "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded'"
+            "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
+            "'patient_reference_bound'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -759,7 +760,7 @@ class ExchangeSecurityAuditEvent(Base):
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
-            "'patient_access_grant')",
+            "'patient_access_grant', 'patient_reference')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
