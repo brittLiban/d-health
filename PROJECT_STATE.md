@@ -10902,3 +10902,163 @@ DH-EX-010's own criterion-10 self-review found. Closed before this closure commi
 evidence" above) and correcting the overclaim in place, not by a separate follow-up commit — this is
 the first DH-EX-01x ticket in this sequence where a self-review finding was folded into the
 implementation commit itself rather than requiring its own closure-commit round.
+
+**Superseded-in-part notice (added by DH-EX-010A1, append-only — not retracting the above):** this
+entry's "Migration/backfill behavior" paragraph states that `0013`'s `downgrade()` "carries **no**
+'real usage exists, refuse to downgrade' guard" and calls the resulting loss "an honest, ordinary
+schema-downgrade information loss, not a blocked/irreversible one." A follow-up review
+(DH-EX-010A1, see its own entry below) found that reasoning wrong about the *stakes* — `access_mode`
+is authorization/capability state, not ordinary data — and added a downgrade guard to the same
+`0013_exchange_access_mode.py` file (no new migration revision). That paragraph is left unedited
+here per this project's append-only discipline; DH-EX-010A1's entry below is the current, correct
+description of `0013`'s downgrade behavior.
+
+---
+
+### DH-EX-010A1 · Refuse unsafe downgrade when ORDER_READ patient grants exist · P0/MEDIUM (review finding) · ✅ BUILT, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED
+
+**Ticket:** DH-EX-010A1. A review finding from DH-EX-010A: migration `0013_exchange_access_mode`'s
+original `downgrade()` unconditionally dropped `access_mode` with no guard, on the reasoning that
+dropping a whole column (unlike `0006`–`0012`'s CHECK-widening) can never hit a DDL-level failure.
+That reasoning was correct about DDL mechanics and wrong about the stakes: `access_mode` is
+authorization/capability state, and the resulting downgrade→re-upgrade round trip silently converts
+a real `ORDER_READ` grant into `LAB_SELECTION`. Harden the migration only — no runtime patient-access
+behavior change.
+
+**Severity/documentation (per the ticket's own instruction):** recorded as **MEDIUM — security-
+capability semantics could be silently erased by downgrade/re-upgrade.** DH-EX-010A's runtime
+behavior (issuance rules, capability enforcement, both enforcement layers) remains fully valid and
+untouched; this is a migration-code correction only.
+
+**Starting HEAD/CI:** `be20382765cb6f69f67125c81bcd5691d7ac0351` — fetched and audited fresh, matched
+the ticket's stated expectation exactly. CI run `34724487617`: success, all 9 jobs green.
+
+**Reproduced unsafe downgrade behavior (before any fix):** seeded one genuine `ORDER_READ` grant
+against a real PostgreSQL database via the actual repository flow (`assign_by_provider()` +
+`issue()`, not a hand-inserted row) — grant id `5799895b-032a-4c06-b510-23df4b1f18b9` in the clean
+verification run (grant `11ecfaaf-229d-4586-9472-17a6abb5324e` in the qualification run below). Ran
+`alembic downgrade -1` (succeeded, no guard existed yet) → `access_mode` column gone → ran `alembic
+upgrade head` → the same surviving row came back `LAB_SELECTION`. Answering the ticket's own
+before-editing question 5 ("what would the pre-0013 application subsequently know about that
+grant"): **nothing** — pre-0013 code has no `access_mode` column and no capability check at either
+enforcement layer, so it treats every surviving grant as unconditionally selection-capable. This
+reframes the bug: it is not merely an information *loss*, it is a silent *privilege restoration* —
+a credential that was correctly read-only regains, from the pre-0013 application's perspective,
+full lab-choice authority with no error, no confirmation, and no trace.
+
+**Established migration fail-fast pattern (question 6):** `0006` through `0012` each widen a closed
+CHECK constraint additively on `upgrade()`; their `downgrade()`s query for real rows using the new
+enum value *before* attempting any DDL and raise a purpose-specific `RuntimeError` subclass
+(`DowngradeBlockedBy*History`) naming the exact count, why the narrower schema can't represent it,
+that no schema change has occurred, and the exact revision the database remains at. `0013` adds a
+whole column rather than widening an enum, so the original author reasoned (see the superseded-in-
+part notice on DH-EX-010A's own entry above) that this pattern didn't apply — a plain `DROP COLUMN`
+can't fail the way re-narrowing a CHECK against incompatible rows can. This ticket applies the
+*same contract* (fail fast, before DDL, with a named exception) to that DROP COLUMN anyway, because
+the guard's purpose was never "prevent a DDL error" — it was always "prevent losing something a
+narrower schema can't represent," and a whole column can lose exactly that too.
+
+**Guard design:** `downgrade()` now runs `SELECT COUNT(*) FROM exchange_patient_access_grants WHERE
+access_mode = 'ORDER_READ'` before any DDL. Deliberately **no** filter on `revoked_at`/`expires_at`
+— a revoked or expired grant's own historical `ORDER_READ` capability is still authoritative
+security state (the credential having gone dead does not erase the fact that it once had, and used,
+read-only authority), matching this repository's established preference for preserving authoritative
+history rather than rewriting it merely to enable a downgrade (the same principle `0011`/`0012`
+apply to security-audit-event history). Any nonzero count raises
+`DowngradeBlockedByOrderReadGrantHistory` naming the count, why 0012 can't represent it, that no
+schema change occurred, and that the database remains at `0013_exchange_access_mode`. Downgrading a
+database where every grant is `LAB_SELECTION` (including zero grants) remains permitted — no
+distinction 0013 introduced is lost in that case. No new migration revision: this edits `0013`'s own
+`downgrade()` Python, since Alembic executes the current file's code for any downgrade request
+regardless of when it was last edited; schema at head remains `0013_exchange_access_mode`, CI's
+`EXPECTED_HEAD` untouched.
+
+**Empty-table downgrade (Case A):** real PostgreSQL, `upgrade head` (clean through 0013) → zero rows
+in `exchange_patient_access_grants` → `alembic downgrade -1` succeeded, `alembic current` confirmed
+`0012_exchange_provider_assign`.
+
+**LAB_SELECTION-only downgrade (Case B):** one legitimate `LAB_SELECTION` grant seeded via the real
+`PatientAccessGrantRepository.issue()` flow (order `AWAITING_LAB_SELECTION`, no `LabSelection` yet)
+→ `downgrade -1` succeeded → re-`upgrade head` to verify the chain stays healthy: succeeded, and the
+surviving row correctly re-backfilled as `LAB_SELECTION` (truthful in this case — it always was).
+
+**ORDER_READ blocked-downgrade evidence (Case C, the key qualification):** one legitimate
+`ORDER_READ` grant seeded via the real `assign_by_provider()` + `issue()` flow (provider assigns a
+lab, then issues access — `issue()` observes the existing `LabSelection` and correctly issues
+`ORDER_READ`). `alembic downgrade -1` raised `DowngradeBlockedByOrderReadGrantHistory` naming exactly
+1 row. Also tested the grant **revoked** (`UPDATE ... SET revoked_at = now()`) before attempting the
+downgrade: still refused, confirming the "check every row, not just currently-usable ones"
+requirement is real and load-bearing, not merely stated.
+
+**Mixed-mode evidence:** the same scratch database, having accumulated one `LAB_SELECTION` grant
+(Case B) and one `ORDER_READ` grant (Case C) across sequential qualification steps, naturally
+exercised the mixed case — `alembic downgrade -1` refused with exactly 1 `ORDER_READ` row named (the
+`LAB_SELECTION` row present alongside it did not soften or bypass the refusal).
+
+**No-partial-DDL evidence:** after the refused downgrade, `alembic current` still reported
+`0013_exchange_access_mode (head)`; `\d exchange_patient_access_grants` confirmed `access_mode`
+still present, still `NOT NULL`, and `ck_exchange_patient_access_grants_access_mode` still present;
+total row count in the table unchanged (2).
+
+**Token/grant preservation evidence:** the blocked-downgrade `ORDER_READ` row
+(`11ecfaaf-229d-4586-9472-17a6abb5324e`) was re-queried after the refusal — identical `id`,
+`access_mode='ORDER_READ'`, and `token_hash` (`9e04bf79bf1578d40ffcf82054716d1ecab25b8b642ec728d0d7b15c931cbccd`)
+byte-for-byte unchanged. No row deleted, no row rewritten, no token hash touched.
+
+**Negative control (guard temporarily removed, restored afterward, `diff`-verified byte-identical
+against a scratchpad backup):** with the guard body replaced by a no-op comment, `downgrade -1`
+succeeded silently against a database holding a genuine `ORDER_READ` grant
+(`5799895b-032a-4c06-b510-23df4b1f18b9`); `\d` confirmed `access_mode` gone entirely; `upgrade head`
+re-added the column, and the same surviving row came back reading `access_mode='LAB_SELECTION'` —
+the exact information-loss (and, per the reframing above, privilege-restoration) bug reproduced on
+demand, with the guard back in place afterward blocking the identical scenario.
+
+**Real PostgreSQL evidence:** disposable scratch role/database (`dhex010a1`/`dhex010a1_qual`),
+`alembic upgrade head` clean through 0013 in every run. All cases above (A, B, C, mixed, revoked,
+negative control) executed against real PostgreSQL — no SQLite substitute was used for any part of
+this qualification, since Alembic's `op.get_bind()`/raw-SQL guard logic and the actual DDL failure
+modes it protects against are only meaningfully exercised against the real production driver.
+Scratch role/database dropped afterward (twice — once after the negative-control run, and the
+database was recreated fresh for the final clean revoked-grant verification to avoid any ambiguity
+between negative-control-corrupted state and a clean check).
+
+**Regression suites:** no runtime code was touched (`PatientAccessMode`, issuance rules, patient API
+responses, route/domain capability checks, provider assignment, selection logic, TTL, one-live-grant
+constraint, raw token generation, audit behavior all untouched) — full adapter suite re-run
+unmodified: `693 passed, 51 skipped, 1 pre-existing warning`, identical to DH-EX-010A's own handoff
+count (zero new SQLite tests added; migration downgrade guards in this repository have zero
+pytest-level coverage by established precedent — confirmed by grep: no existing test file imports
+`alembic` or references any `DowngradeBlockedBy*` class, matching `0006` through `0012`'s own
+convention of real-PostgreSQL-only qualification recorded in this file, not automated migration-
+runner tests. Building new Alembic-driven pytest infrastructure was judged out of this ticket's
+explicit "one migration-safety fix only" scope; this decision is recorded here rather than silently
+skipped).
+
+**Files changed:** `adapter/migrations/versions/0013_exchange_access_mode.py` (docstring correction
++ `downgrade()` guard — no new migration revision), `PROJECT_STATE.md`.
+
+**Exact migration head:** `0013_exchange_access_mode` (unchanged).
+
+**Full tests/lint:** `693 passed, 51 skipped, 1 pre-existing warning` — unchanged from DH-EX-010A's
+handoff (no runtime code touched). `ruff check` and `ruff format --check` both clean across
+`migrations` (and the full `src tests migrations scripts` tree, re-run for safety). `git diff
+--check` clean (no whitespace errors).
+
+**Real facility:** untouched. **Clinical semantics:** none touched. **Patient data to third
+parties:** none. **CI `EXPECTED_HEAD`:** unchanged, still `0013_exchange_access_mode`.
+
+**What remains NOT built by this ticket:** everything explicitly excluded — `PatientAccessMode`
+redesign, issuance-rule changes, patient API response changes, route/domain capability-check
+changes, provider assignment, selection logic, TTL, one-live-grant constraint, raw token generation,
+audit behavior, specimen/sample workflow, result workflow. This ticket is a migration-safety
+correction only, exactly as scoped.
+
+**Next:** DH-EX-008R remains blocked pending its own Human Decision (unchanged). Specimen/sample
+workflow remains the next candidate ticket in the DH-EX-001–010A1 sequence but **is not started
+here** — "Stop after DH-EX-010A1."
+
+**DH-EX-010A1 CLOSED: YES** — the exact information-loss/privilege-restoration bug was reproduced,
+fixed, verified fixed, and the fix's own negative control re-reproduced the original bug on demand
+with the fix temporarily removed. All 14 acceptance criteria met, no deviations.
+
+**READY FOR REVIEW: YES**
