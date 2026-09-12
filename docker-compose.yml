@@ -753,6 +753,10 @@ services:
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       KEYCLOAK_OPENMRS_CLIENT_SECRET: ${KEYCLOAK_OPENMRS_CLIENT_SECRET:?set in .env}
       KEYCLOAK_ADAPTER_CLIENT_SECRET: ${KEYCLOAK_ADAPTER_CLIENT_SECRET:?set in .env}
+      # DH-EX-008: substituted into dhealth-exchange-realm.json at import time,
+      # same mechanism as the two daher-realm secrets above. A separate realm,
+      # separate client, never the same value as either of them.
+      KEYCLOAK_EXCHANGE_API_CLIENT_SECRET: ${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET:?set in .env}
     volumes:
       - ./keycloak/realm-config:/opt/keycloak/data/import:ro
     healthcheck:
@@ -825,6 +829,17 @@ services:
     restart: unless-stopped
     init: true
     read_only: true
+    # DH-EX-008: deliberately NOT `keycloak: condition: service_healthy`. The
+    # Exchange OIDC path is lazy — `JWKSKeySource` wraps a `PyJWKClient` that
+    # fetches keys on first token validation, not at process start — and the
+    # ledger/dead-letter/retry responsibilities this container owns for the
+    # OpenMRS/OpenELIS connector track have no dependency on Keycloak at all.
+    # A hard dependency here would gate that unrelated work on Exchange
+    # infrastructure being healthy, and would stretch every boot by up to
+    # Keycloak's own ~7-minute worst-case start_period+retries window even on
+    # a deployment that never uses Exchange. Exchange readiness is surfaced
+    # instead through `/health/exchange-ready` (see app.py), which is not
+    # wired into this container's own healthcheck below for the same reason.
     depends_on:
       openelis-db:
         condition: service_healthy
@@ -841,6 +856,29 @@ services:
       ADAPTER_RETRY_MAX_ATTEMPTS: ${ADAPTER_RETRY_MAX_ATTEMPTS:-5}
       ADAPTER_RETRY_MULTIPLIER_SECONDS: ${ADAPTER_RETRY_MULTIPLIER_SECONDS:-1}
       ADAPTER_RETRY_MAX_SECONDS: ${ADAPTER_RETRY_MAX_SECONDS:-30}
+      # DH-EX-008: issuer derived from the SAME KEYCLOAK_PUBLIC_URL that
+      # becomes Keycloak's own KC_HOSTNAME (see the keycloak service above) —
+      # not a second, independently-typed copy of it, so the two variables can
+      # never be set to different hosts by mistake. This relies on Keycloak
+      # 26's documented hostname:v2 behavior, that KC_HOSTNAME as a full URL
+      # fixes the `iss` claim regardless of request path — NOT independently
+      # verified against a running Keycloak by this ticket (its pinned image
+      # could not be pulled in this ticket's sandbox; see PROJECT_STATE.md's
+      # DH-EX-008 entry). Confirm this against a real token before relying on
+      # it in a security-sensitive path.
+      EXCHANGE_OIDC_ISSUER: ${EXCHANGE_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}/realms/dhealth-exchange}
+      # Internal Docker network address, deliberately NOT the public issuer
+      # above — this container validates tokens from inside the `internal`
+      # network and has no reason to make key-fetching a public HTTPS
+      # round-trip through Caddy. Must keep serving the SAME realm's keys as
+      # EXCHANGE_OIDC_ISSUER; the two are independent knobs only because
+      # issuer identity and network reachability are genuinely different
+      # concerns, not because either is expected to vary alone in practice.
+      EXCHANGE_OIDC_JWKS_URL: ${EXCHANGE_OIDC_JWKS_URL:-http://keycloak.openelis.org:8080/realms/dhealth-exchange/protocol/openid-connect/certs}
+      # Fixed by dhealth-exchange-realm.json's own committed
+      # exchange-api-audience mapper config, not a value operators choose
+      # independently — override only alongside a matching realm-file change.
+      EXCHANGE_OIDC_AUDIENCE: ${EXCHANGE_OIDC_AUDIENCE:-dhealth-exchange-api}
     volumes:
       - adapter-audit:/var/lib/daher/audit
     tmpfs:

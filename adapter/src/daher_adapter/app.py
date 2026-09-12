@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -104,6 +106,35 @@ def create_app(
             )
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"status": "down"}
+        return {"status": "up"}
+
+    # DH-EX-008: independent of `/health/ready` above by design -- that endpoint's exact response
+    # body (`{"status": "up"}`) is asserted verbatim by this container's own Docker healthcheck
+    # (docker-compose.yml), so it must never gain an Exchange-shaped field or fail merely because
+    # Exchange OIDC is unconfigured or Keycloak is briefly unreachable. This endpoint is NOT routed
+    # publicly through Caddy (see caddy/Caddyfile) and is NOT wired into any Docker healthcheck --
+    # a brief Keycloak hiccup must not restart the adapter process, which owns unrelated
+    # connector-track responsibilities that have nothing to do with Exchange.
+    @app.get("/health/exchange-ready")
+    def exchange_ready(response: Response) -> dict[str, str]:
+        if not active_settings.exchange_oidc_configured:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return {"status": "down", "reason": "unconfigured"}
+        try:
+            request = urllib.request.Request(  # noqa: S310 -- fixed operator-configured URL, not user input
+                active_settings.exchange_oidc_jwks_url
+            )
+            with urllib.request.urlopen(request, timeout=5) as jwks_response:  # noqa: S310
+                jwks_body = json.load(jwks_response)
+            if not isinstance(jwks_body, dict) or not jwks_body.get("keys"):
+                raise ValueError("JWKS response has no keys")
+        except Exception as error:  # A reachability probe must convert any failure into a 503.
+            logger.error(
+                "exchange_readiness_failed",
+                extra={"error_type": type(error).__name__},
+            )
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return {"status": "down", "reason": "jwks_unreachable"}
         return {"status": "up"}
 
     app.include_router(exchange_router)

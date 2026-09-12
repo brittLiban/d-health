@@ -131,6 +131,33 @@ id.{$BASE_DOMAIN} {
 # not permitted to do (see ADR-027's "open risk"). Until resolved,
 # OpenELIS-touching actions stay native at lab.$BASE_DOMAIN.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# exchange.<domain> — DHealth Exchange API (DH-EX-008).
+#
+# Path-scoped to /exchange/v1/* on purpose, not a bare `reverse_proxy
+# adapter:8000` for the whole vhost: the adapter also serves this stack's own
+# health/readiness endpoints (app.py), which have never been meant to be
+# public, and its OpenAPI docs are separately disabled at the FastAPI level
+# (defense in depth, not the only control). Everything else 404s here rather
+# than reaching the adapter at all, so a route added to the adapter later does
+# not become public by omission.
+#
+# No UI at this hostname — DH-EX-008 explicitly excludes building one. Same
+# auth model as DH-EX-002: fails closed 401 without a valid
+# dhealth-exchange-realm bearer token (see exchange/identity_auth.py).
+# ---------------------------------------------------------------------------
+exchange.{$BASE_DOMAIN} {
+	import common
+
+	handle /exchange/v1/* {
+		reverse_proxy adapter:8000
+	}
+
+	handle {
+		respond 404
+	}
+}
+
 app.{$BASE_DOMAIN} {
 	import common
 

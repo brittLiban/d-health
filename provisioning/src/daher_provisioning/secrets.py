@@ -135,6 +135,9 @@ def generate_facility_secrets(facility_id: str) -> FacilitySecrets:
         "KEYCLOAK_OPENMRS_CLIENT_SECRET": general_secret(),
         "KEYCLOAK_OPENELIS_CLIENT_SECRET": general_secret(),
         "KEYCLOAK_ADAPTER_CLIENT_SECRET": general_secret(),
+        # DH-EX-008: separate realm (`dhealth-exchange`), separate client, never
+        # reused from the daher-realm secrets above.
+        "KEYCLOAK_EXCHANGE_API_CLIENT_SECRET": general_secret(),
         # Adapter
         "ADAPTER_DB_PASSWORD": general_secret(),
         # ⚠️ BACKUP_ENCRYPTION_PASSPHRASE is deliberately ABSENT (ADR-025). Generating it

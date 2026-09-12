@@ -261,6 +261,7 @@ Everything below must have a real value before the first `docker compose up -d`:
 | `OE_KEYSTORE_PASSWORD`, `OE_TRUSTSTORE_PASSWORD` | DH-021; never `kspass`/`tspass` |
 | `KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD` | |
 | `KEYCLOAK_OPENMRS_CLIENT_SECRET`, `KEYCLOAK_ADAPTER_CLIENT_SECRET` | |
+| `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` | DH-EX-008; a *different* realm (`dhealth-exchange`) and client — never reuse the two secrets above |
 | `ADAPTER_DB_PASSWORD` | |
 | `BASE_DOMAIN` | `localhost` for local work; the real domain on the pilot VM |
 

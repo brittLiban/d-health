@@ -537,6 +537,91 @@ jobs:
           print("ok — app. origin, OpenMRS redirect reconciliation, and native-origin regressions all check out")
           PY
 
+      - name: Exchange deployment wiring invariants (DH-EX-008)
+        # This cannot boot the real stack (see this file's header — quay.io/Keycloak image pulls
+        # are also unreachable from this repo's own interactive sandbox, confirmed directly rather
+        # than assumed), so it asserts on the committed Caddyfile/compose/realm/app.py text
+        # directly. Real Keycloak realm-import behavior, issuer/JWKS live reachability, and an
+        # authenticated end-to-end request are DH-EX-008R's job, not this check's.
+        run: |
+          python - <<'PY'
+          import json, re, sys
+          from pathlib import Path
+
+          caddyfile = Path("caddy/Caddyfile").read_text()
+          compose = Path("docker-compose.yml").read_text()
+          app_py = Path("adapter/src/daher_adapter/app.py").read_text()
+          bad = []
+
+          # --- Caddy: a separate, path-scoped vhost -- never a bare proxy of the whole host ---
+          exchange_block_match = re.search(r"\nexchange\.\{\$BASE_DOMAIN\} \{(.*?)\n\}\n", caddyfile, re.S)
+          if not exchange_block_match:
+              bad.append("caddy/Caddyfile: no exchange.{$BASE_DOMAIN} block found")
+          else:
+              exchange_block = exchange_block_match.group(1)
+              if "reverse_proxy adapter:8000" not in exchange_block:
+                  bad.append("exchange. block does not reverse_proxy to adapter:8000")
+              if "/exchange/v1/*" not in exchange_block:
+                  bad.append("exchange. block does not path-scope to /exchange/v1/*")
+              if not re.search(r"handle\s*\{\s*respond 404", exchange_block):
+                  bad.append("exchange. block has no catch-all 404 — a new adapter route could become public by omission")
+
+          # --- Compose: keycloak carries the new guard, adapter carries the three OIDC vars ---
+          if "KEYCLOAK_EXCHANGE_API_CLIENT_SECRET:?" not in compose:
+              bad.append("docker-compose.yml: keycloak service is missing the KEYCLOAK_EXCHANGE_API_CLIENT_SECRET guard")
+
+          adapter_block_match = re.search(r"\n  adapter:\n(.*?)(?=\n  [a-z0-9_-]+:\n)", compose, re.S)
+          if not adapter_block_match:
+              bad.append("docker-compose.yml: adapter service not found")
+          else:
+              adapter_block = adapter_block_match.group(1)
+              for var in ("EXCHANGE_OIDC_ISSUER", "EXCHANGE_OIDC_JWKS_URL", "EXCHANGE_OIDC_AUDIENCE"):
+                  if var not in adapter_block:
+                      bad.append(f"docker-compose.yml: adapter service does not set {var}")
+              # Lazy JWKS fetching means a hard Keycloak dependency would only ever
+              # slow or break the unrelated connector-track responsibilities this
+              # container owns -- see the comment above depends_on in the file itself.
+              depends_on_match = re.search(r"depends_on:\n(.*?)(?=\n    [a-z]+:)", adapter_block, re.S)
+              if depends_on_match and re.search(r"^\s*keycloak:\s*$", depends_on_match.group(1), re.M):
+                  bad.append("docker-compose.yml: adapter must not depend_on keycloak (see DH-EX-008 comment)")
+              if re.search(r"^\s*ports:\s*$", adapter_block, re.M):
+                  bad.append("docker-compose.yml: adapter must not publish host ports — only Caddy may")
+              if "body=json.load" in adapter_block and "{'status': 'up'}" not in adapter_block:
+                  bad.append("docker-compose.yml: adapter healthcheck body assertion changed unexpectedly")
+
+          # --- Exchange realm file: separate realm, separate client, separate secret, no users ---
+          realm_path = Path("keycloak/realm-config/dhealth-exchange-realm.json")
+          realm: dict = {}
+          if not realm_path.is_file():
+              bad.append("keycloak/realm-config/dhealth-exchange-realm.json is missing")
+          else:
+              realm = json.loads(realm_path.read_text())
+              if realm.get("realm") != "dhealth-exchange":
+                  bad.append("dhealth-exchange-realm.json: realm name is not 'dhealth-exchange'")
+              clients = realm.get("clients", [])
+              if len(clients) != 1 or clients[0].get("clientId") != "dhealth-exchange-api":
+                  bad.append("dhealth-exchange-realm.json: expected exactly one client, 'dhealth-exchange-api'")
+              elif clients[0].get("secret") != "${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}":
+                  bad.append("dhealth-exchange-realm.json: client secret placeholder does not match KEYCLOAK_EXCHANGE_API_CLIENT_SECRET")
+              if realm.get("users"):
+                  bad.append("dhealth-exchange-realm.json: must not commit real users (DH-EX-008R's job, not this ticket's)")
+
+          daher_realm = json.loads(Path("keycloak/realm-config/daher-realm.json").read_text())
+          if realm_path.is_file() and daher_realm.get("realm") == realm.get("realm"):
+              bad.append("dhealth-exchange and daher realm files name the same realm — they must never merge")
+
+          # --- Adapter app: exchange-ready is a sibling of ready, never a change to its body ---
+          if '"/health/exchange-ready"' not in app_py:
+              bad.append("app.py: /health/exchange-ready endpoint not found")
+          ready_match = re.search(r'@app\.get\("/health/ready"\)\n\s*def ready\(.*?\n\n', app_py, re.S)
+          if not ready_match or '{"status": "up"}' not in ready_match.group(0):
+              bad.append("app.py: /health/ready no longer returns the exact body the container healthcheck asserts")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad)); sys.exit(1)
+          print("ok — Exchange Caddy scoping, compose wiring, realm separation, and readiness invariants all check out")
+          PY
+
       - name: ADR-017B — Daher Reception is registration-only, additive, unchanged for existing roles
         # This cannot boot the real stack (see this file's header), so it asserts
         # on the committed config directly. The live mechanism — that a Keycloak
@@ -2120,7 +2205,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Generate a throwaway env file
         run: |
-          # The compose file guards 17 variables with ${VAR:?} so a missing value
+          # The compose file guards 18 variables with ${VAR:?} so a missing value
           # fails loudly at `up` instead of quietly selecting a published default
           # (bug 14). That guard is exactly why CI cannot use .env.example, which
           # correctly ships those values EMPTY.
@@ -2152,6 +2237,7 @@ jobs:
           KEYCLOAK_ADMIN_PASSWORD=ci-dummy
           KEYCLOAK_OPENMRS_CLIENT_SECRET=ci-dummy
           KEYCLOAK_ADAPTER_CLIENT_SECRET=ci-dummy
+          KEYCLOAK_EXCHANGE_API_CLIENT_SECRET=ci-dummy
           ADAPTER_DB_PASSWORD=ci-dummy
           ENVEOF
       - name: Default profile parses

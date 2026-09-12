@@ -9550,3 +9550,281 @@ follow-up item is prioritized next — this ticket does not choose one.
 
 **READY FOR REVIEW: YES**, pending the exact-SHA CI result recorded immediately below in this
 entry once pushed.
+
+---
+
+### DH-EX-008 · Wire DHealth Exchange into the real Docker/Keycloak/Caddy deployment · P0 · ⚠️ WIRED AND STATICALLY VERIFIED — LIVE KEYCLOAK/CADDY QUALIFICATION BLOCKED, DH-EX-008R STILL REQUIRED
+
+**Ticket:** DH-EX-008. Close the deployment-wiring gap between DH-EX-002's already-reviewed Exchange
+OIDC auth code and the real Docker/Keycloak/Caddy stack — env contract, Keycloak realm deployment,
+Caddy routing, readiness semantics, Compose dependency graph — without declaring pilot-ready or
+performing real-Keycloak end-to-end authentication qualification (explicitly reserved for a
+follow-up ticket, DH-EX-008R, per this ticket's own framing). No Clinic/Lab/Patient/Exchange-admin
+UI. The old OpenMRS/OpenELIS/`daher`-realm connector track stays entirely unchanged.
+
+**Starting state:** HEAD `869072a37f9581f95beaab78b5746d10238d463e` (DH-EX-007A), `origin/master` in
+sync, CI already green from that ticket's own closure. Re-audited fresh via direct `git log`/`git
+status` rather than trusting any prompt-carried SHA (Rule Zero).
+
+**Pre-existing gap found (before editing):** `docker-compose.yml`'s `adapter` service had zero
+Exchange env vars — only `ADAPTER_DB_*` — despite `Settings`/`identity_auth.py`/`exchange/api.py`
+already fully implementing and testing Exchange OIDC at DH-EX-002. `keycloak/realm-config/
+dhealth-exchange-realm.json` already existed (written before this ticket) and was already being
+mounted into Keycloak's import directory along with `daher-realm.json`, but nothing supplied its
+`${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}` placeholder — no guard, no `.env.example` entry, no README
+mention. No `exchange.{$BASE_DOMAIN}` Caddy route existed. `/health/ready` returns 200 regardless of
+Exchange configuration — proven again, not merely quoted from a comment, by the pre-existing (now
+also re-run) test `test_health_endpoints_are_unaffected_by_exchange_configuration`, which asserts
+exactly that. This is correct, by-design behavior for `/health/ready` specifically (it must never
+gate on Exchange/Keycloak) — the gap this ticket closes is that there was no *separate* endpoint an
+operator could use to ask "is Exchange itself actually working," which is what `/health/exchange-
+ready` (below) now provides.
+
+**Chosen issuer, audience, and JWKS URL, and why they differ:**
+- `EXCHANGE_OIDC_ISSUER` derives from the *same* `KEYCLOAK_PUBLIC_URL` variable that becomes
+  Keycloak's own `KC_HOSTNAME` (`docker-compose.yml`'s `keycloak` service, unchanged by this
+  ticket): `${EXCHANGE_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}/realms/dhealth-exchange}`,
+  so the two variables can never be set to different hosts by mistake, without an operator needing
+  to type the same value twice. **Two separate claims, not one:** that Compose *interpolates* this
+  correctly is verified empirically (see "Deployment qualification" below — real
+  `docker compose config` output, both the derived default and an explicit override). That
+  Keycloak's hostname:v2 provider actually *stamps* `KC_HOSTNAME` verbatim into a real token's `iss`
+  claim regardless of request path is reasoned only from Keycloak 26's documented behavior —
+  **not independently verified against a running Keycloak by this ticket** (its pinned image could
+  not be pulled in this sandbox; see below). This is the single highest-risk assumption in this
+  ticket: if `KC_HOSTNAME_STRICT: "false"` combined with `KC_PROXY_HEADERS: xforwarded` instead
+  causes request-derived issuer computation, every authenticated request would fail on an issuer
+  mismatch (`TokenValidator` requires exact equality). Listed again, deliberately, under "What
+  remains NOT proven" below — this paragraph alone does not close it.
+- `EXCHANGE_OIDC_JWKS_URL` is the **internal** Docker network address —
+  `http://keycloak.openelis.org:8080/realms/dhealth-exchange/protocol/openid-connect/certs` — a
+  deliberately different value from the issuer. The adapter validates tokens from inside the
+  `internal` network and has no reason to make its own key-fetching a public HTTPS round-trip
+  through Caddy.
+- `EXCHANGE_OIDC_AUDIENCE` is fixed to `dhealth-exchange-api`, matching
+  `dhealth-exchange-realm.json`'s own already-committed `exchange-api-audience` protocol mapper —
+  not a value operators choose independently.
+
+**`.env` contract added:** `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` (required, `:?`-guarded, a
+distinct value from `KEYCLOAK_OPENMRS_CLIENT_SECRET`/`KEYCLOAK_ADAPTER_CLIENT_SECRET`).
+`EXCHANGE_OIDC_ISSUER`/`EXCHANGE_OIDC_JWKS_URL`/`EXCHANGE_OIDC_AUDIENCE` are optional,
+derived-with-override (documented, commented out, in `.env.example`, matching the existing
+`OPENMRS_PUBLIC_URL`-style convention) — an operator never has to type the issuer value twice.
+
+**Provisioning gap found and fixed (outside the ticket's originally-listed file scope, found by
+auditing before adding the new `:?` guard, not after):** `provisioning/src/daher_provisioning/
+secrets.py`'s `generate_facility_secrets()` did not generate `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET`.
+`provisioning/tests/test_facility_env.py::test_renders_every_variable_the_real_compose_file_requires`
+scrapes `docker-compose.yml`'s `${VAR:?}` guards directly from the real file and asserts the
+renderer produces all of them — so the moment the new guard landed, every facility provisioned
+afterward would have failed at `docker compose up` with a missing required value, and this specific
+test would have caught it. Fixed by adding the key to `secrets.py`'s generator and to
+`facility_env.py`'s `ROTATABLE` tuple, mirroring `KEYCLOAK_ADAPTER_CLIENT_SECRET`'s own existing
+treatment exactly: import-time `${VAR}` substitution only, no `reconcile-sso.sh` entry — confirmed
+by reading `reconcile-sso.sh` in full that it already never reconciles the `daher` realm's own
+`adapter` client secret either (only `openmrs`'s), so this is consistent with existing precedent,
+not a new gap introduced by this ticket.
+
+**Keycloak realm import evidence — NOT demonstrated with real containers, cause identified and
+disclosed, not assumed away:** `quay.io/keycloak/keycloak:26.7.1`'s pinned digest could not be
+pulled in this session's WSL2 sandbox. Two separate direct `docker pull` attempts failed identically
+with a DNS/connection timeout specific to `cdn01.quay.io` (Akamai, quay.io's blob-storage CDN
+redirect target) — `dial tcp: lookup cdn01.quay.io ... i/o timeout`. The pinned `caddy:2-alpine`
+image failed the same way against a *different* registry's CDN backend
+(`production.cloudfront.docker.com`, Docker Hub's), also confirmed with two retries. A small,
+non-CDN-redirected Docker Hub image (`curlimages/curl:8.11.0`) pulled successfully in the same
+session seconds later — isolating the failure to these specific CDN redirect hosts, not a general
+network outage, and ruling out simple flakiness. This repository's own CI has never booted the real
+Compose stack either — confirmed by grepping `.github/workflows/ci.yml` for `docker compose up`:
+zero matches; only `docker compose config` static parsing exists today. Consequently, NOT
+demonstrated: `dhealth-exchange`'s fresh-database import; `dhealth-exchange` importing correctly
+when `daher` already exists (`IGNORE_EXISTING` is per-realm, proven for `daher` at DH-007, and
+reasoned by direct analogy here — not independently proven for this realm); whether
+`${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}` actually substitutes into a running Keycloak's client
+record or lands as the literal placeholder string (the exact failure mode the realm-config README's
+"verified in-process, printed only match/mismatch" precedent exists to guard against, per the
+advisor consultation for this ticket). This is exactly the class of gap DH-EX-008R exists to close,
+not a defect in this ticket's design.
+
+**Caddy route evidence:** `caddy validate` could not run for the identical CDN-pull reason above.
+Verified instead by: (a) syntactically mirroring the already-proven `id.{$BASE_DOMAIN}`/
+`lab.{$BASE_DOMAIN}` block conventions in the same file; (b) a new CI static-check step (see below)
+parsing the real `Caddyfile` text and asserting the `exchange.{$BASE_DOMAIN}` block exists, proxies
+*only* `/exchange/v1/*` to `adapter:8000`, and 404s everything else — so a future adapter route does
+not become public by omission, and the adapter's own health/readiness endpoints and (already
+disabled) OpenAPI docs are never reachable through this vhost; (c) five real negative controls (see
+below), each demonstrated live to fail the new check with the expected error message.
+
+**Readiness design and evidence:** `/health/exchange-ready` added to `adapter/src/daher_adapter/
+app.py` as a fully independent endpoint — never referenced by the container's own Docker
+healthcheck, never routed through Caddy (kept off the public origin deliberately: an unauthenticated
+endpoint that triggers an outbound Keycloak call per request would otherwise be a small
+amplification vector, and its `reason` field is more useful kept off a public/recon-visible
+surface). Three states, all covered by new, real tests in `test_exchange_app_wiring.py` (no mocking
+of `urllib` — a real closed TCP port for the unreachable case, a real local `HTTPServer` on a real
+loopback socket for the reachable/empty-keys cases):
+- `{"status": "down", "reason": "unconfigured"}` / 503 — `exchange_oidc_configured` is False,
+  including when only two of the three OIDC values are set (a real deployment mistake this stands
+  in for).
+- `{"status": "down", "reason": "jwks_unreachable"}` / 503 — the JWKS URL is configured but a real,
+  timeout-bounded (5s) HTTP GET fails outright, or succeeds but returns no usable `"keys"` array.
+- `{"status": "up"}` / 200 — a real HTTP GET to the JWKS URL returns a populated `"keys"` array.
+`/health/ready`'s own body and behavior are provably unchanged: the pre-existing test asserting
+Exchange-unconfigured-but-DB-healthy still returns exactly `{"status": "up"}` passes unmodified, and
+a new test (`test_exchange_ready_never_changes_health_ready_response_body`) asserts it again from
+this ticket's own perspective — the container healthcheck's exact `body == {'status': 'up'}`
+assertion (docker-compose.yml) is the reason this must never gain a field.
+
+**Compose dependency graph:** `adapter` deliberately does **not** `depends_on: keycloak`. Reasoning
+recorded directly in `docker-compose.yml` as a comment, not only here: `JWKSKeySource` wraps a
+`PyJWKClient` that fetches keys lazily, on first token validation, not at process start, so the
+Exchange auth path imposes no boot-time Keycloak dependency; the ledger/dead-letter/retry
+responsibilities this container owns for the OpenMRS/OpenELIS connector track have zero relationship
+to Keycloak; and a hard dependency would both slow every boot by up to Keycloak's own ~7-minute
+worst-case `start_period`+retries window on deployments that never use Exchange, and take the entire
+connector-track adapter down whenever Keycloak fails its healthcheck for an unrelated reason. Guarded
+against regressing by the new static check plus a live-executed negative control (below).
+
+**Negative controls, exact results (all actually run, not merely described):**
+1. Remove `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` from `.env` → `docker compose config` fails with
+   the real, observed message: `error while interpolating services.keycloak.environment.
+   KEYCLOAK_EXCHANGE_API_CLIENT_SECRET: required variable KEYCLOAK_EXCHANGE_API_CLIENT_SECRET is
+   missing a value: set in .env`.
+2. Point `EXCHANGE_OIDC_JWKS_URL` at a closed local TCP port → `/health/exchange-ready` returns 503
+   `{"status": "down", "reason": "jwks_unreachable"}` (`test_exchange_ready_reports_jwks_unreachable`,
+   a real refused connection, not a mock).
+3. Leave `EXCHANGE_OIDC_JWKS_URL` unset while issuer and audience are set → `/health/exchange-ready`
+   returns 503 `{"status": "down", "reason": "unconfigured"}`, identical to fully-unset
+   (`test_exchange_ready_reports_unconfigured_when_only_partially_set`).
+4. Remove the Caddy `exchange.` block entirely → new CI static check fails:
+   `caddy/Caddyfile: no exchange.{$BASE_DOMAIN} block found`.
+5. Widen the Caddy route to a bare whole-vhost `reverse_proxy adapter:8000` → static check fails on
+   both the missing `/exchange/v1/*` path scope and the missing catch-all 404.
+6. Re-add `adapter: depends_on: keycloak: condition: service_healthy` → static check fails:
+   `docker-compose.yml: adapter must not depend_on keycloak (see DH-EX-008 comment)`.
+7. Reuse the adapter's own client-secret placeholder for the Exchange client in
+   `dhealth-exchange-realm.json` → static check fails:
+   `dhealth-exchange-realm.json: client secret placeholder does not match
+   KEYCLOAK_EXCHANGE_API_CLIENT_SECRET`.
+8. Delete `dhealth-exchange-realm.json` entirely → static check fails cleanly:
+   `keycloak/realm-config/dhealth-exchange-realm.json is missing` (this is the exact branch that,
+   before the advisor-caught fix above, would have raised an unhandled `NameError` instead).
+9. Publish a host port on the `adapter` service → static check fails:
+   `docker-compose.yml: adapter must not publish host ports — only Caddy may`.
+10. Rename the Exchange realm to `daher` (a merge attempt) → static check fails on both the
+    realm-name assertion and the cross-realm-merge assertion.
+
+Controls 4-10 were run by extracting the new CI Python check verbatim from `.github/workflows/
+ci.yml` (anchored on the step's name, not on line numbers, so re-verification survives later edits)
+and executing it against real, in-memory-mutated copies of the actual repository files — not against
+a hand-written mock of the check's logic.
+
+**Deployment qualification actually performed (real Docker, WSL2, this session):**
+- `docker compose config` (default and `backup` profiles) parses cleanly against the real, fully
+  edited `docker-compose.yml` and this session's pre-existing dev `.env`.
+- The three-level nested interpolation deriving `EXCHANGE_OIDC_ISSUER` from `KEYCLOAK_PUBLIC_URL`
+  was confirmed correct by inspecting real `docker compose config` output, both at its derived
+  default (`https://id.localhost:8443/realms/dhealth-exchange`, matching this session's
+  `KEYCLOAK_PUBLIC_URL`) and under an explicit override.
+- `docker compose -f provisioning/demo/docker-compose.demo.yml config -q` unaffected.
+- `.github/workflows/ci.yml` re-validated as well-formed YAML after editing (`yaml.safe_load`).
+- The existing "Relative documentation links resolve" CI check was run locally against the edited
+  docs: 25 tracked `.md` files, zero broken links.
+- Real multi-container boot of Keycloak+Caddy+adapter together was attempted and could not be
+  completed — see "Keycloak realm import evidence" above for the exact, reproducible, disclosed
+  cause. No container was left running; `docker compose ps -a`/`down` confirmed a clean state
+  afterward.
+
+**Full test/lint results, all real executions in the WSL2 environment:**
+- Adapter suite (`python -m pytest -q`, SQLite-backed, matching CI's own invocation): **622 passed
+  / 45 skipped / 1 pre-existing warning** (up from 616 at DH-EX-007A's handoff — 6 new tests, all in
+  `test_exchange_app_wiring.py`). The one warning is the same pre-existing `PytestCollectionWarning`
+  already tracked in the backlog, confirmed unchanged.
+- `ruff check`/`ruff format --check` on `adapter/src/daher_adapter/app.py` and
+  `adapter/tests/test_exchange_app_wiring.py`: clean.
+- Provisioning: the two files this ticket touched (`test_facility_env.py`, `test_secrets.py`,
+  including the dynamic `docker-compose.yml` cross-check) — **52/52 passed**. Full suite excluding
+  one unrelated, pre-existing `test_portal.py` collection error: **553 passed** — that error is an
+  artifact of this session's own ad-hoc Python-3.14 venv workaround (the project's pinned
+  `pydantic==2.11.9` has no prebuilt `cp314` wheel for `pydantic-core`; a newer, ABI-compatible
+  `pydantic-core` was installed locally just to run these tests, which left `jinja2`'s
+  `itsdangerous` dependency unresolved for one unrelated test module) — not caused by any change in
+  this ticket, and not present in CI's own properly pinned environment. `ruff check`/`format` on
+  both touched provisioning files: clean.
+- The new CI static-check step, extracted verbatim (anchored on its step name) and run standalone
+  against the real repository: passes, and is proven to actually detect regressions via 7 of the 10
+  negative controls above, which exercise this exact script.
+
+**Independent review pass (self-performed within this ticket, no separate reviewing session —
+recorded as such), findings by severity:**
+- **BLOCKER: none.**
+- **HIGH: none.**
+- **MEDIUM: none requiring a code change.** Live Keycloak realm-import/issuer/JWKS-reachability
+  qualification could not be demonstrated in this sandbox (see above in full) — this is precisely
+  the boundary the ticket itself drew around DH-EX-008R, not a defect this ticket introduced or
+  glossed over.
+- **HIGH, found by an independent advisor pass and fixed before this entry was closed:** the new CI
+  static check's cross-realm-merge guard was a broken conditional expression —
+  `if daher_realm.get("realm") == realm.get("realm") if realm_path.is_file() else False:` parses as
+  `(A == B) if C else False`, not the intended `C and (A == B)`, and `realm` was only assigned
+  inside the branch that runs when the file exists — so the missing-file case this line exists to
+  guard would have raised an unhandled `NameError` instead of the intended `::error::` message. The
+  file this bug's own untested branch was named after (a negative control listed as "not separately
+  run" in an earlier draft of this entry, before the fix) was exactly the branch that was broken —
+  a real instance of the pattern this discipline exists to catch. Fixed to
+  `if realm_path.is_file() and daher_realm.get("realm") == realm.get("realm"):`, with `realm`
+  initialized to `{}` up front. Re-extracted and re-verified against the real repository (passes),
+  and now covered by 8 live negative controls, up from 5 (see the expanded list above) — including
+  one that deletes the realm file entirely (previously would have crashed; now reports the correct
+  `::error::` message) and one that renames the realm to `daher` to attempt a merge (now correctly
+  caught).
+- **LOW:** a dead second clause on the keycloak-guard check
+  (`"KEYCLOAK_EXCHANGE_API_CLIENT_SECRET:\\?" not in compose`) could never match real YAML text — a
+  Python-source escaping artifact, harmless but misleading to a future reader. Removed.
+
+**Real facility:** untouched. **No migration.** **No clinical semantics, sign rule, range-ordering
+rule, or unit requirement was added or implied.** Provisioning's secret-generation/rotation/refusal
+behavior is otherwise unmodified — one more generated key, same rules.
+
+**What remains NOT proven / explicitly deferred to DH-EX-008R:** most load-bearing first — **whether
+Keycloak's real emitted `iss` claim actually equals `EXCHANGE_OIDC_ISSUER` as derived above.** This
+ticket verified that Compose interpolates the derivation correctly, not what a running Keycloak
+puts in a token; if `KC_HOSTNAME_STRICT: "false"` plus `KC_PROXY_HEADERS: xforwarded` causes
+request-derived issuer computation rather than the fixed-URL behavior this design assumes, every
+authenticated Exchange request fails closed on an issuer mismatch. DH-EX-008R must check this
+first, against a real token, before qualifying anything downstream of it. Then everything else the
+ticket itself reserved for that follow-up — correct issuer/audience/signature validation against a
+**real running Keycloak** and a real minted token; live wrong-issuer/wrong-audience/expired/unknown-key rejection
+(the unit-level equivalents already exist from DH-EX-002 in `test_exchange_api.py`'s
+`StaticKeySource`-based tests — cited rather than duplicated, per this ticket's own instruction, and
+not re-verified here); platform-admin role behavior; ordinary identity behavior; organization-
+membership authorization; an authenticated request actually reaching the adapter through Caddy.
+Specific to this ticket's own attempted-but-blocked work: `dhealth-exchange`'s real Keycloak import
+behavior on both a fresh database and one where `daher` already exists; the client secret's real
+substitution into a running Keycloak instance (vs. a literal placeholder string landing as the
+secret); Caddy's actual parse/route of the new vhost via `caddy validate` or a live request. All of
+these share one single, disclosed, reproducible cause — this session's WSL2 sandbox cannot reach
+quay.io's or Docker Hub's CDN blob-storage backends to pull the pinned Keycloak/Caddy images — not
+any ambiguity in this ticket's design choices. **Separately, and more fundamentally: no grant type
+in the committed `dhealth-exchange-realm.json` can currently issue a real token at all**
+(`directAccessGrantsEnabled: false`, `serviceAccountsEnabled: false`, `"users": []` — a structural
+fact of the already-existing, uncommitted-by-this-ticket realm file, not a scheduling choice), so
+even an environment that *can* pull the pinned images still needs a deliberate, separately-approved
+realm-contract change (service-account credentials for machine-to-machine use, or a future portal's
+browser-facing authorization-code flow) before an authenticated end-to-end request becomes possible
+at all. Documented explicitly in `keycloak/realm-config/README.md`'s new "The DHealth Exchange
+realm" section so DH-EX-008R is scoped against this fact rather than assuming it away.
+
+**Files changed:** `.env.example`, `.github/workflows/ci.yml`, `README.md`,
+`adapter/src/daher_adapter/app.py`, `adapter/tests/test_exchange_app_wiring.py`, `caddy/Caddyfile`,
+`docker-compose.yml`, `keycloak/realm-config/README.md`,
+`provisioning/src/daher_provisioning/facility_env.py`,
+`provisioning/src/daher_provisioning/secrets.py`, `PROJECT_STATE.md` (this entry).
+
+**Next:** DH-EX-008R (real-Keycloak end-to-end authenticated qualification) is still required —
+confirmed by this ticket's own findings (the sandbox CDN-pull block and the realm's structural
+inability to issue any token today), not merely assumed from the ticket's original framing.
+
+**READY FOR REVIEW: YES**, with real multi-container Keycloak/Caddy qualification explicitly
+flagged as not performed in this sandbox (network limitation, not a design gap) and reserved for
+DH-EX-008R, pending the exact-SHA CI result recorded immediately below in this entry once pushed.

@@ -86,6 +86,7 @@ ROTATABLE = (
     "KEYCLOAK_OPENMRS_CLIENT_SECRET",
     "KEYCLOAK_OPENELIS_CLIENT_SECRET",
     "KEYCLOAK_ADAPTER_CLIENT_SECRET",
+    "KEYCLOAK_EXCHANGE_API_CLIENT_SECRET",
 )
 
 # Rewriting these breaks the facility or its backups. Each maps to what is actually needed

@@ -3,6 +3,11 @@
 `daher-realm.json` is imported at first boot via `--import-realm`. It is committed so the identity
 configuration is code, not admin-console clicking.
 
+`dhealth-exchange-realm.json` (DH-EX-008) is a second, completely separate realm imported the same
+way, alongside this one, into the same Keycloak container. See "The DHealth Exchange realm" below —
+it is never merged with `daher` and everything in this file up to that section describes `daher`
+only.
+
 **Why this README exists:** JSON has no comments, and Keycloak **rejects unknown fields outright**.
 An earlier version of the realm carried `_comment` keys and the import failed with
 `Unrecognized field "_comment" (class RealmRepresentation), not marked as ignorable` — while the
@@ -95,3 +100,37 @@ mapper names, a clean realm-import restart, and a fresh network-isolated import 
 H2 database. Application activation remains off until the native-role mapping and OpenMRS-provider
 rule receive human approval; the one-login acceptance demonstration has therefore not yet been
 claimed.
+
+## The DHealth Exchange realm (DH-EX-008)
+
+`dhealth-exchange-realm.json` defines a **second, independent realm** — `dhealth-exchange` — for
+the DHealth Exchange API (DH-EX-002), imported the same way as `daher` and mounted from the same
+directory. It is not a client added to `daher`; it is a whole separate realm, with its own roles,
+its own single client, and its own secret. The two realms are never merged, never share a client
+secret, and a role in one confers nothing in the other.
+
+Set in `.env`: `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` — a distinct value from
+`KEYCLOAK_OPENMRS_CLIENT_SECRET`/`KEYCLOAK_ADAPTER_CLIENT_SECRET` above, substituted into the
+`dhealth-exchange-api` client's `${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}` placeholder at import time,
+by the same `--import-realm` substitution mechanism `daher-realm.json` already uses. The same
+"no secrets in that file" and "verified in-process, printed only match/mismatch" rules above apply
+here unchanged.
+
+**No grant type in the committed realm can currently issue a token to anything.** The
+`dhealth-exchange-api` client has `directAccessGrantsEnabled: false` and
+`serviceAccountsEnabled: false`, and `"users": []`. This is deliberate for DH-EX-008's scope — the
+realm's *shape* (roles, client, audience mapper) is what this ticket proves deploys correctly, not
+a working login. A real end-to-end token — correct issuer, correct audience, real signature,
+platform-admin role behavior, an authorized org membership — needs either a browser-facing
+authorization-code flow (a future portal) or service-account credentials added to this client,
+which is a product/security decision, not something DH-EX-008 assumed on its own. That
+authenticated qualification is reserved for a follow-up ticket (DH-EX-008R); do not add real users
+or grant types to this realm merely to make an end-to-end demonstration possible.
+
+Because `IGNORE_EXISTING` import behavior is per-realm (see "Fresh import and existing-realm
+reconciliation" above), `dhealth-exchange` imports correctly whether or not `daher` already exists
+in the same Keycloak database — each realm's presence is judged independently. There is currently
+no `dhealth-exchange` counterpart to `keycloak-sso-config`: the single client's configuration comes
+entirely from the committed realm JSON at first import, with nothing left for a reconciliation job
+to apply in place. Add one if this client ever needs updates applied to an already-populated
+database without a fresh import — same reasoning as the "Fresh import" section above.
