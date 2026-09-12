@@ -10885,3 +10885,20 @@ verified live, and exact-SHA CI (recorded below once pushed).
 criterion is unmet or deferred.
 
 **READY FOR REVIEW: YES**
+
+**CLOSURE appended 2026-09-13 (same session, append-only — completing this entry, not
+retracting it):** Pushed as commit `0ec4d6e83eb594c322ce36bf5d89c52451c675a5`. CI run `34724334426`:
+**success**, all 9 jobs green, in particular `static checks` (9s — the `EXPECTED_HEAD:
+0013_exchange_access_mode` migration-chain check) and `adapter — ruff + pytest` (1m53s — the full
+693-passed/51-skipped suite plus lint). Push succeeded on the first attempt.
+
+**Self-review correction disclosed here, not only in the entry body above:** the version of this
+entry drafted before the advisor review claimed negative control #1 "proves both layers are
+load-bearing" for the capability check; that was wrong (1a exercises an endpoint with no domain
+layer, 1b removes both layers at once, so neither isolates the domain check), and the domain-layer
+branch inside `select()` had zero test coverage before this was caught — the same class of gap
+DH-EX-010's own criterion-10 self-review found. Closed before this closure commit by adding
+`test_select_refuses_order_read_grant_bypassing_the_route_layer` (see "Domain-layer capability check
+evidence" above) and correcting the overclaim in place, not by a separate follow-up commit — this is
+the first DH-EX-01x ticket in this sequence where a self-review finding was folded into the
+implementation commit itself rather than requiring its own closure-commit round.
