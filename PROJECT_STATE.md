@@ -10459,8 +10459,10 @@ won first).
 
 **No-price test:** `test_provider_assigns_lab_with_zero_price_rows_succeeds` (never priced) and
 `test_provider_assignment_succeeds_after_all_price_rows_removed` (priced, then all `LabPrice` rows
-deleted) both pass; `test_provider_assignment_writes_no_price_snapshot` behavior is asserted inline
-in the first (both snapshot columns `None` after assignment).
+deleted) both pass; both snapshot columns (`selected_price_amount`, `selected_price_currency`)
+asserted `None` after assignment is asserted inline within
+`test_provider_assigns_lab_with_zero_price_rows_succeeds` itself — no separate test of that name
+exists.
 
 **Unlisted-lab test:** `test_unlisted_but_accepting_lab_is_assignable_by_provider` (repository) and
 the combined **directory/marketplace separation scenario** the ticket names explicitly as "the one
@@ -10475,7 +10477,10 @@ are untouched and still refuse it, `409`).
 (10/10) passes completely unmodified — `select()`'s own eligibility logic was not touched, only one
 new guard was added to its existing-selection branch. `test_patient_response_still_shows_real_
 total_for_patient_selection` confirms the patient-facing receipt is byte-for-byte unchanged in
-shape and values for an ordinary DH-EX-005 selection.
+shape and values for an ordinary DH-EX-005 selection. The stronger, pre-existing regression proof
+that the *historical* receipt is unaffected is `test_price_snapshot_frozen_at_selection_survives_a_
+later_price_change` (unmodified, still passing) — it proves a frozen price snapshot survives a
+later `LabPrice` change, not merely that an ordinary selection still returns a nonzero total.
 
 **Lab-workflow integration results:** `test_clinician_assigns_lab_and_lab_tech_can_accept_it` — a
 provider-assigned order appears in `GET /organizations/{lab_id}/lab-orders` exactly like any other
@@ -10606,4 +10611,16 @@ started here** — "Do not begin specimen/sample workflow."
 six required negative controls plus a seventh closing a self-found coverage gap, the full
 authorization/tenant matrix, and exact-SHA CI (recorded below once pushed).
 
+**Acceptance-criterion disclosure:** all 30 of this ticket's numbered acceptance criteria are met.
+Unlike DH-EX-009, no criterion is unmet and none is deferred — the only genuine gap this ticket
+surfaces (the pre-grant-issuance timing hole, restated above under "What remains NOT built") is a
+newly-discovered product limitation outside this ticket's stated scope, not an unmet criterion of
+DH-EX-010 itself.
+
 **READY FOR REVIEW: YES**
+
+**CLOSURE appended 2026-09-12 (same session, append-only — completing this entry, not
+retracting it):** Pushed as commit `4a730b07663bca5e7c4b15e6e4e04d4b571ac07e`. CI run `34704373997`:
+**success**, all 9 jobs green, in particular `static checks` (8s — the `EXPECTED_HEAD:
+0012_exchange_provider_assign` migration-chain check) and `adapter — ruff + pytest` (2m8s — the full
+682-passed/50-skipped suite plus lint).
