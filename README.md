@@ -19,7 +19,30 @@ OpenMRS + OpenELIS + Keycloak + the adapter — keeps running exactly as built a
 **first reference connector track** rather than the product's definition. Nothing below is deleted
 or inaccurate; read it as the connector-track foundation the new Exchange builds on. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §17 for the Exchange architecture and
-[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-007 entries for what exists so far.
+[`PROJECT_STATE.md`](PROJECT_STATE.md)'s DH-EX-001 through DH-EX-012A entries for what exists so far
+(this file gives the short version below; `docs/MVP-1.0.md` §8 is the authoritative current-vs-MVP
+status table).
+
+Current backend workflow shape, at a glance:
+
+```text
+order
+  → selected/assigned lab (patient-selected or provider/facility-assigned)
+  → accepted
+  → explicit collection milestone
+  → processing
+  → results entered
+  → explicit authorized release
+  → COMPLETED
+  → provider review
+```
+
+Two things this shape does **not** yet resolve, disclosed rather than glossed over: correcting or
+amending a result — before or after release — has no supported path today (`DECISIONS.md`'s ADR-045,
+open); and the current one-result-per-ordered-item data model is confirmed, from real field
+evidence, not to be the final shape for a real panel-based laboratory workflow (ADR-046) — both
+covered in the DH-EX-012/DH-EX-012A paragraphs below.
+
 The Exchange **core domain/persistence layer** (DH-EX-001), the **organization onboarding, OIDC
 authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab directory,
 synthetic test catalog, lab offerings, DJF pricing, and whole-order lab eligibility backend**
@@ -36,18 +59,15 @@ multi-organization identity, tenant isolation, patient/OIDC auth kept structural
 transactionally-authoritative security-mutation audit throughout.
 
 **DH-EX-007 (lab result submission and completion) is also committed and pushed to
-`origin/master`** (merged via PR #1; migration head `0010_exchange_results_workflow`). The
-selected lab's `LAB_TECH` records one immutable result per ordered item once the order is
-`IN_PROGRESS`; the order becomes `COMPLETED` only once PostgreSQL proves every item has a result;
-the ordering provider can then retrieve the completed results and record a terminal review
-disposition (`no-follow-up-required` / `follow-up-required`). The patient-facing path still never
-returns a result value — it remains coarse-status-only. `ResultDelivery` stays `PENDING`: no
-delivery mechanism, message, or notification exists yet for either the provider or the patient.
-Per commit `30c5212`'s own message: 605 passed / 42 skipped locally, real-PostgreSQL
-result-concurrency qualification passed; this had **not been independently re-run or verified
-against GitHub Actions in the DH-EX-007D documentation-closure session** (no `gh` CLI was reachable
-in that session's environment, and the repository is private to unauthenticated web access) — that
-was true when written.
+`origin/master`** (merged via PR #1; migration head `0010_exchange_results_workflow`). Per commit
+`30c5212`'s own message: 605 passed / 42 skipped locally, real-PostgreSQL result-concurrency
+qualification passed. **Superseded in one specific respect by DH-EX-012, noted below rather than
+silently left stale:** DH-EX-007 originally moved the order straight to `COMPLETED` the instant
+every item had a result, with no separate authorization step — that automatic-completion behavior
+no longer exists (see DH-EX-012 immediately below). The rest of DH-EX-007 stands: the selected
+lab's `LAB_TECH` still records one immutable result per ordered item once the order is
+`IN_PROGRESS`, and the ordering provider still retrieves completed results and records a terminal
+review disposition. The patient-facing path still never returns a result value.
 
 **Correction (DH-EX-007D2, 2026-09-12): exact-SHA CI has since been independently observed.**
 Authenticated GitHub API access (via the repository's own stored git credential, not `gh`) confirmed
@@ -57,6 +77,39 @@ DH-EX-007D documentation-closure commit `a17ebad` with the identical result. **D
 exact-SHA CI-qualified.** This proves the test suite and static checks passed in CI; it proves
 nothing about real Keycloak, a live/browser demonstration, production deployment, or clinical
 readiness — those remain separately unproven, below.
+
+**DH-EX-009 through DH-EX-012A extend the backend well past DH-EX-007**, each committed, pushed,
+CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified — full evidence in
+`docs/ARCHITECTURE.md` §17 and each ticket's own `PROJECT_STATE.md` entry, summarized here:
+
+- **DH-EX-009** adds a provider-scoped patient-reference *binding* API (exact source-identity
+  get-or-create) — narrower than full patient lookup/registration, but the first route that lets a
+  provider create a patient reference at all, rather than requiring one to already exist.
+- **DH-EX-010/DH-EX-010A/DH-EX-010A1** add a **provider/facility-assigned lab routing path**
+  alongside DH-EX-005's original patient-selection path — a clinician can assign a lab directly, with
+  no forced price-marketplace step, closing ADR-043's launch-option (a) gap — plus the access-grant
+  and downgrade-safety fixes that path required.
+- **DH-EX-011** adds an explicit, order-level **sample/specimen collection milestone**
+  (`LabSampleCollection`, `POST .../record-collection`) — a single fact-of-recording step required
+  before processing may start, not full specimen management (no container/volume/site/adequacy
+  modeling exists).
+- **DH-EX-012 (ADR-044)** replaces DH-EX-007's automatic completion with an **explicit, authorized
+  release step**: recording a result — even the last one — now only ever reports readiness
+  (`ready_for_release`); a separate `LAB_RESULT_RELEASER` role (additive to `LAB_TECH`, the same
+  human may hold both) must explicitly call `POST .../release-results` before an order reaches
+  `COMPLETED` and a provider can read anything.
+- **DH-EX-012A (ADR-045, OPEN)** audited the resulting gap — today's `LabResult` model is
+  insert-only with no correction or amendment path at all, before or after release — and recorded a
+  decision packet distinguishing the two problems. **Neither is implemented; ADR-045 remains open,
+  and its implementation is further paused behind DH-EX-012B** (below).
+
+**Current result-domain caveat, from real field evidence (DH-FIELD-001, ADR-046, 2026-09-13):**
+review of real Djibouti diagnostic-workflow artifacts confirmed a laboratory may return multiple
+observations for one ordered diagnostic service — the current `LabOrderItem → one LabResult`
+representation is an interim shape, not the final production result model. See
+`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized findings (no real patient data). **DH-EX-012B
+is the next result-domain ticket**, responsible for resolving this before ADR-045's correction/
+amendment work is implemented.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —
@@ -159,13 +212,14 @@ component doc only once you're touching that component:
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
 | [`CURRENT_STATE.md`](CURRENT_STATE.md) | What actually works vs. what is merely written |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order (maternity/connector-track detail, plus §17 for the Exchange) |
+| [`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`](docs/FIELD-DIAGNOSTIC-WORKFLOW.md) | Generalized findings from real Djibouti diagnostic-workflow artifacts (no patient data) — why the current result data model is not yet final (ADR-046) |
 | [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks (maternity/connector-track component) |
 | [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
 | [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |
 | [`docs/CLINICAL-SIGNOFF.md`](docs/CLINICAL-SIGNOFF.md) | The clinical lead's handover sheet for the maternity/connector-track stack. Inventories what it can already order; **nothing is pre-selected** |
 | [`docs/WATERMARK-DESIGN.md`](docs/WATERMARK-DESIGN.md) | How the adapter will learn an order exists, written **before** any transport code (ADR-005 required it) — maternity/connector-track component |
 | [`docs/UI-001-CLINICAL-UX.md`](docs/UI-001-CLINICAL-UX.md) | Earlier maternity/OpenMRS clinical-UI research — historical/component-specific, not the DHealth Clinic/Lab/Patient UX specification |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI — gates 678 tests plus Ruff, compose parsing, image pinning, secret and link checks |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI — gates the full test suite plus Ruff, compose parsing, image pinning, secret and link checks (exact count drifts too often across suites to keep current here — see the latest CI run) |
 
 ---
 

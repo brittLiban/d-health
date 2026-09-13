@@ -55,6 +55,12 @@ to a different unblocked ticket):
 ## Non-negotiables
 
 - Patient data never goes to a third-party AI/ML service.
+- Real-world artifacts shown to an agent for analysis (photos, scans, printouts of a real order,
+  result, chart, or similar) may never have their real content — names, DOB, identifiers,
+  dossier/report numbers, practitioner names, result values, timestamps, addresses, phone numbers,
+  or a reproduced image of the artifact itself — copied into anything version-controlled. Extract
+  only generalized, synthetic, or architectural findings. (See `AGENTS.md`, added 2026-09-13,
+  DH-FIELD-001.)
 - No clinical diagnosis or interpretation. This system records and routes.
 - French is first-class, not a localisation afterthought.
 - Never invent clinical content — unmodified WHO/OpenMRS/OpenELIS reference defaults only, marked

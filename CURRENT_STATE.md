@@ -1,17 +1,24 @@
 # Current State — Daher Health
 
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
-> **`docs/MVP-1.0.md`** (2026-09-12) — an interoperable diagnostic network (Exchange/Clinic/Lab/
-> Patient/Connect), not primarily the maternity/birth-centre system the "Assessed: 2026-08-17"
-> section immediately below describes. That section, and most of this file, is an honest,
-> unmodified implementation inventory for the **maternity/reference-connector track** — real,
-> current, and still binding wherever that track is touched, just no longer the definition of
-> DHealth's overall scope. **The DHealth Exchange backend's own current state** (DH-EX-001 through
-> DH-EX-007 — what's WRITTEN/TESTED/CI-QUALIFIED vs. NOT BUILT) is inventoried in
-> `docs/MVP-1.0.md` §8, not duplicated here; this file's own Exchange-era entries (search
-> "DH-EX-") remain as the detailed ticket-by-ticket record behind that summary. **DHealth Clinic,
-> DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named applications anywhere
-> in this repository, on either track.
+> **`docs/MVP-1.0.md`** (re-audited 2026-09-13, DH-FIELD-001) — an interoperable diagnostic network
+> (Exchange/Clinic/Lab/Patient/Connect), not primarily the maternity/birth-centre system the
+> "Assessed: 2026-08-17" section immediately below describes. That section, and most of this file,
+> is an honest, unmodified implementation inventory for the **maternity/reference-connector
+> track** — real, current, and still binding wherever that track is touched, just no longer the
+> definition of DHealth's overall scope. **The DHealth Exchange backend's own current state**
+> (DH-EX-001 through **DH-EX-012A** as of this note — organization onboarding, patient/order
+> creation, provider- and patient-driven lab assignment, accept/reject/processing, an explicit
+> sample-collection milestone, result entry, an explicit authorized release step distinct from
+> entry, and the still-open correction/amendment decision packet — what's
+> WRITTEN/TESTED/CI-QUALIFIED vs. NOT BUILT) is inventoried in `docs/MVP-1.0.md` §8, not duplicated
+> here; this file's own Exchange-era entries (search "DH-EX-") remain as the detailed
+> ticket-by-ticket record behind that summary. **The current Exchange result data model is itself
+> not final** — real field evidence (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, ADR-046) confirms one
+> ordered diagnostic service may need to return multiple observations, which today's
+> one-result-per-order-item schema does not represent; DH-EX-012B is the ticket that will resolve
+> this. **DHealth Clinic, DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named
+> applications anywhere in this repository, on either track.
 
 **Assessed:** 2026-08-17 · **Target:** pilot-ready by 2026-09-01 — **historical target date for the
 maternity/reference-connector track; see the note above for the current product definition, and

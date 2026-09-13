@@ -1066,3 +1066,57 @@ WhatsApp/SMS integration — none of this is equivalent to a completed Exchange 
 (`daher-realm.json`) is untouched. Full audit, gap analysis, and the proposed ticket sequence
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
 PROJECT_STATE.md's DH-EX-001 through DH-EX-007 entries.
+
+**DH-EX-008 (deployment wiring) through DH-EX-012A (correction/amendment decision packet) extend
+the Exchange well past DH-EX-007** — reconciled into this document 2026-09-13 (DH-FIELD-001; full
+per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not restated here):
+
+- **DH-EX-008** wires the Exchange's existing OIDC auth code into the real Docker/Keycloak/Caddy
+  deployment (env contract, realm import, `exchange.$BASE_DOMAIN` routing, a dedicated
+  `/health/exchange-ready` endpoint). Statically verified; live Keycloak/Caddy qualification remains
+  blocked in this sandbox (registry image pull unreachable) and is a separate follow-up
+  (DH-EX-008R) — not a claim that Exchange auth works against a running Keycloak.
+- **DH-EX-009** adds `POST .../organizations/{provider_id}/patient-references`, an exact-source-
+  identity get-or-create bind — the first route letting a provider create a patient reference
+  rather than requiring one to pre-exist. Narrower than full patient lookup/registration
+  (§10 item 1 below is downgraded, not closed).
+- **DH-EX-010/DH-EX-010A/DH-EX-010A1** add `POST .../orders/{order_id}/assign-lab`, a
+  provider/facility-assigned routing path that shares the same `LabSelection` row as DH-EX-005's
+  patient-selection path but never touches price consent — closing ADR-043's launch-option (a) gap
+  the original pivot audit left open. DH-EX-010A/010A1 then extend the patient-access-grant
+  mechanism (`access_mode`: `LAB_SELECTION` vs. `ORDER_READ`) so a patient link issued after
+  provider assignment reads the already-settled order without regaining lab-choice authority, and
+  close a downgrade-safety gap in the migration that introduced it.
+- **DH-EX-011** adds `LabSampleCollection` and `POST .../lab-orders/{order_id}/record-collection` —
+  an order-level, immutable "collection was recorded in DHealth at this time" fact, required before
+  `start-processing` may run. This is a milestone, not specimen management: no container, volume,
+  site, handling, storage, or adequacy state exists in the schema.
+- **DH-EX-012 (ADR-044)** is the most structurally significant of this group: it removes DH-EX-007's
+  automatic `IN_PROGRESS→COMPLETED` transition entirely. Recording a result — even an order's last
+  missing one — now only ever reports `ready_for_release`; a new `LAB_RESULT_RELEASER` organization
+  role (LAB-only, additive alongside `LAB_TECH` — the same human may hold and use both, no forced
+  second person) must call a new `POST .../release-results` endpoint before `LabOrder.status` ever
+  becomes `COMPLETED`. A new immutable, order-level `LabResultRelease` row (mirroring
+  `LabSampleCollection`'s own shape) records who released and when; a pre-DH-EX-012 order already
+  `COMPLETED` is grandfathered with no fabricated release row. Provider/clinician visibility gates
+  and `ResultDelivery` are unchanged — only the *producer* of `COMPLETED` moved.
+- **DH-EX-012A (ADR-045, OPEN)** audited the gap DH-EX-012 sharpened rather than created: `LabResult`
+  is, and remains, strictly insert-only — no `UPDATE` path exists anywhere in the package, no
+  entering-actor column exists on the row itself, and no revision/version/supersedes metadata
+  exists. It distinguished pre-release *correction* from post-release *amendment* as two separate,
+  unresolved problems and evaluated options for each without adopting any. **Neither is
+  implemented.**
+
+**Current architectural limitation, confirmed by real field evidence (DH-FIELD-001, ADR-046,
+2026-09-13):** the `LabOrderItem → one LabResult` shape above is confirmed, from direct review of
+real Djibouti diagnostic-workflow artifacts, not to be adequate for a real panel-based laboratory
+workflow — one ordered diagnostic service may need to return multiple observations, which today's
+schema cannot represent. **This is now the reason ADR-045's correction/amendment work is paused**,
+not merely deferred: implementing a correction/revision mechanism against a result shape already
+known to need replacing risks being redone once the cardinality question is resolved. No schema,
+panel composition, or observation vocabulary is chosen by this note — see
+`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized (no-patient-data) findings and
+`DECISIONS.md`'s ADR-046 for the one accepted requirement. **DH-EX-012B is the next result-domain
+ticket.**
+
+Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-012A entries.

@@ -137,7 +137,12 @@ prompted writing it down.
 `docs/ARCHITECTURE.md` → `CURRENT_STATE.md`, then inspect current CI and **measure** test
 counts by running the suite — never copy a count from a doc without re-running it. If the
 ticket you were pointed at is already done, say so and stop; do not redo proven work to match
-a preferred style.
+a preferred style. **Current code and a fresh `git fetch`/CI check always win over an older
+document's own snapshot when the two disagree** — a doc's own "audited against SHA X" line, a
+named line number, or a status table entry is a claim about a moment in time, not a promise it
+still holds. Re-verify a prompt-carried starting SHA against `origin/master` yourself before
+trusting it (this repeated so often across tickets, informally, that it is written down here
+once rather than re-derived every time — added 2026-09-13, DH-FIELD-001).
 
 **Test matrix, not just the happy path.** For any check whose claim matters (a health
 verdict, a security refusal, a persistence guarantee), also write the adjacent cases that
@@ -177,6 +182,14 @@ letting a passing test suite imply more than it showed.
 
 - All patient data stays in this stack's own databases. **No third-party AI/ML service ever
   receives patient data** without Liban's explicit prior sign-off.
+- **Real-world artifacts shown to an agent for analysis (photos, scans, printouts of a real order,
+  result, chart, or similar) may never have their real content — names, DOB, identifiers, dossier/
+  report numbers, practitioner names, result values, timestamps, addresses, phone numbers, or a
+  reproduced image of the artifact itself — copied into anything version-controlled: docs, tests,
+  fixtures, examples, or commit messages. Extract only generalized, synthetic, or architectural
+  findings.** Distinct from the rule above (which governs the *running system's* data flow): this
+  governs an agent's own conduct when handed real evidence during a ticket. (Added 2026-09-13,
+  DH-FIELD-001 — see `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the pattern applied.)
 - No feature performs clinical diagnosis or interpretation. This system records, stores, and
   routes. If a task drifts toward interpretation, stop and flag it. (Restated for the Exchange
   specifically in ADR-043 / `docs/MVP-1.0.md` §13.)

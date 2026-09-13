@@ -12407,3 +12407,167 @@ started here**.
 specifically; the packet as a whole cannot be closed without them).
 
 **READY FOR LIBAN DECISION: YES**
+
+---
+
+### DH-FIELD-001 · Reconcile all source-of-truth docs with current Exchange state and real diagnostic field artifacts · P0 · 📋 DOCUMENTATION RECONCILIATION COMPLETE — NO RUNTIME CHANGE
+
+**Ticket:** DH-FIELD-001. Documentation/evidence ticket only, per its own explicit instruction — no
+result-domain code, migration, or API change. Reconciles this repository's source-of-truth
+documents with (1) the Exchange work actually completed after DH-EX-007, (2) ADR-044/DH-EX-012's
+explicit result release, (3) ADR-045/DH-EX-012A's correction-vs-amendment decision packet, and (4)
+generalized findings from real Djibouti diagnostic-workflow field artifacts Liban reviewed and
+reported to this session.
+
+**Starting HEAD/CI:** `cbdc3dc8b9d2defedebadfb52cc87b6bc4374ec7` — fetched and audited fresh,
+matched the ticket's stated expectation exactly, working tree clean. CI run `34756195488`: success,
+all 9 jobs green.
+
+**Field artifacts reviewed, handling confirmed:** two real-world artifacts (a doctor/clinic-issued
+lab order, a laboratory-generated result packet) were reviewed by Liban and reported to this session
+as generalized findings only — this session never saw the artifacts themselves, only Liban's own
+generalized descriptions of their shape. **No real patient name, DOB, identifier, dossier/report
+number, practitioner name, result value, timestamp, address, phone number, or reproduced image
+appears anywhere in this diff** — confirmed by re-reading every new/changed file before committing,
+not merely asserted. `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` (new) states this handling discipline in
+its own header.
+
+#### Primary result-domain finding
+
+> One ordered diagnostic service may produce multiple returned observations. The current
+> `LabOrderItem → one LabResult` Exchange representation is an interim shape, not the final
+> production result model.
+
+Accepted as a binding architectural requirement, narrowly worded, via new **ADR-046** — exact
+schema, panel composition, analyte vocabulary, and interface protocol all explicitly **not**
+decided. **DH-EX-012B is the next result-domain ticket**, responsible for resolving the schema
+shape. **ADR-045 (correction vs. amendment) remains OPEN, not resolved by this ticket** — but its
+own implementation is now explicitly **paused** behind DH-EX-012B, since building a correction/
+revision mechanism on a result shape already known to need replacing risks being redone.
+
+#### Secondary field findings recorded (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, 16 total)
+
+Order entry is operationally simple and should stay low-friction (Finding 1); panel composition is
+source/facility configuration, not invented here (Finding 3); participating organizations already
+carry their own reference identifiers, a future DHealth Connect requirement (Finding 4); source
+event time is distinct from DHealth's own recorded time — `recorded_at` was already named
+correctly, not renamed (Finding 5); the real lab workflow already distinguishes entry from
+professional release, supporting ADR-044's existing shape (Finding 6); a structured computer-
+generated result packet is evidence of an existing LIS, reinforcing Law 2's existing-LIS +
+DHealth-Connect (never manual duplicate entry) direction, with no specific LIS/protocol claimed
+(Finding 7); reference ranges may need richer-than-low/high representation, preserved without
+clinical interpretation (Finding 8); ordering-practitioner provenance on the lab side should reuse
+existing source-identity binding (Finding 9); patient identity presentation varies across
+organizations, reaffirming existing no-fuzzy-merge policy (Finding 10); the minimum patient-
+verification dataset a lab needs is recorded as an explicit **OPEN** question, not answered
+(Finding 11); paper/print/QR remain valid transitional access methods (Finding 12); QR/reference
+identification is never itself authorization (Finding 13); a real report may span multiple pages —
+"a result" must not be modeled as one scalar (Finding 14); analyzer integration is not demonstrated
+by this evidence and is not inferred (Finding 15).
+
+#### Statements deliberately NOT inferred
+
+No panel composition, analyte list, NFS/coagulation/any named panel's real content, reference range
+value, unit, analyzer mapping, interpretation rule, or critical value was recorded anywhere as a
+result of this ticket. No LIS product, interface protocol (API/FHIR/HL7/CSV), or analyzer-automation
+claim is made for any facility. No minimum patient-verification dataset is chosen. No result-domain
+schema is chosen — that is DH-EX-012B's job.
+
+#### Stale documentation found and reconciled
+
+- **`docs/MVP-1.0.md`** — the most substantially stale document, last audited 2026-09-12 against
+  `origin/master` at `4e12dcfb4cc9b447496783fff1eb24eaf21711a5`, predating DH-EX-009 through
+  DH-EX-012A entirely. Re-audited in place (its own established convention: a living current-state
+  snapshot, not an append-only ADR log) with every changed claim marked **[re-audited
+  2026-09-13]** inline rather than silently rewritten: header audit date/SHA; §3's DHealth
+  Exchange/Lab current-state notes; the full §8 CURRENT/NOT BUILT table (every line-number citation
+  re-verified against current `api.py`, several had already drifted); §10's Known Gaps (items 1, 2,
+  5, 11 marked resolved/partial in place with the original text preserved via strikethrough, never
+  deleted; two new items 15–16 added for the correction/amendment gap and the result-domain
+  cardinality finding); §15's backlog (same treatment; two new items 16–17 added); a stale
+  `api.py:557` citation for `PatientOrderResponse` corrected to its current `api.py:652`/`657`
+  (the class moved as the file grew — same class of drift DH-EX-012A independently caught and fixed
+  in its own citations). Field-validated requirements added to the DHealth Clinic, DHealth Lab,
+  DHealth Connect, and Assisted-digital (§7) sections, each citing `docs/FIELD-DIAGNOSTIC-
+  WORKFLOW.md` by finding number.
+- **`README.md`** — the Exchange summary stopped at DH-EX-007 and still described DH-EX-007's
+  original automatic-completion behavior ("the order becomes `COMPLETED` only once every item has a
+  result") as current, which DH-EX-012 removed. Rewritten: the DH-EX-007 paragraph now discloses the
+  supersession explicitly rather than silently; new paragraphs summarize DH-EX-009 through
+  DH-EX-012A; a golden-journey flow diagram and the correction/amendment + result-domain-not-final
+  caveats were added near the top of the section; a new `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` row was
+  added to the "Where to look" table.
+- **`CURRENT_STATE.md`** — its top-level reader-guidance blockquote pointed to "DH-EX-001 through
+  DH-EX-007" as the Exchange's current state. Updated to point through DH-EX-012A and to disclose
+  the result-domain-not-final finding, without touching the maternity-era historical inventory below
+  it (unchanged, per the ticket's own instruction).
+- **`docs/ARCHITECTURE.md` §17** — stopped at DH-EX-007's own closing paragraph. Appended (not
+  rewritten) new paragraphs for DH-EX-008 through DH-EX-012A, matching the section's own established
+  per-ticket-paragraph convention, plus a closing note on the result-domain limitation and why it
+  pauses ADR-045's implementation.
+- **`DECISIONS.md`** — ADR-042 through ADR-045 left completely untouched, per the ticket's explicit
+  instruction. New **ADR-046** appended.
+
+#### Files changed
+
+`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` (new); `DECISIONS.md` (ADR-046 appended, plus a dated forward
+pointer added to ADR-043's now-superseded "no release step exists" bullet — original text kept
+verbatim, not rewritten); `docs/MVP-1.0.md`; `README.md`; `CURRENT_STATE.md`; `docs/ARCHITECTURE.md`;
+`AGENTS.md` (two genuinely missing repository-wide rules added — see below); `CLAUDE.md` (one bullet
+mirroring AGENTS.md's new real-artifact-handling rule into the always-loaded summary, since that
+rule's value depends on being seen without an agent having to go looking for it); `PROJECT_STATE.md`
+(this entry). **No Python application code, database model, migration, API, frontend code, or test
+file was touched** — confirmed by `git status --short` before committing. `docs/CLINICAL-SIGNOFF.md`
+audited, not changed (see below).
+
+#### AGENTS.md — changed, with reasoning
+
+Audited against the ticket's own four checks. **No invented clinical content** and **Human Decision
+Required** are both already thoroughly covered (the "rule that matters most" section, the
+non-negotiables list) — not touched. Two genuinely missing, repository-wide gaps were found and
+added narrowly:
+
+1. **No existing rule stated that current code/CI wins over an older document's own snapshot claim**
+   when they disagree — every ticket in this session independently re-derived this via informal
+   "re-audit fresh, don't trust a carried SHA" language, but it was never written down. Added one
+   clause to the existing "Audit before coding" bullet.
+2. **No existing rule covered an agent's own conduct when handed real-world artifacts containing
+   real patient data** for analysis (distinct from the existing "patient data stays in this stack's
+   own databases" rule, which governs the *running system's*, not an *agent's own*, data handling).
+   This exact ticket's "ABSOLUTE DATA RULE" is precisely this gap. Added as a new bullet in
+   Non-negotiables.
+
+Both are minimal, dated, and traceable to this ticket — not a rewrite of existing rules.
+
+#### docs/CLINICAL-SIGNOFF.md — audited, not changed
+
+Confirmed by full read: zero mentions of "Exchange" or any "DH-EX-" ticket anywhere in the document;
+its entire content is the maternity/OpenMRS/OpenELIS clinical-signoff process (candidate lab
+sets/panels already installed in OpenMRS/OpenELIS, ANC/partograph fields). No materially false
+cross-product claim exists for these field findings to correct. Per the ticket's own "prefer no
+change" instruction, **left unchanged**.
+
+#### Validation
+
+`git status --short` confirmed only the files listed above changed before staging. No Python
+application code, model, migration, API, or test was touched, so no adapter test run or `ruff`
+check applies to this ticket's own diff. The repository's own "Relative documentation links
+resolve" CI check (`.github/workflows/ci.yml`) was re-read to confirm its exact matching rule
+(`\]\((?!https?:|mailto:)([^)#]+)` against every `*.md` file), then reproduced and run locally
+against every tracked `*.md` file (not just the one new link) — result: every relative link in all
+25 tracked documents resolves, including the one new link added by this ticket
+(`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, from `README.md`'s "Where to look" table). **Scoped
+explicitly, not implied:** this covers only the doc-link-checker step. The remainder of the
+`static checks` CI job (`.env` not tracked, no tracked secrets, image-pinning, compose/XML/JSON/CSV
+parsing, the ADR-017/028/029/040/041 Caddyfile and `reconcile-sso.sh` guards, DH-011D patch guards)
+was **not re-run locally** — none of it asserts on any file this diff touches, so it is expected
+unaffected, not confirmed unaffected; the pushed commit's own CI run confirms it.
+
+**Next:** DH-EX-012B (result-domain schema resolution) is the next ticket. Per this ticket's own
+final instruction, it is **not started here**.
+
+**Human Decision Required: NO** — this ticket reconciles documentation with decisions already made
+(ADR-044/045) and evidence already reported (ADR-046 was decided by Liban directly, not proposed by
+this ticket); it does not itself ask a new question.
+
+**READY FOR REVIEW: YES**

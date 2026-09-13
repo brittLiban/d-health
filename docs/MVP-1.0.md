@@ -2,8 +2,14 @@
 
 **Status:** Product direction ACCEPTED, architecture ACCEPTED — see `DECISIONS.md`'s ADR-043 (which
 extends, and does not retract, ADR-042's 2026-09-08 pivot decision). **Not yet implemented** beyond
-what DH-EX-001 through DH-EX-007 already built (§8).
-**Date:** 2026-09-12. **Audited against `origin/master` at `4e12dcfb4cc9b447496783fff1eb24eaf21711a5`.**
+what DH-EX-001 through DH-EX-012A already built (§8).
+**Date:** 2026-09-12, **re-audited 2026-09-13 (DH-FIELD-001).** Audited against `origin/master` at
+`cbdc3dc8b9d2defedebadfb52cc87b6bc4374ec7`. **What changed in the re-audit, disclosed rather than
+silently corrected:** the 2026-09-12 snapshot below predated DH-EX-009 through DH-EX-012A and
+recorded several since-resolved items as `NOT BUILT`/`OPEN DECISION` — every such correction below
+is marked inline as **[re-audited 2026-09-13]** rather than silently rewritten, so a reader comparing
+against an earlier printout of this document can still see what changed and when. This document's
+own append-only discipline (bottom of file) governs this pass exactly as it has every prior one.
 
 > **What this document is not.** It invents no clinical content. Lab panel contents, ANC/
 > partograph fields, danger thresholds, and staff-role assignments remain reserved to the clinical
@@ -54,7 +60,11 @@ national EMR** — ADR-042's data-minimization boundary is unchanged by this doc
 clinical notes, no medication list, no diagnosis history, no general encounter data.
 
 `CURRENT`: this is the one surface with real, tested, CI-qualified backend code today — DH-EX-001
-through DH-EX-007. See §8.
+through DH-EX-012A **[re-audited 2026-09-13]** (was "through DH-EX-007"). See §8. **Also
+`CURRENT` as of the re-audit, not a caveat about this surface's maturity but a real architectural
+limitation:** the result data model (`LabOrderItem → one LabResult`) is confirmed, from real field
+evidence, not to be the final shape for a panel-based laboratory workflow — see `DECISIONS.md`'s
+ADR-046 and `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`.
 
 ### DHealth Clinic
 
@@ -65,7 +75,16 @@ follow-up disposition. **It is not initially a complete hospital information sys
 
 `NOT BUILT`: no dedicated DHealth Clinic frontend or branded application exists. The Exchange
 backend already exposes provider-facing order-creation/read routes a future DHealth Clinic would
-call (§8); patient lookup/registration does not exist even at the API level (§8, §10).
+call (§8); a provider-scoped patient-reference *binding* API exists (DH-EX-009, exact source-identity
+get-or-create) **[re-audited 2026-09-13 — was "patient lookup/registration does not exist even at
+the API level"]**, but full patient lookup/search/registration by name or demographic still does not
+(§8, §10).
+
+**Field-validated requirement (DH-FIELD-001, 2026-09-13):** real Djibouti clinic-order artifacts
+confirm ordering is operationally simple — patient, requested diagnostic service(s), date, ordering-
+clinician provenance. DHealth Clinic ordering must stay service-level and fast: a clinician selects
+diagnostic *services*, never individual underlying observations, and must never be forced through an
+analyte-by-analyte ordering flow. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 1–2.
 
 ### DHealth Lab
 
@@ -75,8 +94,23 @@ pilot; processing state; structured result entry; result validation/release work
 work/history. **It is not initially intended to replace every advanced LIS capability.**
 
 `NOT BUILT`: no dedicated DHealth Lab frontend exists. The Exchange backend implements the work
-queue, accept/reject/start-processing, and structured result entry (§8); specimen/sample workflow
-and result validation/release are explicit `NOT BUILT` gaps (§10).
+queue, accept/reject/start-processing, structured result entry, an explicit order-level
+sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
+*release* step (DH-EX-012/ADR-044) **[re-audited 2026-09-13 — was "specimen/sample workflow and
+result validation/release are explicit `NOT BUILT` gaps"]** (§8). Specimen/sample workflow remains
+`PARTIAL` — DH-EX-011 is a single fact-of-recording milestone, not specimen management (no
+container/volume/site/adequacy modeling exists). Result *correction/amendment*, before or after
+release, remains `NOT BUILT`/`OPEN DECISION` (ADR-045, §10), and the underlying result-domain shape
+itself is confirmed not final for real panel-based workflows (ADR-046, §10) — native DHealth Lab
+result entry should not be built against today's schema until DH-EX-012B resolves that.
+
+**Field-validated requirement (DH-FIELD-001, 2026-09-13):** DHealth Lab's native result workflow
+must eventually support one ordered diagnostic service producing multiple returned observations
+(ADR-046) — this is the primary reason its structured result-entry UI is not yet designed. Future
+observation/reference-range modeling must also be able to preserve a source's own representation
+(numeric bounds, inequality-style values, or textual reference information) without deriving a
+clinical judgment ("abnormal"/"critical"/etc.) from it. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`
+Findings 2 and 8. No schema is chosen here — DH-EX-012B's job.
 
 ### DHealth Patient
 
@@ -101,6 +135,20 @@ and run (see `CURRENT_STATE.md`); its connection to the *Exchange* core specific
 the connector's own internal order/result routing) is `NOT BUILT` — no file under
 `openmrs-config/` or `openelis-config/` has ever referenced the Exchange, confirmed by grep as of
 this document's audit.
+
+**Field-validated requirement (DH-FIELD-001, 2026-09-13):** a real Djibouti laboratory's own
+structured, computer-generated result packet is evidence that at least one real participating
+laboratory already runs software of some kind — reinforcing, not merely restating, Law 2's "no
+double entry" invariant above: the intended steady state for such an organization is existing LIS +
+DHealth Connect, never existing LIS + manual duplicate DHealth entry. A future connector integration
+must be able to preserve, without inventing or normalizing away, (a) the source system's own
+transaction identifiers alongside DHealth's own, (b) the distinction between a source-system event
+time (collection, result creation, professional release) and DHealth's own received/recorded time,
+and (c) a source's own result/reference-range representation (which may not always be a clean
+numeric low/high pair) — without ever deriving a clinical judgment from it. **No specific LIS
+product, interface protocol (API/FHIR/HL7/CSV or otherwise), or analyzer-integration capability is
+claimed to exist for this or any facility** — none was demonstrated by the reviewed evidence. See
+`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 4, 5, 7, 8, and 15.
 
 ## 4. MVP golden journey
 
@@ -199,6 +247,16 @@ through mobile web, a printed slip, a QR code, an order number, receptionist ass
 assistance, or a future voice/audio channel must still resolve to the same underlying order. The
 access channel must never create a parallel clinical workflow.
 
+**Field-reaffirmed (DH-FIELD-001, 2026-09-13):** real Djibouti workflow evidence confirms paper
+remains operationally valid today, supporting the transitional pattern already implied above —
+digital order → optional printed slip → patient carries it → lab scans QR/enters a reference → the
+same canonical order opens — reaffirming "one order, many doors" as a real-world requirement, not a
+speculative one. **Identifying an order by QR/reference must never itself be authorization**: it is
+a lookup key, structurally independent of the Exchange's own authenticated organization/user
+authorization and of DH-EX-005's separate patient-bearer-grant mechanism — neither is weakened or
+bypassed by knowing an order's reference. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 12–13.
+Still `NOT BUILT`; this remains a design constraint, not a status.
+
 **Human-assisted workflow is a feature, not a failure.** DHealth should not attempt to remove
 people from every interaction. For users who need assistance, clinic and laboratory staff are valid
 interaction points — a receptionist printing the order, a lab tech scanning it, staff helping
@@ -211,7 +269,13 @@ spelling/transliteration differences as a *discovery* aid; it must never silentl
 automatically identify patients. Staff must confirm identity according to an approved workflow.
 `CURRENT`, from DH-EX-004/ADR-042: patient references are bound by source-system + source-identity
 only — never a national identifier, never fuzzy-matched into an automatic merge. `OPEN DECISION`:
-the full patient-matching policy for Djibouti is not invented here.
+the full patient-matching policy for Djibouti is not invented here. **A narrower, field-raised
+question, also `OPEN DECISION` (DH-FIELD-001, 2026-09-13), not answered here:** what minimum
+patient attributes does a receiving laboratory need to safely verify the person presenting for an
+order? Real lab workflow may use demographic detail (e.g. date of birth) for this; this document
+does not conclude the Exchange should automatically transmit or store it — that would be a real
+privacy/scope decision requiring Liban's approval and further field validation, not an agent's
+inference from one artifact. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 11.
 
 **Language/localization.** DHealth is being designed for Djibouti. `DECIDED`: professional
 clinical/administrative interfaces remain French-first unless a later validated facility
@@ -229,25 +293,32 @@ noted), `CI-QUALIFIED` (an exact-SHA GitHub Actions run has been independently o
 `RUNTIME-QUALIFIED` (demonstrated against a real running system, e.g. real PostgreSQL or a real
 browser), or `NOT BUILT`.
 
+**[Re-audited 2026-09-13, DH-FIELD-001 — every row below re-verified against `origin/master` at
+`cbdc3dc8b9d2defedebadfb52cc87b6bc4374ec7`, not carried forward from the 2026-09-12 pass. Several
+line-number citations below had already drifted from that pass's own numbers; all are re-checked
+here, not copied.]**
+
 | Golden-journey step | Status | Evidence |
 |---|---|---|
-| Provider identifies/registers patient | **NOT BUILT** (registration) / partial (reference binding) | `PatientReferenceRepository.get_or_create` exists (`identity.py`), but no HTTP route exposes it — `create_lab_order` (api.py:1513) only calls `patients.get_for_organization` and 404s if the reference doesn't already exist. There is no "look up or register a patient" API today. |
-| Clinician creates lab order | WRITTEN, TESTED, CI-QUALIFIED | DH-EX-004, `POST /organizations/{provider_id}/orders` (api.py:1509). CI run `34441434606` (per PROJECT_STATE.md's DH-EX-004 FINAL CLOSURE). |
-| Lab is assigned/selected | WRITTEN, TESTED, CI-QUALIFIED — **patient-selection path only** | DH-EX-005, `POST /patient/order/selection` (api.py:1807), gated by an opaque bearer grant, exact price consent (`expected_price_ids`), and full DH-EX-003 eligibility re-evaluation. **No provider/facility-assigned-lab route exists** — confirmed by the full route inventory in `api.py`; this is the launch-option (a) referenced in ADR-043's DH-EX-005 conflict note, and it is `NOT BUILT`, not merely undocumented. |
-| Lab receives order | WRITTEN, TESTED, CI-QUALIFIED | `GET /organizations/{lab_id}/lab-orders` (api.py:1868), DH-EX-006. |
-| Lab accepts order | WRITTEN, TESTED, CI-QUALIFIED | `POST .../accept` (DH-EX-006), `SELECTED`→`ACCEPTED`. |
-| Sample/specimen workflow | PARTIAL | DH-EX-011: order-level sample/specimen collection milestone is implemented for the lab workflow (`LabSampleCollection`, `POST .../record-collection`). This is a single fact-of-recording milestone, not specimen management — no specimen type, container, volume, site, handling, storage, or adequacy modeling exists in the Exchange schema. |
-| Processing | WRITTEN, TESTED, CI-QUALIFIED | `POST .../start-processing` (DH-EX-006), `ACCEPTED`→`IN_PROGRESS`. |
-| Result entered | WRITTEN, TESTED-per-commit-message, CI-QUALIFIED | DH-EX-007, `POST .../items/{item_id}/result` (api.py:1997). CI run `34649375844` (DH-EX-007D2). Not independently re-run by any documentation session (no Python interpreter available in this environment — see PROJECT_STATE.md's DH-EX-007 entry). |
-| Result validated/released | **NOT BUILT** | DH-EX-007 only implements automatic `COMPLETED` once every item has a result (application/PostgreSQL-proven counting) — there is no separate authorization step distinguishing "entered" from "validated/released." Recorded as a product gap in ADR-043 and §10 below, not silently assumed to exist. |
-| Ordering provider receives result | WRITTEN, TESTED-per-commit-message, CI-QUALIFIED | `GET .../orders/{order_id}/results` (api.py:2077), provider-only, only once `COMPLETED`. |
-| Clinician reviews result | WRITTEN, TESTED-per-commit-message, CI-QUALIFIED | `POST .../review/no-follow-up-required` / `.../follow-up-required` (api.py:2187/2200). |
-| Patient receives status/follow-up communication | **NOT BUILT** | `ResultDelivery` is created `PENDING` at order creation (DH-EX-001) and no code path anywhere in the repository advances it past `PENDING` — confirmed by grep. No WhatsApp/SMS/email transport exists for the Exchange. `ResultDeliveryRepository.mark_delivered`/`mark_failed` exist (`results.py`) but are never called. |
+| Provider identifies/registers patient | **PARTIAL** (was **NOT BUILT**/partial) | DH-EX-009 added `POST .../organizations/{provider_id}/patient-references` (`bind_patient_reference`, `api.py:1759`) — an exact source-identity get-or-create bind. `create_lab_order` (`api.py:1809`) still only calls `patients.get_for_organization` and 404s if no reference exists — so an order-creation caller must bind first, in a separate call. There is still no "look up or register a patient by name/demographic" API. |
+| Clinician creates lab order | WRITTEN, TESTED, CI-QUALIFIED | DH-EX-004, `POST /organizations/{provider_id}/orders` (`api.py:1806`). CI run `34441434606` (per PROJECT_STATE.md's DH-EX-004 FINAL CLOSURE). |
+| Lab is assigned/selected | WRITTEN, TESTED, CI-QUALIFIED — **both paths now exist** (was "patient-selection path only") | DH-EX-005's patient-selection path, `POST /patient/order/selection` (`api.py:2176`), gated by an opaque bearer grant, exact price consent (`expected_price_ids`), and full DH-EX-003 eligibility re-evaluation — **plus DH-EX-010's provider/facility-assigned path**, `POST .../orders/{order_id}/assign-lab` (`api.py:1934`), which shares the identical `LabSelection` row but never touches price consent. ADR-043's launch-option (a) conflict is closed by DH-EX-010; DH-EX-005's own price-consent contract is otherwise unchanged. |
+| Lab receives order | WRITTEN, TESTED, CI-QUALIFIED | `GET /organizations/{lab_id}/lab-orders` (`api.py:2246`), DH-EX-006. |
+| Lab accepts order | WRITTEN, TESTED, CI-QUALIFIED | `POST .../accept` (`api.py:2272`, DH-EX-006), `SELECTED`→`ACCEPTED`. |
+| Sample/specimen workflow | PARTIAL (unchanged this pass) | DH-EX-011: order-level sample/specimen collection milestone (`LabSampleCollection`, `POST .../record-collection`, `api.py:2374`), required before `start-processing` may run. This is a single fact-of-recording milestone, not specimen management — no specimen type, container, volume, site, handling, storage, or adequacy modeling exists in the Exchange schema. |
+| Processing | WRITTEN, TESTED, CI-QUALIFIED | `POST .../start-processing` (`api.py:2341`, DH-EX-006), `ACCEPTED`→`IN_PROGRESS`. |
+| Result entered | WRITTEN, TESTED, CI-QUALIFIED | DH-EX-007/DH-EX-012, `POST .../items/{item_id}/result` (`submit_lab_result`, `api.py:2419`). **Behavior changed by DH-EX-012, not merely re-cited**: even an order's last missing result no longer transitions the order — it only reports `ready_for_release`. See the next row. |
+| Result validated/released | **WRITTEN, TESTED, CI-QUALIFIED** (was **NOT BUILT**) | DH-EX-012/ADR-044: `POST .../release-results` (`api.py:2528`), gated on a new `LAB_RESULT_RELEASER` role (additive alongside `LAB_TECH`), required before `LabOrder.status` becomes `COMPLETED`. This is the separate authorization step ADR-043 originally recorded as missing — it now exists, distinctly from result entry. **What is not yet built, recorded honestly rather than folded into this row's own status:** correcting or amending an already-entered or already-released result has no supported path at all (ADR-045, §10), and the underlying one-result-per-item shape is confirmed not final for real panel-based workflows (ADR-046, §10). |
+| Ordering provider receives result | WRITTEN, TESTED, CI-QUALIFIED | `GET .../orders/{order_id}/results` (`get_lab_order_results`, `api.py:2594`), provider-only, only once `COMPLETED` — the gate that now depends on explicit release, not automatic completion. |
+| Clinician reviews result | WRITTEN, TESTED, CI-QUALIFIED | `POST .../review/no-follow-up-required` / `.../follow-up-required` (`api.py:2701`/`api.py:2714`). |
+| Patient receives status/follow-up communication | **NOT BUILT** (unchanged this pass) | `ResultDelivery` is created `PENDING` at order creation (DH-EX-001) and no code path anywhere in the repository advances it past `PENDING` — re-confirmed by grep as of this pass. No WhatsApp/SMS/email transport exists for the Exchange. `ResultDeliveryRepository.mark_delivered`/`mark_failed` exist (`results.py`) but are never called. |
 
 **RUNTIME-QUALIFIED, for any of the above: none.** Every qualification on record for DH-EX-001
-through DH-EX-007 is CI/unit/integration-test-level against SQLite and/or a disposable PostgreSQL
-instance. **Real Keycloak qualification: NOT RUN for any Exchange ticket.** **Manual live/browser
-demonstration: NOT RUN.** No production deployment exists. No pilot has begun.
+through DH-EX-012A is CI/unit/integration-test-level against SQLite and/or a disposable PostgreSQL
+instance (re-confirmed this pass — was "through DH-EX-007"). **Real Keycloak qualification: NOT RUN
+for any Exchange ticket** (DH-EX-008 wired the deployment but could not qualify live, per §10 item
+14 below). **Manual live/browser demonstration: NOT RUN.** No production deployment exists. No pilot
+has begun.
 
 ## 9. Explicit out-of-scope list
 
@@ -267,43 +338,77 @@ work — see §14.
 ## 10. Known gaps
 
 Gaps found by direct code inspection during this audit, each an `OPEN DECISION` or `NOT BUILT`
-item, not resolved by this document:
+item, not resolved by this document. **Re-audited 2026-09-13 (DH-FIELD-001) — items resolved since
+the 2026-09-12 pass are marked `RESOLVED` in place, not deleted, so the original gap remains
+legible; item numbers are kept stable since §15 and other documents point at them by number.**
 
-1. **No patient lookup/registration API.** Order creation requires a pre-existing
-   `patient_reference_id`; there is no route to create or find one. Blocks DHealth Clinic's most
-   basic MVP purpose.
-2. **No provider/facility-assigned-lab path.** Only patient self-selection (with price consent)
-   exists. ADR-043's launch-option (a) is not implemented.
-3. **DH-EX-005's price-consent contract vs. Law 1.** Recorded in ADR-043 as an explicit,
-   unresolved conflict — not reinterpreted here.
-4. **No specimen/sample management.** DH-EX-011 added an order-level collection *milestone* only
-   (`LabSampleCollection`) — no specimen type, container, volume, site, handling, storage, or
-   adequacy entity/state exists in the Exchange schema.
-5. **No result validation/release step**, distinct from result entry. See ADR-043.
-6. **`ResultDelivery.status` semantics undecided.** `DELIVERED` could mean available-to-provider,
-   sent-to-connector, received-by-connector, presented-to-user, or acknowledged-by-user. Not
-   chosen. See ADR-043.
-7. **No patient communication transport.** No SMS/WhatsApp/email code exists for the Exchange;
-   ADR-003's real-credential WhatsApp gate (maternity-era) is unrelated infrastructure that has
-   never been wired to the Exchange.
+1. ~~No patient lookup/registration API.~~ **PARTIAL, not fully resolved [re-audited
+   2026-09-13].** DH-EX-009 added `POST .../organizations/{provider_id}/patient-references`, an
+   exact-source-identity get-or-create bind — order creation no longer strictly requires a
+   *pre-existing* reference if the caller binds first. Full lookup/search/registration by name or
+   demographic still does not exist. Still blocks DHealth Clinic's most basic MVP purpose, just less
+   completely than before.
+2. ~~No provider/facility-assigned-lab path.~~ **RESOLVED [re-audited 2026-09-13].** DH-EX-010
+   added `POST .../orders/{order_id}/assign-lab` — ADR-043's launch-option (a) is now implemented,
+   coexisting with patient self-selection on the same `LabSelection` row.
+3. **DH-EX-005's price-consent contract vs. Law 1.** Unchanged, still an explicit, unresolved
+   conflict recorded in ADR-043 — DH-EX-010's provider-assignment path is one of the two acceptable
+   launch options ADR-043 itself named for this conflict, not a resolution of the conflict itself.
+4. **No specimen/sample management.** Unchanged. DH-EX-011 added an order-level collection
+   *milestone* only (`LabSampleCollection`) — no specimen type, container, volume, site, handling,
+   storage, or adequacy entity/state exists in the Exchange schema.
+5. ~~No result validation/release step, distinct from result entry.~~ **RESOLVED [re-audited
+   2026-09-13].** DH-EX-012/ADR-044 added exactly this: an explicit `LAB_RESULT_RELEASER`-gated
+   release step, structurally separate from result entry, required before `COMPLETED`. **What
+   remains open as a direct consequence, recorded as new items 15–16 below:** no correction/
+   amendment path exists either before or after this new release step (ADR-045), and the underlying
+   result-per-item data model this release step operates on is itself confirmed not final for real
+   panel-based workflows (ADR-046).
+6. **`ResultDelivery.status` semantics undecided.** Unchanged. `DELIVERED` could mean
+   available-to-provider, sent-to-connector, received-by-connector, presented-to-user, or
+   acknowledged-by-user. Not chosen. See ADR-043.
+7. **No patient communication transport.** Unchanged. No SMS/WhatsApp/email code exists for the
+   Exchange; ADR-003's real-credential WhatsApp gate (maternity-era) is unrelated infrastructure
+   that has never been wired to the Exchange.
 8. **Sensitive-content policy per channel** (SMS/WhatsApp/lock-screen/voice/shared family phones)
-   is undecided.
-9. **Proxy/family authorization** is undecided; no code or semantics exist.
+   is undecided. Unchanged.
+9. **Proxy/family authorization** is undecided; no code or semantics exist. Unchanged.
 10. **Full patient-matching/national-identifier policy for Djibouti** is undecided beyond the
-    existing exact-source-identity rule.
-11. **`LabResult.numeric_value`/`reference_range_low`/`reference_range_high` have no API-level
-    `max_digits`/`decimal_places` constraint** matching their `Numeric(18, 4)` database columns —
+    existing exact-source-identity rule. Unchanged. **Sharpened by field evidence, not resolved
+    [re-audited 2026-09-13]:** what minimum patient attributes a receiving laboratory needs to
+    safely verify the presenting patient is now an explicitly named open question, not merely
+    implied — §7, `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 11.
+11. ~~`LabResult.numeric_value`/`reference_range_low`/`reference_range_high` have no API-level
+    `max_digits`/`decimal_places` constraint matching their `Numeric(18, 4)` database columns —
     confirmed by reading `api.py`'s `LabResultSubmitRequest` (line 647) against `models.py`'s
     `LabResult` (line 474), the same class of gap DH-EX-003R already fixed for `LabPrice.amount`
     (api.py line 366). A value with more than 4 decimal places or too many integer digits reaches
-    the database rather than a clean 422. This is DH-EX-007A in the follow-up backlog (§15).
+    the database rather than a clean 422. This is DH-EX-007A in the follow-up backlog (§15).~~
+    **RESOLVED [re-audited 2026-09-13].** Fixed by DH-EX-007A (`PROJECT_STATE.md`'s DH-EX-007A
+    entry) — the API boundary now rejects an over-scale or over-precision Decimal value with a
+    clean 422 before it can reach the database. (Original line citations above are stale — kept
+    verbatim for history, not re-verified against current line numbers since the gap they describe
+    no longer exists.)
 12. **No exact-SHA CI-independent review (DH-EX-007R) exists** for DH-EX-007 itself — only the
-    implementing commit's own self-review, per PROJECT_STATE.md's DH-EX-007 entry.
-13. **DHealth Exchange has no connector wiring to OpenMRS/OpenELIS.** The two systems exist as
-    separate, working stacks; nothing routes an Exchange order through them or vice versa.
-14. **No real Keycloak qualification anywhere in the Exchange.** Every authorization boundary
-    (`require_clinician`, `require_lab_tech`, etc.) is proven against a locally generated RSA
-    keypair (`StaticKeySource`), never a real identity provider.
+    implementing commit's own self-review, per PROJECT_STATE.md's DH-EX-007 entry. Not re-verified
+    by this pass; carried forward unchanged.
+13. **DHealth Exchange has no connector wiring to OpenMRS/OpenELIS.** Unchanged. The two systems
+    exist as separate, working stacks; nothing routes an Exchange order through them or vice versa.
+14. **No real Keycloak qualification anywhere in the Exchange.** Unchanged in substance — DH-EX-008
+    wired the deployment configuration (env contract, realm import, routing) but could not qualify
+    against a live Keycloak in its own sandbox (registry image unreachable); every authorization
+    boundary (`require_clinician`, `require_lab_tech`, etc.) remains proven only against a locally
+    generated RSA keypair (`StaticKeySource`), never a real identity provider.
+15. **New [DH-FIELD-001, 2026-09-13]. No result correction (pre-release) or amendment
+    (post-release) path exists.** `LabResult` is insert-only, package-wide, with no entering-actor
+    column and no revision metadata (confirmed by DH-EX-012A's audit). ADR-045 records the decision
+    packet distinguishing the two problems; **neither is decided or implemented.** See ADR-045.
+16. **New [DH-FIELD-001, 2026-09-13]. The current `LabOrderItem → one LabResult` model is confirmed
+    not final for real panel-based laboratory workflows.** Real field evidence shows one ordered
+    diagnostic service may need to return multiple observations — today's schema cannot represent
+    this. ADR-046 accepts this as a binding architectural requirement without choosing a schema.
+    **This is now the reason item 15's implementation is paused, not merely still open** — see
+    `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` and ADR-046. DH-EX-012B is the ticket that will resolve this.
 
 ## 11. Pilot shape (`PROPOSED PILOT`)
 
@@ -344,13 +449,19 @@ or by the product pivot.
 receives the full lab result. The patient does not automatically receive detailed numeric/clinical
 values — only order status, which lab was selected, that a result is ready, that the doctor has
 reviewed it, and the doctor's `NO_FOLLOW_UP_REQUIRED`/`FOLLOW_UP_REQUIRED` disposition. Confirmed
-current in code: `PatientOrderResponse` (api.py:557, `extra="forbid"`) defines no result field.
+current in code: `PatientOrderResponse` (`api.py:652`, `extra="forbid"` at `api.py:657`) defines no
+result field — **re-verified 2026-09-13 (DH-FIELD-001): this document's own line citation had
+drifted to `api.py:557`, which no longer points at this class; corrected here.**
 
 **Central data boundary — `DECIDED` at ADR-042, unchanged here.** The Exchange core may persist
 organization identity, patient/practitioner *references* (source-system + source-identity only),
 requested-test catalog entries, sender/lab organization identity, a frozen price snapshot, order
 status, the lab result value, result-delivery state, and the doctor's follow-up disposition. It may
 not hold free-text clinical notes, a medication list, diagnosis history, or general encounter data.
+An ordering-practitioner reference used on the lab side of a transaction must derive from this same
+existing source-system + source-identity provenance mechanism (DH-EX-004/DH-EX-009), never from
+unrelated authentication/account metadata — reaffirmed by field evidence, not a new rule
+(`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 9).
 
 **Never a shared multi-tenant clinical *store*** for a connector-backed facility (ADR-020/ADR-021,
 unaffected by this document) — that rule is scoped to per-facility clinical stacks, not to the
@@ -381,29 +492,52 @@ Recorded here and in `PROJECT_STATE.md`'s DH-MVP-001 entry. No implementation de
 already evidenced above is assigned to any item — each is a ticket to open, not a design already
 made.
 
-1. **DH-EX-007A** — result numeric/API precision parity with PostgreSQL (§10, item 11).
-2. Exchange deployment/auth wiring (no environment currently runs the Exchange API against real
-   infrastructure end to end).
-3. Real Keycloak qualification for the Exchange's authorization boundaries.
+**Re-audited 2026-09-13 (DH-FIELD-001) — item numbers kept stable; resolved items marked in place.**
+
+1. ~~**DH-EX-007A** — result numeric/API precision parity with PostgreSQL (§10, item 11).~~
+   **RESOLVED [re-audited 2026-09-13]** — see §10 item 11.
+2. Exchange deployment/auth wiring. **PARTIAL [re-audited 2026-09-13]** — DH-EX-008 wired the real
+   Docker/Keycloak/Caddy deployment configuration; live qualification against a running Keycloak is
+   still blocked (registry image unreachable in the qualifying sandbox) and remains open as
+   DH-EX-008R.
+3. Real Keycloak qualification for the Exchange's authorization boundaries. Unchanged — see §10
+   item 14.
 4. Patient reviewed/result-ready disposition (a patient-facing signal distinct from the doctor's
-   own review disposition — not designed here).
+   own review disposition — not designed here). Unchanged.
 5. Result/PHI read-access audit (does every read of a `LabResult` value get an audit row today, not
-   just mutations? — not verified by this document).
+   just mutations? — not verified by this document). Unchanged.
 6. Identity-first-seen audit consistency (whether `PatientReference`/`PractitionerReference`
-   creation is itself audited as consistently as order/result mutations).
-7. `ResultDelivery` semantics decision (§10, item 6).
+   creation is itself audited as consistently as order/result mutations). Unchanged.
+7. `ResultDelivery` semantics decision (§10, item 6). Unchanged.
 8. The current pytest collection warning present across every DH-EX-* CI run on record (never
-   identified or fixed; carried forward unresolved).
-9. Exchange API modularization (`api.py` has grown to over 2,200 lines across seven tickets without
-   a structural split).
+   identified or fixed; carried forward unresolved). Not re-verified by this pass.
+9. Exchange API modularization (`api.py` has grown to over 2,800 lines across twelve-plus tickets
+   without a structural split — **re-measured 2026-09-13, was "over 2,200 lines across seven
+   tickets"**).
 10. Full deployed synthetic golden journey (§4) demonstrated end to end against real infrastructure.
+    Unchanged.
 11. Patient-selection/price-contract decision for a price-free launch UX (ADR-043's DH-EX-005
-    conflict).
-12. Lab result validation/release workflow (§10, item 5).
-13. Assisted-digital/print/QR patient workflow (§7).
-14. Provider UX speed/order-set requirements (Law 3 targets, §6).
+    conflict). Unchanged — DH-EX-010's provider-assignment path is a coexisting option, not a
+    resolution of this specific conflict (§10 item 3).
+12. ~~Lab result validation/release workflow (§10, item 5).~~ **RESOLVED [re-audited
+    2026-09-13]** — see §10 item 5. **Superseded by two new, narrower items below, raised by
+    resolving this one:** result correction/amendment (item 16) and result-domain cardinality
+    (item 17).
+13. Assisted-digital/print/QR patient workflow (§7). Unchanged; reaffirmed by field evidence
+    (§7, `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 12–13).
+14. Provider UX speed/order-set requirements (Law 3 targets, §6). Unchanged.
 15. DHealth Connect no-double-entry integration contract (the concrete mechanism by which a
-    connector satisfies Law 2 — not designed here).
+    connector satisfies Law 2 — not designed here). Unchanged; sharpened by field evidence that at
+    least one real participating laboratory already runs software of some kind (§3 DHealth Connect,
+    `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 7) — still no specific LIS, protocol, or interface
+    claimed.
+16. **New [DH-FIELD-001, 2026-09-13].** Result correction (pre-release) and amendment
+    (post-release) implementation — ADR-045's decision packet, not yet decided by Liban, and its
+    implementation additionally paused behind item 17 (§10 items 15–16).
+17. **New [DH-FIELD-001, 2026-09-13].** Result-domain schema resolution — the ticket referred to
+    throughout this document as DH-EX-012B: must decide how one ordered diagnostic service can
+    produce zero, one, or multiple returned observations (ADR-046), without inventing panel
+    composition, analyte vocabulary, or any fixed observation set.
 
 ---
 

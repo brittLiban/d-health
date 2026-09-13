@@ -4910,6 +4910,10 @@ contract as built. This is recorded as **OPEN DECISION**, not resolved.
   from a separate `RESULT VALIDATED / RELEASED` step. **No such separate authorization step exists
   in the current implementation** — recorded as a product gap, not silently assumed to exist. Exact
   roles and semantics must come from real laboratory workflow input, not be invented here.
+  **[Forward pointer, 2026-09-13, DH-FIELD-001 — this bullet is no longer current, kept verbatim for
+  history rather than rewritten:** this gap was closed by DH-EX-012/ADR-044 (`LAB_RESULT_RELEASER`
+  role, explicit `release-results` step). See ADR-044 above and ADR-046 below for what remains
+  open.]
 - **Patient result-communication content policy** for SMS/WhatsApp/lock-screen notifications/voice
   calls/shared family phones. ADR-042 already decided the patient does not automatically receive
   detailed numeric results; this ADR does not add or relax that boundary, and does not decide the
@@ -5118,3 +5122,61 @@ without adopting it); whether a future revision row should carry its own `entere
 directly, in addition to the existing order-centric audit event.
 
 **Full audit, evidence, and reasoning:** `PROJECT_STATE.md`'s DH-EX-012A entry.
+
+---
+
+## ADR-046 — ACCEPTED (architectural requirement only): orderable diagnostic service and returned observation cardinality
+
+**Date:** 2026-09-13 · **Status:** ACCEPTED for the single requirement stated below — **everything
+else it touches remains OPEN**, resolved by neither this ADR nor DH-FIELD-001, the ticket that
+raised it · **Decided by:** Liban, from direct review of two real Djibouti diagnostic workflow
+artifacts (a clinic-issued lab order and a laboratory-generated result packet), reported as
+generalized findings to DH-FIELD-001. **No real patient data from either artifact appears in this
+entry, in `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, or anywhere else in this repository** — see that
+document's own header for the exact handling discipline followed.
+
+**Relationship to ADR-044/ADR-045.** Not a reopening of either. ADR-044 (result release
+authorization) and ADR-045 (pre-release correction vs. post-release amendment) both already assumed,
+implicitly, that "a result" means one `LabResult` row per `LabOrderItem` — the current Exchange
+schema's actual shape. This ADR records field evidence that this assumption does not hold for real
+panel-based laboratory workflows, without retracting or altering either prior ADR's own content.
+
+### The accepted requirement
+
+> DHealth's production result domain must support one ordered diagnostic service producing zero,
+> one, or multiple returned observations. The ordering clinician is not required to order each
+> underlying observation individually. The current `LabOrderItem → one LabResult` implementation is
+> an interim Exchange representation and must not be treated as the final model for real
+> panel-based workflows.
+
+This is accepted as an architectural requirement — a constraint any future result-domain schema must
+satisfy — not as a schema, migration, or implementation. Nothing in the current Exchange codebase
+changes as a result of this ADR.
+
+### Explicitly NOT decided by this ADR
+
+- The exact result-domain schema shape (a new `Observation`-per-`LabResult` model, a nested
+  structure, or any other representation) — DH-EX-012B's job, not this ADR's.
+- Any specific panel's composition, analyte vocabulary, or fixed observation set — real laboratory-
+  workflow/catalog evidence and clinical-lead sign-off are required before any such content is
+  recorded anywhere in this repository, per `AGENTS.md`'s existing rule against inventing clinical
+  content.
+- Analyzer integration, middleware, or interface protocol of any kind — not demonstrated by the
+  reviewed evidence (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 15).
+- The LIS interface type (API/FHIR/HL7/CSV or otherwise) for any future DHealth Connect integration.
+- Report/PDF/document storage — a separate product and privacy decision.
+- The post-release amendment architecture ADR-045 already left open — unaffected and unresolved by
+  this ADR.
+
+### Consequence for ADR-045
+
+**ADR-045 remains OPEN, not resolved by this ADR.** But its own implementation is now explicitly
+**paused**, for a reason distinct from ADR-045's own unresolved questions: building a correction/
+revision mechanism on top of today's one-`LabResult`-per-item representation — which this ADR just
+confirmed is not the final production shape — risks being redone once the result-domain cardinality
+question is resolved. **DH-EX-012B is the next result-domain ticket**, responsible for resolving the
+schema shape this ADR requires; ADR-045's own Questions 1–5 remain answerable independently of
+DH-EX-012B's outcome, but their *implementation* should wait for a stable underlying schema.
+
+**Full evidence, generalized field findings, and the full reconciliation this ADR triggered:**
+`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` and `PROJECT_STATE.md`'s DH-FIELD-001 entry.
