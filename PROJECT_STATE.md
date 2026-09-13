@@ -11217,10 +11217,17 @@ ticket's own invariant (a racing `start_processing` from `SELECTED` can never wi
 scheduling, since it now unconditionally requires a milestone that itself requires `ACCEPTED` first)
 and was replaced with `test_accept_vs_collection_race`, matching the ticket's own explicitly-named
 "ACCEPT / COLLECTION RACE" section; the replacement's rationale is documented in the new test's own
-docstring rather than silently deleting the old one. (4) collection vs. cancellation — audited the
-existing cancellation paths; no interaction risk found beyond what the existing order-status guards
-already serialize, so no new test was added beyond what the existing suite already covers for
-cancellation.
+docstring rather than silently deleting the old one. (4) collection vs. cancellation — verified, not
+merely asserted: `CANCELLED` is reachable only through `LabOrderRepository.transition()`
+(`ACCEPTED`→`CANCELLED` is in `_ALLOWED_TRANSITIONS`; grep of `api.py` confirms no HTTP cancel
+endpoint exists in production today), which locks the same `LabOrder` row via `with_for_update()`
+that `_record_collection_in_session` locks. Real PostgreSQL row-locking therefore serializes the two
+down to one coherent outcome without any new code: whichever commits first is what the other
+observes — a milestone recorded before cancellation is honest history on a since-cancelled order (no
+guard removes it), and a cancellation that commits first leaves collection's own `ACCEPTED`-only
+precondition unmet, so a racing `record_collection` correctly fails closed. No new test was added
+beyond what this mechanism already guarantees; not exercised as its own qualification scenario since
+no production caller can reach it today.
 
 **Backward compatibility, explicitly required:** an existing `IN_PROGRESS` legacy order with no
 collection milestone retains safe idempotent `start_processing` retry semantics — no fabricated
@@ -11234,8 +11241,10 @@ submission — no new result-specific specimen rule was added, since correctly g
 `IN_PROGRESS` already closes the gap this ticket exists to close.
 
 **Patient/provider surfaces:** the milestone is not exposed through the patient endpoint, the
-Clinic/provider API, or notifications — confirmed by grep of `PatientOrderResponse` and the provider-
-facing response models, none of which gained a new field in this ticket.
+Clinic/provider API, or notifications — verified directly against `api.py`: `collection_recorded_at`
+was added to `LabWorkflowOrderResponse` only; `PatientOrderResponse` (the patient-facing view) and
+`LabOrderResponse`/`LabOrderSummaryResponse` (the provider-facing views) were re-read in full and
+confirmed unchanged, no field added to either.
 
 **Accession/sample identifier:** no accession-number format was invented, and the order UUID was not
 assumed to double as a lab accession number. No code path in this ticket required answering that
@@ -11355,3 +11364,21 @@ required negative controls executed and observed failing as predicted, migration
 proactively guarded and proven load-bearing. All 26 acceptance criteria met, no deviations.
 
 **READY FOR REVIEW: YES**
+
+**CLOSURE appended 2026-09-13 (same session, append-only — completing this entry, not retracting
+it):** Pushed as commit `ddf8a042a1f61d1aebf1b412e049180af9d3cd02`. CI run `34736161520`: **success**,
+all 9 jobs green (verified directly via `gh run view 34736161520 --json status,conclusion,headSha,jobs`
+against that exact SHA — not inferred from a branch-level status). Push succeeded on the first
+attempt.
+
+**Self-review corrections disclosed here, folded into this same closure commit rather than a
+separate round:** an advisor pass on the drafted entry caught two unverified claims before this
+closure was written. (1) The "collection vs. cancellation" concurrency item originally asserted
+"audited the existing cancellation paths; no interaction risk found" with no evidence attached —
+corrected in place above to the actual verified mechanism (`CANCELLED` is reachable only through
+`LabOrderRepository.transition()`, which locks the same `LabOrder` row via `with_for_update()` that
+`_record_collection_in_session` locks, so PostgreSQL's own row-locking serializes the two with no
+new code required; also confirmed no HTTP cancel endpoint exists in production today). (2) The
+"patient/provider surfaces" claim's "confirmed by grep" was vague about what was actually checked —
+corrected to name the exact three response models re-read (`PatientOrderResponse`,
+`LabOrderResponse`, `LabOrderSummaryResponse`) and confirm none gained a field.
