@@ -297,6 +297,33 @@ def test_golden_lab_workflow_journey(
     )
     assert accept_response.status_code == 200, accept_response.text
     assert accept_response.json()["status"] == "ACCEPTED"
+    assert accept_response.json()["collection_recorded_at"] is None
+
+    # DH-EX-011: a new ACCEPTED -> IN_PROGRESS transition requires an explicit collection
+    # milestone -- start-processing before recording it must fail, then succeed after.
+    premature_start = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
+        headers=_auth(lab_tech_token),
+    )
+    assert premature_start.status_code == 409, premature_start.text
+
+    collection_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+    assert collection_response.status_code == 201, collection_response.text
+    recorded_at = collection_response.json()["recorded_at"]
+
+    # `.rstrip("Z")` tolerates a SQLite-only naive-vs-aware datetime serialization quirk (a fresh
+    # read after commit can come back tz-naive on SQLite -- see `_aware()`'s docstring in
+    # `patient_access.py`/`selection.py` for the identical, already-documented class of gap; never
+    # observed against real PostgreSQL) -- both values are the same instant either way.
+    detail_after_collection = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    )
+    assert detail_after_collection.json()["collection_recorded_at"].rstrip(
+        "Z"
+    ) == recorded_at.rstrip("Z")
 
     start_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
@@ -304,6 +331,7 @@ def test_golden_lab_workflow_journey(
     )
     assert start_response.status_code == 200, start_response.text
     assert start_response.json()["status"] == "IN_PROGRESS"
+    assert start_response.json()["collection_recorded_at"].rstrip("Z") == recorded_at.rstrip("Z")
 
     with sessions() as session:
         order = session.get(LabOrder, order_id)
@@ -426,6 +454,12 @@ def test_marketplace_changes_after_selection_do_not_invalidate_assignment(
         headers=_auth(lab_tech_token),
     )
     assert accept_response.status_code == 200
+
+    collection_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+    assert collection_response.status_code == 201, collection_response.text
 
     start_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
@@ -774,6 +808,10 @@ def test_incompatible_transitions_return_409(
     )
     assert reject_after_accept.status_code == 409
 
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
     start = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
         headers=_auth(lab_tech_token),
@@ -873,6 +911,10 @@ def test_start_replay_is_idempotent_no_duplicate_audit(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/accept",
         headers=_auth(lab_tech_token),
     )
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
     first = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
         headers=_auth(lab_tech_token),
@@ -923,14 +965,21 @@ def test_frozen_price_unchanged_by_lab_workflow(
         expected_current_price_id=current_price_id,
     )
 
-    client.post(
+    accept_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/accept",
         headers=_auth(lab_tech_token),
     )
-    client.post(
+    assert accept_response.status_code == 200
+    collection_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+    assert collection_response.status_code == 201
+    start_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
         headers=_auth(lab_tech_token),
     )
+    assert start_response.status_code == 200
 
     with sessions() as session:
         order = session.get(LabOrder, order_id)
@@ -1150,6 +1199,12 @@ def test_start_processing_audit_atomicity(
         headers=_auth(lab_tech_token),
     )
     assert accept.status_code == 200
+
+    collection = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+    assert collection.status_code == 201, collection.text
 
     def _raise(*_a, **_kw):
         raise RuntimeError("simulated audit failure")
@@ -1618,6 +1673,7 @@ def test_25way_same_action_start_processing_concurrency(tmp_path: Path) -> None:
     h = _build_repo_harness(tmp_path, db_name="same-start")
     lab, order_id = _seed_selected_order(h, name="samestart")
     h["workflow"].accept(order_id=order_id, lab_organization_id=lab.id)
+    h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
 
     outcomes = []
     errors = []
@@ -1651,13 +1707,25 @@ def test_25way_same_action_start_processing_concurrency(tmp_path: Path) -> None:
         assert order.status == "IN_PROGRESS"
 
 
-def _run_accept_vs_start_once(tmp_path: Path, i: int) -> None:
+def _run_accept_vs_collection_once(tmp_path: Path, i: int) -> None:
+    """DH-EX-011's own required "ACCEPT / COLLECTION RACE": racing `accept` against
+    `record_collection` from SELECTED. This test **replaces**
+    `test_accept_vs_start_processing_race`'s original accept-vs-start-processing race, which
+    DH-EX-011 makes structurally impossible to preserve in its original form: `start_processing`
+    now always requires a recorded collection milestone, which itself always requires ACCEPTED --
+    a single racing `start_processing` call can never satisfy both preconditions by winning a race
+    against `accept` alone, so every run would now deterministically observe "conflict" regardless
+    of thread scheduling, silently destroying the test's own reason to exist as a race proof. The
+    genuinely meaningful race at this same SELECTED/ACCEPTED boundary post-DH-EX-011 is accept vs.
+    collection instead -- exactly the race this ticket's own "ACCEPT / COLLECTION RACE" section
+    names explicitly. See `test_collection_vs_start_processing_race` below for the new, separate,
+    genuinely meaningful race this ticket introduces at the ACCEPTED/IN_PROGRESS boundary."""
     import threading
 
     from daher_adapter.exchange.lab_workflow import InvalidLabWorkflowTransition
 
-    h = _build_repo_harness(tmp_path, db_name=f"accept-vs-start-{i}")
-    lab, order_id = _seed_selected_order(h, name=f"avs{i}")
+    h = _build_repo_harness(tmp_path, db_name=f"accept-vs-collection-{i}")
+    lab, order_id = _seed_selected_order(h, name=f"avc{i}")
 
     results = {}
     barrier = threading.Barrier(2)
@@ -1667,6 +1735,67 @@ def _run_accept_vs_start_once(tmp_path: Path, i: int) -> None:
         h["workflow"].accept(order_id=order_id, lab_organization_id=lab.id)
         results["accept"] = "done"
 
+    def do_collection():
+        barrier.wait(timeout=10)
+        try:
+            h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
+            results["collection"] = "ok"
+        except InvalidLabWorkflowTransition:
+            results["collection"] = "conflict"
+
+    t1 = threading.Thread(target=do_accept)
+    t2 = threading.Thread(target=do_collection)
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    if results["collection"] == "conflict":
+        # collection lost the race (order was still SELECTED) -- retry it now that accept landed.
+        _record, created = h["workflow"].record_collection(
+            order_id=order_id, lab_organization_id=lab.id
+        )
+        assert created is True
+
+    with h["sessions"]() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "ACCEPTED"
+    collection = h["workflow"].get_collection_for_order(order_id)
+    assert collection is not None
+    # No fabricated success either way: the milestone exists and the order is ACCEPTED regardless
+    # of which thread actually created it, never a state where collection was recorded against a
+    # still-SELECTED order.
+
+
+def test_accept_vs_collection_race(tmp_path: Path) -> None:
+    for i in range(5):
+        _run_accept_vs_collection_once(tmp_path, i)
+
+
+def _run_collection_vs_start_processing_once(tmp_path: Path, i: int) -> None:
+    """DH-EX-011's own required "COLLECTION VS START-PROCESSING" race, at the ACCEPTED/IN_PROGRESS
+    boundary: from ACCEPTED with no collection yet, race `record_collection` against
+    `start_processing`. Both valid outcomes per the ticket: collection commits first and
+    start-processing then sees it and succeeds, or start-processing commits first (observes no
+    collection yet) and is refused with a controlled conflict, collection then commits, and a
+    retried start-processing succeeds. Never a state where IN_PROGRESS is reached with no
+    collection milestone ever recorded."""
+    import threading
+
+    from daher_adapter.exchange.lab_workflow import InvalidLabWorkflowTransition
+
+    h = _build_repo_harness(tmp_path, db_name=f"collection-vs-start-{i}")
+    lab, order_id = _seed_selected_order(h, name=f"cvs{i}")
+    h["workflow"].accept(order_id=order_id, lab_organization_id=lab.id)
+
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def do_collection():
+        barrier.wait(timeout=10)
+        h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
+        results["collection"] = "done"
+
     def do_start():
         barrier.wait(timeout=10)
         try:
@@ -1675,7 +1804,7 @@ def _run_accept_vs_start_once(tmp_path: Path, i: int) -> None:
         except InvalidLabWorkflowTransition:
             results["start"] = "conflict"
 
-    t1 = threading.Thread(target=do_accept)
+    t1 = threading.Thread(target=do_collection)
     t2 = threading.Thread(target=do_start)
     t1.start()
     t2.start()
@@ -1687,7 +1816,8 @@ def _run_accept_vs_start_once(tmp_path: Path, i: int) -> None:
         final_status = order.status
 
     if results["start"] == "conflict":
-        # start lost the race (order was still SELECTED) -- retry it now that accept landed.
+        # start lost the race (no collection existed yet at that instant) -- collection has since
+        # committed (the other thread's own join above already completed), so a retry must succeed.
         _record, transitioned = h["workflow"].start_processing(
             order_id=order_id, lab_organization_id=lab.id
         )
@@ -1696,15 +1826,53 @@ def _run_accept_vs_start_once(tmp_path: Path, i: int) -> None:
             order = session.get(LabOrder, order_id)
             final_status = order.status
     assert final_status == "IN_PROGRESS"
-    # Repo-direct calls never write audit rows (audit is written at the API layer) -- this test
-    # proves the domain-layer transaction/locking contract only, not audit atomicity.
+    assert h["workflow"].get_collection_for_order(order_id) is not None
 
 
-def test_accept_vs_start_processing_race(tmp_path: Path) -> None:
-    """Optional but valuable per the ticket: from SELECTED, race `accept` against
-    `start-processing`. The only coherent outcomes: start sees SELECTED and gets a controlled
-    conflict (accept then succeeds separately, final ACCEPTED), or accept commits first and start
-    then succeeds against the now-ACCEPTED order (final IN_PROGRESS) -- never a direct
-    SELECTED->IN_PROGRESS without the ACCEPTED transition having actually occurred."""
+def test_collection_vs_start_processing_race(tmp_path: Path) -> None:
     for i in range(5):
-        _run_accept_vs_start_once(tmp_path, i)
+        _run_collection_vs_start_processing_once(tmp_path, i)
+
+
+def test_10way_concurrent_collection_recording(tmp_path: Path) -> None:
+    """DH-EX-011's own required "10 simultaneous collection recordings": exactly one milestone
+    row, exactly one real mutation, every other concurrent attempt resolves to the same milestone
+    via the idempotent-replay path -- never a duplicate row, never an exception."""
+    import threading
+
+    h = _build_repo_harness(tmp_path, db_name="same-collection")
+    lab, order_id = _seed_selected_order(h, name="samecollection")
+    h["workflow"].accept(order_id=order_id, lab_organization_id=lab.id)
+
+    outcomes = []
+    errors = []
+    lock = threading.Lock()
+    thread_count = 10
+    barrier = threading.Barrier(thread_count)
+
+    def attempt():
+        try:
+            barrier.wait(timeout=10)
+            _record, created = h["workflow"].record_collection(
+                order_id=order_id, lab_organization_id=lab.id
+            )
+            with lock:
+                outcomes.append(created)
+        except Exception as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    threads = [threading.Thread(target=attempt) for _ in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, errors
+    assert len(outcomes) == thread_count
+    assert outcomes.count(True) == 1
+    with h["sessions"]() as session:
+        from daher_adapter.exchange.models import LabSampleCollection
+
+        count = session.scalar(select(func.count()).select_from(LabSampleCollection))
+    assert count == 1

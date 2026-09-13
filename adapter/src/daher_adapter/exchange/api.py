@@ -717,6 +717,22 @@ class LabWorkflowOrderResponse(BaseModel):
     patient_display_name: str | None
     ordering_provider_name: str
     requested_tests: list[LabWorkflowOrderItemResponse]
+    collection_recorded_at: datetime | None
+    """DH-EX-011: ``null`` means no sample/specimen collection milestone has been recorded in
+    DHealth for this order -- honestly "unrecorded" for a legacy order, never a claim that
+    collection did not happen (see ``LabSampleCollection``'s own docstring in ``models.py``)."""
+
+
+class LabCollectionResponse(BaseModel):
+    """DH-EX-011: the response to recording (or idempotently replaying) the order-level
+    sample/specimen collection workflow milestone -- deliberately narrow, exactly the one fact
+    this ticket records. No specimen type/tube/volume/handling field exists anywhere in this
+    shape because none is modeled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    recorded_at: datetime
 
 
 # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review ----
@@ -2126,6 +2142,7 @@ def build_exchange_router(
                 )
                 for item in record.items
             ],
+            collection_recorded_at=record.collection_recorded_at,
         )
 
     @router.get("/organizations/{lab_id}/lab-orders", response_model=list[LabWorkflowOrderResponse])
@@ -2254,6 +2271,45 @@ def build_exchange_router(
         except InvalidLabWorkflowTransition as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         return _lab_workflow_order_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/record-collection",
+        response_model=LabCollectionResponse,
+    )
+    def record_lab_order_collection(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabCollectionResponse:
+        # DH-EX-011: records exactly one fact -- this LAB_TECH explicitly advanced the
+        # order-level sample/specimen collection workflow milestone. No request body: the order
+        # comes from the URL, the lab from the URL/auth context, the actor from authentication,
+        # and the timestamp from the server clock -- never a caller-supplied value.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, created = lab_workflow.record_collection(
+                    order_id=order_id, lab_organization_id=lab_id, session=session
+                )
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_sample_collection_recorded",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return LabCollectionResponse(order_id=record.lab_order_id, recorded_at=record.recorded_at)
 
     # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review
 

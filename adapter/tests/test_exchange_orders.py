@@ -202,6 +202,17 @@ def test_completed_order_cannot_transition_again(sessions: sessionmaker[Session]
 
     orders.transition(created.id, LabOrderStatus.SELECTED)
     orders.transition(created.id, LabOrderStatus.ACCEPTED)
+    # DH-EX-011: a *new* ACCEPTED -> IN_PROGRESS transition through this generic repository
+    # primitive now requires a recorded collection milestone too (this test's own raw
+    # state-machine exercise is exactly the "generic path" DH-EX-011's own ticket warned must not
+    # become an unguarded bypass) -- inserted directly since this file never touches
+    # `LabWorkflowRepository`/`LabSelectionRepository`.
+    from daher_adapter.exchange.models import LabSampleCollection
+
+    lab = make_lab(organizations)
+    with sessions() as session:
+        session.add(LabSampleCollection(lab_order_id=created.id, lab_organization_id=lab.id))
+        session.commit()
     orders.transition(created.id, LabOrderStatus.IN_PROGRESS)
     completed = orders.transition(created.id, LabOrderStatus.COMPLETED)
     assert completed.status == LabOrderStatus.COMPLETED.value

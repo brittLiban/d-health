@@ -1473,6 +1473,8 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
     # test needs to prove never leak to the patient.
     workflow = LabWorkflowRepository(sessions, organizations)
     workflow.accept(order_id=order_id, lab_organization_id=lab.id)
+    # DH-EX-011: start_processing now requires a recorded collection milestone.
+    workflow.record_collection(order_id=order_id, lab_organization_id=lab.id)
     workflow.start_processing(order_id=order_id, lab_organization_id=lab.id)
 
     results = LabResultRepository(sessions)

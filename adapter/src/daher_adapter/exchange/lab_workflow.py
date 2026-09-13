@@ -32,6 +32,21 @@ reject, or 25 concurrent identical commands) against the same order down to one 
 mutates, so PostgreSQL's MVCC guarantees it observes a consistent, already-resolved fact once the
 order lock is held -- the same reasoning `selection.py`'s own docstring gives for why its
 price/offering/directory reads need no lock of their own.
+
+**DH-EX-011 addition.** ``record_collection`` records the explicit, order-level sample/specimen
+collection workflow milestone (see ``LabSampleCollection``'s own docstring in ``models.py`` for the
+full "record a fact, invent no clinical content" contract) -- a *separate* concern from the
+``ACCEPTED``/``IN_PROGRESS``/``REJECTED`` status machine above, not a fourth status value. It shares
+this module's own lock-order and assignment-ownership discipline exactly (``LabOrder`` locked first,
+``LabSelection`` the sole ownership proof), but does not mutate ``LabOrder.status`` at all -- the
+order remains ``ACCEPTED`` after a milestone is recorded. ``start_processing`` (via
+``_transition_in_session``) is extended with a one-line, duplicated-not-shared invariant check
+requiring a recorded milestone before a *new* ``ACCEPTED -> IN_PROGRESS`` transition -- duplicated
+(not factored into a cross-module helper) because it is a single trivial existence query, and this
+package's own established style favors a repeated one-liner over a premature shared abstraction; the
+identical duplicate lives in ``exchange/orders.py``'s ``transition()``, so that the *generic*
+state-machine mutation path cannot bypass the same invariant this module enforces on its own
+dedicated ``start_processing`` action -- see that function's own comment for why both must agree.
 """
 
 from __future__ import annotations
@@ -44,8 +59,15 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.exchange.models import LabOrder, LabOrderStatus, LabSelection, OrganizationType
+from daher_adapter.exchange.models import (
+    LabOrder,
+    LabOrderStatus,
+    LabSampleCollection,
+    LabSelection,
+    OrganizationType,
+)
 from daher_adapter.exchange.organizations import OrganizationRepository
+from daher_adapter.models import utc_now
 
 
 class LabOrderNotAssigned(RuntimeError):
@@ -79,6 +101,19 @@ class LabWorkflowOrderRecord:
     selected_at: datetime
     updated_at: datetime
     items: tuple[LabWorkflowOrderItemRecord, ...]
+    collection_recorded_at: datetime | None
+    """DH-EX-011: ``None`` means exactly "no sample/specimen collection milestone has been
+    recorded in DHealth for this order" -- for a legacy order that predates this ticket, that is
+    honestly "unrecorded," never a false claim that collection did not happen (see
+    ``LabSampleCollection``'s own docstring)."""
+
+
+@dataclass(frozen=True, slots=True)
+class LabSampleCollectionRecord:
+    id: uuid.UUID
+    lab_order_id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    recorded_at: datetime
 
 
 class LabWorkflowRepository:
@@ -102,7 +137,10 @@ class LabWorkflowRepository:
             )
             if selection is None or selection.lab_organization_id != lab_organization_id:
                 return None
-            return _to_record(order, selection)
+            collection = session.scalar(
+                select(LabSampleCollection).where(LabSampleCollection.lab_order_id == order_id)
+            )
+            return _to_record(order, selection, collection)
 
     def list_for_lab(
         self,
@@ -114,18 +152,25 @@ class LabWorkflowRepository:
         """Bounded, deterministically-ordered work-queue listing: most-recently-updated first
         (``LabOrder.updated_at`` carries ``onupdate=utc_now``, so every status transition already
         reliably advances it -- no extra bookkeeping column needed), order UUID as a stable
-        tie-break for two orders updated in the same instant."""
+        tie-break for two orders updated in the same instant.
+
+        DH-EX-011: collection state is folded into this same query via ``outerjoin`` -- never a
+        second per-row query -- so exposing ``collection_recorded_at`` here introduces zero N+1
+        regression regardless of how many orders this bounded listing returns."""
         with self._sessions() as session:
             query = (
-                select(LabOrder, LabSelection)
+                select(LabOrder, LabSelection, LabSampleCollection)
                 .join(LabSelection, LabSelection.lab_order_id == LabOrder.id)
+                .outerjoin(LabSampleCollection, LabSampleCollection.lab_order_id == LabOrder.id)
                 .where(LabSelection.lab_organization_id == lab_organization_id)
             )
             if status_filter is not None:
                 query = query.where(LabOrder.status == status_filter.value)
             query = query.order_by(LabOrder.updated_at.desc(), LabOrder.id.desc()).limit(limit)
             rows = session.execute(query).all()
-            return [_to_record(order, selection) for order, selection in rows]
+            return [
+                _to_record(order, selection, collection) for order, selection, collection in rows
+            ]
 
     def accept(
         self, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID, session: Session | None = None
@@ -216,8 +261,12 @@ class LabWorkflowRepository:
 
         current = LabOrderStatus(order.status)
         if current == to_status:
-            # Idempotent replay of an already-completed transition -- no mutation, no audit.
-            return _to_record(order, selection), False
+            # Idempotent replay of an already-completed transition -- no mutation, no audit. This
+            # branch fires unconditionally, before the DH-EX-011 collection check below, which is
+            # exactly what preserves a legacy pre-DH-EX-011 IN_PROGRESS order's safe retry: an
+            # order already IN_PROGRESS with no collection milestone never reaches that check on a
+            # repeated start_processing call, so no fake milestone is ever needed to let it pass.
+            return _to_record(order, selection, _get_collection(session, order_id)), False
         if current != from_status:
             raise InvalidLabWorkflowTransition(
                 f"cannot move LabOrder {order_id} to {to_status.value!r} from its current "
@@ -225,12 +274,98 @@ class LabWorkflowRepository:
                 f"{to_status.value!r}"
             )
 
+        # DH-EX-011: a *new* ACCEPTED -> IN_PROGRESS transition requires an explicitly recorded
+        # sample/specimen collection milestone -- never inferred from status. Deliberately
+        # duplicated (not shared via cross-module import) in `exchange/orders.py`'s own generic
+        # `transition()`, so the same invariant holds regardless of which repository method a
+        # caller uses to reach IN_PROGRESS -- see this module's own docstring for why.
+        if to_status == LabOrderStatus.IN_PROGRESS and _get_collection(session, order_id) is None:
+            raise InvalidLabWorkflowTransition(
+                f"cannot start processing LabOrder {order_id} -- no sample/specimen collection "
+                f"milestone has been recorded for this order yet"
+            )
+
         order.status = to_status.value
         session.flush()
-        return _to_record(order, selection), True
+        return _to_record(order, selection, _get_collection(session, order_id)), True
+
+    def record_collection(
+        self, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID, session: Session | None = None
+    ) -> tuple[LabSampleCollectionRecord, bool]:
+        """DH-EX-011: records the explicit, order-level fact that this lab's authorized
+        ``LAB_TECH`` advanced the sample/specimen collection workflow milestone -- see
+        ``LabSampleCollection``'s own docstring in ``models.py`` for the full contract. Returns
+        ``(record, created)``: ``created=False`` means an existing milestone was returned as a
+        safe idempotent replay -- unconditionally, even if the order has since progressed past
+        ``ACCEPTED`` to ``IN_PROGRESS``/``COMPLETED``/``CANCELLED``, because the milestone
+        genuinely already happened and this call never rewrites or duplicates it.
+
+        A *new* milestone may only be created while ``order.status == ACCEPTED``. Any other
+        status with no existing milestone (including ``SELECTED`` -- collection attempted before
+        acceptance -- or a legacy ``IN_PROGRESS``/``COMPLETED`` order that predates this ticket and
+        never had one recorded) raises ``InvalidLabWorkflowTransition`` rather than fabricating
+        retroactive physical-event history: DHealth did not observe collection for that order, and
+        this call must never silently manufacture that it did."""
+        if session is not None:
+            return self._record_collection_in_session(
+                session, order_id=order_id, lab_organization_id=lab_organization_id
+            )
+        with self._sessions.begin() as owned_session:
+            return self._record_collection_in_session(
+                owned_session, order_id=order_id, lab_organization_id=lab_organization_id
+            )
+
+    def _record_collection_in_session(
+        self, session: Session, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID
+    ) -> tuple[LabSampleCollectionRecord, bool]:
+        self._organizations.require_type(lab_organization_id, OrganizationType.LAB)
+
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        existing = _get_collection(session, order_id)
+        if existing is not None:
+            # Idempotent replay -- unconditional regardless of the order's current status: the
+            # milestone genuinely already happened, so this never re-validates status, never
+            # rewrites `recorded_at`, and never creates a second row.
+            return _to_collection_record(existing), False
+
+        if LabOrderStatus(order.status) != LabOrderStatus.ACCEPTED:
+            raise InvalidLabWorkflowTransition(
+                f"cannot record a sample/specimen collection milestone for LabOrder {order_id} "
+                f"in status {order.status!r} -- a new milestone may only be recorded while "
+                f"ACCEPTED, and none was ever recorded for this order"
+            )
+
+        collection = LabSampleCollection(
+            lab_order_id=order_id, lab_organization_id=lab_organization_id, recorded_at=utc_now()
+        )
+        session.add(collection)
+        session.flush()
+        return _to_collection_record(collection), True
+
+    def get_collection_for_order(self, order_id: uuid.UUID) -> LabSampleCollectionRecord | None:
+        with self._sessions() as session:
+            collection = _get_collection(session, order_id)
+            return None if collection is None else _to_collection_record(collection)
 
 
-def _to_record(order: LabOrder, selection: LabSelection) -> LabWorkflowOrderRecord:
+def _get_collection(session: Session, order_id: uuid.UUID) -> LabSampleCollection | None:
+    return session.scalar(
+        select(LabSampleCollection).where(LabSampleCollection.lab_order_id == order_id)
+    )
+
+
+def _to_record(
+    order: LabOrder, selection: LabSelection, collection: LabSampleCollection | None
+) -> LabWorkflowOrderRecord:
     return LabWorkflowOrderRecord(
         id=order.id,
         status=order.status,
@@ -249,4 +384,14 @@ def _to_record(order: LabOrder, selection: LabSelection) -> LabWorkflowOrderReco
             )
             for item in order.items
         ),
+        collection_recorded_at=collection.recorded_at if collection is not None else None,
+    )
+
+
+def _to_collection_record(collection: LabSampleCollection) -> LabSampleCollectionRecord:
+    return LabSampleCollectionRecord(
+        id=collection.id,
+        lab_order_id=collection.lab_order_id,
+        lab_organization_id=collection.lab_organization_id,
+        recorded_at=collection.recorded_at,
     )

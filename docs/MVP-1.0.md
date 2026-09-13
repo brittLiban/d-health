@@ -236,7 +236,7 @@ browser), or `NOT BUILT`.
 | Lab is assigned/selected | WRITTEN, TESTED, CI-QUALIFIED — **patient-selection path only** | DH-EX-005, `POST /patient/order/selection` (api.py:1807), gated by an opaque bearer grant, exact price consent (`expected_price_ids`), and full DH-EX-003 eligibility re-evaluation. **No provider/facility-assigned-lab route exists** — confirmed by the full route inventory in `api.py`; this is the launch-option (a) referenced in ADR-043's DH-EX-005 conflict note, and it is `NOT BUILT`, not merely undocumented. |
 | Lab receives order | WRITTEN, TESTED, CI-QUALIFIED | `GET /organizations/{lab_id}/lab-orders` (api.py:1868), DH-EX-006. |
 | Lab accepts order | WRITTEN, TESTED, CI-QUALIFIED | `POST .../accept` (DH-EX-006), `SELECTED`→`ACCEPTED`. |
-| Sample/specimen workflow | **NOT BUILT** | DH-EX-001's own design note (PROJECT_STATE.md): "no physical specimen-collection state, matching the DH-011J2 lesson that this cannot be reliably inferred." No specimen/sample entity or state exists in the Exchange schema. |
+| Sample/specimen workflow | PARTIAL | DH-EX-011: order-level sample/specimen collection milestone is implemented for the lab workflow (`LabSampleCollection`, `POST .../record-collection`). This is a single fact-of-recording milestone, not specimen management — no specimen type, container, volume, site, handling, storage, or adequacy modeling exists in the Exchange schema. |
 | Processing | WRITTEN, TESTED, CI-QUALIFIED | `POST .../start-processing` (DH-EX-006), `ACCEPTED`→`IN_PROGRESS`. |
 | Result entered | WRITTEN, TESTED-per-commit-message, CI-QUALIFIED | DH-EX-007, `POST .../items/{item_id}/result` (api.py:1997). CI run `34649375844` (DH-EX-007D2). Not independently re-run by any documentation session (no Python interpreter available in this environment — see PROJECT_STATE.md's DH-EX-007 entry). |
 | Result validated/released | **NOT BUILT** | DH-EX-007 only implements automatic `COMPLETED` once every item has a result (application/PostgreSQL-proven counting) — there is no separate authorization step distinguishing "entered" from "validated/released." Recorded as a product gap in ADR-043 and §10 below, not silently assumed to exist. |
@@ -276,7 +276,9 @@ item, not resolved by this document:
    exists. ADR-043's launch-option (a) is not implemented.
 3. **DH-EX-005's price-consent contract vs. Law 1.** Recorded in ADR-043 as an explicit,
    unresolved conflict — not reinterpreted here.
-4. **No specimen/sample workflow.** No entity or state exists for it in the Exchange schema.
+4. **No specimen/sample management.** DH-EX-011 added an order-level collection *milestone* only
+   (`LabSampleCollection`) — no specimen type, container, volume, site, handling, storage, or
+   adequacy entity/state exists in the Exchange schema.
 5. **No result validation/release step**, distinct from result entry. See ADR-043.
 6. **`ResultDelivery.status` semantics undecided.** `DELIVERED` could mean available-to-provider,
    sent-to-connector, received-by-connector, presented-to-user, or acknowledged-by-user. Not

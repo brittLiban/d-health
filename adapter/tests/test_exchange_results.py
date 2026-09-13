@@ -122,6 +122,8 @@ def _create_and_select(
     )
     if advance_to_in_progress:
         repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
+        # DH-EX-011: start_processing now requires a recorded collection milestone.
+        repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
         repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 
@@ -172,6 +174,8 @@ def _create_and_select_two_items(
         expected_price_ids=frozenset({price_1, price_2}),
     )
     repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
+    # DH-EX-011: start_processing now requires a recorded collection milestone.
+    repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
     repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 

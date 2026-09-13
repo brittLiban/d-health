@@ -51,6 +51,7 @@ __all__ = [
     "LabPrice",
     "LabResult",
     "LabResultType",
+    "LabSampleCollection",
     "LabSelection",
     "Organization",
     "OrganizationMembership",
@@ -437,6 +438,48 @@ class LabSelection(Base):
     )
 
 
+class LabSampleCollection(Base):
+    """DH-EX-011: records exactly one fact -- an authorized ``LAB_TECH`` at the order's own
+    selected lab explicitly advanced the order-level sample/specimen collection workflow
+    milestone in DHealth. Nothing more. This is deliberately **not** a specimen/sample entity: no
+    specimen type, container/tube, volume, collection site, handling/storage rule, or clinical
+    adequacy judgment is modeled or implied here -- those require a real laboratory
+    workflow/clinical decision this ticket does not make (`AGENTS.md`'s "never invent clinical
+    content" rule). This row exists solely so a later ``ACCEPTED -> IN_PROGRESS`` transition has an
+    explicit, non-inferred fact to require, per DH-EX-001's own original design note that DHealth
+    must never infer a physical-world specimen event from another workflow timestamp/status --
+    generalizing the same lesson DH-011J2 already proved the hard way on the OpenELIS connector
+    track (no reliable native signal for specimen collection existed there either; see
+    `DECISIONS.md`'s ADR-018 DH-011J2 addendum).
+
+    ``recorded_at`` -- deliberately named, and deliberately **not** ``collected_at`` -- is when
+    DHealth's own server clock observed this explicit action, never a caller-supplied or
+    backdated clinical timestamp. It states "a lab user advanced this milestone at this instant,"
+    never "physical collection definitively occurred at this exact historical moment" and never
+    "this specimen is clinically adequate." One row per ``LabOrder`` maximum (the unique
+    ``lab_order_id``, mirroring ``LabSelection``'s own one-row-per-order shape): this is an
+    order-level workflow milestone, not a per-specimen/per-item record, matching this ticket's own
+    explicit scope boundary against a specimen-management/LIS subsystem.
+
+    No historical backfill exists or ever will for rows predating this ticket: a pre-DH-EX-011
+    order already ``IN_PROGRESS``/``COMPLETED`` with no matching row here means "collection was not
+    recorded in DHealth," never "collection definitely did not happen" -- the honest absence this
+    ticket's own instruction requires, not a retroactively fabricated one."""
+
+    __tablename__ = "exchange_lab_sample_collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class LabResult(Base):
     """Minimum representation for the synthetic MVP: numeric-with-unit-and-range, or text --
     never both, enforced by a CHECK constraint. No automated interpretation and no
@@ -746,7 +789,7 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
             "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
             "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
-            "'patient_reference_bound', 'lab_order_assigned'"
+            "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

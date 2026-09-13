@@ -11062,3 +11062,296 @@ fixed, verified fixed, and the fix's own negative control re-reproduced the orig
 with the fix temporarily removed. All 14 acceptance criteria met, no deviations.
 
 **READY FOR REVIEW: YES**
+
+### DH-EX-011 · Record an explicit sample/specimen collection milestone before processing · P0 · ✅ BUILT, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED
+
+**Ticket:** DH-EX-011. DH-EX-001's own design note excluded any physical specimen-collection state
+from the schema, matching the DH-011J2 lesson (from the OpenELIS/OpenMRS connector track) that no
+reliable native signal for specimen collection exists — the absence was deliberate, not an
+oversight, and DHealth must never infer a physical-world event from another workflow
+timestamp/status. This ticket closes that gap with one explicit, lab-recorded milestone: an
+authorized `LAB_TECH` at the order's own selected lab records "sample/specimen collection happened"
+as its own fact, and a *new* `ACCEPTED`→`IN_PROGRESS` transition now requires it. **Not** a
+specimen-management/LIS subsystem — no specimen type, container, volume, site, handling, storage,
+temperature, centrifugation, rejection criteria, clinical adequacy, accession-number semantics,
+multi-specimen mapping, or analyzer routing is invented anywhere in this ticket.
+
+**Starting HEAD/CI:** `eac1b0ae1497875332f0b6c1329a3a689146f663` — fetched and audited fresh (the
+ticket's own instruction was not to trust its stated SHA blindly); matched exactly. CI run
+`34725859938`: success, all 9 jobs green.
+
+**Pre-ticket specimen gap, confirmed by fresh audit:** grepped the full `exchange/` package and its
+migrations for any specimen/sample/collection entity or column — none existed. `SELECTED`→
+`ACCEPTED`→`IN_PROGRESS` (DH-EX-006) had no representation of the physical collection step at all;
+`IN_PROGRESS` meant only "the lab clicked start," never "the lab actually has the sample."
+
+**All code paths capable of producing `IN_PROGRESS`, audited before implementation (and the
+ticket's own instruction to name every one, not just the API route):** (1)
+`LabWorkflowRepository.start_processing` — the sole production HTTP-reachable path (`POST
+.../start-processing`); (2) `LabOrderRepository.transition()` — a second, independent generic
+state-machine primitive with **zero production HTTP callers** today (confirmed by full-codebase
+grep; only test callers exist), but per the ticket's explicit "do not leave API path = safe,
+repository path = bypass and claim the property is enforced" instruction, gated identically anyway;
+(3) direct ORM `order.status = "IN_PROGRESS"` assignment / raw `UPDATE` — not a supported production
+path with zero production callers, used deliberately in this ticket's own tests
+(`test_legacy_in_progress_order_start_processing_replay_unaffected` and the committed real-
+PostgreSQL qualification's legacy-row test) *because* it is the only way to honestly manufacture a
+genuine pre-DH-EX-011 legacy row for testing — it is not a gap left open, it is the simulated shape
+of history that predates this ticket.
+
+**Data model — separate immutable row, not a boolean flag (with the ticket's own required
+justification):** new `LabSampleCollection` (`exchange_lab_sample_collections`): `id`,
+`lab_order_id` (UNIQUE — one row per order, mirroring `LabSelection`'s own shape),
+`lab_organization_id`, `recorded_at` (system-generated via `utc_now()`, never caller-supplied). A
+boolean `sample_collected` column on `LabOrder` was rejected: a separate row gives (a) explicit
+physical-world evidence rather than an ambiguous flag, (b) its own timestamp independent of any
+status-change timestamp, (c) a real uniqueness constraint at the database level, (d) clearer audit
+semantics (a row's existence *is* the fact, matching `LabSelection`'s own precedent), (e) room for
+future extensibility without a schema rewrite, and (f) an honest, queryable "never recorded" state
+for historical orders rather than a lossy default `false`. No new `LabOrderStatus` enum value was
+added — audit confirmed the milestone is a fact that sits alongside `ACCEPTED`, not a replacement
+for it; no redesign was needed, so no Human Decision was raised on this point.
+
+**Semantic precision — `recorded_at`, not `collected_at`:** DHealth knows precisely when its own
+user recorded the milestone in the system; it does not know, and must never claim to know, the exact
+historical instant physical collection occurred. The column, the dataclass field, and the API
+response field are all named `recorded_at` throughout, and `LabSampleCollection`'s own docstring in
+`models.py` states this distinction explicitly.
+
+**Endpoint contract:** `POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/record-
+collection` — no request body (`extra="forbid"` on the response model only; the route itself accepts
+none). Actor, lab, order, and time are all derived from the URL, the authenticated principal, and
+the server clock — never accepted from the caller, closing off any path for a caller to backdate or
+misattribute the milestone.
+
+**Authorization matrix, all denials verified by HTTP test:** `LAB_TECH` at the order's own selected
+lab → 201 (or 200 on replay). Denied, all as 404 (anti-enumeration, matching `LabOrderNotAssigned`'s
+established convention and `_require_lab_tech`'s existing pattern, confirmed against
+`test_provider_clinician_cannot_act_as_lab`'s precedent before writing the assertion): clinician
+(`test_clinician_cannot_record_collection`), `ORG_ADMIN` alone
+(`test_org_admin_alone_cannot_record_collection`), platform-admin alone
+(`test_platform_admin_alone_cannot_record_collection`), `LAB_TECH` at a different lab
+(`test_cross_lab_lab_tech_gets_anti_enumeration_404`). Assignment ownership relies solely on the
+committed `LabSelection` row — never re-checked against marketplace listing/prices/
+`accepting_orders`, matching DH-EX-006's own established principle for this exact question.
+
+**Lifecycle rules:** a *new* milestone may be created only while `order.status == ACCEPTED` and the
+order is assigned to the calling lab (`test_provider_assigned_collection_journey`). Attempting
+collection before acceptance (`SELECTED`) is a 409
+(`test_collection_before_acceptance_is_conflict`). An existing milestone is returned as a safe
+idempotent replay (200, unchanged `recorded_at`) **unconditionally**, regardless of the order's
+current status — including after it has progressed to `IN_PROGRESS`
+(`test_collection_idempotent_replay`, `test_collection_replay_survives_progression_to_in_progress`)
+— never a duplicate row, never a second audit event, never a rewritten timestamp.
+
+**No retroactive fabrication (the ticket's own "extremely important" rule):** a legacy order already
+`IN_PROGRESS` (or further) with no collection row, simulated via direct ORM/raw-SQL status
+assignment bypassing both guarded repository methods, must never have a collection row invented for
+it. A fresh `record_collection` call against such an order fails closed with
+`InvalidLabWorkflowTransition` (409) rather than silently manufacturing history DHealth never
+observed — proven in-suite
+(`test_legacy_in_progress_order_start_processing_replay_unaffected`) and independently against real
+PostgreSQL (`test_no_retroactive_fabrication_for_legacy_in_progress_order`).
+
+**Start-processing invariant, enforced independently in both paths (deliberately duplicated, not
+shared via a cross-module helper — "a single trivial existence query," matching this package's
+established avoid-premature-abstraction style):** `LabWorkflowRepository._transition_in_session`'s
+new guard fires only after its idempotent-replay branch (`if current == to_status: return ...`),
+which is exactly what preserves a legacy `IN_PROGRESS` order's safe retry semantics — a replay never
+reaches the new collection check, so no fabricated milestone is ever needed to let it pass
+(confirmed both in-suite and against real PostgreSQL, where the same legacy row's repeated
+`start_processing` call returns `transitioned=False` with `collection_recorded_at` still `None`).
+`LabOrderRepository.transition()` carries the identical guard independently. Both gates verified
+against real PostgreSQL (`test_start_processing_gate_enforced_via_workflow_repository`,
+`test_start_processing_gate_enforced_via_generic_transition_path`).
+
+**Lab work-queue representation, with the required N+1 investigation:** `LabWorkflowOrderRecord` and
+the HTTP response gained `collection_recorded_at: datetime | None`. `list_for_lab`'s query gained a
+single `outerjoin(LabSampleCollection, LabSampleCollection.lab_order_id == LabOrder.id)` alongside
+its existing `LabSelection` join. Measured, not assumed: an initial naive query-count assertion
+failed (21 queries for 2 orders, 51 for 8) — isolated by temporarily reverting the new join and
+re-measuring, which produced **identical** counts with or without it, proving the linear per-order
+growth is pre-existing DH-EX-006 behavior (`_lab_workflow_order_response`'s per-order
+`organizations.get`/`patients.get` calls in `api.py`, plus `_to_record`'s `order.items` lazy-load),
+not anything this ticket introduced. Documented as a discovered-but-out-of-scope finding, not fixed
+here. The committed test (`test_list_for_lab_collection_join_adds_no_marginal_per_order_query`)
+instead measures the *marginal* delta between a 2-order and 8-order lab and asserts DH-EX-011's own
+join contributes zero additional per-order query cost.
+
+**Audit design:** new closed-vocabulary event `lab_sample_collection_recorded` (widened CHECK in
+migration `0014`, widened `SecurityEventType` Literal in `security_audit.py`), reusing the existing
+`lab_order` resource type (a fact about the order's workflow, matching
+`lab_order_assigned`/`accepted`/`rejected`/`processing_started`'s own convention — not a new kind of
+resource). Actor = the recording `LAB_TECH`'s identity, organization = the selected lab, outcome =
+`created`. Collection-row insert and audit-event insert commit in the same transaction inside
+`record_lab_order_collection`'s route handler; `test_collection_audit_atomicity` forces the audit
+write to fail mid-transaction and confirms zero collection rows survive.
+
+**Migration:** `0014_exchange_collection` (24 characters, respecting DH-EX-009's `VARCHAR(32)`
+finding), revises `0013_exchange_access_mode`. Creates `exchange_lab_sample_collections` (UNIQUE
+`lab_order_id`, RESTRICT FKs to `exchange_lab_orders`/`exchange_organizations`) and widens
+`ck_exchange_security_audit_events_event_type`. No historical backfill — an absent row for a
+pre-0014 order means "not recorded in DHealth," never "definitely did not happen."
+
+**Downgrade safety — DH-EX-010A1's lesson applied proactively this time, not discovered after the
+fact:** two independent guards, both fail-fast before any DDL. (1) refuses to narrow the widened
+CHECK if any real `lab_sample_collection_recorded` audit row exists (the same `0006`–`0012`
+contract). (2) refuses to drop `exchange_lab_sample_collections` itself if it contains any real row
+— extending DH-EX-010A1's own finding from "a column can be silently dropped" to "a whole new table
+can be silently dropped too," since dropping a table can never fail at the DDL level the way
+re-narrowing an incompatible CHECK does. Both checks run in that order, both before any DDL; either
+failing leaves the database unchanged at `0014_exchange_collection`. An unused schema (zero rows
+either place) remains conditionally downgradeable.
+
+**Concurrency:** (1) 10 simultaneous `record_collection` calls for the same order — one row created,
+nine safe idempotent replays, zero UNIQUE-constraint crashes surfaced to any caller
+(`test_10way_concurrent_collection_recording` in-suite;
+`test_10way_concurrent_collection_recording_yields_one_row` against real PostgreSQL). (2) collection
+vs. start-processing race — both valid outcomes observed across repeated runs (collection wins, then
+start-processing succeeds; or start-processing loses with a conflict, then a caller's retry succeeds
+once collection has landed) — never processing beginning without the milestone
+(`test_collection_vs_start_processing_race` in-suite, 5 consecutive real-PostgreSQL runs via
+`test_collection_vs_start_processing_race_yields_coherent_outcome`). (3) accept vs. collection race —
+the pre-existing `test_accept_vs_start_processing_race` became structurally meaningless under this
+ticket's own invariant (a racing `start_processing` from `SELECTED` can never win regardless of
+scheduling, since it now unconditionally requires a milestone that itself requires `ACCEPTED` first)
+and was replaced with `test_accept_vs_collection_race`, matching the ticket's own explicitly-named
+"ACCEPT / COLLECTION RACE" section; the replacement's rationale is documented in the new test's own
+docstring rather than silently deleting the old one. (4) collection vs. cancellation — audited the
+existing cancellation paths; no interaction risk found beyond what the existing order-status guards
+already serialize, so no new test was added beyond what the existing suite already covers for
+cancellation.
+
+**Backward compatibility, explicitly required:** an existing `IN_PROGRESS` legacy order with no
+collection milestone retains safe idempotent `start_processing` retry semantics — no fabricated
+collection record is ever created merely to make the retry pass, proven in-suite and against real
+PostgreSQL (see "No retroactive fabrication" above).
+
+**Processing response / result submission — deliberately not redesigned:** `start-processing`'s
+response shape gained only the additive `collection_recorded_at` field on the order representation;
+no other shape change. `LabOrder.status == IN_PROGRESS` remains the sole rule gating result
+submission — no new result-specific specimen rule was added, since correctly gating entry into
+`IN_PROGRESS` already closes the gap this ticket exists to close.
+
+**Patient/provider surfaces:** the milestone is not exposed through the patient endpoint, the
+Clinic/provider API, or notifications — confirmed by grep of `PatientOrderResponse` and the provider-
+facing response models, none of which gained a new field in this ticket.
+
+**Accession/sample identifier:** no accession-number format was invented, and the order UUID was not
+assumed to double as a lab accession number. No code path in this ticket required answering that
+question, so — per the ticket's own escape hatch — no `Human Decision Required` entry was raised for
+it; if pilot operations later require a real accession scheme, that is a future decision, not a gap
+silently filled here.
+
+**Clinical content — nothing invented, confirmed by clean scope adherence:** implementation never
+required an answer about specimen type, tube/container type, count, volume, collection site, fasting
+requirements, handling instructions, storage/temperature, centrifugation, rejection criteria,
+clinical adequacy, multi-specimen-per-order mapping, off-site collection, or recollection policy. No
+stop-and-record was needed because none of these questions ever arose while implementing the single
+narrow fact this ticket specifies.
+
+**Required negative controls — all 7 executed against real running code, observed failing exactly as
+predicted, and restored (`diff`-verified byte-identical against scratchpad backups):**
+1. Removed the collection-required guard from `start_processing` → `ACCEPTED`→`IN_PROGRESS`
+   succeeded with no milestone recorded, reproducing the exact gap this ticket closes.
+2. Replaced the explicit-row check with inference from `ACCEPTED`/`IN_PROGRESS` status alone →
+   collection appeared "recorded" for orders that never had a real milestone row, reproducing the
+   DH-EX-001/DH-011J2 inference failure mode this ticket exists to prevent.
+3. Removed the selected-lab ownership check in `_record_collection_in_session` → a lab with no
+   `LabSelection` for the order could record a collection milestone for someone else's order.
+4. Removed the `_require_lab_tech` authorization dependency on the route → a clinician/`ORG_ADMIN`
+   could record a collection milestone.
+5. Removed the existing-row idempotency check → a second call created a second row, violating the
+   one-row-per-order invariant and producing a `UNIQUE` constraint crash under concurrency.
+6. Moved the audit-event write outside the collection-row transaction → a forced audit failure left
+   an orphaned collection row with no corresponding audit trail.
+7. Removed both migration downgrade guards, demonstrated twice against real PostgreSQL for a clean
+   signal: first against a database with both real audit history and real collection rows (only the
+   audit-check failure path was exercised, via a `CheckViolation` on re-narrowing the CHECK); then
+   against a second, cleanly-seeded scratch database (`dhex011_negctrl2`) holding 9 real collection
+   rows and **zero** audit rows (seeded via the repository-direct qualification path, which never
+   calls `security_audit.record`) — this time the downgrade **succeeded silently with no error at
+   all**, and `\dt` confirmed `exchange_lab_sample_collections` permanently dropped, definitively
+   proving the exact silent-destruction risk the migration-safety section exists to prevent.
+
+**Real PostgreSQL qualification:** committed as
+`adapter/tests/integration/test_dhex011_postgres_qualification.py` (skip-gated on `DHEX011_PG_*` env
+vars, matching the `test_dhex01{0,0a,0a1}_postgres_qualification.py` precedent — this ticket does
+**not** deviate to scratch-only, undiscoverable evidence). Six tests, all passing against a
+disposable scratch database (`dhex011_ciqual`) migrated clean to `0014_exchange_collection`:
+persistence/idempotent replay across a status change, no-retroactive-fabrication against a
+raw-`UPDATE`-simulated legacy row, the start-processing gate via both
+`LabWorkflowRepository.start_processing` and the generic `LabOrderRepository.transition()`, 10-way
+concurrent collection recording, and the collection-vs-start-processing race (5 runs). The
+downgrade-safety negative control (item 7 above) and the migration-chain upgrade/downgrade/re-upgrade
+health check were run via separate scratch databases/scripts (not committed as pytest, matching
+`0006`–`0013`'s own established convention of real-PostgreSQL-only migration-safety qualification
+recorded in this file rather than automated migration-runner tests) and are recorded here as the
+evidence of record. Scratch roles/databases dropped after every run.
+
+**Intentional test changes, each explained (per the ticket's own "explain every change, do not
+silently rewrite" instruction):** `test_exchange_results.py`'s `_create_and_select` /
+`_create_and_select_two_items` and `test_exchange_results_api.py`'s `_create_in_progress_order`
+helpers gained a `record_collection`/`record-collection` call between accept and start-processing —
+required because those tests build an `IN_PROGRESS` order as setup scaffolding, not as their own
+subject under test. Four inline accept→start-processing sites in `test_exchange_lab_workflow.py`
+gained the same call for the same reason. `test_exchange_orders.py`'s
+`test_completed_order_cannot_transition_again` inserts a `LabSampleCollection` row directly via raw
+session, since that test exercises the bare `LabOrderRepository.transition()` primitive and never
+touches `LabWorkflowRepository`. `test_exchange_patient_access.py`'s leak-prevention test gained the
+same call for the same setup-scaffolding reason. `test_accept_vs_start_processing_race` was replaced
+by `test_accept_vs_collection_race` (rationale above, under "Concurrency"). `test_frozen_price_
+unchanged_by_lab_workflow` gained the missing `record-collection` call plus explicit status-code
+assertions on accept/start-processing — a pre-existing-test correction found during advisor review:
+without it, start-processing silently 409'd and the test stopped exercising the workflow its name
+claims, without ever asserting the status code that would have caught it.
+
+**Existing suites, confirmed unaffected beyond the intentional changes above:** DH-EX-006 lab-
+workflow tests and DH-EX-007 result-submission tests remain green in every case not itself testing
+the new invariant. No DH-EX-006/007 test assertion was weakened to accommodate this ticket.
+
+**Docs:** `docs/MVP-1.0.md` line 239's readiness table and line 279's "no specimen/sample workflow"
+gap statement were both materially false after this ticket and updated to the ticket's own mandated
+phrasing — "Order-level sample/specimen collection milestone is implemented for the lab workflow" —
+explicitly **not** "specimen management is built" and **not** "DHealth Lab is built." No other doc
+content touched.
+
+**Files changed:** `.github/workflows/ci.yml` (`EXPECTED_HEAD` →
+`0014_exchange_collection`); `adapter/src/daher_adapter/exchange/{api.py, lab_workflow.py, models.py,
+orders.py, security_audit.py}`; `adapter/tests/{test_exchange_lab_workflow.py, test_exchange_orders.py,
+test_exchange_patient_access.py, test_exchange_results.py, test_exchange_results_api.py}`; new
+`adapter/migrations/versions/0014_exchange_collection.py`,
+`adapter/tests/test_exchange_sample_collection.py` (13 HTTP-level tests),
+`adapter/tests/integration/test_dhex011_postgres_qualification.py` (6 real-PostgreSQL tests);
+`docs/MVP-1.0.md`; `PROJECT_STATE.md`.
+
+**Exact migration head:** `0014_exchange_collection`.
+
+**Full tests/lint:** `708 passed, 57 skipped, 1 pre-existing warning` — up from DH-EX-010A1's `693
+passed, 51 skipped` (+15 passed: 13 in the new `test_exchange_sample_collection.py` + 2 net in
+`test_exchange_lab_workflow.py`, since `test_accept_vs_start_processing_race` →
+`test_accept_vs_collection_race` is a like-for-like replacement and
+`test_collection_vs_start_processing_race`/`test_10way_concurrent_collection_recording` are the two
+genuinely new additions; +6 skipped: the new committed real-PostgreSQL qualification file, skipped in
+CI by design). `ruff check` and `ruff format --check` both clean across `src tests migrations
+scripts`. `git diff --check` clean (no whitespace errors).
+
+**Real facility:** untouched — this is Exchange-track only. **Clinical semantics:** none added; the
+milestone is a workflow fact, not a clinical interpretation. **Patient data to third parties:** none.
+**CI `EXPECTED_HEAD`:** `0014_exchange_collection`.
+
+**What remains NOT built by this ticket:** specimen/sample management of any kind (type, container,
+volume, site, handling, storage, adequacy), accession-number scheme, multi-specimen-per-order
+mapping, recollection/off-site-collection handling, patient/provider visibility of the milestone,
+result validation/release (distinct from result entry, per ADR-043's own recorded gap).
+
+**Next:** result validation/release remains the next candidate ticket in the DH-EX-001–011 sequence
+but **is not started here** — per the ticket's own final instruction, "Stop after DH-EX-011. Do not
+begin result validation/release."
+
+**DH-EX-011 QUALIFIED: YES** — real PostgreSQL (persistence/idempotency, no-retroactive-fabrication,
+both start-processing gate paths, 10-way concurrency, collection-vs-start-processing race ×5), all 7
+required negative controls executed and observed failing as predicted, migration downgrade safety
+proactively guarded and proven load-bearing. All 26 acceptance criteria met, no deviations.
+
+**READY FOR REVIEW: YES**

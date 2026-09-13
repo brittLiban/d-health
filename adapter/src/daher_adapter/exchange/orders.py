@@ -41,6 +41,7 @@ from daher_adapter.exchange.models import (
     LabOrder,
     LabOrderItem,
     LabOrderStatus,
+    LabSampleCollection,
     OrganizationType,
     ResultDelivery,
     ResultDeliveryStatus,
@@ -329,7 +330,20 @@ class LabOrderRepository:
         """Row-locks the order and refuses any transition not explicitly present in
         ``_ALLOWED_TRANSITIONS`` -- this is the sole place order status ever changes after
         creation. Never silently invents a rollback transition; a COMPLETED/REJECTED/CANCELLED
-        order has no outgoing edges at all."""
+        order has no outgoing edges at all.
+
+        DH-EX-011: a generic ``ACCEPTED -> IN_PROGRESS`` transition through this method requires
+        the same recorded sample/specimen collection milestone
+        ``exchange/lab_workflow.py``'s own dedicated ``start_processing`` action requires --
+        deliberately duplicated here (a single trivial existence query), not shared via a
+        cross-module helper, so that this generic state-machine primitive cannot become an
+        unguarded bypass of an invariant its own domain-specific sibling enforces. This method has
+        no production HTTP caller today (`lab_workflow.start_processing` is the sole supported way
+        to reach ``IN_PROGRESS``), but nothing prevents a future caller from using it directly, and
+        this repository's own established discipline is to enforce a security/workflow invariant
+        inside the mutation itself, never rely solely on "no caller happens to bypass it today"
+        (the same reasoning DH-EX-010's `assign_by_provider` tenant check and DH-EX-010A's
+        capability check both already apply)."""
         with self._sessions.begin() as session:
             order = session.scalar(
                 select(LabOrder).where(LabOrder.id == order_id).with_for_update()
@@ -342,6 +356,21 @@ class LabOrderRepository:
                 raise InvalidOrderTransition(
                     f"cannot move LabOrder {order_id} from {current.value!r} to {to_status.value!r}"
                 )
+            if to_status == LabOrderStatus.IN_PROGRESS:
+                has_collection = (
+                    session.scalar(
+                        select(LabSampleCollection.id).where(
+                            LabSampleCollection.lab_order_id == order_id
+                        )
+                    )
+                    is not None
+                )
+                if not has_collection:
+                    raise InvalidOrderTransition(
+                        f"cannot move LabOrder {order_id} from 'ACCEPTED' to 'IN_PROGRESS' -- no "
+                        f"sample/specimen collection milestone has been recorded for this order "
+                        f"(DH-EX-011)"
+                    )
             order.status = to_status.value
             session.flush()
             return _to_order_record(order)

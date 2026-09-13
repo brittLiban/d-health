@@ -55,6 +55,10 @@ SecurityEventType = Literal[
     # "lab_order" resource_type since it mutates the LabOrder's own selection, same as
     # lab_order_accepted/rejected/processing_started above.
     "lab_order_assigned",
+    # DH-EX-011 order-level sample/specimen collection workflow milestone. Reuses "lab_order" as
+    # resource_type -- this event records a fact about the LabOrder's workflow, not a new kind of
+    # resource, matching lab_order_assigned/accepted/rejected/processing_started's own convention.
+    "lab_sample_collection_recorded",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[

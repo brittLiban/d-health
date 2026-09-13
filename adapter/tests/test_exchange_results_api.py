@@ -233,6 +233,12 @@ def _create_in_progress_order(
         headers=_auth(lab_tech_token),
     )
     assert accept_response.status_code == 200, accept_response.text
+    # DH-EX-011: start-processing now requires a recorded collection milestone.
+    collection_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+    assert collection_response.status_code == 201, collection_response.text
     start_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
         headers=_auth(lab_tech_token),
