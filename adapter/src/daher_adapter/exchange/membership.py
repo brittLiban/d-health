@@ -43,7 +43,16 @@ from daher_adapter.exchange.models import (
 # one caller that happens to pre-validate today.
 ALLOWED_ROLES_BY_ORG_TYPE: dict[OrganizationType, frozenset[OrganizationRole]] = {
     OrganizationType.PROVIDER: frozenset({OrganizationRole.ORG_ADMIN, OrganizationRole.CLINICIAN}),
-    OrganizationType.LAB: frozenset({OrganizationRole.ORG_ADMIN, OrganizationRole.LAB_TECH}),
+    OrganizationType.LAB: frozenset(
+        {
+            OrganizationRole.ORG_ADMIN,
+            OrganizationRole.LAB_TECH,
+            # DH-EX-012/ADR-044: additive, not a replacement for LAB_TECH -- a membership may hold
+            # both roles simultaneously (the same human may enter and later release), exactly one
+            # of them (entry-only or release-only), or neither. ORG_ADMIN does not imply this role.
+            OrganizationRole.LAB_RESULT_RELEASER,
+        }
+    ),
 }
 
 

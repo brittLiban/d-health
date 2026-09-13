@@ -207,13 +207,29 @@ def test_completed_order_cannot_transition_again(sessions: sessionmaker[Session]
     # state-machine exercise is exactly the "generic path" DH-EX-011's own ticket warned must not
     # become an unguarded bypass) -- inserted directly since this file never touches
     # `LabWorkflowRepository`/`LabSelectionRepository`.
-    from daher_adapter.exchange.models import LabSampleCollection
+    from daher_adapter.exchange.membership import ExchangeIdentityRepository
+    from daher_adapter.exchange.models import LabResultRelease, LabSampleCollection
 
     lab = make_lab(organizations)
+    identities = ExchangeIdentityRepository(sessions)
+    releaser, _ = identities.get_or_create(issuer="https://test.example", subject="releaser-1")
     with sessions() as session:
         session.add(LabSampleCollection(lab_order_id=created.id, lab_organization_id=lab.id))
         session.commit()
     orders.transition(created.id, LabOrderStatus.IN_PROGRESS)
+    # DH-EX-012: a *new* IN_PROGRESS -> COMPLETED transition through this same generic primitive
+    # now requires an existing LabResultRelease row too, for the identical "generic path must not
+    # bypass the invariant" reason -- inserted directly since this file never touches
+    # `LabResultReleaseRepository`.
+    with sessions() as session:
+        session.add(
+            LabResultRelease(
+                lab_order_id=created.id,
+                lab_organization_id=lab.id,
+                released_by_identity_id=releaser.id,
+            )
+        )
+        session.commit()
     completed = orders.transition(created.id, LabOrderStatus.COMPLETED)
     assert completed.status == LabOrderStatus.COMPLETED.value
 

@@ -50,6 +50,7 @@ __all__ = [
     "LabOrderStatus",
     "LabPrice",
     "LabResult",
+    "LabResultRelease",
     "LabResultType",
     "LabSampleCollection",
     "LabSelection",
@@ -520,10 +521,53 @@ class LabResult(Base):
     reference_range_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     reference_range_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     text_value: Mapped[str | None] = mapped_column(String(2048))
+    # DH-EX-012/ADR-044 semantic finding, kept unchanged for backward compatibility (this name is
+    # already an API-contract field on `LabResultSubmitResponse`/`ProviderResultItemResponse`):
+    # this is the time this result was *entered* into DHealth, never a release/validation
+    # timestamp. See `LabResultRelease.released_at` for the distinct, later, explicit-release time.
     completed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     order_item: Mapped[LabOrderItem] = relationship(back_populates="result")
+
+
+class LabResultRelease(Base):
+    """DH-EX-012/ADR-044: records exactly one fact -- an authorized ``LAB_RESULT_RELEASER`` at the
+    order's own selected lab explicitly authorized this order's already-entered result set to leave
+    the lab workflow and become visible to the ordering provider. This is a workflow-authorization
+    record, not a clinical one: DHealth does not claim to medically, scientifically, or clinically
+    validate the result by this row existing -- see ``docs/MVP-1.0.md`` §13's "does not
+    independently diagnose, interpret, or recommend" boundary, which this model does not cross.
+
+    Order-level only (ADR-044): one release per ``LabOrder`` (``lab_order_id`` UNIQUE), never
+    per-item -- partial/item-level release is explicitly out of MVP scope. Immutable once created:
+    no revision, no un-release, no delete anywhere in this codebase. ``released_at`` is
+    system-generated (``utc_now()``), never caller-supplied, mirroring ``LabSampleCollection.
+    recorded_at``'s identical discipline. ``released_by_identity_id`` is the authenticated
+    identity that actually committed the release -- on a lost-response retry or a different
+    authorized releaser's later retry, this value is never overwritten; the fact is who actually
+    released it first, not who asked most recently.
+
+    No historical backfill: a pre-DH-EX-012 ``LabOrder`` already ``COMPLETED`` with no matching row
+    here predates this ticket's explicit release step -- that is honestly "no release recorded",
+    never fabricated after the fact (ADR-044's grandfather rule, mirroring DH-EX-011's identical
+    no-retroactive-fabrication discipline for ``LabSampleCollection``)."""
+
+    __tablename__ = "exchange_lab_result_releases"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    released_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    released_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
 
 
 class ResultDelivery(Base):
@@ -596,14 +640,21 @@ class OrganizationMembershipStatus(StrEnum):
 
 class OrganizationRole(StrEnum):
     """MVP organization roles only -- no billing/reception/pharmacy roles. Validity against
-    organization type (PROVIDER: ORG_ADMIN/CLINICIAN; LAB: ORG_ADMIN/LAB_TECH) is enforced by
-    ``exchange/membership.py``'s repository layer, not a DB constraint, for the same reason
-    ``LabOffering``'s lab-organization-type check is repository-enforced elsewhere in this file:
-    SQL cannot portably CHECK a value against a column on a different, joined-through table."""
+    organization type (PROVIDER: ORG_ADMIN/CLINICIAN; LAB: ORG_ADMIN/LAB_TECH/LAB_RESULT_RELEASER)
+    is enforced by ``exchange/membership.py``'s repository layer, not a DB constraint, for the same
+    reason ``LabOffering``'s lab-organization-type check is repository-enforced elsewhere in this
+    file: SQL cannot portably CHECK a value against a column on a different, joined-through table.
+
+    ``LAB_RESULT_RELEASER`` (DH-EX-012, ADR-044): the explicit result-release authority, distinct
+    from ``LAB_TECH``'s result-*entry* authority. ADR-044 binds this as an additive role, not a
+    replacement -- the same human may hold both simultaneously (no forced second-person workflow),
+    and a membership holding only one of the two may do exactly that one thing (enter, or release)
+    and not the other."""
 
     ORG_ADMIN = "ORG_ADMIN"
     CLINICIAN = "CLINICIAN"
     LAB_TECH = "LAB_TECH"
+    LAB_RESULT_RELEASER = "LAB_RESULT_RELEASER"
 
 
 class ExchangeIdentity(Base):
@@ -683,7 +734,7 @@ class OrganizationRoleAssignment(Base):
             "membership_id", "role", name="uq_exchange_org_role_assignments_membership_role"
         ),
         CheckConstraint(
-            "role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH')",
+            "role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER')",
             name="ck_exchange_org_role_assignments_role",
         ),
     )
@@ -692,7 +743,9 @@ class OrganizationRoleAssignment(Base):
     membership_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=False
     )
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    # DH-EX-012: widened from String(16) to String(32) -- 'LAB_RESULT_RELEASER' is 19 characters,
+    # which does not fit the original width sized only for 'ORG_ADMIN'/'CLINICIAN'/'LAB_TECH'.
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
@@ -789,7 +842,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
             "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
             "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
-            "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded'"
+            "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded', "
+            "'lab_results_released'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -798,7 +852,7 @@ class ExchangeSecurityAuditEvent(Base):
             name="ck_exchange_security_audit_events_outcome",
         ),
         CheckConstraint(
-            "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH')",
+            "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER')",
             name="ck_exchange_security_audit_events_role",
         ),
         CheckConstraint(
@@ -827,7 +881,9 @@ class ExchangeSecurityAuditEvent(Base):
     membership_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=True
     )
-    role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # DH-EX-012: widened from String(16) to String(32), matching
+    # `OrganizationRoleAssignment.role`'s identical widening -- 'LAB_RESULT_RELEASER' is 19 chars.
+    role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # DH-EX-003: generic target identification for catalog/directory/offering/price mutations.
     # Deliberately not a FK -- the target table varies by `resource_type`, and a single polymorphic
     # FK is not portably expressible; the CHECK constraint above is the closed-set guard instead.

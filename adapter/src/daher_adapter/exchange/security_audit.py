@@ -59,6 +59,12 @@ SecurityEventType = Literal[
     # resource_type -- this event records a fact about the LabOrder's workflow, not a new kind of
     # resource, matching lab_order_assigned/accepted/rejected/processing_started's own convention.
     "lab_sample_collection_recorded",
+    # DH-EX-012/ADR-044: explicit order-level result release. Reuses "lab_order" as resource_type
+    # for the identical reason -- a fact about the LabOrder's workflow, not a new resource kind.
+    # `lab_order_completed` is still written in the same transaction for the actual COMPLETED
+    # transition (moved here from result entry -- see PROJECT_STATE.md's DH-EX-012 entry for the
+    # actor semantic change this causes: the actor is now the releaser, not the entering tech).
+    "lab_results_released",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[

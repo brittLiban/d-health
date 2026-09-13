@@ -32,6 +32,7 @@ from daher_adapter.exchange.models import (
     LabOrder,
     LabOrderItem,
     LabResult,
+    LabResultRelease,
     ResultDelivery,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
@@ -94,6 +95,24 @@ def _bootstrap_identity(client: TestClient, private_key, subject: str, **token_k
     response = client.get("/exchange/v1/me", headers=_auth(token))
     assert response.status_code == 200, response.text
     return response.json()["identity_id"]
+
+
+def _release_results(client, private_key, lab_id, order_id, name: str) -> dict:
+    """DH-EX-012/ADR-044: bootstraps a fresh LAB_RESULT_RELEASER identity -- a *different* human
+    from whichever LAB_TECH entered the results, exercising the un-forced two-person path ADR-044
+    permits without requiring -- and releases the order's results. The sole supported production
+    way to reach COMPLETED after this ticket."""
+    releaser_id = _bootstrap_identity(client, private_key, f"releaser-{name}")
+    _grant_roles(
+        client, private_key, lab_id, releaser_id, f"releaser-{name}", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject=f"releaser-{name}")
+    response = client.post(
+        f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/release-results",
+        headers=_auth(releaser_token),
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
 def _grant_roles(client, private_key, org_id, identity_id, subject: str, roles: list[str]) -> None:
@@ -272,10 +291,10 @@ def _audit_events(sessions, event_type: str) -> list[dict]:
         ]
 
 
-# -- golden journey: result -> completion -> provider read -> review -----------------------------
+# -- golden journey: result -> release -> completion -> provider read -> review ------------------
 
 
-def test_golden_numeric_result_completion_provider_read_and_review(
+def test_golden_numeric_result_release_completion_provider_read_and_review(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:
     private_key, _ = keypair
@@ -297,7 +316,10 @@ def test_golden_numeric_result_completion_provider_read_and_review(
     )
     assert submit_response.status_code == 201, submit_response.text
     body = submit_response.json()
-    assert body["order_status"] == "COMPLETED"
+    # DH-EX-012/ADR-044: even the order's sole result no longer completes it -- only an explicit
+    # release does. `ready_for_release` reports the same "every item now has a result" fact.
+    assert body["order_status"] == "IN_PROGRESS"
+    assert body["ready_for_release"] is True
     assert body["result_type"] == "NUMERIC"
     assert set(body.keys()) == {
         "order_id",
@@ -306,11 +328,46 @@ def test_golden_numeric_result_completion_provider_read_and_review(
         "result_type",
         "completed_at",
         "order_status",
+        "ready_for_release",
     }
 
     with sessions() as session:
         order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"
+
+    # Pre-release: provider cannot read yet, but the lab's own releaser can inspect first --
+    # "a releaser must not be forced to release results they cannot inspect."
+    pre_release_provider = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert pre_release_provider.status_code == 409, pre_release_provider.text
+
+    inspection_response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(lab_tech_token),
+    )
+    assert inspection_response.status_code == 200, inspection_response.text
+    inspection_body = inspection_response.json()
+    assert inspection_body["all_results_entered"] is True
+    assert inspection_body["released"] is False
+    assert inspection_body["released_at"] is None
+    assert Decimal(inspection_body["results"][0]["numeric_value"]) == Decimal("13.5")
+
+    release_body = _release_results(client, private_key, lab.id, order_id, "Golden")
+    assert release_body["order_id"] == str(order_id)
+    assert release_body["released_at"] is not None
+    releaser_identity_id = release_body["released_by_identity_id"]
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
         assert order.status == "COMPLETED"
+
+    post_release_inspection = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(lab_tech_token),
+    )
+    assert post_release_inspection.json()["released"] is True
 
     results_response = client.get(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
@@ -337,8 +394,30 @@ def test_golden_numeric_result_completion_provider_read_and_review(
         delivery = session.scalar(
             select(ResultDelivery).where(ResultDelivery.lab_order_id == order_id)
         )
-        assert delivery.status == "PENDING"  # DH-EX-007 never touches ResultDelivery
+        assert delivery.status == "PENDING"  # DH-EX-007/012 never touch ResultDelivery
         assert delivery.delivered_at is None
+
+    # DH-EX-012/ADR-044: `lab_order_completed`'s actor is now the releaser, never the LAB_TECH who
+    # entered the result -- a semantic change from DH-EX-007, disclosed in PROJECT_STATE.md.
+    result_events = _audit_events(sessions, "lab_result_recorded")
+    released_events = _audit_events(sessions, "lab_results_released")
+    completed_events = _audit_events(sessions, "lab_order_completed")
+    review_events = _audit_events(sessions, "doctor_review_recorded")
+    assert len(result_events) == 1
+    assert len(released_events) == 1
+    assert len(completed_events) == 1
+    assert len(review_events) == 1
+    assert result_events[0]["organization_id"] == str(lab.id)
+    assert released_events[0]["organization_id"] == str(lab.id)
+    assert completed_events[0]["organization_id"] == str(lab.id)
+    assert review_events[0]["organization_id"] == str(provider.id)
+    with sessions() as session:
+        completed_audit = session.scalar(
+            select(ExchangeSecurityAuditEvent).where(
+                ExchangeSecurityAuditEvent.event_type == "lab_order_completed"
+            )
+        )
+        assert str(completed_audit.actor_identity_id) == releaser_identity_id
 
     result_events = _audit_events(sessions, "lab_result_recorded")
     completed_events = _audit_events(sessions, "lab_order_completed")
@@ -429,7 +508,9 @@ def test_result_after_completed_refused(
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1"},
     )
-    assert first.json()["order_status"] == "COMPLETED"
+    assert first.json()["ready_for_release"] is True
+    # DH-EX-012/ADR-044: an explicit release is required to reach COMPLETED now.
+    _release_results(client, private_key, lab.id, order_id, "AfterComplete")
 
     second = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
@@ -631,14 +712,16 @@ def test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation(
     assert _audit_events(sessions, "lab_order_completed") == []
 
     # No partial state was left behind -- a subsequent well-formed submission for the same item
-    # still succeeds and completes this one-item order.
+    # still succeeds and leaves this one-item order ready for release (DH-EX-012: no longer
+    # auto-completed).
     good = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1.2345"},
     )
     assert good.status_code == 201, good.text
-    assert good.json()["order_status"] == "COMPLETED"
+    assert good.json()["order_status"] == "IN_PROGRESS"
+    assert good.json()["ready_for_release"] is True
 
 
 def test_text_result_flow_unaffected_by_decimal_hardening(
@@ -696,7 +779,9 @@ def test_duplicate_result_on_still_in_progress_order_refused(
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "2"},
     )
-    assert second.json()["order_status"] == "COMPLETED"
+    # DH-EX-012/ADR-044: even the last missing result leaves the order IN_PROGRESS now.
+    assert second.json()["order_status"] == "IN_PROGRESS"
+    assert second.json()["ready_for_release"] is True
 
 
 def test_partial_results_keep_order_in_progress_via_api(
@@ -722,8 +807,12 @@ def test_partial_results_keep_order_in_progress_via_api(
             json={"result_type": "NUMERIC", "numeric_value": str(i + 1)},
         )
         assert response.status_code == 201, response.text
-        expected_status = "COMPLETED" if i == len(item_ids) - 1 else "IN_PROGRESS"
-        assert response.json()["order_status"] == expected_status
+        # DH-EX-012/ADR-044: order status stays IN_PROGRESS regardless of which item this is --
+        # only `ready_for_release` reflects completeness now; only explicit release reaches
+        # COMPLETED.
+        assert response.json()["order_status"] == "IN_PROGRESS"
+        expected_ready = i == len(item_ids) - 1
+        assert response.json()["ready_for_release"] is expected_ready
 
 
 def test_result_for_item_belonging_to_different_order_refused(
@@ -917,6 +1006,9 @@ def test_provider_results_response_excludes_internal_fields(
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1"},
     )
+    # DH-EX-012/ADR-044: provider visibility requires COMPLETED, which requires an explicit
+    # release.
+    _release_results(client, private_key, lab.id, order_id, "LeakCheck")
 
     body = client.get(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
@@ -980,6 +1072,8 @@ def test_second_terminal_review_is_a_controlled_conflict(
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1"},
     )
+    # DH-EX-012/ADR-044: review requires COMPLETED, which requires an explicit release.
+    _release_results(client, private_key, lab.id, order_id, "ReviewTwice")
     first = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
         headers=_auth(clinician_token),
@@ -1062,6 +1156,8 @@ def test_reviewer_identity_is_the_authenticated_caller_not_the_ordering_clinicia
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1"},
     )
+    # DH-EX-012/ADR-044: review requires COMPLETED, which requires an explicit release.
+    _release_results(client, private_key, lab.id, order_id, "ReviewerDiff")
 
     second_clinician_id = _bootstrap_identity(client, private_key, "second-reviewer")
     _grant_roles(
@@ -1113,13 +1209,15 @@ def test_frozen_price_and_catalog_snapshots_unchanged_by_result_recording(
 # -- audit atomicity --------------------------------------------------------------------------
 
 
-def test_result_and_completion_audit_atomicity(
+def test_result_audit_atomicity(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
 ) -> None:
-    """A one-item order's sole result would also complete it -- both the `lab_result_recorded`
-    and `lab_order_completed` audit rows, the `LabResult` insert, and the `LabOrder.status`
-    write must all roll back together when the audit insert fails, exactly matching DH-EX-006R's
-    established pattern for accept/reject/start-processing."""
+    """The `LabResult` insert and its `lab_result_recorded` audit row must roll back together when
+    the audit insert fails, exactly matching DH-EX-006R's established pattern for accept/reject/
+    start-processing. DH-EX-012/ADR-044: renamed from `..._and_completion_audit_atomicity` --
+    result submission no longer completes anything by itself (see
+    `test_release_and_completion_audit_atomicity` below for the release endpoint's own two-audit
+    atomicity, where `lab_order_completed` now actually fires)."""
     private_key, _ = keypair
     _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
         client, private_key, organizations, catalog, directory, patients, name="ResultAuditFail"
@@ -1140,11 +1238,622 @@ def test_result_and_completion_audit_atomicity(
 
     with sessions() as session:
         order = session.get(LabOrder, order_id)
-        assert order.status == "IN_PROGRESS"  # never advanced to COMPLETED
+        assert order.status == "IN_PROGRESS"
         assert session.scalar(select(LabResult)) is None  # result insert rolled back too
 
     assert _audit_events(sessions, "lab_result_recorded") == []
     assert _audit_events(sessions, "lab_order_completed") == []
+
+
+def test_release_and_completion_audit_atomicity(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
+) -> None:
+    """DH-EX-012/ADR-044: the release insert, the `LabOrder.status` write to COMPLETED, the
+    `lab_results_released` audit row, and the `lab_order_completed` audit row must all roll back
+    together when the audit insert fails -- no split-brain state (a release row with the order
+    still IN_PROGRESS, or COMPLETED with no release row) for a new DH-EX-012 order."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReleaseAuditFail"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-ReleaseAuditFail")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        releaser_id,
+        "releaser-ReleaseAuditFail",
+        ["LAB_RESULT_RELEASER"],
+    )
+    releaser_token = make_token(private_key, subject="releaser-ReleaseAuditFail")
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        client.post(
+            f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+            headers=_auth(releaser_token),
+        )
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"  # never advanced to COMPLETED
+        assert session.scalar(select(LabResultRelease)) is None  # release insert rolled back too
+
+    assert _audit_events(sessions, "lab_results_released") == []
+    assert _audit_events(sessions, "lab_order_completed") == []
+
+
+def test_release_rollback_when_only_completion_audit_fails(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
+) -> None:
+    """Narrower than `test_release_and_completion_audit_atomicity` above: here the FIRST audit
+    write (`lab_results_released`) is allowed to succeed and only the SECOND
+    (`lab_order_completed`) fails, proving the whole transaction still rolls back completely --
+    no split-brain state where a `lab_results_released` audit row survives without its matching
+    release row, status write, and `lab_order_completed` row."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="PartialAuditFail"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-PartialAuditFail")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        releaser_id,
+        "releaser-PartialAuditFail",
+        ["LAB_RESULT_RELEASER"],
+    )
+    releaser_token = make_token(private_key, subject="releaser-PartialAuditFail")
+
+    real_record = ExchangeSecurityAuditRepository.record
+    call_count = {"n": 0}
+
+    def _fail_second_call(self, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("simulated completion-audit failure")
+        return real_record(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _fail_second_call)
+
+    with pytest.raises(RuntimeError, match="simulated completion-audit failure"):
+        client.post(
+            f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+            headers=_auth(releaser_token),
+        )
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"  # never advanced to COMPLETED
+        assert session.scalar(select(LabResultRelease)) is None  # release insert rolled back too
+    assert _audit_events(sessions, "lab_results_released") == []
+    assert _audit_events(sessions, "lab_order_completed") == []
+
+
+# -- authorization: release endpoint --------------------------------------------------------------
+
+
+def test_lab_tech_alone_cannot_release_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="TechAloneRelease"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(lab_tech_token),
+    )
+    assert response.status_code == 403, response.text
+    with sessions() as session:
+        assert session.scalar(select(LabResultRelease)) is None
+
+
+def test_org_admin_alone_cannot_release_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="AdminAloneRelease"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    org_admin_id = _bootstrap_identity(client, private_key, "org-admin-release")
+    _grant_roles(client, private_key, lab.id, org_admin_id, "org-admin-release", ["ORG_ADMIN"])
+    org_admin_token = make_token(private_key, subject="org-admin-release")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(org_admin_token),
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_platform_admin_alone_cannot_release_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="PlatformAloneRelease",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    admin_token = make_token(
+        private_key, subject="platform-admin-release", roles=[PLATFORM_ADMIN_ROLE]
+    )
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_clinician_cannot_release_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ClinicianRelease"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(clinician_token),
+    )
+    assert response.status_code == 404, response.text  # clinician has zero relationship to lab.id
+
+
+def test_cross_lab_releaser_cannot_release_results_and_is_non_enumerating(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CrossLabRelease"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    impostor_lab, _impostor_token, _id = _setup_lab_tech(
+        client, private_key, organizations, "impostor-releaser"
+    )
+    impostor_releaser_id = _bootstrap_identity(client, private_key, "impostor-releaser-role")
+    _grant_roles(
+        client,
+        private_key,
+        impostor_lab.id,
+        impostor_releaser_id,
+        "impostor-releaser-role",
+        ["LAB_RESULT_RELEASER"],
+    )
+    impostor_releaser_token = make_token(private_key, subject="impostor-releaser-role")
+
+    real_response = client.post(
+        f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(impostor_releaser_token),
+    )
+    fake_response = client.post(
+        f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{uuid.uuid4()}/release-results",
+        headers=_auth(impostor_releaser_token),
+    )
+    assert real_response.status_code == 404
+    assert fake_response.status_code == 404
+    assert real_response.json() == fake_response.json()
+    with sessions() as session:
+        assert session.scalar(select(LabResultRelease)) is None
+
+
+def test_releaser_alone_cannot_submit_result(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """`LAB_RESULT_RELEASER` grants no result-*entry* authority -- that remains `LAB_TECH`'s
+    alone, symmetric to `test_lab_tech_alone_cannot_release_results` above."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReleaserAloneEnter"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-alone-enter")
+    _grant_roles(
+        client, private_key, lab.id, releaser_id, "releaser-alone-enter", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject="releaser-alone-enter")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(releaser_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    assert response.status_code == 403, response.text
+    with sessions() as session:
+        assert session.scalar(select(LabResult)) is None
+
+
+# -- authorization: lab-side inspection endpoint ----------------------------------------------
+
+
+def test_releaser_alone_can_inspect_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A `LAB_RESULT_RELEASER` with no `LAB_TECH` role must still be able to inspect what they are
+    about to release."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReleaserInspect"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-inspect-only")
+    _grant_roles(
+        client, private_key, lab.id, releaser_id, "releaser-inspect-only", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject="releaser-inspect-only")
+
+    response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(releaser_token),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["all_results_entered"] is True
+
+
+def test_org_admin_alone_cannot_inspect_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="AdminInspect"
+    )
+    org_admin_id = _bootstrap_identity(client, private_key, "org-admin-inspect")
+    _grant_roles(client, private_key, lab.id, org_admin_id, "org-admin-inspect", ["ORG_ADMIN"])
+    org_admin_token = make_token(private_key, subject="org-admin-inspect")
+
+    response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(org_admin_token),
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_platform_admin_alone_cannot_inspect_results(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="PlatformInspect"
+    )
+    admin_token = make_token(
+        private_key, subject="platform-admin-inspect", roles=[PLATFORM_ADMIN_ROLE]
+    )
+
+    response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_clinician_cannot_use_lab_inspection_endpoint(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ClinicianInspect"
+    )
+
+    response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert response.status_code == 404, response.text  # zero relationship to lab.id
+
+
+def test_cross_lab_cannot_inspect_results_and_is_non_enumerating(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, _lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CrossLabInspect"
+    )
+    impostor_lab, impostor_token, _id = _setup_lab_tech(
+        client, private_key, organizations, "impostor-inspect"
+    )
+
+    real_response = client.get(
+        f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(impostor_token),
+    )
+    fake_response = client.get(
+        f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{uuid.uuid4()}/results",
+        headers=_auth(impostor_token),
+    )
+    assert real_response.status_code == 404
+    assert fake_response.status_code == 404
+    assert real_response.json() == fake_response.json()
+
+
+# -- dual-role, incomplete release, and legacy-order handling ---------------------------------
+
+
+def test_dual_role_identity_may_enter_and_release_the_same_order(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """ADR-044's central permission: the SAME human may hold both `LAB_TECH` and
+    `LAB_RESULT_RELEASER` and use both on the same order -- no forced second person. This is the
+    one path negative control 4 ("accidentally add a second-person restriction") must break."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="DualRole"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    dual_identity_id = _bootstrap_identity(client, private_key, "dual-role-human")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        dual_identity_id,
+        "dual-role-human",
+        ["LAB_TECH", "LAB_RESULT_RELEASER"],
+    )
+    dual_token = make_token(private_key, subject="dual-role-human")
+
+    submit = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(dual_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    assert submit.status_code == 201, submit.text
+
+    release = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(dual_token),
+    )
+    assert release.status_code == 201, release.text
+    assert release.json()["released_by_identity_id"] == dual_identity_id
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "COMPLETED"
+
+    results_response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert results_response.status_code == 200, results_response.text
+
+
+def test_release_refused_when_results_incomplete(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A two-item order with only one result entered must refuse release with a controlled
+    conflict, never silently completing a half-resulted order."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="IncompleteRelease",
+        test_count=2,
+    )
+    item_ids = _order_item_ids(sessions, order_id)
+    submit = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_ids[0]}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    assert submit.json()["ready_for_release"] is False
+
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-incomplete")
+    _grant_roles(
+        client, private_key, lab.id, releaser_id, "releaser-incomplete", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject="releaser-incomplete")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(releaser_token),
+    )
+    assert response.status_code == 409, response.text
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"
+        assert session.scalar(select(LabResultRelease)) is None
+
+
+def test_release_on_legacy_completed_order_is_refused_not_fabricated(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A pre-DH-EX-012 order that reached COMPLETED via the old automatic-completion behavior has
+    no `LabResultRelease` row -- manufactured here with a raw status write (there is no longer any
+    live code path that can produce this shape). ADR-044's grandfather rule: release must refuse
+    with a distinguishable conflict rather than fabricating a release record, while provider read
+    and clinician review remain completely unaffected."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="LegacyCompleted"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        order.status = "COMPLETED"  # simulates a pre-DH-EX-012 auto-completed order
+        session.commit()
+
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-legacy")
+    _grant_roles(
+        client, private_key, lab.id, releaser_id, "releaser-legacy", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject="releaser-legacy")
+
+    release_attempt = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(releaser_token),
+    )
+    assert release_attempt.status_code == 409, release_attempt.text
+    with sessions() as session:
+        assert session.scalar(select(LabResultRelease)) is None  # never fabricated
+
+    # Provider visibility and clinician review are unaffected -- both gate on LabOrder.status
+    # alone, which this legacy order already satisfies.
+    results_response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert results_response.status_code == 200, results_response.text
+
+    review_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
+        headers=_auth(clinician_token),
+    )
+    assert review_response.status_code == 200, review_response.text
+
+
+# -- idempotent release replay ------------------------------------------------------------------
+
+
+def test_release_replay_by_same_releaser_returns_identical_provenance(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReplaySameReleaser"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-ReplaySameReleaser")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        releaser_id,
+        "releaser-ReplaySameReleaser",
+        ["LAB_RESULT_RELEASER"],
+    )
+    releaser_token = make_token(private_key, subject="releaser-ReplaySameReleaser")
+
+    first = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(releaser_token),
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(releaser_token),
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["released_at"].rstrip("Z") == first.json()["released_at"].rstrip("Z")
+    assert second.json()["released_by_identity_id"] == first.json()["released_by_identity_id"]
+    with sessions() as session:
+        from sqlalchemy import func
+
+        count = session.scalar(select(func.count()).select_from(LabResultRelease))
+    assert count == 1
+
+
+def test_release_replay_by_a_different_releaser_never_rewrites_provenance(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A *different*, equally-authorized `LAB_RESULT_RELEASER` retrying the same order must see the
+    first committer's provenance unchanged -- the fact recorded is who actually released it first,
+    never rewritten by whoever asks most recently."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReplayDiffReleaser"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    first_body = _release_results(client, private_key, lab.id, order_id, "ReplayDiffReleaserFirst")
+
+    second_releaser_id = _bootstrap_identity(client, private_key, "releaser-ReplayDiffSecond")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        second_releaser_id,
+        "releaser-ReplayDiffSecond",
+        ["LAB_RESULT_RELEASER"],
+    )
+    second_releaser_token = make_token(private_key, subject="releaser-ReplayDiffSecond")
+
+    second_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(second_releaser_token),
+    )
+    assert second_response.status_code == 200, second_response.text
+    assert (
+        second_response.json()["released_by_identity_id"] == first_body["released_by_identity_id"]
+    )
+    assert second_response.json()["released_by_identity_id"] != second_releaser_id
+    assert second_response.json()["released_at"].rstrip("Z") == first_body["released_at"].rstrip(
+        "Z"
+    )
 
 
 def test_doctor_review_audit_atomicity(
@@ -1160,6 +1869,9 @@ def test_doctor_review_audit_atomicity(
         headers=_auth(lab_tech_token),
         json={"result_type": "NUMERIC", "numeric_value": "1"},
     )
+    # DH-EX-012/ADR-044: review requires COMPLETED, which requires an explicit release -- done
+    # here, before the audit repository is monkeypatched below, so the release itself succeeds.
+    _release_results(client, private_key, lab.id, order_id, "ReviewAuditFail")
 
     def _raise(*_a, **_kw):
         raise RuntimeError("simulated audit failure")

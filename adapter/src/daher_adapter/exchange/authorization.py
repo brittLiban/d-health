@@ -204,6 +204,75 @@ class AuthorizationService:
             organization=organization, membership=membership, via_platform_admin=False
         )
 
+    def require_lab_result_releaser(
+        self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """DH-EX-012/ADR-044: the gate for explicit order-level result release --
+        deliberately does **not** let `platform_admin` bypass, the same reasoning
+        `require_lab_tech`/`require_clinician` already establish: network administration is not
+        clinical laboratory authority, here specifically not release authority. An `ORG_ADMIN` of
+        the lab organization who does not also hold `LAB_RESULT_RELEASER` is refused too --
+        ADR-044 is explicit that administrative authority never implies release authority. A
+        `LAB_TECH` who does not also hold `LAB_RESULT_RELEASER` is refused as well -- entry and
+        release are separate authorities that the same human may hold together, but neither one
+        implies the other (ADR-044's "no forced second-person, no automatic same-role grant"
+        binding decision).
+
+        Anti-enumeration matches `require_lab_tech` exactly: a genuinely nonexistent organization
+        404s for everyone; a normal caller with zero relationship to a real organization also
+        404s; a platform admin (who already has visibility that the organization exists) gets 403
+        for a real organization they lack this role in, never a 404."""
+        organization = self._get_organization_or_404(organization_id)
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized("lab result releaser role required")
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held_roles = self._roles.list_for_membership(membership.id)
+        if OrganizationRole.LAB_RESULT_RELEASER.value not in held_roles:
+            raise NotAuthorized("lab result releaser role required")
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
+
+    def require_lab_tech_or_result_releaser(
+        self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """DH-EX-012: the gate for the lab's own pre-release result-inspection read -- a releaser
+        must be able to see what they are about to release, and the tech who entered the results
+        must be able to see their own work, so either role suffices for a read-only inspection.
+        Same anti-enumeration and no-platform-admin-bypass discipline as `require_lab_tech`/
+        `require_lab_result_releaser`, applied to an "either role" check instead of one role."""
+        organization = self._get_organization_or_404(organization_id)
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized("lab technician or lab result releaser role required")
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held_roles = self._roles.list_for_membership(membership.id)
+        if (
+            OrganizationRole.LAB_TECH.value not in held_roles
+            and OrganizationRole.LAB_RESULT_RELEASER.value not in held_roles
+        ):
+            raise NotAuthorized("lab technician or lab result releaser role required")
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
+
     def require_any_active_membership(self, principal: AuthenticatedPrincipal) -> None:
         """DH-EX-003: the gate for network-wide reads (catalog list, lab directory, the
         marketplace whole-order query) that are not scoped to any single organization the caller

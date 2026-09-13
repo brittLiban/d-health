@@ -162,12 +162,12 @@ def _seed_in_progress_order(sessions: sessionmaker, *, key_prefix: str, item_cou
 
 def test_concurrent_same_item_submission_yields_exactly_one_result(sessions: sessionmaker) -> None:
     """Single-item order: the LabOrder FOR UPDATE lock serializes every concurrent submission for
-    this order down to one winner. Because this is a *one-item* order, that single winner also
-    completes it (same invariant `test_second_submission_on_a_completed_one_item_order_hits_the_
-    state_gate_first` pins down at the unit level) -- so the nine losers correctly observe
-    `InvalidResultSubmissionState` (order already COMPLETED), never `DuplicateResult`, matching
-    the ticket's required check order (lifecycle gate before the duplicate check). Both are
-    controlled conflicts; neither is a raw DB error."""
+    this order down to one winner. DH-EX-012/ADR-044: unlike DH-EX-007's original behavior (where
+    this single winner also completed a one-item order, so the nine losers hit
+    `InvalidResultSubmissionState` before ever reaching the duplicate check), recording a result no
+    longer completes the order by itself -- the order stays `IN_PROGRESS` for every loser, so all
+    nine now correctly observe the real `DuplicateResult` conflict instead, identical to the
+    two-item companion test below. Both are controlled conflicts; neither is a raw DB error."""
     key_prefix = f"pg7sameitem-{uuid.uuid4().hex[:8]}"
     lab_id, order_id, item_ids = _seed_in_progress_order(sessions, key_prefix=key_prefix)
     item_id = item_ids[0]
@@ -232,7 +232,8 @@ def test_concurrent_same_item_submission_yields_exactly_one_result(sessions: ses
         # across this session's qualification steps and may hold unrelated orders' audit rows.
         assert recorded_events_for_this_order == 0
         order = session.get(LabOrder, order_id)
-        assert order.status == "COMPLETED"  # one-item order: the single winner completed it
+        # DH-EX-012/ADR-044: never auto-completed -- stays IN_PROGRESS regardless of the winner.
+        assert order.status == "IN_PROGRESS"
 
 
 def test_concurrent_same_item_submission_on_still_in_progress_order_yields_duplicate_result(
@@ -296,9 +297,13 @@ def test_concurrent_same_item_submission_on_still_in_progress_order_yields_dupli
         assert order.status == "IN_PROGRESS"  # second item still has no result
 
 
-def test_concurrent_final_two_results_converge_to_completed_with_no_lost_write(
+def test_concurrent_final_two_results_converge_to_ready_for_release_with_no_lost_write(
     sessions: sessionmaker,
 ) -> None:
+    """DH-EX-012/ADR-044: renamed from `..._converge_to_completed_...` -- recording even the last
+    missing result no longer completes the order by itself; `ready_for_release` reports the same
+    DB-grounded "every item now has a result" fact, but the order stays `IN_PROGRESS` until an
+    explicit, authorized release (see `test_dhex012_postgres_qualification.py`)."""
     key_prefix = f"pg7finaltwo-{uuid.uuid4().hex[:8]}"
     lab_id, order_id, item_ids = _seed_in_progress_order(
         sessions, key_prefix=key_prefix, item_count=2
@@ -320,7 +325,7 @@ def test_concurrent_final_two_results_converge_to_completed_with_no_lost_write(
                 value=Decimal(i + 1),
             )
             with lock:
-                outcomes[i] = outcome.order_completed
+                outcomes[i] = outcome.ready_for_release
         except BaseException as error:  # noqa: BLE001 -- captured for the assertion
             with lock:
                 unexpected_errors.append(error)
@@ -334,12 +339,12 @@ def test_concurrent_final_two_results_converge_to_completed_with_no_lost_write(
     assert not unexpected_errors, f"no lost write / no raw DB error: {unexpected_errors!r}"
     assert len(outcomes) == 2, "both concurrent submissions must succeed -- no lost write"
     assert sorted(outcomes.values()) == [False, True], (
-        "exactly one of the two must be the order-completing submission"
+        "exactly one of the two must be the ready-for-release-triggering submission"
     )
 
     with sessions() as session:
         order = session.get(LabOrder, order_id)
-        assert order.status == "COMPLETED"
+        assert order.status == "IN_PROGRESS"  # DH-EX-012: never auto-completed by result entry
         result_count = session.scalar(
             select(func.count())
             .select_from(LabResult)
@@ -509,7 +514,9 @@ def test_boundary_valid_decimal_persists_exactly_in_real_postgres(
         json={"result_type": "NUMERIC", "numeric_value": "99999999999999.9999"},
     )
     assert response.status_code == 201, response.text
-    assert response.json()["order_status"] == "COMPLETED"
+    # DH-EX-012/ADR-044: even this one-item order's sole result no longer completes it.
+    assert response.json()["order_status"] == "IN_PROGRESS"
+    assert response.json()["ready_for_release"] is True
 
     with sessions() as session:
         result = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item_ids[0]))

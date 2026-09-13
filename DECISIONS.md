@@ -4989,3 +4989,45 @@ and the `lab_result_released` audit event are evaluated, not built — implement
 Questions 1 and 2 are answered, per DH-EX-012D's own "decision/audit ticket only" scope.
 
 **Full audit, evidence, and reasoning:** `PROJECT_STATE.md`'s DH-EX-012D entry.
+
+---
+
+**Decision accepted by Liban — 2026-09-13.** Both questions above are resolved. This section is an
+append, not a revision — the OPEN packet above (questions, options, flagged risk) stands unchanged
+as the record of what was evaluated and why; this is the record of what was chosen.
+
+**Question 1 answered: Option B** — a new, dedicated `LAB_RESULT_RELEASER` organization role
+(LAB-only, additive alongside `LAB_TECH`, never replacing it). `ORG_ADMIN` and platform-admin do not
+gain release authority by virtue of that role alone — release requires the explicit
+`LAB_RESULT_RELEASER` grant, checked independently of every other role.
+
+**Question 2 answered: Option A** — always permitted. The same human may hold both `LAB_TECH` and
+`LAB_RESULT_RELEASER` simultaneously and use both on the same order. No second-person requirement,
+no `released_by != entered_by` check, no facility-policy toggle exists anywhere in the
+implementation — a single qualified person may enter and release without waiting on anyone else.
+
+**Implemented exactly as DH-EX-012D's audit recommended, now binding, not merely recommended:**
+
+- Release terminology is `RELEASED`, never "validated" — no clinical interpretation is added or
+  implied anywhere in the release path.
+- Release is order-level, matching `ResultDelivery`, the provider result API, and `DoctorReview`.
+- No new `LabOrderStatus` was added — readiness is the existing `missing_count == 0` aggregate,
+  exposed as `ready_for_release` on result submission.
+- One immutable, order-level `LabResultRelease` record (id, `lab_order_id` UNIQUE,
+  `lab_organization_id`, `released_by_identity_id`, `released_at` — server time only): no revision,
+  no un-release, no delete.
+- A pre-DH-EX-012 order already `COMPLETED` is grandfathered with no fabricated release row —
+  `LegacyCompletedOrderHasNoRelease` is raised instead, distinguishable from `ResultsNotReadyForRelease`.
+  Provider visibility and clinician review for such an order are unaffected, exactly as recommended.
+- `LabResult.completed_at` keeps its name and its "entered," not "released," meaning.
+- The flagged amendment/correction gap remains open and unsolved by this ticket, recorded as a P0
+  pre-real-patient-pilot follow-up in `PROJECT_STATE.md`'s DH-EX-012 entry — accepting this decision
+  does not resolve it.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-EX-012 entry (migration
+`0015_exchange_result_release`, `exchange/results.py`'s `LabResultReleaseRepository`, the
+`require_lab_result_releaser` authorization check, the release and lab-side inspection endpoints,
+real-PostgreSQL qualification, and full test evidence).
+
+**Status: this ADR is now RESOLVED**, not OPEN — recorded here rather than editing the header above,
+so the original question/evidence packet remains legible as written at the time it was raised.

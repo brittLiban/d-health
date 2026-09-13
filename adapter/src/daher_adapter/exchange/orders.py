@@ -41,6 +41,7 @@ from daher_adapter.exchange.models import (
     LabOrder,
     LabOrderItem,
     LabOrderStatus,
+    LabResultRelease,
     LabSampleCollection,
     OrganizationType,
     ResultDelivery,
@@ -343,7 +344,13 @@ class LabOrderRepository:
         this repository's own established discipline is to enforce a security/workflow invariant
         inside the mutation itself, never rely solely on "no caller happens to bypass it today"
         (the same reasoning DH-EX-010's `assign_by_provider` tenant check and DH-EX-010A's
-        capability check both already apply)."""
+        capability check both already apply).
+
+        DH-EX-012/ADR-044: a generic ``IN_PROGRESS -> COMPLETED`` transition through this method
+        now requires an existing ``LabResultRelease`` row too, for the identical reason -- the
+        dedicated release action (``exchange/results.py``'s ``LabResultReleaseRepository.release``)
+        is the sole supported production way to reach ``COMPLETED``, but this generic primitive
+        must not become an unguarded bypass of that same invariant."""
         with self._sessions.begin() as session:
             order = session.scalar(
                 select(LabOrder).where(LabOrder.id == order_id).with_for_update()
@@ -370,6 +377,18 @@ class LabOrderRepository:
                         f"cannot move LabOrder {order_id} from 'ACCEPTED' to 'IN_PROGRESS' -- no "
                         f"sample/specimen collection milestone has been recorded for this order "
                         f"(DH-EX-011)"
+                    )
+            if to_status == LabOrderStatus.COMPLETED:
+                has_release = (
+                    session.scalar(
+                        select(LabResultRelease.id).where(LabResultRelease.lab_order_id == order_id)
+                    )
+                    is not None
+                )
+                if not has_release:
+                    raise InvalidOrderTransition(
+                        f"cannot move LabOrder {order_id} from 'IN_PROGRESS' to 'COMPLETED' -- "
+                        f"no result release record exists for this order (DH-EX-012)"
                     )
             order.status = to_status.value
             session.flush()

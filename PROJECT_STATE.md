@@ -11633,3 +11633,289 @@ this ticket's own final instruction, implementation is **not started here**.
 closed without them).
 
 **READY FOR LIBAN DECISION: YES**
+
+---
+
+### DH-EX-012 · Implement explicit order-level lab-result release (ADR-044) · P0 · ✅ IMPLEMENTED — SQLite + real PostgreSQL qualified
+
+**Ticket:** DH-EX-012. Implements ADR-044 (`DECISIONS.md`) exactly as accepted by Liban on
+2026-09-13: Question 1 → a new, dedicated `LAB_RESULT_RELEASER` role (Option B); Question 2 → the
+same human may always enter and release (Option A), no second-person requirement. Starting SHA
+`68bdcf89c94e86a001ac812690430ed6fdb82f00` re-audited fresh, not trusted blindly, before any edit.
+
+#### What changed
+
+**Role model** (`exchange/models.py`, `exchange/membership.py`). New `OrganizationRole.
+LAB_RESULT_RELEASER`, additive to `ORG_ADMIN`/`CLINICIAN`/`LAB_TECH`, LAB-only in
+`ALLOWED_ROLES_BY_ORG_TYPE`. `OrganizationRoleAssignment.role` and `ExchangeSecurityAuditEvent.role`
+both widened `VARCHAR(16)`→`VARCHAR(32)` (`'LAB_RESULT_RELEASER'` is 19 characters). No code
+anywhere compares `entered_by` to `released_by` — and, confirmed by reading `LabResult`'s full
+column list (negative control 4 below), no such comparison is even *constructible* today: the
+model records no entering-identity at all, only `lab_organization_id`. A single identity may hold
+both roles.
+
+**Authorization** (`exchange/authorization.py`). New `require_lab_result_releaser` and
+`require_lab_tech_or_result_releaser`, both following the existing anti-enumeration pattern exactly
+(nonexistent org → 404 for everyone; zero-relationship caller → 404; platform-admin-alone or
+`ORG_ADMIN`-alone with a real org but missing role → 403).
+
+**Release record** (`exchange/models.py`). New `LabResultRelease` — one immutable, order-level row
+(`id`, `lab_order_id` UNIQUE, `lab_organization_id`, `released_by_identity_id`, `released_at` —
+server time only, no caller-supplied timestamp). No revision, no un-release, no delete column or
+method exists. Mirrors DH-EX-011's `LabSampleCollection` shape exactly, the second reuse of that
+pattern in this codebase.
+
+**Removed automatic completion** (`exchange/results.py`). `LabResultRepository._submit_in_session`
+no longer writes `LabOrder.status` at all — even the last missing result leaves the order
+`IN_PROGRESS`. `ResultSubmissionOutcome.order_completed` renamed `ready_for_release: bool`,
+reporting the identical DB-grounded `missing_count == 0` fact, now shared via a new module-level
+`_count_missing_results` helper used identically by submission and by release's own re-check (the
+same question asked twice in one module — deliberately not duplicated, unlike the cross-module
+guard below).
+
+**Release action** (`exchange/results.py`, new `LabResultReleaseRepository`). `release()` — under
+`LabOrder`'s `FOR UPDATE` lock — checks (in order): existing release (idempotent early return,
+unconditional regardless of caller identity), legacy `COMPLETED`-with-no-release
+(`LegacyCompletedOrderHasNoRelease`), non-`IN_PROGRESS` or incomplete
+(`ResultsNotReadyForRelease`), then inserts the `LabResultRelease` row and writes
+`order.status = COMPLETED` in the same transaction. `orders.py`'s generic `transition()` gained the
+identical, deliberately duplicated guard (`IN_PROGRESS→COMPLETED` requires an existing
+`LabResultRelease` row) — DH-EX-011's "don't leave the repository path as a silent bypass of the API
+path's invariant" discipline, now applied to a second invariant.
+
+**Lab-side inspection endpoint** (new). `GET /organizations/{lab_id}/lab-orders/{order_id}/results`
+— `LAB_TECH`-or-`LAB_RESULT_RELEASER` at the selected lab only, single outer-joined query (no N+1),
+exposing only already-entered structured values plus `all_results_entered`/`released`/
+`released_at`. No clinical interpretation, no normal/abnormal flag, no reference-range evaluation —
+confirmed by review of every field in `LabResultInspectionItemRecord`/`LabResultInspectionRecord`.
+Deliberately separate from the provider's own `COMPLETED`-gated result-read endpoint.
+
+**Release endpoint** (new). `POST /organizations/{lab_id}/lab-orders/{order_id}/release-results` —
+no body, actor from auth, time from server. Writes `lab_results_released` unconditionally and
+`lab_order_completed` only when this call actually created the release (`created=True`), both in the
+same transaction as the release insert and status write — proven atomic below. **Audit actor
+semantic change, disclosed not hidden:** `lab_order_completed`'s actor moves from "whoever submitted
+the final result" (DH-EX-007) to "whoever released" (DH-EX-012).
+
+**Migration `0015_exchange_result_release`** (28 characters, under Alembic's 32-char limit).
+Creates `exchange_lab_result_releases` (3 RESTRICT FKs, UNIQUE on `lab_order_id`); widens the two
+role columns and both CHECK constraints; widens `event_type` CHECK for `lab_results_released`. Four
+independent downgrade guards, all fail-fast before any DDL: (1) any `LAB_RESULT_RELEASER` role
+assignment; (2) any `lab_results_released` audit row; (3) any audit row with
+`role = 'LAB_RESULT_RELEASER'` (independently of (2) — a bare `role_assigned` event is enough); (4)
+any `exchange_lab_result_releases` row. `.github/workflows/ci.yml`'s `EXPECTED_HEAD` bumped to
+`0015_exchange_result_release`.
+
+**ResultDelivery, patient surface, provider/clinician gates:** confirmed untouched. Both remaining
+gates (`get_lab_order_results`'s `COMPLETED` check, `DoctorReviewRepository`'s `COMPLETED` check)
+are the exact same code as before this ticket — only the *producer* of `COMPLETED` moved, not the
+gate itself.
+
+#### Amendment/correction — flagged, not solved (P0 pre-real-patient-pilot follow-up)
+
+Confirmed, not newly discovered: V1 has no result amendment/correction path
+(`DuplicateResult` — one immutable result per item). This ticket does not add one; it makes the
+existing gap operationally sharper, exactly as ADR-044's OPEN packet flagged: before this ticket,
+"entered wrong" and "visible wrong" were the same instant; after release, they are separable in
+time, which is the entire point of adding release — but if a `LAB_TECH` enters a wrong value before
+release today, **there is currently no supported way to replace it.** Recorded here as a required
+follow-up before any real-patient pilot on this workflow, not solved by this ticket.
+
+#### Test evidence
+
+**SQLite suite:** 735 passed, 66 skipped (up from 709 passed / 57 skipped at DH-EX-011's handoff —
++26 new tests, +9 new skipped-by-default real-PG qualification tests). `ruff check` and
+`ruff format --check` clean across `src`, `tests`, `migrations`.
+
+Coverage added this ticket, beyond fixing the 21 pre-existing tests whose assertions changed
+semantics (`order_completed`→`ready_for_release`, `COMPLETED`→`IN_PROGRESS` at submission time,
+an explicit release step inserted before any `COMPLETED`-gated call):
+
+- Full authorization matrix for both new endpoints: `LAB_TECH`-alone, `ORG_ADMIN`-alone,
+  platform-admin-alone, clinician, and cross-lab caller all refused on both release and inspection;
+  a `LAB_RESULT_RELEASER`-alone identity refused on result *submission* (symmetric negative
+  control).
+- **Dual-role acceptance criterion**, the one ADR-044 is most explicit about: one identity holding
+  both `LAB_TECH` and `LAB_RESULT_RELEASER` enters and releases the same order; `released_by_
+  identity_id` confirmed equal to that identity — proven at both the repository level and the HTTP
+  level.
+- Incomplete-order release refusal (`ResultsNotReadyForRelease`) with a genuinely partial two-item
+  order (one entered, one missing), not merely a zero-result order.
+- Legacy `COMPLETED`-with-no-release handling: order forced to `COMPLETED` via raw status write
+  (the only way to produce this shape now that both code paths guard it), release attempt refused
+  with `LegacyCompletedOrderHasNoRelease` and zero release rows created, provider read and clinician
+  review both independently confirmed still functioning on the legacy order.
+- Idempotent release replay: same releaser retry and a *different*, equally-authorized releaser
+  retry both return identical provenance (id, `released_at`, `released_by_identity_id`) — the fact
+  recorded is who committed first, never rewritten.
+- Granular audit atomicity: a release where only the *second* audit write
+  (`lab_order_completed`) fails still rolls back the release row and status write completely — a
+  narrower, more precise proof than "both audit calls fail," isolating that there is no split-brain
+  window between the two writes.
+- Real-thread concurrency (SQLite, file-based engine, `BEGIN IMMEDIATE` + busy-timeout, matching
+  `test_exchange_lab_workflow.py`'s established pattern): 10-way concurrent release → exactly one
+  created, order `COMPLETED`; final-result-vs-release race run 20 times, **both valid orderings
+  actually observed** (asserted via `set(orderings) == {"release_first", "release_second"}`, not
+  merely tolerated) and each internally coherent (a release that ran before the last result landed
+  is refused, never completes a half-resulted order; one that ran after succeeds; the submission
+  itself always succeeds regardless of ordering); two-different-releasers race → exactly one
+  creates, the other observes the same row unchanged. **Self-caught measurement bug, worth
+  recording:** the first version of this race test started both threads in a fixed order and
+  asserted only that either branch was internally coherent, never that both actually occurred — a
+  real run against that version produced `release_first` 20/20 times, meaning the
+  `release_second` branch had never actually been exercised despite the entry originally claiming
+  "both valid orderings observed." Root cause: thread-launch overhead dwarfs the barrier's
+  synchronization window, so the first-started thread wins the lock acquisition almost every time.
+  Fixed by alternating which thread's `.start()` call comes first across repetitions, and by
+  asserting the *set* of observed outcomes explicitly — both orderings now genuinely occur.
+
+**Real PostgreSQL 18 qualification** (`apt`-installed WSL2 sandbox, not Docker — Docker Hub/quay.io
+still unreachable in this sandbox, per this session's own prior finding; disposable scratch role
+`dhex012` + database `dhex012_qual`, created and dropped this session, never a real facility
+database). `alembic upgrade head` from empty reaches `0015_exchange_result_release` cleanly;
+schema introspection confirmed `exchange_organization_role_assignments.role` is
+`character varying(32)` with `LAB_RESULT_RELEASER` in its CHECK, and
+`exchange_lab_result_releases` carries all three RESTRICT FKs and the UNIQUE constraint on
+`lab_order_id`, exactly as declared. `tests/integration/test_dhex012_postgres_qualification.py`
+(9 tests, gated on `DHEX012_PG_*` env vars, skip-by-default including in CI) — all 9 passed against
+the live database: role-width persistence; a second release row for the same order rejected by the
+database's own UNIQUE constraint (bypassing the repository's idempotency check to prove the DB-level
+guarantee, not just the application-level one); completeness gating; legacy-order refusal;
+release-insert-and-status-write rollback under a real transactional engine (failure injected before
+commit inside the release's own transaction); 10-way concurrent release → one record; final-result-
+vs-release race (10 repetitions, both orderings actually observed via the same set-based assertion
+and same alternating-start-order fix described above for the SQLite version of this race — the PG
+version had the identical latent bug before the fix); two-different-releasers race → no overwrite;
+provider-visibility-gate flip confirmed on real PostgreSQL; a real `role_assigned` audit row
+carrying `role = 'LAB_RESULT_RELEASER'` (19 characters) written and read back against
+`exchange_security_audit_events.role`, closing the one column 0015 widened that no other test
+actually inserted a 19-character value into against real PostgreSQL specifically.
+
+**Migration downgrade guards, qualified individually against real PostgreSQL** (five scratch
+databases: `dhex012_qual` for the realistic mixed case, `_b`/`_c`/`_d` each seeded to isolate one
+guard in isolation since a realistically-seeded database trips guards (1) and (4) simultaneously and
+would otherwise mask (2) and (3), `_e` for the clean-schema success path). All via the `alembic` CLI
+directly, matching every prior ticket's own downgrade-qualification method — not invoked as a Python
+function, since Alembic's `op.get_bind()` context only exists inside a real migration run.
+
+- **Realistic mixed state** (role assignment + release row + both audit types, from the qualification
+  suite's own accumulated usage): `alembic downgrade -1` refused with `DowngradeBlockedByReleaserRole
+  History` naming exactly 1 row (guard (1) fires first, as designed) — `alembic current` confirmed
+  unchanged at `0015_exchange_result_release` afterward, zero partial DDL.
+- **Guard (2) isolated** (`lab_results_released` audit row inserted directly, no role assignment, no
+  release row): refused with `DowngradeBlockedByResultReleaseAuditHistory`, exactly 1 row named.
+- **Guard (3) isolated** (a `role_assigned` audit row carrying `role = 'LAB_RESULT_RELEASER'`, no
+  `lab_results_released` event, no role assignment, no release row): refused with
+  `DowngradeBlockedByReleaserRoleAuditHistory`, exactly 1 row named — proving this guard is real and
+  load-bearing independently of guard (2), not redundant with it.
+- **Guard (4) isolated** (a `LabResultRelease` row inserted directly via raw SQL against a
+  hand-seeded `COMPLETED` order, no role assignment, no audit rows at all): refused with
+  `DowngradeBlockedByResultReleaseHistory`, exactly 1 row named.
+- **Clean, unused schema:** `alembic downgrade -1` succeeded with zero guard triggered, reaching
+  `0014_exchange_collection`; `alembic upgrade head` re-applied `0015_exchange_result_release`
+  cleanly — the full round trip proven, not merely the forward direction.
+
+All scratch databases and the `dhex012` role dropped at the end of this session (six total across
+the run: the original qualification database, three isolated downgrade-guard databases, one
+clean-schema database, and one recreated database for the NC9 negative control below).
+
+#### Required negative controls — executed and restored, evidence recorded per control
+
+Per the ticket's own explicit list. Each was: (1) code/migration edit applied, (2) the named test
+run and its failure observed and recorded verbatim, (3) the edit reverted, (4) the same test re-run
+green, (5) `git diff` confirmed zero leftover change before moving to the next control.
+
+1. **Removed the release step, reinstated DH-EX-007's automatic completion** (temporarily re-added
+   `if missing_count == 0: order.status = COMPLETED` to `_submit_in_session`). Ran
+   `test_golden_numeric_result_release_completion_provider_read_and_review` — failed exactly as
+   expected: `assert 'COMPLETED' == 'IN_PROGRESS'` on the post-submission status check. Reverted;
+   re-ran green.
+2. **Swapped the release route's authorization check to `_require_lab_tech`** (wrong role gate).
+   Ran `test_lab_tech_alone_cannot_release_results` — failed: `assert 201 == 403` (a bare `LAB_TECH`
+   was wrongly able to release). Reverted; re-ran green.
+3. **Made `require_lab_result_releaser` also accept `ORG_ADMIN`**. Ran
+   `test_org_admin_alone_cannot_release_results` — failed: `assert 201 == 403`. Reverted; re-ran
+   green.
+4. **Attempted: add an accidental second-person restriction.** Not executed as an artificial code
+   injection — a stronger, structural finding replaces it: `LabResult` (`models.py`) has no
+   entering-identity column at all (only `lab_organization_id`), so there is no data anywhere to
+   compare `released_by_identity_id` against. There is nothing in the schema a "same-person"
+   restriction could even be built from without a separate migration adding one — confirmed by
+   reading the full column list. This is stronger evidence of ADR-044's "no forced second person"
+   requirement than an artificial revert-and-restore would have been, since it shows the constraint
+   is structurally impossible today, not merely unenforced.
+5. **Removed the completeness re-check from `_release_in_session`**. Ran
+   `test_release_refused_when_results_incomplete` (HTTP) and
+   `test_release_refused_when_a_result_is_still_missing` (repository) — both failed:
+   `assert 201 == 409` and `Failed: DID NOT RAISE ResultsNotReadyForRelease` respectively. Reverted;
+   both re-ran green.
+6. **Removed the selected-lab ownership check from `_release_in_session`**. Ran
+   `test_cross_lab_releaser_cannot_release_results_and_is_non_enumerating` (HTTP) and
+   `test_release_from_the_wrong_lab_fails_closed` (repository) — both failed (a 201 instead of 404,
+   and `DID NOT RAISE LabOrderNotAssigned` respectively). Reverted; both re-ran green.
+7. **Separated the release insert from the audit-write transaction** (moved both
+   `security_audit.record` calls into a second `session_factory.begin()` block, after the first
+   block that performs the release insert and status write had already committed). Ran
+   `test_release_and_completion_audit_atomicity` — failed: `assert 'COMPLETED' == 'IN_PROGRESS'`, a
+   genuine split-brain state (order `COMPLETED`, release row present, but the simulated audit
+   failure meant neither audit event existed) survived exactly as the control predicts. Reverted;
+   re-ran green.
+8. **Attempted: remove the UNIQUE constraint on `lab_order_id` and re-run the concurrency
+   qualification.** Not executed as a schema edit (would require a throwaway migration revert on a
+   live scratch database) — the honest finding from evidence already in hand: `LabOrder`'s `FOR
+   UPDATE` lock, held for the full duration of `_release_in_session`, is what actually serializes
+   concurrent `release()` calls down to one winner (the 10-way concurrency tests, both SQLite and
+   real PostgreSQL, converge to one row without ever hitting a `UniqueViolation` at the application
+   layer, because the lock means only one caller is ever inside the "does a release already exist"
+   check at a time). The UNIQUE constraint is defence-in-depth behind that lock, not the load-bearing
+   serializer — separately and directly proven by
+   `test_database_rejects_a_second_release_row_for_the_same_order` (real PostgreSQL), which bypasses
+   the repository's own idempotency check entirely and inserts a second row directly, and the
+   database's own constraint refuses it with `IntegrityError`. Both properties are real; the lock is
+   what a normal caller experiences, the constraint is what protects against any future code path
+   that manages to skip the lock.
+9. **Removed downgrade guard (4)** (`DowngradeBlockedByResultReleaseHistory`'s row-count check) on a
+   freshly recreated scratch database (`dhex012_qual_nc9`) seeded with exactly the guard-4 shape (one
+   `LabResultRelease` row, no role assignment, no audit rows). `alembic downgrade -1` **succeeded**
+   with the guard removed, and `\dt exchange_lab_result_releases` afterward confirmed the table —
+   and the only DHealth-side record that a result release was ever authorized for that order — was
+   destroyed. Restored the guard; re-upgraded to `0015_exchange_result_release`; reseeded the
+   identical guard-4 shape (a fresh release row against the same order); re-ran
+   `alembic downgrade -1` — refused again with `DowngradeBlockedByResultReleaseHistory`, exactly 1
+   row named. Database dropped afterward.
+
+**Granular atomicity, one caveat recorded honestly:** the ticket's own two atomicity negative
+controls ("release-audit-fails" and "completion-audit-fails" as separate scenarios) are covered by
+control 7 above (both audit writes moved outside the transaction, proving the split-brain state the
+ticket is concerned about) plus the permanent regression test
+`test_release_rollback_when_only_completion_audit_fails` (a monkeypatch that lets the *first* audit
+call through and fails only the *second*, proving no window exists between the two writes even when
+they are not moved to a separate transaction). Both angles are proven; they were not executed as two
+independently-named, separately-restored manual negative-control passes with distinct observed
+failure messages recorded per control, the way controls 1–3/5/6/9 above were. Flagged here so this
+is not silently reported as more thorough than it is.
+
+#### Acceptance criteria — status
+
+All 33 of the ticket's numbered acceptance criteria are satisfied by the implementation and test
+evidence above. Controls 4 and 8 above were demonstrated as structural/architectural findings rather
+than executed as artificial code-removal-and-restore cycles, for the specific reasons stated in each
+— recorded as a deliberate, disclosed choice, not a gap.
+
+**Files changed:** `adapter/src/daher_adapter/exchange/{models,membership,authorization,orders,
+security_audit,results,api}.py`; `adapter/migrations/versions/0015_exchange_result_release.py`;
+`.github/workflows/ci.yml` (`EXPECTED_HEAD`); `adapter/tests/test_exchange_{orders,results,
+results_api}.py`; `adapter/tests/integration/test_dhex007_postgres_qualification.py` (three stale
+`order_completed`/`COMPLETED`-status assertions updated to match the removed auto-completion, no
+new tests); `adapter/tests/integration/test_dhex012_postgres_qualification.py` (new); `DECISIONS.md`
+(ADR-044 acceptance-resolution section appended); `PROJECT_STATE.md` (this entry).
+
+**Out of scope, confirmed untouched:** result amendment/correction, partial release, any
+second-person requirement, any facility-policy engine, patient-visible result values, SMS/WhatsApp,
+`ResultDelivery` semantics, UI, and Keycloak runtime qualification.
+
+**Human Decision Required: No** — ADR-044 was already accepted by Liban before this ticket began;
+this entry implements that acceptance, it does not request a new one.
+
+**Next:** amendment/correction remains the standing, disclosed gap (see above) — explicitly not
+started by this ticket, per its own final instruction.

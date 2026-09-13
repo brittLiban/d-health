@@ -109,8 +109,12 @@ from daher_adapter.exchange.results import (
     DoctorReviewRepository,
     DuplicateResult,
     InvalidResultSubmissionState,
+    LabResultInspectionRecord,
+    LabResultReleaseRepository,
     LabResultRepository,
+    LegacyCompletedOrderHasNoRelease,
     OrderItemNotFound,
+    ResultsNotReadyForRelease,
     ResultSubmissionOutcome,
     ReviewAlreadyFinalized,
     ReviewNotAllowedYet,
@@ -166,7 +170,7 @@ class _InactiveMembershipReplay(Exception):
         self.membership_id = membership_id
 
 
-_ROLE_LITERAL = Literal["ORG_ADMIN", "CLINICIAN", "LAB_TECH"]
+_ROLE_LITERAL = Literal["ORG_ADMIN", "CLINICIAN", "LAB_TECH", "LAB_RESULT_RELEASER"]
 
 
 class OrganizationCreateRequest(BaseModel):
@@ -806,7 +810,13 @@ class LabResultSubmitRequest(BaseModel):
 class LabResultSubmitResponse(BaseModel):
     """Deliberately narrow -- confirms the mutation and the order's resulting status, nothing
     more. No internal auth/security-audit fields, no patient token/grant data, no re-statement of
-    frozen catalog/price snapshots the caller already has from the work-queue read."""
+    frozen catalog/price snapshots the caller already has from the work-queue read.
+
+    DH-EX-012/ADR-044: ``order_status`` is truthfully always ``'IN_PROGRESS'`` now -- recording a
+    result, even the last one, no longer completes the order. ``ready_for_release`` is the new,
+    additive field reporting the same DB-grounded "every item now has a result" fact DH-EX-007's
+    since-removed automatic completion used to act on; this response never acts on it, only
+    reports it."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -816,6 +826,7 @@ class LabResultSubmitResponse(BaseModel):
     result_type: str
     completed_at: datetime
     order_status: str
+    ready_for_release: bool
 
 
 class ProviderResultItemResponse(BaseModel):
@@ -843,6 +854,56 @@ class ProviderOrderResultsResponse(BaseModel):
     order_id: uuid.UUID
     order_status: str
     results: list[ProviderResultItemResponse]
+
+
+class LabResultInspectionItemResponse(BaseModel):
+    """DH-EX-012: unlike ``ProviderResultItemResponse``, every field beyond ``item_id`` may be
+    ``None`` -- this is the lab's own pre-release view, which must show what is still missing, not
+    only what has already been entered. No clinical interpretation: no normal/abnormal flag, no
+    reference-range evaluation is computed here or anywhere in this codebase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    result_type: str | None
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+    completed_at: datetime | None
+
+
+class LabResultInspectionResponse(BaseModel):
+    """DH-EX-012: the selected lab's own operational read of an order's entered results, before
+    release -- "a releaser must not be forced to release results they cannot inspect." Deliberately
+    separate from provider delivery (`ProviderOrderResultsResponse`, gated on `COMPLETED`) and from
+    the DH-EX-006 order-detail view (`LabWorkflowOrderResponse`, which carries no result values at
+    all)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    order_status: str
+    all_results_entered: bool
+    released: bool
+    released_at: datetime | None
+    results: list[LabResultInspectionItemResponse]
+
+
+class LabResultReleaseResponse(BaseModel):
+    """DH-EX-012/ADR-044: the response to releasing (or idempotently replaying) an order's result
+    set -- deliberately narrow, matching `LabCollectionResponse`'s own precedent. No result values,
+    no clinical content: confirms only that the workflow-authorization action was recorded, by
+    whom, and when."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    released_by_identity_id: uuid.UUID
+    released_at: datetime
 
 
 class DoctorReviewResponse(BaseModel):
@@ -879,6 +940,7 @@ def build_exchange_router(
     )
     lab_workflow = LabWorkflowRepository(session_factory, organizations)
     results = LabResultRepository(session_factory)
+    releases = LabResultReleaseRepository(session_factory)
     reviews = DoctorReviewRepository(session_factory)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
@@ -1029,6 +1091,42 @@ def build_exchange_router(
         # `_require_clinician` exactly (see `AuthorizationService.require_lab_tech`'s docstring).
         try:
             return authz.require_lab_tech(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_lab_result_releaser(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        # DH-EX-012/ADR-044: deliberately `authz.require_lab_result_releaser`, never
+        # `require_org_admin`/`require_role` -- platform admin must NOT bypass this one, mirroring
+        # `_require_lab_tech` exactly (see `AuthorizationService.require_lab_result_releaser`'s
+        # docstring).
+        try:
+            return authz.require_lab_result_releaser(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_lab_tech_or_releaser(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        # DH-EX-012: the pre-release inspection read -- either role suffices, platform admin does
+        # not bypass (see `AuthorizationService.require_lab_tech_or_result_releaser`'s docstring).
+        try:
+            return authz.require_lab_tech_or_result_releaser(principal, organization_id)
         except ResourceNotFound as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
@@ -2348,10 +2446,12 @@ def build_exchange_router(
                         value=body.text_value or "",
                         session=session,
                     )
-                # `lab_result_recorded` and (if this was the order's last missing item)
-                # `lab_order_completed` commit or roll back together with the result insert and
-                # the order's own status write -- both audit rows are added to the identical
-                # `session` this transaction already owns, never a separate commit.
+                # `lab_result_recorded` commits or rolls back together with the result insert --
+                # added to the identical `session` this transaction already owns, never a separate
+                # commit. DH-EX-012/ADR-044: `lab_order_completed` is no longer written here, even
+                # for the last missing item -- recording a result never completes the order by
+                # itself any more; see `release_lab_order_results` below for where
+                # `lab_order_completed` now fires, atomically with the release itself.
                 security_audit.record(
                     session,
                     event_type="lab_result_recorded",
@@ -2361,16 +2461,6 @@ def build_exchange_router(
                     resource_type="lab_order",
                     resource_id=order_id,
                 )
-                if outcome.order_completed:
-                    security_audit.record(
-                        session,
-                        event_type="lab_order_completed",
-                        actor_identity_id=principal.identity_id,
-                        organization_id=lab_id,
-                        outcome="updated",
-                        resource_type="lab_order",
-                        resource_id=order_id,
-                    )
         except LabOrderNotAssigned as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
@@ -2391,6 +2481,110 @@ def build_exchange_router(
             result_type=outcome.result.result_type,
             completed_at=outcome.result.completed_at,
             order_status=outcome.order_status,
+            ready_for_release=outcome.ready_for_release,
+        )
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/results",
+        response_model=LabResultInspectionResponse,
+    )
+    def get_lab_order_results_for_release(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabResultInspectionResponse:
+        # DH-EX-012: the selected lab's own pre-release operational read -- NOT provider delivery
+        # (that is `get_lab_order_results` below, gated on COMPLETED). Either LAB_TECH or
+        # LAB_RESULT_RELEASER may inspect: a releaser must be able to see what they are about to
+        # release, and the tech who entered results must be able to see their own work.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        record: LabResultInspectionRecord | None = results.get_for_lab(order_id, lab_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return LabResultInspectionResponse(
+            order_id=record.order_id,
+            order_status=record.order_status,
+            all_results_entered=record.all_results_entered,
+            released=record.released,
+            released_at=record.released_at,
+            results=[
+                LabResultInspectionItemResponse(
+                    item_id=item.item_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    result_type=item.result_type,
+                    numeric_value=item.numeric_value,
+                    numeric_unit=item.numeric_unit,
+                    reference_range_low=item.reference_range_low,
+                    reference_range_high=item.reference_range_high,
+                    text_value=item.text_value,
+                    completed_at=item.completed_at,
+                )
+                for item in record.items
+            ],
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/release-results",
+        response_model=LabResultReleaseResponse,
+    )
+    def release_lab_order_results(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabResultReleaseResponse:
+        # DH-EX-012/ADR-044: the sole supported production way to move a LabOrder from
+        # IN_PROGRESS to COMPLETED. No request body: actor from authentication, lab/order from the
+        # URL, time from the server clock. LAB_RESULT_RELEASER only -- LAB_TECH alone (without
+        # also holding LAB_RESULT_RELEASER) is refused, matching ADR-044's explicit "entry and
+        # release are separate authorities" binding decision.
+        _require_lab_result_releaser(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, created = releases.release(
+                    order_id=order_id,
+                    lab_organization_id=lab_id,
+                    released_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                # `lab_results_released` and `lab_order_completed` commit or roll back together
+                # with the release insert and the order's own status write, all in the identical
+                # `session` this transaction already owns. Actor is the releaser -- a semantic
+                # change from DH-EX-007, where `lab_order_completed`'s actor was whoever submitted
+                # the final result (see PROJECT_STATE.md's DH-EX-012 entry).
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_results_released",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_completed",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except LegacyCompletedOrderHasNoRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ResultsNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return LabResultReleaseResponse(
+            order_id=record.lab_order_id,
+            released_by_identity_id=record.released_by_identity_id,
+            released_at=record.released_at,
         )
 
     @router.get(
