@@ -25,6 +25,7 @@ from daher_adapter.exchange.audit import ExchangeAuditWriter
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.directory import LabDirectoryProfileRepository
 from daher_adapter.exchange.identity import PatientReferenceRepository
+from daher_adapter.exchange.membership import ExchangeIdentityRepository
 from daher_adapter.exchange.models import (
     ExchangeSecurityAuditEvent,
     LabOrder,
@@ -1478,11 +1479,15 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
     workflow.start_processing(order_id=order_id, lab_organization_id=lab.id)
 
     results = LabResultRepository(sessions)
+    labtech_identity, _ = ExchangeIdentityRepository(sessions).get_or_create(
+        issuer="https://test.example", subject="leak-check-labtech"
+    )
     results.record_numeric(
         order_id=order_id,
         lab_order_item_id=item_ids[0],
         lab_organization_id=lab.id,
         value=D("999.5"),
+        recorded_by_identity_id=labtech_identity.id,
         unit="mg/dL",
         reference_range_low=D("70"),
         reference_range_high=D("100"),
@@ -1491,6 +1496,7 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
         order_id=order_id,
         lab_order_item_id=item_ids[1],
         lab_organization_id=lab.id,
+        recorded_by_identity_id=labtech_identity.id,
         value="Positive -- urgent",
     )
 

@@ -12751,3 +12751,292 @@ paused behind that same future ticket, unchanged from DH-FIELD-001's framing.
 **Human Decision Required: YES** — the zero-observation-completion question above.
 
 **READY FOR LIBAN DECISION/REVIEW: YES**
+
+---
+
+### DH-EX-012C · Implement ADR-047 multi-observation result domain · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+
+**Ticket:** DH-EX-012C. Implements the schema ADR-047 recommended and Liban accepted, resolving
+ADR-046's requirement (one ordered diagnostic service may return zero, one, or many observations)
+with the zero-observation-completion question answered as **NO** (Option (a) — an item may never
+reach `entry_complete` with zero observations).
+
+**Starting HEAD/CI:** `6abe2db1d4bbe5fe274fe85b5176e6035eef0b8a`, fetched and audited fresh, matched
+the ticket's stated expectation exactly, working tree clean. CI run `34761238752`: success, all 9
+jobs green (independently re-verified via GitHub's check-runs API at the end of DH-EX-012B, not
+merely trusted).
+
+**Environment note, disclosed rather than glossed over:** this session runs on native Windows Git
+Bash, which has no working Python interpreter and no Docker. Real PostgreSQL qualification was made
+possible by WSL2 Ubuntu being available on this machine with PostgreSQL 18 natively installed
+(`sudo pg_lsclusters` confirmed it already running) — a disposable database/role (`dhex012c_qual`,
+plus a throwaway `dhex012c_control10` for the downgrade-guard-removal demonstration, dropped after
+use) was created for this ticket specifically. A Windows-native Python venv was also built (for
+tooling that doesn't need `fcntl`), but the adapter's own `daher_adapter.audit` module imports
+`fcntl` unconditionally, so all adapter test/lint/migration commands in this ticket ran inside WSL2,
+not the Windows-native venv.
+
+#### Schema implemented
+
+```text
+LabOrder
+  └─ LabOrderItem            (unchanged)
+       └─ LabResult          (container: id, lab_order_item_id UNIQUE, lab_organization_id,
+                               created_at, entry_completed_at, entry_completed_by_identity_id)
+            └─ LabObservation[]  (id, lab_result_id, source_code, source_system,
+                                   display_label_snapshot, result_type, numeric_value,
+                                   numeric_unit, reference_range_low, reference_range_high,
+                                   text_value, recorded_at — no uniqueness beyond primary key)
+```
+
+Exactly the shape ADR-047 recommended and Liban accepted — no deviation. `NATIVE_OBSERVATION_
+SOURCE_SYSTEM = "dhealth-exchange"` (`exchange/results.py`) reuses the identical literal `exchange/
+api.py`'s `_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM` already uses, for the identical fact (DHealth
+itself asserting an identity, not an external source).
+
+#### Migration
+
+`0016_exchange_observations`, revises `0015_exchange_result_release`. `.github/workflows/ci.yml`'s
+`EXPECTED_HEAD` updated to match.
+
+**Legacy migration behavior, verified against real PostgreSQL with real pre-existing legacy data
+(not merely an empty-table CI run):** seeded two legacy-shaped orders directly via raw SQL at the
+pre-0016 schema (order A: `IN_PROGRESS` with one legacy scalar `LabResult` row; order B: a
+`COMPLETED`-without-release order, exercising ADR-044's grandfather rule) before running `alembic
+upgrade head`. Verified after upgrade: each legacy row became one container (`entry_completed_at`/
+`created_at` backfilled from the old `completed_at`, `entry_completed_by_identity_id` left `NULL` —
+never fabricated) plus exactly one child observation (`source_code`/`display_label_snapshot` reused
+from the item's own `catalog_code_snapshot`/`catalog_display_name_snapshot`, `source_system =
+"dhealth-exchange"`, every value field copied verbatim). Order B's `COMPLETED` status and zero-row
+`exchange_lab_result_releases` count were unaffected by the migration — the grandfather rule holds
+through this schema change.
+
+**Downgrade guards, each independently demonstrated against real PostgreSQL, not just written:**
+four fail-fast guards (`DowngradeBlockedByMultiObservationHistory`,
+`DowngradeBlockedByIncompleteEntryHistory`, `DowngradeBlockedByNativeCompletionProvenanceHistory`,
+`DowngradeBlockedByObservationAuditVocabularyHistory`), each triggered one at a time by mutating
+real rows in the qualification database (a second observation added; `entry_completed_at` nulled;
+a real `entry_completed_by_identity_id` set; a real `lab_observation_recorded` audit row inserted),
+confirming each guard fires with the exact expected exception, the database left completely
+unchanged at `0016_exchange_observations` after each refusal (`alembic current` re-checked after
+each). With no guards triggered, a real downgrade to `0015_exchange_result_release` was run and the
+reconstructed `exchange_lab_results` row matched the original pre-upgrade scalar values bit-for-bit
+(verified by direct comparison, not assumed).
+
+**Guard-removal data-loss demonstration (required negative control 10):** on a separate, disposable
+database seeded with exactly one native-completed two-observation container, all four guards were
+temporarily disabled (`if False and ...`) and the downgrade forced through. Result: the second
+observation (a distinct real value) was **silently and permanently discarded** — the reconstructed
+old-schema row contained only the first observation's value, no error, no warning. This is concrete,
+observed evidence for why the guards exist, not a hypothetical. Guards restored immediately after
+(confirmed via `grep -rn "NEGATIVE CONTROL" adapter/src adapter/migrations` returning nothing); the
+disposable database dropped.
+
+#### Result-entry workflow
+
+Three distinct actions where DH-EX-007 had one:
+
+1. **`POST .../items/{item_id}/observations`** (new) — `record_observation`: appends one
+   `LabObservation` under the item's container (created lazily on first call), any number of times,
+   while the container's entry is not yet completed. `LabObservationRecordRequest` requires
+   caller-supplied `source_code`/`display_label` (ADR-047's hybrid-namespace identity — no LOINC
+   dependency, no analyte ontology, no hard-coded panel content); `source_system` is not
+   caller-accepted, always server-assigned. `LAB_TECH` only, same lab-assignment/`IN_PROGRESS`
+   guards as before.
+2. **`POST .../items/{item_id}/complete-result-entry`** (new) — `complete_entry`: the **only** place
+   `entry_completed_at` is ever set. Requires >=1 existing observation
+   (`EntryNotReadyForCompletion` otherwise); idempotent on replay (`created=False`, original
+   actor/time never overwritten); freezes the container (`EntryAlreadyCompleted` refuses any further
+   observation). `LAB_TECH` only, deliberately **not** `LAB_RESULT_RELEASER` — entry and release stay
+   separate authorities at the item level, mirroring ADR-044's order-level split.
+3. **`POST .../items/{item_id}/result`** (existing route, reshaped internals) — the
+   backward-compatible single-observation convenience path: atomically creates the container,
+   records exactly one observation (source identity reused from the item's own catalog snapshot),
+   and completes the entry, in one call, one transaction. Refuses (`DuplicateResult`) if the item
+   already has a container of any kind — never a way to add a second observation or re-complete.
+   Does not auto-release; unaffected by ADR-044.
+
+**Completeness, never inferred by counting:** the single shared choke point
+`_count_missing_or_malformed_results` (renamed from DH-EX-012B's `_count_missing_results`) now asks
+"does this item have a container whose `entry_completed_at` is set, backed by a real EXISTS check
+for >=1 observation row" — the EXISTS clause is deliberate defense-in-depth, re-derived from the
+database on every call by both `ready_for_release` and `LabResultReleaseRepository.release`'s own
+re-check, never trusted from the container's own flag alone.
+
+#### Freeze / concurrency discipline
+
+Every result-entry mutation (`record_observation`, `complete_entry`, `record_numeric`/
+`record_text`) shares one preamble, `_lock_order_and_item_for_entry`, which locks `LabOrder FOR
+UPDATE` first — identical lock order to every prior DH-EX-005/006/007/012 mutation. This single lock
+is what serializes observation-vs-observation, observation-vs-completion, and completion-vs-release
+races; no additional row-level lock exists or is needed.
+
+**Real-PostgreSQL concurrency qualification** (new file, `tests/integration/
+test_dhex012c_postgres_qualification.py`, `DHEX012C_PG_*` env-gated, never in CI), run 5+ times
+each for stability, zero flakes observed:
+
+- 10 concurrent `record_observation` calls on one item: all 10 persist, no lost write, container
+  never auto-completes.
+- Observation racing `complete_entry`: exactly one ordering occurs per run (the shared lock
+  guarantees this); whichever wins is internally coherent — a losing observation is refused
+  (`EntryAlreadyCompleted`) and never persists; a winning observation exists before completion locks.
+- `complete_entry` racing `LabResultReleaseRepository.release` on a two-item order (item 1 already
+  complete, item 2's completion races release): release never succeeds while item 2 is incomplete;
+  whichever call the lock admits first is the one that determines the final state, no split-brain
+  (`COMPLETED` order with an incomplete item never observed).
+- 10 concurrent `complete_entry` calls on the same item: exactly one creates the completion fact;
+  every other call observes that identical fact back, never overwrites it, never creates a second
+  one.
+
+**Existing DH-EX-007/DH-EX-012 real-Postgres qualification files updated for the new signature/
+shape** (`test_dhex007_postgres_qualification.py`, `test_dhex012_postgres_qualification.py`) — both
+needed `recorded_by_identity_id` added to every `record_numeric` call and their scalar-field
+assertions reshaped to read through `LabObservation`. **Two pre-existing, DH-EX-012C-unrelated bugs
+found and fixed while doing this, disclosed rather than silently folded in:**
+1. `test_dhex007_postgres_qualification.py`'s `_seed_in_progress_order` never called
+   `workflow.record_collection` before `start_processing` — a DH-EX-011 requirement this fixture
+   predates. It was never caught because this file is skipped by default in CI; DH-EX-012C's own
+   real qualification run is what surfaced it. Fixed with one line, matching every other seed
+   helper's existing pattern.
+2. My own first version of `test_dhex012_postgres_qualification.py`'s fix created the new
+   `recorded_by_identity_id`'s identity *inside* the raced closure in
+   `_run_final_result_vs_release_once`, which biased the race 10/10 toward `release_first` (the
+   extra DB round-trip inside the timing-sensitive window). Moved the identity creation outside the
+   race, matching the existing `releaser` variable's own placement — confirmed both orderings occur
+   again after the fix.
+
+All three integration files pass together in one invocation (19 passed, 51 skipped — the 51 being
+every other track's own opt-in file skipped for lack of its own env vars).
+
+#### API shape
+
+`LabResultSubmitResponse` gains `observation_id`/`entry_completed_at` (additive; `result_id`/
+`completed_at` keep their old meaning). New `LabObservationResponse`, `EntryCompletionResponse`.
+`ProviderResultItemResponse`/`LabResultInspectionItemResponse` reshaped from flat scalar fields to
+`entry_completed_at`/`observations: list[...]` — a deliberate breaking change, per ADR-047's own
+instruction not to preserve a flat shape once it makes panel results wrong.
+`LabResultInspectionResponse.all_results_entered` renamed `all_items_entry_complete` (the underlying
+fact materially changed; kept under its old name would have silently repointed an existing field's
+meaning). Patient-facing `PatientOrderResponse` is unaffected and unchanged — still excludes every
+result field by construction (`extra="forbid"`, no result field defined); the existing
+`test_patient_order_response_never_leaks_a_real_lab_result_even_after_selection` regression test
+(updated only for the new `recorded_by_identity_id` parameter, not its actual assertions) still
+passes. `DoctorReview`/`ResultDelivery` untouched, confirmed by dedicated tests still passing
+unchanged.
+
+**Measured, not estimated, N+1 check:** built a 5-item, 15-observation (3 each) released order in a
+throwaway in-memory SQLite engine with `before_cursor_execute` query counting.
+`LabResultRepository.list_for_order` (provider read): **2 queries**, constant regardless of item/
+observation count (`selectinload` batches every container's observations in one second query).
+`LabResultRepository.get_for_lab` (lab inspection read): **5 queries**, also constant (order,
+selection, outer-joined item+container rows, one batched observation query, release lookup) — no
+per-item or per-observation query anywhere in either path.
+
+#### Audit
+
+Two new event types: `lab_observation_recorded` (fires once per recorded observation, including
+inside the compat path), `lab_result_entry_completed` (fires once per genuine completion, never on
+an idempotent replay). `lab_result_recorded` is retired — kept in the `event_type` CHECK constraint's
+allowed list only because real historical rows already carry it (narrowing would require proving
+none exist, an unnecessary destructive-adjacent step for an otherwise purely additive migration); no
+code path writes a new one. All writes atomic with their mutation, in the identical
+`session_factory.begin()` transaction — confirmed by a dedicated new atomicity test for the granular
+`complete-result-entry` endpoint (`test_granular_completion_audit_atomicity`, mirroring the existing
+compat-path atomicity test) in addition to the existing compat-path and release-path atomicity
+tests, all still passing and all independently exercised as negative controls below.
+
+#### Required negative controls — all 10 executed for real, every mutation restored after observing failure
+
+1. **Restored old "row exists = complete" logic** (`_count_missing_or_malformed_results` reduced to
+   `LabResult.id.is_(None)` only) → `test_multi_observation_golden_flow_release_and_provider_read`
+   went red (premature release returned 201 instead of the expected 409-refused). Reverted.
+2. **Permitted completion with zero observations** (removed the observation-count guard in
+   `complete_entry`, lazily creating a container if absent) →
+   `test_completion_rejected_with_zero_observations` (repository) and
+   `..._via_api` (HTTP) both went red (201 instead of 409). Reverted.
+3. **Removed the completeness check from release entirely** →
+   `test_release_refused_when_a_result_is_still_missing` (repository) and
+   `test_release_refused_when_results_incomplete` (HTTP) both went red (201 instead of 409).
+   Reverted.
+4. **Permitted observation after entry completion** (removed the `EntryAlreadyCompleted` freeze
+   check) → `test_observation_after_completion_is_frozen_and_refused` (repository) and
+   `test_observation_after_completion_refused_via_api` (HTTP) both went red (201 instead of 409).
+   Reverted.
+5. **Removed the lab-ownership check** from the shared `_lock_order_and_item_for_entry` preamble →
+   three tests went red simultaneously (`test_result_from_a_different_lab_than_selected_fails_
+   closed`, `test_wrong_lab_cannot_submit_result_and_is_non_enumerating`,
+   `test_wrong_lab_cannot_record_observation_or_complete_entry_and_is_non_enumerating`) — 201/200
+   instead of the expected 404/`LabOrderNotAssigned`. Reverted.
+6. **Removed `LAB_TECH` authorization** from the observation-entry route →
+   `test_clinician_cannot_record_observation_or_complete_entry` went red (201 instead of 404).
+   Reverted.
+7. **Removed the release-role check** from the release route →
+   `test_lab_tech_alone_cannot_release_results` went red (201 instead of 403). Reverted.
+8. **Split the completion write and its audit row into two separate transactions** in
+   `complete_lab_result_entry` → the new `test_granular_completion_audit_atomicity` went red
+   (completion persisted with `entry_completed_at` set despite the simulated audit failure that
+   should have rolled the whole thing back). Reverted.
+9. **Removed the `FOR UPDATE` lock** from `_lock_order_and_item_for_entry` → run against real
+   PostgreSQL 8 times: `test_concurrent_completion_calls_converge_to_one_provenance` failed all 8
+   times (4 of 10 concurrent calls each reported `created=True` — a genuine, observed corruption of
+   the "exactly one provenance" invariant, not a hypothetical); `test_concurrent_observation_
+   inserts_do_not_corrupt_the_container` failed 5 of 8 times. Reverted; re-confirmed 3 consecutive
+   clean runs afterward.
+10. **Disabled all four migration downgrade guards** (`if False and ...`) on a disposable database
+    seeded with one native-completed two-observation container, then forced the downgrade through →
+    real, observed data loss (the second observation silently discarded, no error) — see the
+    migration section above for the full account. Reverted; confirmed no `NEGATIVE CONTROL` string
+    remains anywhere in `adapter/src`/`adapter/migrations`.
+
+#### Test matrix coverage
+
+Required matrix items from the ticket are covered by: the 20 new tests added this ticket (5
+repository-level in `test_exchange_results.py`, 15 HTTP-level in `test_exchange_results_api.py`,
+4 real-Postgres concurrency tests in the new integration file) plus the pre-existing suite's own
+already-comprehensive auth/lifecycle/cross-tenant matrix for the compat endpoint and release (all
+re-verified passing under the new schema, not merely assumed unaffected): simple numeric/text
+one-observation services, multiple observations under one item, mixed numeric/text observations,
+multiple items with differing observation counts, zero-observations-while-incomplete,
+zero-observation-completion-rejected, duplicate-completion-replay-idempotent,
+observation-after-completion-rejected, observation-on-wrong-item-refused, cross-order-refused,
+cross-lab-refused, clinician-cannot-enter, org-admin-alone-cannot-enter, releaser-alone-cannot-enter-
+observation, releaser-alone-cannot-complete-entry, lab-tech-cannot-release-alone,
+same-human-dual-role-works, incomplete-item-blocks-release, all-items-complete-allows-release,
+provider-cannot-see-before-release, provider-sees-nested-observations-after-release, releaser-can-
+inspect-all-values-before-release, patient-bearer-still-exposes-nothing, legacy-migration-correct,
+legacy-COMPLETED-no-release-still-works, DoctorReview-still-COMPLETED-gated, ResultDelivery-
+untouched, audit-atomicity (three separate tests: compat path, granular completion, release),
+migration-upgrade, migration-downgrade-guards (all four, individually), real-PostgreSQL uniqueness/
+integrity, and concurrency races (four scenarios).
+
+#### Validation
+
+`ruff check`/`ruff format --check` on `src tests migrations scripts`: clean. Full SQLite suite:
+**748 passed, 70 skipped** (up from DH-EX-012B's baseline 735/66 — 13 net new tests after the
+negative-control-driven additions, plus the pre-existing suite fully re-passing under the new
+schema). Real-PostgreSQL: **19 passed** across all three qualification files run together in one
+invocation, **0 flakes** across 5+ repeated runs of the new concurrency file and 3+ repeated runs of
+the fixed DH-EX-012 file.
+
+#### Known remaining gaps, stated plainly
+
+- **ADR-045 (pre-release correction / post-release amendment) remains OPEN and its implementation
+  remains paused** — nothing here begins it. The observation-level attachment point ADR-047 already
+  identified (a future `supersedes_observation_id`/`superseded_at` pair on `LabObservation`, mirroring
+  `LabPrice.superseded_at`) is structurally available but not built.
+- No DHealth-owned observation-catalog table exists — every observation today is either
+  caller-supplied (granular path) or reused from the ordered item's own catalog snapshot (compat
+  path). This is exactly what ADR-047 scoped for this ticket, not a gap introduced here.
+- The "not performed / no result obtainable" representation is explicitly and deliberately
+  undefined, per the accepted zero-observation decision.
+- Manual/live browser demonstration and real Keycloak qualification remain unperformed, unchanged
+  from every prior Exchange ticket's own disclosed boundary.
+
+**Human Decision Required: NO** — this ticket implements a decision already made (ADR-047's
+recommendation plus Liban's zero-observation resolution); it does not itself raise a new question.
+
+**Next:** ADR-045's correction/amendment implementation is the natural next result-domain ticket,
+now that the underlying schema is stable — not started here, per this ticket's own final
+instruction.
+
+**READY FOR LIBAN REVIEW: YES**

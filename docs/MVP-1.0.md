@@ -60,11 +60,11 @@ national EMR** — ADR-042's data-minimization boundary is unchanged by this doc
 clinical notes, no medication list, no diagnosis history, no general encounter data.
 
 `CURRENT`: this is the one surface with real, tested, CI-qualified backend code today — DH-EX-001
-through DH-EX-012A **[re-audited 2026-09-13]** (was "through DH-EX-007"). See §8. **Also
-`CURRENT` as of the re-audit, not a caveat about this surface's maturity but a real architectural
-limitation:** the result data model (`LabOrderItem → one LabResult`) is confirmed, from real field
-evidence, not to be the final shape for a panel-based laboratory workflow — see `DECISIONS.md`'s
-ADR-046 and `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`.
+through DH-EX-012C **[re-audited 2026-09-13]** (was "through DH-EX-007", then "through DH-EX-012A").
+See §8. The result data model is `LabOrderItem → LabResult (container) → LabObservation[]`
+(0..N observations per item) as of DH-EX-012C/ADR-047, implementing the requirement real field
+evidence established — see `DECISIONS.md`'s ADR-046/ADR-047 and `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`.
+Result correction/amendment (ADR-045) remains OPEN and unimplemented, independent of this change.
 
 ### DHealth Clinic
 
@@ -100,17 +100,27 @@ sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-
 result validation/release are explicit `NOT BUILT` gaps"]** (§8). Specimen/sample workflow remains
 `PARTIAL` — DH-EX-011 is a single fact-of-recording milestone, not specimen management (no
 container/volume/site/adequacy modeling exists). Result *correction/amendment*, before or after
-release, remains `NOT BUILT`/`OPEN DECISION` (ADR-045, §10), and the underlying result-domain shape
-itself is confirmed not final for real panel-based workflows (ADR-046, §10) — native DHealth Lab
-result entry should not be built against today's schema until DH-EX-012B resolves that.
+release, remains `NOT BUILT`/`OPEN DECISION` (ADR-045, §10) — unaffected by the result-domain change
+below. **[Re-audited 2026-09-13, DH-EX-012C — the sentence that followed here is no longer current,
+kept only as history: "the underlying result-domain shape itself is confirmed not final for real
+panel-based workflows (ADR-046), native DHealth Lab result entry should not be built against
+today's schema until DH-EX-012B resolves that."]** The multi-observation result domain ADR-046
+required is now implemented (ADR-047, DH-EX-012C): a diagnostic service's result entry is a
+per-item container (`LabResult`) holding zero, one, or many child observations (`LabObservation`),
+entered one at a time or via one atomic single-observation convenience call, with one explicit
+completion action per item — never inferred from how many observations exist. See §8's "Result
+validated/released" row for the exact API shape.
 
-**Field-validated requirement (DH-FIELD-001, 2026-09-13):** DHealth Lab's native result workflow
-must eventually support one ordered diagnostic service producing multiple returned observations
-(ADR-046) — this is the primary reason its structured result-entry UI is not yet designed. Future
-observation/reference-range modeling must also be able to preserve a source's own representation
-(numeric bounds, inequality-style values, or textual reference information) without deriving a
-clinical judgment ("abnormal"/"critical"/etc.) from it. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`
-Findings 2 and 8. No schema is chosen here — DH-EX-012B's job.
+**Field-validated requirement (DH-FIELD-001, 2026-09-13), now implemented (DH-EX-012C, same day):**
+DHealth Lab's native result workflow supports one ordered diagnostic service producing multiple
+returned observations (ADR-046/ADR-047). No panel composition, analyte vocabulary, or clinical
+content of any kind was invented to build this — observation identity is caller-supplied
+(`source_code`/`display_label`) or, for the simple single-observation case, reused from the ordered
+item's own catalog snapshot; no DHealth-owned observation catalog exists yet. Reference-range
+representation (numeric bounds only, for now) still lives per observation, unchanged in shape from
+before — richer representations (inequality-style values, textual reference information) remain a
+future, not-yet-built extension, per Finding 8. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 2
+and 8, and `DECISIONS.md`'s ADR-047 for the full accepted architecture.
 
 ### DHealth Patient
 
@@ -308,7 +318,7 @@ here, not copied.]**
 | Sample/specimen workflow | PARTIAL (unchanged this pass) | DH-EX-011: order-level sample/specimen collection milestone (`LabSampleCollection`, `POST .../record-collection`, `api.py:2374`), required before `start-processing` may run. This is a single fact-of-recording milestone, not specimen management — no specimen type, container, volume, site, handling, storage, or adequacy modeling exists in the Exchange schema. |
 | Processing | WRITTEN, TESTED, CI-QUALIFIED | `POST .../start-processing` (`api.py:2341`, DH-EX-006), `ACCEPTED`→`IN_PROGRESS`. |
 | Result entered | WRITTEN, TESTED, CI-QUALIFIED | DH-EX-007/DH-EX-012, `POST .../items/{item_id}/result` (`submit_lab_result`, `api.py:2419`). **Behavior changed by DH-EX-012, not merely re-cited**: even an order's last missing result no longer transitions the order — it only reports `ready_for_release`. See the next row. |
-| Result validated/released | **WRITTEN, TESTED, CI-QUALIFIED** (was **NOT BUILT**) | DH-EX-012/ADR-044: `POST .../release-results` (`api.py:2528`), gated on a new `LAB_RESULT_RELEASER` role (additive alongside `LAB_TECH`), required before `LabOrder.status` becomes `COMPLETED`. This is the separate authorization step ADR-043 originally recorded as missing — it now exists, distinctly from result entry. **What is not yet built, recorded honestly rather than folded into this row's own status:** correcting or amending an already-entered or already-released result has no supported path at all (ADR-045, §10), and the underlying one-result-per-item shape is confirmed not final for real panel-based workflows (ADR-046, §10). |
+| Result validated/released | **WRITTEN, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED** (was **NOT BUILT**) | DH-EX-012/ADR-044: `POST .../release-results` (`api.py:2811`), gated on a new `LAB_RESULT_RELEASER` role (additive alongside `LAB_TECH`), required before `LabOrder.status` becomes `COMPLETED`. This is the separate authorization step ADR-043 originally recorded as missing — it now exists, distinctly from result entry. **DH-EX-012C/ADR-047, 2026-09-13:** the underlying result domain is no longer one scalar per item — `POST .../items/{item_id}/observations` (`api.py:2634`) records any number of observations under an item's container, and `POST .../items/{item_id}/complete-result-entry` (`api.py:2705`) is the one explicit, LAB_TECH-only signal that an item's entry is finished (never inferred from observation count); `POST .../items/{item_id}/result` (`api.py:2542`) remains as an atomic single-observation convenience call for the simple case. Provider/lab-inspection reads now return nested observations per item. Real-PostgreSQL qualified, including concurrency (observation-vs-observation, observation-vs-completion, completion-vs-release, concurrent completion) and migration upgrade/downgrade-guard evidence — see `PROJECT_STATE.md`'s DH-EX-012C entry. **What is still not built:** correcting or amending an already-entered or already-released result has no supported path at all (ADR-045, §10) — unaffected by this change; no "not performed"/"no result obtainable" representation exists (deliberately, per ADR-047's accepted zero-observation resolution). |
 | Ordering provider receives result | WRITTEN, TESTED, CI-QUALIFIED | `GET .../orders/{order_id}/results` (`get_lab_order_results`, `api.py:2594`), provider-only, only once `COMPLETED` — the gate that now depends on explicit release, not automatic completion. |
 | Clinician reviews result | WRITTEN, TESTED, CI-QUALIFIED | `POST .../review/no-follow-up-required` / `.../follow-up-required` (`api.py:2701`/`api.py:2714`). |
 | Patient receives status/follow-up communication | **NOT BUILT** (unchanged this pass) | `ResultDelivery` is created `PENDING` at order creation (DH-EX-001) and no code path anywhere in the repository advances it past `PENDING` — re-confirmed by grep as of this pass. No WhatsApp/SMS/email transport exists for the Exchange. `ResultDeliveryRepository.mark_delivered`/`mark_failed` exist (`results.py`) but are never called. |
@@ -403,12 +413,19 @@ legible; item numbers are kept stable since §15 and other documents point at th
     (post-release) path exists.** `LabResult` is insert-only, package-wide, with no entering-actor
     column and no revision metadata (confirmed by DH-EX-012A's audit). ADR-045 records the decision
     packet distinguishing the two problems; **neither is decided or implemented.** See ADR-045.
-16. **New [DH-FIELD-001, 2026-09-13]. The current `LabOrderItem → one LabResult` model is confirmed
-    not final for real panel-based laboratory workflows.** Real field evidence shows one ordered
-    diagnostic service may need to return multiple observations — today's schema cannot represent
-    this. ADR-046 accepts this as a binding architectural requirement without choosing a schema.
-    **This is now the reason item 15's implementation is paused, not merely still open** — see
-    `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` and ADR-046. DH-EX-012B is the ticket that will resolve this.
+16. ~~**New [DH-FIELD-001, 2026-09-13]. The current `LabOrderItem → one LabResult` model is
+    confirmed not final for real panel-based laboratory workflows.** Real field evidence shows one
+    ordered diagnostic service may need to return multiple observations — today's schema cannot
+    represent this. ADR-046 accepts this as a binding architectural requirement without choosing a
+    schema. This is now the reason item 15's implementation is paused, not merely still open — see
+    `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` and ADR-046. DH-EX-012B is the ticket that will resolve
+    this.~~ **RESOLVED [re-audited 2026-09-13, DH-EX-012C].** ADR-047 (recommended by DH-EX-012B,
+    accepted by Liban) is implemented: `LabOrderItem → LabResult` (container) `→ LabObservation[]`
+    (0..N per container), real-PostgreSQL qualified including concurrency and migration
+    upgrade/downgrade evidence. **Item 15's pause is now lifted for the schema-shape reason above —
+    ADR-045's own five questions remain independently unresolved and its implementation remains
+    paused for those reasons, not this one.** See `PROJECT_STATE.md`'s DH-EX-012C entry and
+    `DECISIONS.md`'s ADR-047 accepted-resolution append.
 
 ## 11. Pilot shape (`PROPOSED PILOT`)
 
@@ -532,12 +549,15 @@ made.
     `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 7) — still no specific LIS, protocol, or interface
     claimed.
 16. **New [DH-FIELD-001, 2026-09-13].** Result correction (pre-release) and amendment
-    (post-release) implementation — ADR-045's decision packet, not yet decided by Liban, and its
-    implementation additionally paused behind item 17 (§10 items 15–16).
-17. **New [DH-FIELD-001, 2026-09-13].** Result-domain schema resolution — the ticket referred to
+    (post-release) implementation — ADR-045's decision packet, not yet decided by Liban. **No
+    longer paused behind item 17 [re-audited 2026-09-13, DH-EX-012C] — item 17 is resolved, but
+    ADR-045's own five questions remain independently unresolved on their own terms** (§10 item
+    15).
+17. ~~**New [DH-FIELD-001, 2026-09-13].** Result-domain schema resolution — the ticket referred to
     throughout this document as DH-EX-012B: must decide how one ordered diagnostic service can
     produce zero, one, or multiple returned observations (ADR-046), without inventing panel
-    composition, analyte vocabulary, or any fixed observation set.
+    composition, analyte vocabulary, or any fixed observation set.~~ **RESOLVED [re-audited
+    2026-09-13, DH-EX-012C]** — see §10 item 16.
 
 ---
 

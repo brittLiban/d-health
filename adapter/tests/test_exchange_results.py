@@ -20,12 +20,19 @@ from daher_adapter.exchange.identity import (
 )
 from daher_adapter.exchange.lab_workflow import LabOrderNotAssigned, LabWorkflowRepository
 from daher_adapter.exchange.membership import ExchangeIdentityRepository
-from daher_adapter.exchange.models import DoctorReviewStatus, LabPrice, ResultDeliveryStatus
+from daher_adapter.exchange.models import (
+    DoctorReviewStatus,
+    LabPrice,
+    LabResultType,
+    ResultDeliveryStatus,
+)
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.results import (
     DoctorReviewRepository,
     DuplicateResult,
+    EntryAlreadyCompleted,
+    EntryNotReadyForCompletion,
     InvalidResultSubmissionState,
     LabResultReleaseRepository,
     LabResultRepository,
@@ -74,6 +81,15 @@ def _build(sessions: sessionmaker[Session]) -> Repos:
         directory=LabDirectoryProfileRepository(sessions, organizations),
         identities=ExchangeIdentityRepository(sessions),
     )
+
+
+def _labtech_identity_id(repos: Repos, subject: str = "labtech-generic"):
+    """DH-EX-012C: `record_numeric`/`record_text`/`record_observation`/`complete_entry` all now
+    require a real actor identity (native completion provenance must never be fabricated). Tests
+    that do not care which specific identity recorded a result share this one generic identity;
+    tests that do (dual-role, provenance-specific) bootstrap their own."""
+    identity, _ = repos.identities.get_or_create(issuer="https://test.example", subject=subject)
+    return identity.id
 
 
 def _release(repos: Repos, *, order_id, lab_id, key: str):
@@ -208,6 +224,7 @@ def test_result_binds_to_the_correct_order_item_and_lab(sessions: sessionmaker[S
     item_id = order.items[0].id
 
     outcome = repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -215,14 +232,18 @@ def test_result_binds_to_the_correct_order_item_and_lab(sessions: sessionmaker[S
         unit="g/dL",
     )
 
-    assert outcome.result.lab_order_item_id == item_id
-    assert outcome.result.lab_organization_id == lab.id
     # DH-EX-012/ADR-044: recording even a one-item order's sole result no longer completes it --
-    # `ready_for_release` reports the same "every item now has a result" fact, but only an
+    # `ready_for_release` reports the same "every item's entry is complete" fact, but only an
     # explicit `LabResultReleaseRepository.release` call may act on it.
     assert outcome.ready_for_release is True
     assert outcome.order_status == "IN_PROGRESS"
-    assert repos.results.get_for_item(item_id) is not None
+    stored = repos.results.get_for_item(item_id)
+    assert stored is not None
+    assert stored.lab_order_item_id == item_id
+    assert stored.lab_organization_id == lab.id
+    assert stored.entry_completed_at is not None
+    assert len(stored.observations) == 1
+    assert stored.observations[0].id == outcome.observation.id
 
 
 def test_result_from_a_different_lab_than_selected_fails_closed(
@@ -236,6 +257,7 @@ def test_result_from_a_different_lab_than_selected_fails_closed(
 
     with pytest.raises(LabOrderNotAssigned):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=item_id,
             lab_organization_id=lab_impostor.id,
@@ -260,6 +282,7 @@ def test_result_before_any_lab_selected_fails_closed(sessions: sessionmaker[Sess
 
     with pytest.raises(LabOrderNotAssigned):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=order.items[0].id,
             lab_organization_id=lab.id,
@@ -279,6 +302,7 @@ def test_result_before_in_progress_fails_closed(sessions: sessionmaker[Session])
 
     with pytest.raises(InvalidResultSubmissionState):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=order.items[0].id,
             lab_organization_id=lab.id,
@@ -296,6 +320,7 @@ def test_result_for_item_belonging_to_a_different_order_fails_closed(
 
     with pytest.raises(OrderItemNotFound):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order_a.id,
             lab_order_item_id=order_b.items[0].id,
             lab_organization_id=lab.id,
@@ -312,11 +337,16 @@ def test_duplicate_result_for_the_same_item_refused(sessions: sessionmaker[Sessi
     order, _practitioner = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key="dup-1")
     item_id = order.items[0].id
     repos.results.record_numeric(
-        order_id=order.id, lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
     )
 
     with pytest.raises(DuplicateResult):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=item_id,
             lab_organization_id=lab.id,
@@ -330,6 +360,7 @@ def test_duplicate_result_does_not_change_the_first_value(sessions: sessionmaker
     order, _practitioner = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key="dup-2")
     item_id = order.items[0].id
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -338,6 +369,7 @@ def test_duplicate_result_does_not_change_the_first_value(sessions: sessionmaker
 
     with pytest.raises(DuplicateResult):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=item_id,
             lab_organization_id=lab.id,
@@ -345,7 +377,8 @@ def test_duplicate_result_does_not_change_the_first_value(sessions: sessionmaker
         )
 
     stored = repos.results.get_for_item(item_id)
-    assert stored.numeric_value == Decimal("1.0000")
+    assert len(stored.observations) == 1
+    assert stored.observations[0].numeric_value == Decimal("1.0000")
 
 
 def test_second_submission_on_a_completed_one_item_order_hits_the_state_gate_first(
@@ -361,7 +394,11 @@ def test_second_submission_on_a_completed_one_item_order_hits_the_state_gate_fir
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="single-dup")
     item_id = order.items[0].id
     outcome = repos.results.record_numeric(
-        order_id=order.id, lab_order_item_id=item_id, lab_organization_id=lab.id, value=Decimal("1")
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        value=Decimal("1"),
     )
     assert outcome.ready_for_release is True
     assert outcome.order_status == "IN_PROGRESS"
@@ -370,6 +407,7 @@ def test_second_submission_on_a_completed_one_item_order_hits_the_state_gate_fir
 
     with pytest.raises(InvalidResultSubmissionState):
         repos.results.record_numeric(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=item_id,
             lab_organization_id=lab.id,
@@ -387,6 +425,7 @@ def test_partial_results_keep_a_multi_item_order_in_progress(
     )
 
     first = repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -396,6 +435,7 @@ def test_partial_results_keep_a_multi_item_order_in_progress(
     assert first.order_status == "IN_PROGRESS"
 
     second = repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[1].id,
         lab_organization_id=lab.id,
@@ -412,6 +452,7 @@ def test_result_completion_does_not_automatically_deliver(sessions: sessionmaker
     lab = make_lab(repos.organizations)
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id)
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -421,6 +462,188 @@ def test_result_completion_does_not_automatically_deliver(sessions: sessionmaker
     delivery = repos.deliveries.get_for_order(order.id)
     assert delivery.status == ResultDeliveryStatus.PENDING.value
     assert delivery.delivered_at is None
+
+
+# -- DH-EX-012C: granular multi-observation entry / explicit completion ----------------------
+
+
+def test_multiple_observations_recorded_under_one_item_before_completion(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="multi-obs")
+    item_id = order.items[0].id
+    actor = _labtech_identity_id(repos)
+
+    first = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="WBC",
+        display_label_snapshot="White blood cell count",
+        numeric_value=Decimal("6.2"),
+        numeric_unit="10^9/L",
+    )
+    second = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.TEXT,
+        source_code="MORPH",
+        display_label_snapshot="Morphology",
+        text_value="Normal",
+    )
+
+    assert first.lab_result_id == second.lab_result_id
+    stored = repos.results.get_for_item(item_id)
+    assert stored is not None
+    assert stored.entry_completed_at is None
+    assert {o.id for o in stored.observations} == {first.id, second.id}
+
+    completion, created = repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=actor,
+    )
+    assert created is True
+    assert completion.entry_completed_by_identity_id == actor
+
+    completed = repos.results.get_for_item(item_id)
+    assert completed.entry_completed_at is not None
+    assert len(completed.observations) == 2
+
+
+def test_completion_rejected_with_zero_observations(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="zero-obs")
+
+    with pytest.raises(EntryNotReadyForCompletion):
+        repos.results.complete_entry(
+            order_id=order.id,
+            lab_order_item_id=order.items[0].id,
+            lab_organization_id=lab.id,
+            completed_by_identity_id=_labtech_identity_id(repos),
+        )
+
+    refreshed = repos.orders.get(order.id)
+    assert refreshed.status == "IN_PROGRESS"
+
+
+def test_completion_is_idempotent_and_never_overwrites_first_actor(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="complete-idem")
+    item_id = order.items[0].id
+    repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.1"),
+    )
+    first_actor = _labtech_identity_id(repos, subject="complete-idem-first")
+    second_actor = _labtech_identity_id(repos, subject="complete-idem-second")
+
+    first_record, first_created = repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=first_actor,
+    )
+    assert first_created is True
+    assert first_record.entry_completed_by_identity_id == first_actor
+
+    replay_record, replay_created = repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=second_actor,
+    )
+    assert replay_created is False
+    assert replay_record.entry_completed_by_identity_id == first_actor
+    assert replay_record.entry_completed_at == first_record.entry_completed_at.replace(
+        tzinfo=replay_record.entry_completed_at.tzinfo
+    )
+
+
+def test_observation_after_completion_is_frozen_and_refused(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="freeze")
+    item_id = order.items[0].id
+    repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="NA",
+        display_label_snapshot="Sodium",
+        numeric_value=Decimal("140"),
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=_labtech_identity_id(repos),
+    )
+
+    with pytest.raises(EntryAlreadyCompleted):
+        repos.results.record_observation(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="K",
+            display_label_snapshot="Potassium",
+            numeric_value=Decimal("4.0"),
+        )
+
+    stored = repos.results.get_for_item(item_id)
+    assert len(stored.observations) == 1
+
+
+def test_release_refuses_malformed_zero_observation_complete_container(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Defense in depth: a `LabResult` container marked `entry_completed_at` with zero
+    observations cannot be produced by any live code path (both completion paths require >=1
+    observation first, and observations are never deleted) -- manufactured here via a raw write,
+    exactly matching the established pattern for the legacy-completed-order test above. Release
+    must still refuse it, never trusting the container's own flag alone."""
+    from daher_adapter.exchange.models import LabResult as _LabResult
+    from daher_adapter.models import utc_now as _utc_now
+
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="malformed-zero")
+    item_id = order.items[0].id
+
+    with sessions() as session:
+        session.add(
+            _LabResult(
+                lab_order_item_id=item_id,
+                lab_organization_id=lab.id,
+                entry_completed_at=_utc_now(),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(ResultsNotReadyForRelease):
+        _release(repos, order_id=order.id, lab_id=lab.id, key="malformed-zero")
+
+    refreshed = repos.orders.get(order.id)
+    assert refreshed.status == "IN_PROGRESS"
+    assert repos.releases.get_for_order(order.id) is None
 
 
 def test_delivery_state_independent_of_result_and_destination_explicit(
@@ -466,6 +689,7 @@ def test_doctor_review_no_follow_up_required_explicit(sessions: sessionmaker[Ses
     lab = make_lab(repos.organizations)
     order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-nofu")
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -488,6 +712,7 @@ def test_doctor_review_follow_up_required_explicit(sessions: sessionmaker[Sessio
     lab = make_lab(repos.organizations)
     order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-fu")
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -522,6 +747,7 @@ def test_release_refused_when_a_result_is_still_missing(sessions: sessionmaker[S
         repos, sessions, lab_id=lab.id, key="release-incomplete"
     )
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -543,6 +769,7 @@ def test_release_from_the_wrong_lab_fails_closed(sessions: sessionmaker[Session]
         repos, sessions, lab_id=lab_selected.id, key="release-wrong-lab"
     )
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab_selected.id,
@@ -563,6 +790,7 @@ def test_release_idempotent_replay_preserves_first_committer_provenance(
     lab = make_lab(repos.organizations)
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="release-replay")
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -608,6 +836,7 @@ def test_release_on_legacy_completed_order_raises_distinguishable_conflict(
         repos, sessions, lab_id=lab.id, key="legacy-completed"
     )
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -636,6 +865,7 @@ def test_dual_role_identity_release_records_that_same_identity(
     lab = make_lab(repos.organizations)
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="dual-role-repo")
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -659,6 +889,7 @@ def test_second_terminal_review_is_a_controlled_conflict_not_a_silent_overwrite(
     lab = make_lab(repos.organizations)
     order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-twice")
     repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -718,6 +949,7 @@ def test_10way_concurrent_release_converges_to_one_record(tmp_path) -> None:
     lab = make_lab(h.organizations, name="release-10way-lab")
     order, _practitioner = _create_and_select(h, local_sessions, lab_id=lab.id, key="r10")
     h.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(h),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -780,6 +1012,7 @@ def _run_final_result_vs_release_once(tmp_path, i: int) -> str:
         h, local_sessions, lab_id=lab.id, key=f"fvr-{i}"
     )
     h.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(h),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,
@@ -797,6 +1030,7 @@ def _run_final_result_vs_release_once(tmp_path, i: int) -> str:
         try:
             barrier.wait(timeout=10)
             outcomes["submit"] = h.results.record_numeric(
+                recorded_by_identity_id=_labtech_identity_id(h),
                 order_id=order.id,
                 lab_order_item_id=order.items[1].id,
                 lab_organization_id=lab.id,
@@ -873,6 +1107,7 @@ def test_two_different_releasers_race_no_overwrite(tmp_path) -> None:
     lab = make_lab(h.organizations, name="two-releasers-lab")
     order, _practitioner = _create_and_select(h, local_sessions, lab_id=lab.id, key="tworel")
     h.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(h),
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=lab.id,

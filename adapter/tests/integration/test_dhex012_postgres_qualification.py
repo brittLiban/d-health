@@ -156,6 +156,13 @@ def _new_releaser(seed: dict, *, name: str):
     return identity
 
 
+def _new_labtech(seed: dict, *, name: str):
+    identity, _ = seed["identities"].get_or_create(
+        issuer="https://pg-qualification.example", subject=name
+    )
+    return identity
+
+
 # -- role width / constraint ---------------------------------------------------------------------
 
 
@@ -230,6 +237,7 @@ def test_database_rejects_a_second_release_row_for_the_same_order(sessions: sess
     seed = _seed_in_progress_order(sessions, key_prefix=f"uniq-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-1-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -263,6 +271,7 @@ def test_release_refused_against_real_postgres_when_a_result_is_missing(
     )
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-2-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -290,6 +299,7 @@ def test_legacy_completed_order_with_no_release_row_refuses_against_real_postgre
     seed = _seed_in_progress_order(sessions, key_prefix=f"legacy-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-3-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -326,6 +336,7 @@ def test_release_insert_and_status_write_roll_back_together_on_real_postgres(
     seed = _seed_in_progress_order(sessions, key_prefix=f"atomic-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-4-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -366,6 +377,7 @@ def test_10way_concurrent_release_converges_to_one_record(sessions: sessionmaker
     seed = _seed_in_progress_order(sessions, key_prefix=f"tenway-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-5-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -419,12 +431,14 @@ def _run_final_result_vs_release_once(sessions: sessionmaker, i: int) -> dict[st
     )
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-6-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
         value=Decimal("1"),
     )
     releaser = _new_releaser(seed, name=f"fvr-releaser-{i}")
+    submit_actor = _new_labtech(seed, name=f"labtech-7-{uuid.uuid4().hex[:6]}")
 
     outcomes: dict[str, object] = {}
     barrier = threading.Barrier(2)
@@ -433,6 +447,7 @@ def _run_final_result_vs_release_once(sessions: sessionmaker, i: int) -> dict[st
         try:
             barrier.wait(timeout=15)
             seed["results"].record_numeric(
+                recorded_by_identity_id=submit_actor.id,
                 order_id=order.id,
                 lab_order_item_id=order.items[1].id,
                 lab_organization_id=seed["lab"].id,
@@ -518,6 +533,7 @@ def test_two_different_releasers_race_no_overwrite(sessions: sessionmaker) -> No
     seed = _seed_in_progress_order(sessions, key_prefix=f"tworel-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-8-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,
@@ -567,6 +583,7 @@ def test_provider_visibility_gate_flips_on_release_against_real_postgres(
     seed = _seed_in_progress_order(sessions, key_prefix=f"visibility-{uuid.uuid4().hex[:8]}")
     order = seed["order"]
     seed["results"].record_numeric(
+        recorded_by_identity_id=_new_labtech(seed, name=f"labtech-9-{uuid.uuid4().hex[:6]}").id,
         order_id=order.id,
         lab_order_item_id=order.items[0].id,
         lab_organization_id=seed["lab"].id,

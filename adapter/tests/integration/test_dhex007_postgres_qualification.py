@@ -45,9 +45,11 @@ from daher_adapter.exchange.identity import (
     PractitionerReferenceRepository,
 )
 from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
+from daher_adapter.exchange.membership import ExchangeIdentityRepository
 from daher_adapter.exchange.models import (
     DoctorReview,
     ExchangeSecurityAuditEvent,
+    LabObservation,
     LabOrder,
     LabPrice,
     LabResult,
@@ -154,10 +156,21 @@ def _seed_in_progress_order(sessions: sessionmaker, *, key_prefix: str, item_cou
         expected_price_ids=frozenset(price_ids),
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
+    # DH-EX-011: start_processing now requires a recorded collection milestone -- this fixture
+    # predates that ticket and was never updated (this file is skipped by default in CI, so the
+    # staleness went unnoticed until DH-EX-012C's real qualification actually ran it again).
+    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
     order = orders.get(order.id)
     return lab.id, order.id, [item.id for item in order.items]
+
+
+def _labtech_identity_id(sessions: sessionmaker, subject: str):
+    identity, _ = ExchangeIdentityRepository(sessions).get_or_create(
+        issuer="https://pg-qualification.example", subject=subject
+    )
+    return identity.id
 
 
 def test_concurrent_same_item_submission_yields_exactly_one_result(sessions: sessionmaker) -> None:
@@ -184,6 +197,7 @@ def test_concurrent_same_item_submission_yields_exactly_one_result(sessions: ses
         try:
             barrier.wait(timeout=15)
             results.record_numeric(
+                recorded_by_identity_id=_labtech_identity_id(sessions, f"pg7-actor-1-{i}"),
                 order_id=order_id,
                 lab_order_item_id=item_id,
                 lab_organization_id=lab_id,
@@ -221,7 +235,7 @@ def test_concurrent_same_item_submission_yields_exactly_one_result(sessions: ses
             select(func.count())
             .select_from(ExchangeSecurityAuditEvent)
             .where(
-                ExchangeSecurityAuditEvent.event_type == "lab_result_recorded",
+                ExchangeSecurityAuditEvent.event_type == "lab_observation_recorded",
                 ExchangeSecurityAuditEvent.resource_id == order_id,
             )
         )
@@ -260,6 +274,7 @@ def test_concurrent_same_item_submission_on_still_in_progress_order_yields_dupli
         try:
             barrier.wait(timeout=15)
             results.record_numeric(
+                recorded_by_identity_id=_labtech_identity_id(sessions, f"pg7-actor-2-{i}"),
                 order_id=order_id,
                 lab_order_item_id=item_id,
                 lab_organization_id=lab_id,
@@ -319,6 +334,7 @@ def test_concurrent_final_two_results_converge_to_ready_for_release_with_no_lost
         try:
             barrier.wait(timeout=15)
             outcome = results.record_numeric(
+                recorded_by_identity_id=_labtech_identity_id(sessions, f"pg7-actor-3-{i}"),
                 order_id=order_id,
                 lab_order_item_id=item_id,
                 lab_organization_id=lab_id,
@@ -519,5 +535,10 @@ def test_boundary_valid_decimal_persists_exactly_in_real_postgres(
     assert response.json()["ready_for_release"] is True
 
     with sessions() as session:
-        result = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item_ids[0]))
-        assert result.numeric_value == Decimal("99999999999999.9999")
+        container = session.scalar(
+            select(LabResult).where(LabResult.lab_order_item_id == item_ids[0])
+        )
+        observation = session.scalar(
+            select(LabObservation).where(LabObservation.lab_result_id == container.id)
+        )
+        assert observation.numeric_value == Decimal("99999999999999.9999")

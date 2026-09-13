@@ -5451,3 +5451,61 @@ report/PDF repository, and a national terminology service are all explicitly not
 anything recommended here, and none is proposed.
 
 **Full evidence, dependency map, and options analysis:** `PROJECT_STATE.md`'s DH-EX-012B entry.
+
+---
+
+**Decision accepted by Liban — 2026-09-13.** This section is an append, not a revision — the
+RECOMMENDED packet above (architecture, options, rejected alternatives, evidence) stands unchanged
+as the record of what was evaluated and why; this is the record of what was chosen and implemented,
+per DH-EX-012C.
+
+**Recommended architecture accepted, exactly as evaluated above:** ``LabOrder → LabOrderItem →
+LabResult (container) → LabObservation[]``, with ``LabResult`` reduced to identity plus the two
+completion-provenance columns, every scalar value column moved to the new ``LabObservation`` child
+table, and the hybrid-namespace observation identity design (mandatory ``source_code``/
+``source_system``/``display_label_snapshot``, no optional catalog-link column added since no such
+catalog table exists yet). Nothing about the recommended shape changed between recommendation and
+implementation.
+
+**The one open question is resolved: NO zero-observation completed result in MVP (Option (a)).** An
+ordered item's container may exist with zero observations while its entry is incomplete — that is
+the ordinary in-progress state, not an error. It may **never** transition to
+``entry_completed_at`` being set while it has zero observations. Concretely:
+
+```text
+0 observations + incomplete  = valid
+>=1 observation + incomplete = valid
+>=1 observation + complete   = valid
+0 observations + complete    = INVALID, structurally refused
+```
+
+`LabResultRepository.complete_entry` refuses with `EntryNotReadyForCompletion` if zero observations
+exist at the moment completion is attempted. `LabResultReleaseRepository.release` independently
+re-derives the identical completeness fact from the database on every call (never trusting the
+completion endpoint alone) and additionally treats a container found with `entry_completed_at` set
+but zero observations as a release-blocking `ResultsNotReadyForRelease` condition — real
+defense-in-depth, not merely written: a real-PostgreSQL negative control manufactured exactly this
+malformed state via a raw row insert and confirmed release refuses it (see PROJECT_STATE.md's
+DH-EX-012C entry).
+
+**Explicitly, deliberately NOT defined by this decision, exactly as flagged when the question was
+raised:** no "not performed" / "unable to perform" / "cancelled test" / "insufficient sample" / "no
+result obtainable" representation of any kind is introduced. If a real laboratory workflow later
+requires representing that an ordered service produced no result, that requires its own future
+explicit field/clinical-workflow decision — this decision does not anticipate, name, or reserve a
+value for it.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-EX-012C entry (migration
+`0016_exchange_observations`, `exchange/models.py`'s `LabObservation`/redefined `LabResult`,
+`exchange/results.py`'s `record_observation`/`complete_entry`/reshaped `record_numeric`/
+`record_text`, the new `POST .../items/{item_id}/observations` and
+`POST .../items/{item_id}/complete-result-entry` routes, nested provider/lab-inspection response
+shapes, real-PostgreSQL qualification, and full negative-control evidence).
+
+**Status: this ADR is now RESOLVED**, not RECOMMENDED — recorded here rather than editing the
+header above, so the original evaluated packet remains legible as written at the time it was
+proposed, exactly matching ADR-044's own append-don't-rewrite precedent.
+
+**ADR-045 (pre-release correction vs. post-release amendment) remains OPEN and its implementation
+remains paused**, unaffected and unresolved by this decision — nothing in DH-EX-012C's
+implementation begins correction/amendment work.

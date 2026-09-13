@@ -37,11 +37,12 @@ order
   → provider review
 ```
 
-Two things this shape does **not** yet resolve, disclosed rather than glossed over: correcting or
+One thing this shape does **not** yet resolve, disclosed rather than glossed over: correcting or
 amending a result — before or after release — has no supported path today (`DECISIONS.md`'s ADR-045,
-open); and the current one-result-per-ordered-item data model is confirmed, from real field
-evidence, not to be the final shape for a real panel-based laboratory workflow (ADR-046) — both
-covered in the DH-EX-012/DH-EX-012A paragraphs below.
+open) — covered in the DH-EX-012/DH-EX-012A paragraphs below. The result data model itself
+(`LabOrderItem → LabResult` container `→ LabObservation[]`, 0..N observations per ordered item) was
+confirmed by real field evidence not to be a single scalar per item, and is now implemented
+(ADR-046/ADR-047, DH-EX-012C) — see the paragraph below DH-EX-012A.
 
 The Exchange **core domain/persistence layer** (DH-EX-001), the **organization onboarding, OIDC
 authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab directory,
@@ -98,18 +99,22 @@ CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified —
   (`ready_for_release`); a separate `LAB_RESULT_RELEASER` role (additive to `LAB_TECH`, the same
   human may hold both) must explicitly call `POST .../release-results` before an order reaches
   `COMPLETED` and a provider can read anything.
-- **DH-EX-012A (ADR-045, OPEN)** audited the resulting gap — today's `LabResult` model is
-  insert-only with no correction or amendment path at all, before or after release — and recorded a
-  decision packet distinguishing the two problems. **Neither is implemented; ADR-045 remains open,
-  and its implementation is further paused behind DH-EX-012B** (below).
-
-**Current result-domain caveat, from real field evidence (DH-FIELD-001, ADR-046, 2026-09-13):**
-review of real Djibouti diagnostic-workflow artifacts confirmed a laboratory may return multiple
-observations for one ordered diagnostic service — the current `LabOrderItem → one LabResult`
-representation is an interim shape, not the final production result model. See
-`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized findings (no real patient data). **DH-EX-012B
-is the next result-domain ticket**, responsible for resolving this before ADR-045's correction/
-amendment work is implemented.
+- **DH-EX-012A (ADR-045, OPEN)** audited the resulting gap — today's result model is insert-only
+  with no correction or amendment path at all, before or after release — and recorded a decision
+  packet distinguishing the two problems. **Neither is implemented; ADR-045 remains open.**
+- **DH-EX-012C (ADR-047, IMPLEMENTED, 2026-09-13)** replaces the one-scalar-per-item result model
+  with `LabOrderItem → LabResult` (a per-item container) `→ LabObservation[]` (zero, one, or many
+  observations per item), the shape real field evidence (DH-FIELD-001, ADR-046) required. A new
+  `POST .../items/{item_id}/observations` records any number of observations; a new
+  `POST .../items/{item_id}/complete-result-entry` is the one explicit signal an item's entry is
+  finished — **never inferred from how many observations exist**, and an item may never complete
+  with zero observations (Liban's accepted resolution of ADR-047's one open question). The existing
+  `POST .../items/{item_id}/result` remains as an atomic single-observation convenience call for
+  the simple case. Provider/lab-inspection reads now return nested observations per item. Real-
+  PostgreSQL qualified, including migration upgrade/downgrade-guard evidence and four concurrency
+  scenarios. ADR-045's correction/amendment work remains paused independently — see
+  `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized field findings behind this change (no
+  real patient data) and `PROJECT_STATE.md`'s DH-EX-012C entry for full evidence.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —
@@ -212,7 +217,7 @@ component doc only once you're touching that component:
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | Tickets, blockers, critical path, session handoff notes |
 | [`CURRENT_STATE.md`](CURRENT_STATE.md) | What actually works vs. what is merely written |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full design: topology, data flow, versions, build order (maternity/connector-track detail, plus §17 for the Exchange) |
-| [`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`](docs/FIELD-DIAGNOSTIC-WORKFLOW.md) | Generalized findings from real Djibouti diagnostic-workflow artifacts (no patient data) — why the current result data model is not yet final (ADR-046) |
+| [`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`](docs/FIELD-DIAGNOSTIC-WORKFLOW.md) | Generalized findings from real Djibouti diagnostic-workflow artifacts (no patient data) — the evidence behind ADR-046/ADR-047's multi-observation result domain (DH-EX-012C) |
 | [`backup/README.md`](backup/README.md) | Backup operation, verification boundary, and status checks (maternity/connector-track component) |
 | [`backup/restore-drill.md`](backup/restore-drill.md) | The performed restore, the **correct** restore procedure, and what it does not yet cover |
 | [`provisioning/README.md`](provisioning/README.md) | Multi-facility provisioning API + portal — **a separate system that never touches clinical data** |

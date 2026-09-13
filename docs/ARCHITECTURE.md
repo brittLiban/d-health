@@ -1067,7 +1067,7 @@ WhatsApp/SMS integration — none of this is equivalent to a completed Exchange 
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
 PROJECT_STATE.md's DH-EX-001 through DH-EX-007 entries.
 
-**DH-EX-008 (deployment wiring) through DH-EX-012A (correction/amendment decision packet) extend
+**DH-EX-008 (deployment wiring) through DH-EX-012C (multi-observation result domain) extend
 the Exchange well past DH-EX-007** — reconciled into this document 2026-09-13 (DH-FIELD-001; full
 per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not restated here):
 
@@ -1101,22 +1101,30 @@ per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not r
   `COMPLETED` is grandfathered with no fabricated release row. Provider/clinician visibility gates
   and `ResultDelivery` are unchanged — only the *producer* of `COMPLETED` moved.
 - **DH-EX-012A (ADR-045, OPEN)** audited the gap DH-EX-012 sharpened rather than created: `LabResult`
-  is, and remains, strictly insert-only — no `UPDATE` path exists anywhere in the package, no
-  entering-actor column exists on the row itself, and no revision/version/supersedes metadata
-  exists. It distinguished pre-release *correction* from post-release *amendment* as two separate,
-  unresolved problems and evaluated options for each without adopting any. **Neither is
-  implemented.**
+  was, at that point, strictly insert-only — no `UPDATE` path anywhere in the package, no
+  entering-actor column, no revision/version/supersedes metadata. It distinguished pre-release
+  *correction* from post-release *amendment* as two separate, unresolved problems and evaluated
+  options for each without adopting any. **Neither is implemented; ADR-045 remains OPEN.**
+- **DH-EX-012C (ADR-047, IMPLEMENTED, 2026-09-13)** replaces the `LabOrderItem → one LabResult`
+  shape with `LabOrderItem → LabResult` (now a per-item *container* — identity plus one explicit
+  `entry_completed_at`/`entry_completed_by_identity_id` completion signal, no value columns) `→
+  LabObservation[]` (0..N observations per container, each carrying its own hybrid-namespace
+  identity and value). Real field evidence (DH-FIELD-001, ADR-046) established that one ordered
+  diagnostic service may return multiple observations; ADR-047 (recommended by DH-EX-012B,
+  accepted by Liban with the zero-observation-completion question resolved as **no** — an item may
+  never complete with zero observations) is the schema that satisfies it. Two new endpoints
+  (`POST .../items/{item_id}/observations`, `POST .../items/{item_id}/complete-result-entry`)
+  join the existing single-observation convenience route, which now atomically creates the
+  container, records one observation, and completes the entry in one call. Completeness is a
+  single explicit signal, never inferred by counting observations; release's own completeness
+  re-check additionally defends against a malformed "complete but zero observations" container,
+  demonstrated via a real-PostgreSQL negative control. Migration `0016_exchange_observations`
+  migrates every legacy scalar `LabResult` row losslessly into one container plus one observation,
+  with four independent downgrade guards, each demonstrated against real PostgreSQL — including a
+  guard-removal control proving real, silent data loss occurs without them. **ADR-045's correction/
+  amendment work remains paused for its own five independently unresolved questions, no longer for
+  the schema-cardinality reason above.** No panel composition, analyte vocabulary, or clinical
+  content of any kind was invented — observation identity is caller-supplied or, for the simple
+  case, reused from the ordered item's own catalog snapshot.
 
-**Current architectural limitation, confirmed by real field evidence (DH-FIELD-001, ADR-046,
-2026-09-13):** the `LabOrderItem → one LabResult` shape above is confirmed, from direct review of
-real Djibouti diagnostic-workflow artifacts, not to be adequate for a real panel-based laboratory
-workflow — one ordered diagnostic service may need to return multiple observations, which today's
-schema cannot represent. **This is now the reason ADR-045's correction/amendment work is paused**,
-not merely deferred: implementing a correction/revision mechanism against a result shape already
-known to need replacing risks being redone once the cardinality question is resolved. No schema,
-panel composition, or observation vocabulary is chosen by this note — see
-`docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized (no-patient-data) findings and
-`DECISIONS.md`'s ADR-046 for the one accepted requirement. **DH-EX-012B is the next result-domain
-ticket.**
-
-Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-012A entries.
+Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-012C entries.

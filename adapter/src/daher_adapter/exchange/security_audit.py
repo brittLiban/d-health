@@ -43,6 +43,11 @@ SecurityEventType = Literal[
     "lab_order_processing_started",
     # DH-EX-007 lab result recording, order completion, and doctor review. All three reference a
     # LabOrder id (`resource_type="lab_order"`) -- audit stays order-centric, never per-item.
+    # `lab_result_recorded` is RETIRED as of DH-EX-012C -- kept in this CHECK constraint only
+    # because real historical rows already carry it (narrowing the constraint would require
+    # proving no such row exists, an unnecessary destructive-adjacent step for a purely additive
+    # ticket); no code path writes a new one. `lab_observation_recorded`/
+    # `lab_result_entry_completed` below are its replacements.
     "lab_result_recorded",
     "lab_order_completed",
     "doctor_review_recorded",
@@ -65,6 +70,16 @@ SecurityEventType = Literal[
     # transition (moved here from result entry -- see PROJECT_STATE.md's DH-EX-012 entry for the
     # actor semantic change this causes: the actor is now the releaser, not the entering tech).
     "lab_results_released",
+    # DH-EX-012C/ADR-047: the multi-observation result domain. `lab_observation_recorded` fires
+    # once per recorded `LabObservation` -- both the granular multi-observation endpoint and the
+    # backward-compatible single-observation convenience path write it. `lab_result_entry_completed`
+    # fires once per ordered item whose result entry is explicitly marked complete (never on an
+    # idempotent replay -- see `LabResultRepository.complete_entry`). Both reuse
+    # `resource_type="lab_order"`, matching every other per-item-but-order-scoped event above --
+    # audit stays order-centric, never per-item/per-observation, unchanged from DH-EX-007's own
+    # convention.
+    "lab_observation_recorded",
+    "lab_result_entry_completed",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[

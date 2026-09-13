@@ -83,6 +83,7 @@ from daher_adapter.exchange.membership import (
 from daher_adapter.exchange.models import (
     DoctorReviewStatus,
     LabOrderStatus,
+    LabResultType,
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
@@ -108,6 +109,8 @@ from daher_adapter.exchange.results import (
     DoctorReviewRecord,
     DoctorReviewRepository,
     DuplicateResult,
+    EntryAlreadyCompleted,
+    EntryNotReadyForCompletion,
     InvalidResultSubmissionState,
     LabResultInspectionRecord,
     LabResultReleaseRepository,
@@ -813,35 +816,138 @@ class LabResultSubmitResponse(BaseModel):
     frozen catalog/price snapshots the caller already has from the work-queue read.
 
     DH-EX-012/ADR-044: ``order_status`` is truthfully always ``'IN_PROGRESS'`` now -- recording a
-    result, even the last one, no longer completes the order. ``ready_for_release`` is the new,
-    additive field reporting the same DB-grounded "every item now has a result" fact DH-EX-007's
-    since-removed automatic completion used to act on; this response never acts on it, only
-    reports it."""
+    result, even the last one, no longer completes the order. ``ready_for_release`` reports the
+    same DB-grounded "every item now has a completed result entry" fact DH-EX-007's since-removed
+    automatic completion used to act on; this response never acts on it, only reports it.
+
+    DH-EX-012C/ADR-047: this is the backward-compatible single-observation convenience path's
+    response. ``result_id`` keeps its name (the container id, for compatibility) and
+    ``completed_at`` keeps its old meaning (when the one observation's value was entered) --
+    ``observation_id``/``entry_completed_at`` are new, additive fields for the newly-relevant facts
+    this call also atomically performs (recording the observation and completing the item's entry
+    in one step)."""
 
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
     item_id: uuid.UUID
     result_id: uuid.UUID
+    observation_id: uuid.UUID
     result_type: str
     completed_at: datetime
+    entry_completed_at: datetime
     order_status: str
     ready_for_release: bool
 
 
-class ProviderResultItemResponse(BaseModel):
+class LabObservationRecordRequest(BaseModel):
+    """DH-EX-012C: one observation under an ordered item's result-entry container -- the granular,
+    multi-observation-capable counterpart to ``LabResultSubmitRequest``. ``source_code``/
+    ``display_label`` are caller-supplied and mandatory: ADR-047's hybrid-namespace identity design
+    requires every observation to carry its own source/display identity, and DHealth never invents
+    one on the caller's behalf (no LOINC dependency, no universal analyte ontology, no hard-coded
+    panel content). ``source_system`` is deliberately not accepted here -- no external LIS/Connect
+    source exists yet; every observation this route can produce is self-asserted by DHealth itself
+    (see ``exchange/results.py``'s ``NATIVE_OBSERVATION_SOURCE_SYSTEM``), and a future Connect
+    import path is free to introduce its own value once it exists. Value-shape validation mirrors
+    ``LabResultSubmitRequest`` exactly -- see that model's own docstring for the full reasoning."""
+
     model_config = ConfigDict(extra="forbid")
 
+    result_type: Literal["NUMERIC", "TEXT"]
+    source_code: str = Field(min_length=1, max_length=64)
+    display_label: str = Field(min_length=1, max_length=256)
+    numeric_value: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    numeric_unit: str | None = Field(default=None, max_length=32)
+    reference_range_low: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    reference_range_high: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    text_value: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _value_matches_declared_type(self) -> "LabObservationRecordRequest":
+        if self.result_type == "NUMERIC":
+            if self.numeric_value is None:
+                raise ValueError("numeric_value is required when result_type is 'NUMERIC'")
+            if self.text_value is not None:
+                raise ValueError("text_value must not be set when result_type is 'NUMERIC'")
+        else:
+            if self.text_value is None or not self.text_value.strip():
+                raise ValueError("text_value is required when result_type is 'TEXT'")
+            if (
+                self.numeric_value is not None
+                or self.numeric_unit is not None
+                or self.reference_range_low is not None
+                or self.reference_range_high is not None
+            ):
+                raise ValueError("numeric fields must not be set when result_type is 'TEXT'")
+        return self
+
+
+class LabObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
     item_id: uuid.UUID
-    catalog_code_snapshot: str
-    catalog_display_name_snapshot: str
+    result_id: uuid.UUID
+    observation_id: uuid.UUID
+    source_code: str
+    source_system: str
+    display_label_snapshot: str
     result_type: str
     numeric_value: Decimal | None
     numeric_unit: str | None
     reference_range_low: Decimal | None
     reference_range_high: Decimal | None
     text_value: str | None
-    completed_at: datetime
+    recorded_at: datetime
+
+
+class EntryCompletionResponse(BaseModel):
+    """DH-EX-012C: the response to marking (or idempotently replaying) an ordered item's result
+    entry complete -- deliberately narrow, matching `LabResultReleaseResponse`'s own precedent. No
+    result values, no clinical content: confirms only that the workflow fact was recorded, by whom,
+    and when."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    item_id: uuid.UUID
+    entry_completed_at: datetime
+    entry_completed_by_identity_id: uuid.UUID | None
+
+
+class ProviderObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    source_code: str
+    source_system: str
+    display_label_snapshot: str
+    result_type: str
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+
+
+class ProviderResultItemResponse(BaseModel):
+    """DH-EX-012C/ADR-047: nested, not flat -- one ordered item may now carry zero, one, or many
+    observations, so a flat per-item scalar shape can no longer represent this honestly (ADR-047's
+    own instruction against preserving a flat shape merely for compatibility once doing so makes
+    panel results wrong). ``entry_completed_at`` is always non-``None`` here: this shape only ever
+    appears inside ``ProviderOrderResultsResponse``, which is itself only ever returned once
+    ``LabOrder.status == COMPLETED`` -- release (`LabResultReleaseRepository.release`) already
+    proved every item's entry is complete before that transition is possible."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    entry_completed_at: datetime
+    observations: list[ProviderObservationResponse]
 
 
 class ProviderOrderResultsResponse(BaseModel):
@@ -856,24 +962,37 @@ class ProviderOrderResultsResponse(BaseModel):
     results: list[ProviderResultItemResponse]
 
 
+class LabResultInspectionObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    source_code: str
+    source_system: str
+    display_label_snapshot: str
+    result_type: str
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+
+
 class LabResultInspectionItemResponse(BaseModel):
-    """DH-EX-012: unlike ``ProviderResultItemResponse``, every field beyond ``item_id`` may be
-    ``None`` -- this is the lab's own pre-release view, which must show what is still missing, not
-    only what has already been entered. No clinical interpretation: no normal/abnormal flag, no
-    reference-range evaluation is computed here or anywhere in this codebase."""
+    """DH-EX-012, reshaped by DH-EX-012C: this is the lab's own pre-release view, which must show
+    what is still missing, not only what has already been entered -- ``entry_completed``/
+    ``entry_completed_at`` are ``False``/``None`` and ``observations`` may be empty while entry is
+    still in progress. No clinical interpretation: no normal/abnormal flag, no reference-range
+    evaluation is computed here or anywhere in this codebase."""
 
     model_config = ConfigDict(extra="forbid")
 
     item_id: uuid.UUID
     catalog_code_snapshot: str
     catalog_display_name_snapshot: str
-    result_type: str | None
-    numeric_value: Decimal | None
-    numeric_unit: str | None
-    reference_range_low: Decimal | None
-    reference_range_high: Decimal | None
-    text_value: str | None
-    completed_at: datetime | None
+    entry_completed: bool
+    entry_completed_at: datetime | None
+    observations: list[LabResultInspectionObservationResponse]
 
 
 class LabResultInspectionResponse(BaseModel):
@@ -881,13 +1000,17 @@ class LabResultInspectionResponse(BaseModel):
     release -- "a releaser must not be forced to release results they cannot inspect." Deliberately
     separate from provider delivery (`ProviderOrderResultsResponse`, gated on `COMPLETED`) and from
     the DH-EX-006 order-detail view (`LabWorkflowOrderResponse`, which carries no result values at
-    all)."""
+    all). DH-EX-012C: ``all_results_entered`` is renamed ``all_items_entry_complete`` -- the
+    underlying fact materially changed (from "has a result row" to "entry explicitly marked
+    complete, backed by at least one observation"), so this field keeps its old name only in
+    concept, not in name, per this ticket's own instruction against silently repointing a field's
+    meaning."""
 
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
     order_status: str
-    all_results_entered: bool
+    all_items_entry_complete: bool
     released: bool
     released_at: datetime | None
     results: list[LabResultInspectionItemResponse]
@@ -2423,6 +2546,12 @@ def build_exchange_router(
         body: LabResultSubmitRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabResultSubmitResponse:
+        # DH-EX-012C: the backward-compatible single-observation convenience path -- atomically
+        # creates the container, records exactly one observation, and completes the item's entry,
+        # in one call. Refuses outright (`DuplicateResult`) if the item already has any
+        # observation/completion content; use the granular observation/completion endpoints below
+        # for anything beyond the simple one-observation case. Does NOT auto-release the order --
+        # ADR-044's explicit release step is unaffected.
         _require_lab_tech(principal, lab_id)
         try:
             with session_factory.begin() as session:
@@ -2433,6 +2562,7 @@ def build_exchange_router(
                         lab_order_item_id=item_id,
                         lab_organization_id=lab_id,
                         value=body.numeric_value,
+                        recorded_by_identity_id=principal.identity_id,
                         unit=body.numeric_unit,
                         reference_range_low=body.reference_range_low,
                         reference_range_high=body.reference_range_high,
@@ -2444,17 +2574,27 @@ def build_exchange_router(
                         lab_order_item_id=item_id,
                         lab_organization_id=lab_id,
                         value=body.text_value or "",
+                        recorded_by_identity_id=principal.identity_id,
                         session=session,
                     )
-                # `lab_result_recorded` commits or rolls back together with the result insert --
-                # added to the identical `session` this transaction already owns, never a separate
-                # commit. DH-EX-012/ADR-044: `lab_order_completed` is no longer written here, even
-                # for the last missing item -- recording a result never completes the order by
-                # itself any more; see `release_lab_order_results` below for where
-                # `lab_order_completed` now fires, atomically with the release itself.
+                # Both events commit or roll back together with the observation/container insert
+                # and the completion write -- added to the identical `session` this transaction
+                # already owns, never a separate commit. DH-EX-012/ADR-044: `lab_order_completed`
+                # is still not written here -- recording/completing a result entry never completes
+                # the order by itself; see `release_lab_order_results` below for where
+                # `lab_order_completed` fires, atomically with the release itself.
                 security_audit.record(
                     session,
-                    event_type="lab_result_recorded",
+                    event_type="lab_observation_recorded",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_result_entry_completed",
                     actor_identity_id=principal.identity_id,
                     organization_id=lab_id,
                     outcome="created",
@@ -2477,11 +2617,143 @@ def build_exchange_router(
         return LabResultSubmitResponse(
             order_id=order_id,
             item_id=item_id,
-            result_id=outcome.result.id,
-            result_type=outcome.result.result_type,
-            completed_at=outcome.result.completed_at,
+            result_id=outcome.observation.lab_result_id,
+            observation_id=outcome.observation.id,
+            result_type=outcome.observation.result_type,
+            completed_at=outcome.observation.recorded_at,
+            entry_completed_at=outcome.entry_completed_at,
             order_status=outcome.order_status,
             ready_for_release=outcome.ready_for_release,
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/observations",
+        response_model=LabObservationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def record_lab_observation(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        body: LabObservationRecordRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationResponse:
+        # DH-EX-012C/ADR-047: the granular, multi-observation-capable entry path -- may be called
+        # any number of times for the same item while its entry is not yet completed. Never
+        # completes anything itself; see `complete_lab_result_entry` below for the one place
+        # `entry_completed_at` is ever set.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                observation = results.record_observation(
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    result_type=LabResultType(body.result_type),
+                    source_code=body.source_code,
+                    display_label_snapshot=body.display_label,
+                    numeric_value=body.numeric_value,
+                    numeric_unit=body.numeric_unit,
+                    reference_range_low=body.reference_range_low,
+                    reference_range_high=body.reference_range_high,
+                    text_value=body.text_value,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_observation_recorded",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except EntryAlreadyCompleted as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        return LabObservationResponse(
+            order_id=order_id,
+            item_id=item_id,
+            result_id=observation.lab_result_id,
+            observation_id=observation.id,
+            source_code=observation.source_code,
+            source_system=observation.source_system,
+            display_label_snapshot=observation.display_label_snapshot,
+            result_type=observation.result_type,
+            numeric_value=observation.numeric_value,
+            numeric_unit=observation.numeric_unit,
+            reference_range_low=observation.reference_range_low,
+            reference_range_high=observation.reference_range_high,
+            text_value=observation.text_value,
+            recorded_at=observation.recorded_at,
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/complete-result-entry",
+        response_model=EntryCompletionResponse,
+    )
+    def complete_lab_result_entry(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> EntryCompletionResponse:
+        # DH-EX-012C/ADR-047: the single explicit signal that this item's result entry is
+        # finished -- never inferred from observation count. LAB_TECH only, deliberately not
+        # LAB_RESULT_RELEASER -- entry completion and release are separate authorities, exactly
+        # mirroring ADR-044's own "entry and release are separate" framing at the item level
+        # instead of the order level. No request body: actor from authentication, item/order/lab
+        # from the URL, time from the server clock. Idempotent: a retry after the first successful
+        # completion returns the identical original fact, never overwriting it.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, created = results.complete_entry(
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    completed_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_result_entry_completed",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except EntryNotReadyForCompletion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return EntryCompletionResponse(
+            order_id=order_id,
+            item_id=item_id,
+            entry_completed_at=record.entry_completed_at,
+            entry_completed_by_identity_id=record.entry_completed_by_identity_id,
         )
 
     @router.get(
@@ -2504,7 +2776,7 @@ def build_exchange_router(
         return LabResultInspectionResponse(
             order_id=record.order_id,
             order_status=record.order_status,
-            all_results_entered=record.all_results_entered,
+            all_items_entry_complete=record.all_items_entry_complete,
             released=record.released,
             released_at=record.released_at,
             results=[
@@ -2512,13 +2784,24 @@ def build_exchange_router(
                     item_id=item.item_id,
                     catalog_code_snapshot=item.catalog_code_snapshot,
                     catalog_display_name_snapshot=item.catalog_display_name_snapshot,
-                    result_type=item.result_type,
-                    numeric_value=item.numeric_value,
-                    numeric_unit=item.numeric_unit,
-                    reference_range_low=item.reference_range_low,
-                    reference_range_high=item.reference_range_high,
-                    text_value=item.text_value,
-                    completed_at=item.completed_at,
+                    entry_completed=item.entry_completed_at is not None,
+                    entry_completed_at=item.entry_completed_at,
+                    observations=[
+                        LabResultInspectionObservationResponse(
+                            observation_id=observation.id,
+                            source_code=observation.source_code,
+                            source_system=observation.source_system,
+                            display_label_snapshot=observation.display_label_snapshot,
+                            result_type=observation.result_type,
+                            numeric_value=observation.numeric_value,
+                            numeric_unit=observation.numeric_unit,
+                            reference_range_low=observation.reference_range_low,
+                            reference_range_high=observation.reference_range_high,
+                            text_value=observation.text_value,
+                            recorded_at=observation.recorded_at,
+                        )
+                        for observation in item.observations
+                    ],
                 )
                 for item in record.items
             ],
@@ -2620,13 +2903,26 @@ def build_exchange_router(
                     catalog_display_name_snapshot=item_by_id[
                         record.lab_order_item_id
                     ].catalog_display_name_snapshot,
-                    result_type=record.result_type,
-                    numeric_value=record.numeric_value,
-                    numeric_unit=record.numeric_unit,
-                    reference_range_low=record.reference_range_low,
-                    reference_range_high=record.reference_range_high,
-                    text_value=record.text_value,
-                    completed_at=record.completed_at,
+                    # `entry_completed_at` is never None here -- release already proved every
+                    # item's entry is complete before COMPLETED was reachable at all (see
+                    # `ProviderResultItemResponse`'s own docstring).
+                    entry_completed_at=record.entry_completed_at,  # type: ignore[arg-type]
+                    observations=[
+                        ProviderObservationResponse(
+                            observation_id=observation.id,
+                            source_code=observation.source_code,
+                            source_system=observation.source_system,
+                            display_label_snapshot=observation.display_label_snapshot,
+                            result_type=observation.result_type,
+                            numeric_value=observation.numeric_value,
+                            numeric_unit=observation.numeric_unit,
+                            reference_range_low=observation.reference_range_low,
+                            reference_range_high=observation.reference_range_high,
+                            text_value=observation.text_value,
+                            recorded_at=observation.recorded_at,
+                        )
+                        for observation in record.observations
+                    ],
                 )
                 for record in results.list_for_order(order_id)
                 if record.lab_order_item_id in item_by_id

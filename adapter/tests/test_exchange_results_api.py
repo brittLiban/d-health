@@ -325,8 +325,10 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
         "order_id",
         "item_id",
         "result_id",
+        "observation_id",
         "result_type",
         "completed_at",
+        "entry_completed_at",
         "order_status",
         "ready_for_release",
     }
@@ -349,10 +351,13 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
     )
     assert inspection_response.status_code == 200, inspection_response.text
     inspection_body = inspection_response.json()
-    assert inspection_body["all_results_entered"] is True
+    assert inspection_body["all_items_entry_complete"] is True
     assert inspection_body["released"] is False
     assert inspection_body["released_at"] is None
-    assert Decimal(inspection_body["results"][0]["numeric_value"]) == Decimal("13.5")
+    assert inspection_body["results"][0]["entry_completed"] is True
+    assert Decimal(inspection_body["results"][0]["observations"][0]["numeric_value"]) == Decimal(
+        "13.5"
+    )
 
     release_body = _release_results(client, private_key, lab.id, order_id, "Golden")
     assert release_body["order_id"] == str(order_id)
@@ -378,8 +383,10 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
     assert results_body["order_status"] == "COMPLETED"
     assert len(results_body["results"]) == 1
     result_line = results_body["results"][0]
-    assert Decimal(result_line["numeric_value"]) == Decimal("13.5")
-    assert result_line["numeric_unit"] == "g/dL"
+    assert len(result_line["observations"]) == 1
+    observation_line = result_line["observations"][0]
+    assert Decimal(observation_line["numeric_value"]) == Decimal("13.5")
+    assert observation_line["numeric_unit"] == "g/dL"
 
     review_response = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
@@ -399,15 +406,21 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
 
     # DH-EX-012/ADR-044: `lab_order_completed`'s actor is now the releaser, never the LAB_TECH who
     # entered the result -- a semantic change from DH-EX-007, disclosed in PROJECT_STATE.md.
-    result_events = _audit_events(sessions, "lab_result_recorded")
+    # DH-EX-012C: the backward-compatible single-observation convenience path writes both
+    # `lab_observation_recorded` and `lab_result_entry_completed` atomically -- `lab_result_
+    # recorded` is retired, no code path writes it any more.
+    observation_events = _audit_events(sessions, "lab_observation_recorded")
+    entry_completed_events = _audit_events(sessions, "lab_result_entry_completed")
     released_events = _audit_events(sessions, "lab_results_released")
     completed_events = _audit_events(sessions, "lab_order_completed")
     review_events = _audit_events(sessions, "doctor_review_recorded")
-    assert len(result_events) == 1
+    assert len(observation_events) == 1
+    assert len(entry_completed_events) == 1
     assert len(released_events) == 1
     assert len(completed_events) == 1
     assert len(review_events) == 1
-    assert result_events[0]["organization_id"] == str(lab.id)
+    assert observation_events[0]["organization_id"] == str(lab.id)
+    assert entry_completed_events[0]["organization_id"] == str(lab.id)
     assert released_events[0]["organization_id"] == str(lab.id)
     assert completed_events[0]["organization_id"] == str(lab.id)
     assert review_events[0]["organization_id"] == str(provider.id)
@@ -418,16 +431,6 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
             )
         )
         assert str(completed_audit.actor_identity_id) == releaser_identity_id
-
-    result_events = _audit_events(sessions, "lab_result_recorded")
-    completed_events = _audit_events(sessions, "lab_order_completed")
-    review_events = _audit_events(sessions, "doctor_review_recorded")
-    assert len(result_events) == 1
-    assert len(completed_events) == 1
-    assert len(review_events) == 1
-    assert result_events[0]["organization_id"] == str(lab.id)
-    assert completed_events[0]["organization_id"] == str(lab.id)
-    assert review_events[0]["organization_id"] == str(provider.id)
 
 
 def test_golden_text_result(
@@ -680,9 +683,10 @@ def test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:
     """A 422 from Pydantic happens before the endpoint's transaction ever opens -- prove that
-    directly: no ``LabResult`` row, no ``lab_result_recorded``/``lab_order_completed`` audit event,
-    and no ``LabOrder.status`` change, for an over-scale request on a one-item order (so a real
-    completion would otherwise have been triggered by a successful submission)."""
+    directly: no ``LabResult`` row, no ``lab_observation_recorded``/``lab_result_entry_completed``/
+    ``lab_order_completed`` audit event, and no ``LabOrder.status`` change, for an over-scale
+    request on a one-item order (so a real completion would otherwise have been triggered by a
+    successful submission)."""
     private_key, _ = keypair
     _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
         client,
@@ -708,7 +712,8 @@ def test_rejected_decimal_result_creates_no_result_audit_row_or_order_mutation(
         order = session.get(LabOrder, order_id)
         assert order.status == "IN_PROGRESS"
 
-    assert _audit_events(sessions, "lab_result_recorded") == []
+    assert _audit_events(sessions, "lab_observation_recorded") == []
+    assert _audit_events(sessions, "lab_result_entry_completed") == []
     assert _audit_events(sessions, "lab_order_completed") == []
 
     # No partial state was left behind -- a subsequent well-formed submission for the same item
@@ -1028,13 +1033,23 @@ def test_provider_results_response_excludes_internal_fields(
         "item_id",
         "catalog_code_snapshot",
         "catalog_display_name_snapshot",
+        "entry_completed_at",
+        "observations",
+    }
+    observation_keys = set(body["results"][0]["observations"][0].keys())
+    assert forbidden.isdisjoint(observation_keys)
+    assert observation_keys == {
+        "observation_id",
+        "source_code",
+        "source_system",
+        "display_label_snapshot",
         "result_type",
         "numeric_value",
         "numeric_unit",
         "reference_range_low",
         "reference_range_high",
         "text_value",
-        "completed_at",
+        "recorded_at",
     }
 
 
@@ -1212,12 +1227,14 @@ def test_frozen_price_and_catalog_snapshots_unchanged_by_result_recording(
 def test_result_audit_atomicity(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
 ) -> None:
-    """The `LabResult` insert and its `lab_result_recorded` audit row must roll back together when
-    the audit insert fails, exactly matching DH-EX-006R's established pattern for accept/reject/
-    start-processing. DH-EX-012/ADR-044: renamed from `..._and_completion_audit_atomicity` --
-    result submission no longer completes anything by itself (see
-    `test_release_and_completion_audit_atomicity` below for the release endpoint's own two-audit
-    atomicity, where `lab_order_completed` now actually fires)."""
+    """The `LabResult` container/observation insert and its `lab_observation_recorded` audit row
+    must roll back together when the audit insert fails, exactly matching DH-EX-006R's established
+    pattern for accept/reject/start-processing. DH-EX-012C: the backward-compatible convenience
+    path also writes a `lab_result_entry_completed` event in the same transaction -- since the
+    monkeypatched `record` raises on its very first call, that second event never even attempts to
+    write, and the whole transaction (container, observation, and completion) rolls back as one
+    unit (see `test_release_and_completion_audit_atomicity` below for the release endpoint's own
+    two-audit atomicity, where `lab_order_completed` fires)."""
     private_key, _ = keypair
     _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
         client, private_key, organizations, catalog, directory, patients, name="ResultAuditFail"
@@ -1239,10 +1256,49 @@ def test_result_audit_atomicity(
     with sessions() as session:
         order = session.get(LabOrder, order_id)
         assert order.status == "IN_PROGRESS"
-        assert session.scalar(select(LabResult)) is None  # result insert rolled back too
+        assert session.scalar(select(LabResult)) is None  # container insert rolled back too
 
-    assert _audit_events(sessions, "lab_result_recorded") == []
+    assert _audit_events(sessions, "lab_observation_recorded") == []
+    assert _audit_events(sessions, "lab_result_entry_completed") == []
     assert _audit_events(sessions, "lab_order_completed") == []
+
+
+def test_granular_completion_audit_atomicity(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
+) -> None:
+    """DH-EX-012C: the granular `complete-result-entry` endpoint's `entry_completed_at` write and
+    its `lab_result_entry_completed` audit row must roll back together when the audit insert
+    fails -- mirrors `test_result_audit_atomicity`'s identical claim for the compat endpoint,
+    applied to this new endpoint specifically."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="GranularCompleteF"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    observe_response = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    assert observe_response.status_code == 201, observe_response.text
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        client.post(_completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+
+    with sessions() as session:
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item_id))
+        assert container.entry_completed_at is None, "completion write must roll back too"
+    assert _audit_events(sessions, "lab_result_entry_completed") == []
 
 
 def test_release_and_completion_audit_atomicity(
@@ -1545,7 +1601,7 @@ def test_releaser_alone_can_inspect_results(
         headers=_auth(releaser_token),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["all_results_entered"] is True
+    assert response.json()["all_items_entry_complete"] is True
 
 
 def test_org_admin_alone_cannot_inspect_results(
@@ -1890,3 +1946,286 @@ def test_doctor_review_audit_atomicity(
         assert review.reviewed_at is None
         assert review.reviewed_by_practitioner_reference_id is None
     assert _audit_events(sessions, "doctor_review_recorded") == []
+
+
+# -- DH-EX-012C/ADR-047: granular multi-observation entry / explicit completion ----------------
+
+
+def _observation_url(lab_id, order_id, item_id) -> str:
+    return f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/observations"
+
+
+def _completion_url(lab_id, order_id, item_id) -> str:
+    return (
+        f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}"
+        f"/complete-result-entry"
+    )
+
+
+def test_multi_observation_golden_flow_release_and_provider_read(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="MultiObs"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    first = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "WBC",
+            "display_label": "White blood cell count",
+            "numeric_value": "6.2",
+            "numeric_unit": "10^9/L",
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["source_system"] == "dhealth-exchange"
+
+    second = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "TEXT",
+            "source_code": "MORPH",
+            "display_label": "Morphology",
+            "text_value": "Normal",
+        },
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["result_id"] == first.json()["result_id"]
+
+    # Not yet complete -- release must refuse.
+    premature_release = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
+        headers=_auth(_bootstrap_and_grant_releaser(client, private_key, lab.id, "MultiObs")),
+    )
+    assert premature_release.status_code == 409, premature_release.text
+
+    inspection = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(lab_tech_token),
+    ).json()
+    assert inspection["all_items_entry_complete"] is False
+    assert len(inspection["results"][0]["observations"]) == 2
+    assert inspection["results"][0]["entry_completed"] is False
+
+    complete = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+    )
+    assert complete.status_code == 201, complete.text
+    assert complete.json()["entry_completed_by_identity_id"] is not None
+
+    release_body = _release_results(client, private_key, lab.id, order_id, "MultiObs-2")
+    assert release_body["released_at"] is not None
+
+    provider_body = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    ).json()
+    observations = provider_body["results"][0]["observations"]
+    assert {o["source_code"] for o in observations} == {"WBC", "MORPH"}
+
+
+def _bootstrap_and_grant_releaser(client, private_key, lab_id, name: str) -> str:
+    releaser_id = _bootstrap_identity(client, private_key, f"releaser-{name}")
+    _grant_roles(
+        client, private_key, lab_id, releaser_id, f"releaser-{name}", ["LAB_RESULT_RELEASER"]
+    )
+    return make_token(private_key, subject=f"releaser-{name}")
+
+
+def test_completion_rejected_with_zero_observations_via_api(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ZeroObsApi"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    response = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+    )
+    assert response.status_code == 409, response.text
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        assert order.status == "IN_PROGRESS"
+
+
+def test_observation_after_completion_refused_via_api(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="FreezeApi"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    complete = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+    )
+    assert complete.status_code == 201, complete.text
+
+    late = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "K",
+            "display_label": "Potassium",
+            "numeric_value": "4.0",
+        },
+    )
+    assert late.status_code == 409, late.text
+
+
+def test_completion_replay_is_idempotent_via_api(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CompleteReplay"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "GLU",
+            "display_label": "Glucose",
+            "numeric_value": "5.1",
+        },
+    )
+
+    first = client.post(_completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+    assert first.status_code == 201, first.text
+
+    replay = client.post(_completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["entry_completed_at"].rstrip("Z") == first.json()[
+        "entry_completed_at"
+    ].rstrip("Z")
+    assert (
+        replay.json()["entry_completed_by_identity_id"]
+        == first.json()["entry_completed_by_identity_id"]
+    )
+
+    entry_completed_events = _audit_events(sessions, "lab_result_entry_completed")
+    assert len(entry_completed_events) == 1
+
+
+def test_clinician_cannot_record_observation_or_complete_entry(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, clinician_token, lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ClinicianObs"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    # Anti-enumeration: the clinician has zero relationship to lab.id, matching
+    # `test_provider_clinician_cannot_submit_lab_result`'s identical 404 (not 403).
+    observation_response = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(clinician_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    assert observation_response.status_code == 404, observation_response.text
+
+    completion_response = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(clinician_token)
+    )
+    assert completion_response.status_code == 404, completion_response.text
+
+
+def test_releaser_alone_cannot_complete_entry(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Entry completion is LAB_TECH authority, deliberately not LAB_RESULT_RELEASER -- entry and
+    release stay separate authorities at the item level, mirroring ADR-044's order-level split."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="ReleaserComplete"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    releaser_token = _bootstrap_and_grant_releaser(client, private_key, lab.id, "ReleaserComplete")
+
+    response = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(releaser_token)
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_wrong_lab_cannot_record_observation_or_complete_entry_and_is_non_enumerating(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Mirrors `test_wrong_lab_cannot_submit_result_and_is_non_enumerating`: a real LAB_TECH of a
+    genuinely different lab, calling with their *own* lab id, is refused identically (404, never
+    disclosing whether the order exists) whether the order id is real or fabricated."""
+    private_key, _ = keypair
+    _provider, _clinician_token, _lab, _lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="WrongLabObs"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    impostor_lab, impostor_token, _id = _setup_lab_tech(
+        client, private_key, organizations, "impostor-observation"
+    )
+
+    real_response = client.post(
+        _observation_url(impostor_lab.id, order_id, item_id),
+        headers=_auth(impostor_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    fake_response = client.post(
+        _observation_url(impostor_lab.id, uuid.uuid4(), item_id),
+        headers=_auth(impostor_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    )
+    assert real_response.status_code == 404
+    assert fake_response.status_code == 404
+    assert real_response.json() == fake_response.json()
+
+    completion_response = client.post(
+        _completion_url(impostor_lab.id, order_id, item_id), headers=_auth(impostor_token)
+    )
+    assert completion_response.status_code == 404, completion_response.text
