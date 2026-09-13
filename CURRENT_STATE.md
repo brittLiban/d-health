@@ -7,18 +7,21 @@
 > is an honest, unmodified implementation inventory for the **maternity/reference-connector
 > track** — real, current, and still binding wherever that track is touched, just no longer the
 > definition of DHealth's overall scope. **The DHealth Exchange backend's own current state**
-> (DH-EX-001 through **DH-EX-012C** as of this note — organization onboarding, patient/order
+> (DH-EX-001 through **DH-EX-013** as of this note — organization onboarding, patient/order
 > creation, provider- and patient-driven lab assignment, accept/reject/processing, an explicit
 > sample-collection milestone, a multi-observation result entry/completion workflow, an explicit
-> authorized release step distinct from entry, and the still-open correction/amendment decision
-> packet — what's WRITTEN/TESTED/CI-QUALIFIED/REAL-POSTGRESQL-QUALIFIED vs. NOT BUILT) is
+> authorized release step distinct from entry, and an immutable pre-release observation-correction
+> workflow — what's WRITTEN/TESTED/CI-QUALIFIED/REAL-POSTGRESQL-QUALIFIED vs. NOT BUILT) is
 > inventoried in `docs/MVP-1.0.md` §8, not duplicated here; this file's own Exchange-era entries
 > (search "DH-EX-") remain as the detailed ticket-by-ticket record behind that summary. **The
 > result data model that field evidence (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, ADR-046) found
-> inadequate — one ordered diagnostic service may need to return multiple observations — is now
+> inadequate — one ordered diagnostic service may need to return multiple observations — is
 > implemented** (ADR-047, DH-EX-012C): `LabOrderItem → LabResult` (a container) `→
-> LabObservation[]` (0..N observations). Result correction/amendment (ADR-045) remains its own,
-> separately OPEN and unimplemented question, unaffected by this change. **DHealth Clinic,
+> LabObservation[]` (0..N observations). **A pre-release, non-destructive correction workflow for an
+> entered observation is now also implemented** (ADR-045 Questions 1–3, DH-EX-013): an immutable
+> supersession chain (`supersedes_observation_id`/`superseded_at`), never a destructive overwrite.
+> Post-release amendment (ADR-045 Questions 4–5) remains its own, separately OPEN and unimplemented
+> question, deferred to DH-EX-014. **DHealth Clinic,
 > DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named applications anywhere
 > in this repository, on either track.
 

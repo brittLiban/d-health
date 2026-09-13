@@ -116,12 +116,14 @@ from daher_adapter.exchange.results import (
     LabResultReleaseRepository,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
+    ObservationNotFound,
     OrderItemNotFound,
     ResultsNotReadyForRelease,
     ResultSubmissionOutcome,
     ReviewAlreadyFinalized,
     ReviewNotAllowedYet,
     ReviewNotFound,
+    StaleObservationVersion,
 )
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 from daher_adapter.exchange.selection import (
@@ -884,6 +886,12 @@ class LabObservationRecordRequest(BaseModel):
 
 
 class LabObservationResponse(BaseModel):
+    """Shared by both the granular entry route and the DH-EX-013 correction route -- a freshly
+    recorded observation always has ``supersedes_observation_id``/``superseded_at`` both ``None``;
+    a correction's response has ``supersedes_observation_id`` set to the observation it replaced
+    and ``superseded_at`` still ``None`` (it is itself effective, until a future correction of its
+    own)."""
+
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
@@ -900,6 +908,22 @@ class LabObservationResponse(BaseModel):
     reference_range_high: Decimal | None
     text_value: str | None
     recorded_at: datetime
+    recorded_by_identity_id: uuid.UUID | None
+    supersedes_observation_id: uuid.UUID | None
+    superseded_at: datetime | None
+
+
+class LabObservationHistoryResponse(BaseModel):
+    """DH-EX-013: every observation that has ever existed under this item's container, superseded
+    and effective alike, ordered oldest to newest -- the one place a lab-authorized caller may see
+    historical (non-effective) observations at all. Never returned by any provider-facing or
+    release-facing route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    item_id: uuid.UUID
+    observations: list[LabObservationResponse]
 
 
 class EntryCompletionResponse(BaseModel):
@@ -979,11 +1003,15 @@ class LabResultInspectionObservationResponse(BaseModel):
 
 
 class LabResultInspectionItemResponse(BaseModel):
-    """DH-EX-012, reshaped by DH-EX-012C: this is the lab's own pre-release view, which must show
-    what is still missing, not only what has already been entered -- ``entry_completed``/
+    """DH-EX-012, reshaped by DH-EX-012C/DH-EX-013: this is the lab's own pre-release view, which
+    must show what is still missing, not only what has already been entered -- ``entry_completed``/
     ``entry_completed_at`` are ``False``/``None`` and ``observations`` may be empty while entry is
-    still in progress. No clinical interpretation: no normal/abnormal flag, no reference-range
-    evaluation is computed here or anywhere in this codebase."""
+    still in progress. ``observations`` is always the *effective* set only -- a superseded
+    historical value never appears here; ``has_correction_history`` is a cheap boolean signal (not
+    the full chain) that at least one correction has happened for this item -- fetch
+    ``GET .../items/{item_id}/observations/history`` for the actual chain. No clinical
+    interpretation: no normal/abnormal flag, no reference-range evaluation is computed here or
+    anywhere in this codebase."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -993,6 +1021,7 @@ class LabResultInspectionItemResponse(BaseModel):
     entry_completed: bool
     entry_completed_at: datetime | None
     observations: list[LabResultInspectionObservationResponse]
+    has_correction_history: bool
 
 
 class LabResultInspectionResponse(BaseModel):
@@ -2626,6 +2655,29 @@ def build_exchange_router(
             ready_for_release=outcome.ready_for_release,
         )
 
+    def _observation_response(
+        order_id: uuid.UUID, item_id: uuid.UUID, observation
+    ) -> LabObservationResponse:
+        return LabObservationResponse(
+            order_id=order_id,
+            item_id=item_id,
+            result_id=observation.lab_result_id,
+            observation_id=observation.id,
+            source_code=observation.source_code,
+            source_system=observation.source_system,
+            display_label_snapshot=observation.display_label_snapshot,
+            result_type=observation.result_type,
+            numeric_value=observation.numeric_value,
+            numeric_unit=observation.numeric_unit,
+            reference_range_low=observation.reference_range_low,
+            reference_range_high=observation.reference_range_high,
+            text_value=observation.text_value,
+            recorded_at=observation.recorded_at,
+            recorded_by_identity_id=observation.recorded_by_identity_id,
+            supersedes_observation_id=observation.supersedes_observation_id,
+            superseded_at=observation.superseded_at,
+        )
+
     @router.post(
         "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/observations",
         response_model=LabObservationResponse,
@@ -2652,6 +2704,7 @@ def build_exchange_router(
                     result_type=LabResultType(body.result_type),
                     source_code=body.source_code,
                     display_label_snapshot=body.display_label,
+                    recorded_by_identity_id=principal.identity_id,
                     numeric_value=body.numeric_value,
                     numeric_unit=body.numeric_unit,
                     reference_range_low=body.reference_range_low,
@@ -2681,22 +2734,7 @@ def build_exchange_router(
         except EntryAlreadyCompleted as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
-        return LabObservationResponse(
-            order_id=order_id,
-            item_id=item_id,
-            result_id=observation.lab_result_id,
-            observation_id=observation.id,
-            source_code=observation.source_code,
-            source_system=observation.source_system,
-            display_label_snapshot=observation.display_label_snapshot,
-            result_type=observation.result_type,
-            numeric_value=observation.numeric_value,
-            numeric_unit=observation.numeric_unit,
-            reference_range_low=observation.reference_range_low,
-            reference_range_high=observation.reference_range_high,
-            text_value=observation.text_value,
-            recorded_at=observation.recorded_at,
-        )
+        return _observation_response(order_id, item_id, observation)
 
     @router.post(
         "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/complete-result-entry",
@@ -2756,6 +2794,108 @@ def build_exchange_router(
             entry_completed_by_identity_id=record.entry_completed_by_identity_id,
         )
 
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}"
+        "/observations/{observation_id}/correct",
+        response_model=LabObservationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def correct_lab_observation(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        body: LabObservationRecordRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationResponse:
+        # DH-EX-013/ADR-045 (pre-release correction only): supersedes the currently effective
+        # `observation_id` with one new immutable observation -- never mutates the original row's
+        # value. LAB_TECH only, matching entry authority exactly (ADR-045's Decision 2 --
+        # LAB_RESULT_RELEASER is not required merely to correct an unreleased observation). No
+        # reason field accepted (ADR-045's Decision 3 -- no mandatory correction reason for MVP,
+        # and no invented closed reason codes). Permitted whether or not the item's entry is
+        # already complete; refused outright once the order is released -- see
+        # `results.correct_observation`'s own docstring for why the same LabOrder-locked
+        # IN_PROGRESS check already used by every other entry mutation is what enforces this.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                successor = results.correct_observation(
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    observation_id=observation_id,
+                    result_type=LabResultType(body.result_type),
+                    source_code=body.source_code,
+                    display_label_snapshot=body.display_label,
+                    corrected_by_identity_id=principal.identity_id,
+                    numeric_value=body.numeric_value,
+                    numeric_unit=body.numeric_unit,
+                    reference_range_low=body.reference_range_low,
+                    reference_range_high=body.reference_range_high,
+                    text_value=body.text_value,
+                    session=session,
+                )
+                # Atomic with the correction/supersession write -- same transaction, same
+                # `session_factory.begin()`, matching `lab_result_entry_completed`'s own
+                # established atomicity discipline exactly.
+                security_audit.record(
+                    session,
+                    event_type="lab_observation_corrected",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="observation not found"
+            ) from error
+        except StaleObservationVersion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        return _observation_response(order_id, item_id, successor)
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/observations/history",
+        response_model=LabObservationHistoryResponse,
+    )
+    def get_lab_observation_history(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationHistoryResponse:
+        # DH-EX-013: the one supported way to reconstruct a correction chain -- every observation
+        # ever recorded under this item, superseded and effective alike. Same auth as the ordinary
+        # pre-release inspection read (either LAB_TECH or LAB_RESULT_RELEASER); tenant ownership is
+        # proven the same way `get_lab_order_results_for_release` does, by requiring the item's own
+        # order to belong to this exact lab before returning anything.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        inspection = results.get_for_lab(order_id, lab_id)
+        if inspection is None or not any(item.item_id == item_id for item in inspection.items):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        history = results.get_correction_history(item_id)
+        if history is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            )
+        return LabObservationHistoryResponse(
+            order_id=order_id,
+            item_id=item_id,
+            observations=[
+                _observation_response(order_id, item_id, observation)
+                for observation in history.observations
+            ],
+        )
+
     @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/results",
         response_model=LabResultInspectionResponse,
@@ -2786,6 +2926,7 @@ def build_exchange_router(
                     catalog_display_name_snapshot=item.catalog_display_name_snapshot,
                     entry_completed=item.entry_completed_at is not None,
                     entry_completed_at=item.entry_completed_at,
+                    has_correction_history=item.has_correction_history,
                     observations=[
                         LabResultInspectionObservationResponse(
                             observation_id=observation.id,

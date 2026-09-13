@@ -18,7 +18,7 @@ from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate
 from exchange_support import make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
@@ -29,6 +29,7 @@ from daher_adapter.exchange.identity import PatientReferenceRepository
 from daher_adapter.exchange.models import (
     DoctorReview,
     ExchangeSecurityAuditEvent,
+    LabObservation,
     LabOrder,
     LabOrderItem,
     LabResult,
@@ -2229,3 +2230,442 @@ def test_wrong_lab_cannot_record_observation_or_complete_entry_and_is_non_enumer
         _completion_url(impostor_lab.id, order_id, item_id), headers=_auth(impostor_token)
     )
     assert completion_response.status_code == 404, completion_response.text
+
+
+# -- DH-EX-013/ADR-045: pre-release observation correction -------------------------------------
+
+
+def _correction_url(lab_id, order_id, item_id, observation_id) -> str:
+    return (
+        f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}"
+        f"/observations/{observation_id}/correct"
+    )
+
+
+def _history_url(lab_id, order_id, item_id) -> str:
+    return (
+        f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}"
+        f"/observations/history"
+    )
+
+
+def test_correction_golden_flow_history_and_release(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectGolden"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "GLU",
+            "display_label": "Glucose",
+            "numeric_value": "5.1",
+        },
+    )
+    assert original.status_code == 201, original.text
+    original_id = original.json()["observation_id"]
+
+    corrected = client.post(
+        _correction_url(lab.id, order_id, item_id, original_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "GLU",
+            "display_label": "Glucose",
+            "numeric_value": "5.9",
+        },
+    )
+    assert corrected.status_code == 201, corrected.text
+    corrected_body = corrected.json()
+    assert corrected_body["supersedes_observation_id"] == original_id
+    assert corrected_body["superseded_at"] is None
+    assert Decimal(corrected_body["numeric_value"]) == Decimal("5.9")
+
+    # Lab inspection shows only the effective (corrected) value, with a history indicator.
+    inspection = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(lab_tech_token),
+    ).json()
+    item_line = inspection["results"][0]
+    assert item_line["has_correction_history"] is True
+    assert len(item_line["observations"]) == 1
+    assert Decimal(item_line["observations"][0]["numeric_value"]) == Decimal("5.9")
+
+    # History endpoint reconstructs both versions.
+    history = client.get(_history_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+    assert history.status_code == 200, history.text
+    history_observations = history.json()["observations"]
+    assert [Decimal(o["numeric_value"]) for o in history_observations] == [
+        Decimal("5.1"),
+        Decimal("5.9"),
+    ]
+    assert history_observations[0]["superseded_at"] is not None
+    assert history_observations[1]["superseded_at"] is None
+
+    complete = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+    )
+    assert complete.status_code == 201, complete.text
+    release_body = _release_results(client, private_key, lab.id, order_id, "CorrectGolden")
+    assert release_body["released_at"] is not None
+
+    provider_body = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    ).json()
+    provider_observations = provider_body["results"][0]["observations"]
+    assert len(provider_observations) == 1
+    assert Decimal(provider_observations[0]["numeric_value"]) == Decimal("5.9")
+
+
+def test_correction_after_entry_completion_before_release_works(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectPostComplete"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "CA",
+            "display_label": "Calcium",
+            "numeric_value": "9.5",
+        },
+    ).json()
+    complete = client.post(
+        _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+    )
+    assert complete.status_code == 201, complete.text
+    entry_completed_at = complete.json()["entry_completed_at"]
+
+    corrected = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "CA",
+            "display_label": "Calcium",
+            "numeric_value": "9.8",
+        },
+    )
+    assert corrected.status_code == 201, corrected.text
+
+    inspection = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/results",
+        headers=_auth(lab_tech_token),
+    ).json()
+    assert inspection["results"][0]["entry_completed"] is True
+    assert inspection["results"][0]["entry_completed_at"].rstrip("Z") == entry_completed_at.rstrip(
+        "Z"
+    )
+
+
+def test_correction_after_release_refused(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectPostRelease"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "CL",
+            "display_label": "Chloride",
+            "numeric_value": "100",
+        },
+    ).json()
+    client.post(_completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+    _release_results(client, private_key, lab.id, order_id, "CorrectPostRelease")
+
+    response = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "CL",
+            "display_label": "Chloride",
+            "numeric_value": "101",
+        },
+    )
+    assert response.status_code == 409, response.text
+
+
+def test_correcting_stale_observation_refused_via_api(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectStale"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+    first_correction = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "141",
+        },
+    )
+    assert first_correction.status_code == 201, first_correction.text
+
+    stale_correction = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "999",
+        },
+    )
+    assert stale_correction.status_code == 409, stale_correction.text
+
+
+def test_clinician_cannot_correct_or_view_history(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectClinician"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+
+    correction_response = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(clinician_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "141",
+        },
+    )
+    assert correction_response.status_code == 404, correction_response.text
+
+    history_response = client.get(
+        _history_url(lab.id, order_id, item_id), headers=_auth(clinician_token)
+    )
+    assert history_response.status_code == 404, history_response.text
+
+
+def test_releaser_alone_cannot_correct(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """LAB_TECH is entry authority (ADR-045's Decision 2) -- a LAB_RESULT_RELEASER with no
+    LAB_TECH role may inspect and view history, but not correct."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectReleaser"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+    releaser_token = _bootstrap_and_grant_releaser(client, private_key, lab.id, "CorrectReleaser")
+
+    correction_response = client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(releaser_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "141",
+        },
+    )
+    assert correction_response.status_code == 403, correction_response.text
+
+    # But the releaser CAN view history, matching the ordinary pre-release inspection auth.
+    history_response = client.get(
+        _history_url(lab.id, order_id, item_id), headers=_auth(releaser_token)
+    )
+    assert history_response.status_code == 200, history_response.text
+
+
+def test_wrong_lab_cannot_correct_or_view_history_and_is_non_enumerating(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectWrongLab"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+    impostor_lab, impostor_token, _id = _setup_lab_tech(
+        client, private_key, organizations, "impostor-correction"
+    )
+
+    correction_response = client.post(
+        _correction_url(impostor_lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(impostor_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "141",
+        },
+    )
+    assert correction_response.status_code == 404, correction_response.text
+
+    history_response = client.get(
+        _history_url(impostor_lab.id, order_id, item_id), headers=_auth(impostor_token)
+    )
+    assert history_response.status_code == 404, history_response.text
+
+
+def test_correction_audit_atomicity(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions, monkeypatch
+) -> None:
+    """The new observation insert, the predecessor's `superseded_at` write, and the
+    `lab_observation_corrected` audit row must roll back together when the audit insert fails."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectAuditFail"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        client.post(
+            _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+            headers=_auth(lab_tech_token),
+            json={
+                "result_type": "NUMERIC",
+                "source_code": "NA",
+                "display_label": "Sodium",
+                "numeric_value": "141",
+            },
+        )
+
+    with sessions() as session:
+        original_row = session.get(LabObservation, uuid.UUID(original["observation_id"]))
+        assert original_row.superseded_at is None
+        observation_count = session.scalar(
+            select(func.count())
+            .select_from(LabObservation)
+            .where(LabObservation.lab_result_id == original_row.lab_result_id)
+        )
+        assert observation_count == 1, "no successor observation may have been left behind"
+    assert _audit_events(sessions, "lab_observation_corrected") == []
+
+
+def test_patient_bearer_never_sees_correction_or_history(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Regression: correction/history must never leak through the patient bearer-access surface,
+    which excludes every result field by construction regardless of correction activity."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="CorrectPatient"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "140",
+        },
+    ).json()
+    client.post(
+        _correction_url(lab.id, order_id, item_id, original["observation_id"]),
+        headers=_auth(lab_tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "NA",
+            "display_label": "Sodium",
+            "numeric_value": "141",
+        },
+    )
+    client.post(_completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token))
+    _release_results(client, private_key, lab.id, order_id, "CorrectPatient")
+
+    # `_create_in_progress_order` already issued and consumed one patient-access grant to drive
+    # the patient-selection step -- revoke it before issuing a fresh one for this assertion.
+    revoke_response = client.delete(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
+        headers=_auth(clinician_token),
+    )
+    assert revoke_response.status_code == 204, revoke_response.text
+
+    access_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
+        headers=_auth(clinician_token),
+    )
+    assert access_response.status_code == 201, access_response.text
+    access_token = access_response.json()["access_token"]
+
+    patient_body = client.get("/exchange/v1/patient/order", headers=_auth(access_token)).json()
+    body_text = str(patient_body)
+    assert "140" not in body_text
+    assert "141" not in body_text
+    assert "numeric_value" not in patient_body
+    assert "observations" not in patient_body

@@ -37,12 +37,13 @@ order
   → provider review
 ```
 
-One thing this shape does **not** yet resolve, disclosed rather than glossed over: correcting or
-amending a result — before or after release — has no supported path today (`DECISIONS.md`'s ADR-045,
-open) — covered in the DH-EX-012/DH-EX-012A paragraphs below. The result data model itself
-(`LabOrderItem → LabResult` container `→ LabObservation[]`, 0..N observations per ordered item) was
-confirmed by real field evidence not to be a single scalar per item, and is now implemented
-(ADR-046/ADR-047, DH-EX-012C) — see the paragraph below DH-EX-012A.
+One thing this shape does **not** yet resolve, disclosed rather than glossed over: amending an
+already-*released* result has no supported path today (`DECISIONS.md`'s ADR-045 Questions 4–5,
+open) — covered in the DH-EX-012/DH-EX-012A/DH-EX-013 paragraphs below. Correcting an observation
+*before* release is implemented (DH-EX-013). The result data model itself (`LabOrderItem →
+LabResult` container `→ LabObservation[]`, 0..N observations per ordered item) was confirmed by real
+field evidence not to be a single scalar per item, and is now implemented (ADR-046/ADR-047,
+DH-EX-012C) — see the paragraph below DH-EX-012A.
 
 The Exchange **core domain/persistence layer** (DH-EX-001), the **organization onboarding, OIDC
 authentication, and multi-tenant authorization boundary** (DH-EX-002), the **lab directory,
@@ -99,9 +100,9 @@ CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified —
   (`ready_for_release`); a separate `LAB_RESULT_RELEASER` role (additive to `LAB_TECH`, the same
   human may hold both) must explicitly call `POST .../release-results` before an order reaches
   `COMPLETED` and a provider can read anything.
-- **DH-EX-012A (ADR-045, OPEN)** audited the resulting gap — today's result model is insert-only
+- **DH-EX-012A (ADR-045)** audited the resulting gap — today's result model is insert-only
   with no correction or amendment path at all, before or after release — and recorded a decision
-  packet distinguishing the two problems. **Neither is implemented; ADR-045 remains open.**
+  packet distinguishing the two problems.
 - **DH-EX-012C (ADR-047, IMPLEMENTED, 2026-09-13)** replaces the one-scalar-per-item result model
   with `LabOrderItem → LabResult` (a per-item container) `→ LabObservation[]` (zero, one, or many
   observations per item), the shape real field evidence (DH-FIELD-001, ADR-046) required. A new
@@ -112,9 +113,17 @@ CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified —
   `POST .../items/{item_id}/result` remains as an atomic single-observation convenience call for
   the simple case. Provider/lab-inspection reads now return nested observations per item. Real-
   PostgreSQL qualified, including migration upgrade/downgrade-guard evidence and four concurrency
-  scenarios. ADR-045's correction/amendment work remains paused independently — see
-  `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized field findings behind this change (no
-  real patient data) and `PROJECT_STATE.md`'s DH-EX-012C entry for full evidence.
+  scenarios. See `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` for the generalized field findings behind this
+  change (no real patient data) and `PROJECT_STATE.md`'s DH-EX-012C entry for full evidence.
+- **DH-EX-013 (ADR-045 Questions 1–3, IMPLEMENTED, 2026-09-13)** implements pre-release correction:
+  `POST .../observations/{observation_id}/correct` supersedes the currently-effective observation
+  with a new, immutable one (`supersedes_observation_id`/`superseded_at`) — never a destructive
+  overwrite — LAB_TECH-only, no reason field, structurally refused once the order is released. A new
+  `GET .../observations/history` returns the full correction chain to LAB_TECH/LAB_RESULT_RELEASER
+  only; release, provider reads, and lab inspection all continue to see only the effective
+  observation. **Post-release amendment (ADR-045 Questions 4–5) remains open, deferred to
+  DH-EX-014.** Real-PostgreSQL qualified, including a full-unique-constraint-backed concurrency
+  race and downgrade-guard evidence — see `PROJECT_STATE.md`'s DH-EX-013 entry.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —

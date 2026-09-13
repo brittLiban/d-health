@@ -80,6 +80,12 @@ SecurityEventType = Literal[
     # convention.
     "lab_observation_recorded",
     "lab_result_entry_completed",
+    # DH-EX-013/ADR-045 (pre-release correction only): `lab_observation_corrected` fires once per
+    # correction -- one immutable new `LabObservation` row superseding exactly one prior effective
+    # one. Reuses `resource_type="lab_order"`, same convention as every event above; the mutation's
+    # own audit atomicity requirement (correction + supersession + this event, one transaction) is
+    # exactly `lab_result_entry_completed`'s own established discipline, not a new pattern.
+    "lab_observation_corrected",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[

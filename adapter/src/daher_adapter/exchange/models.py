@@ -512,7 +512,13 @@ class LabResult(Base):
     comparison instead of a multi-hop join, and so that check cannot be silently bypassed by
     omitting a join elsewhere. One container per order item, unchanged from before this ticket
     (``lab_order_item_id`` stays database-`UNIQUE`) -- ADR-047 rejected letting an ordered item have
-    more than one container; cardinality now varies only at the observation level beneath it."""
+    more than one container; cardinality now varies only at the observation level beneath it.
+
+    **DH-EX-013/ADR-045 (pre-release correction):** correcting one of this container's effective
+    observations never touches this row -- ``entry_completed_at``/``entry_completed_by_identity_id``
+    are never cleared or rewritten by a correction, even though a correction may happen after entry
+    is already complete. Rewriting either would misrepresent when entry was originally completed;
+    see ``LabResultRepository.correct_observation``'s own docstring for the full reasoning."""
 
     __tablename__ = "exchange_lab_results"
     __table_args__ = (Index("ix_exchange_lab_results_lab_organization_id", "lab_organization_id"),)
@@ -534,6 +540,11 @@ class LabResult(Base):
         ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
     )
     order_item: Mapped[LabOrderItem] = relationship(back_populates="result")
+    # DH-EX-013: this relationship returns every observation ever recorded under this container,
+    # superseded and effective alike -- no ordinary repository read in `exchange/results.py` uses
+    # it directly for exactly that reason (each one queries `LabObservation` explicitly, filtered
+    # to `superseded_at IS NULL`). Kept for ad hoc inspection/debugging only; treat any future use
+    # of this relationship in application code as a bug unless it is genuinely a full-history read.
     observations: Mapped[list[LabObservation]] = relationship(
         back_populates="result", order_by="LabObservation.recorded_at"
     )
@@ -564,11 +575,44 @@ class LabObservation(Base):
     both refuse to invent a "one code per result" rule unsupported by real laboratory-workflow
     evidence; a real source may legitimately report a repeated measurement.
 
-    **Append-only, exactly matching this codebase's established pattern for
-    ``LabSampleCollection``/``LabResultRelease``**: no code path anywhere updates or deletes a
-    ``LabObservation`` row. Once its container's ``entry_completed_at`` is set, no further
-    observation may be added under it either (`LabResultRepository`'s freeze check) -- correction/
-    revision is ADR-045's still-open, still-unimplemented work, deliberately not started here.
+    **Append-only in the sense that matters: no value column is ever updated or deleted.** DH-EX-013
+    adds exactly one permitted mutation -- setting ``superseded_at`` on a row once a correction
+    supersedes it (see below) -- mirroring this codebase's own established pattern for
+    ``LabSampleCollection``/``LabResultRelease``/``LabPrice.superseded_at`` of marking a fact
+    retired rather than deleting or overwriting it. Once its container's ``entry_completed_at`` is
+    set, no further *new* observation may be added under it (`LabResultRepository`'s freeze check,
+    unaffected by DH-EX-013) -- but an existing *effective* observation may still be corrected, per
+    ADR-045's accepted pre-release-correction decision (see `LabResultRepository.correct_
+    observation`'s own docstring for the full reasoning this does not "reopen" entry).
+
+    **DH-EX-013/ADR-045 (pre-release correction only): immutable supersession chain.**
+    ``supersedes_observation_id`` is ``NULL`` for an original observation, or the id of the exact
+    observation this one corrects. ``superseded_at`` is ``NULL`` while this row is the chain's
+    *effective* value, and is set (once, never cleared, never overwritten) the instant a correction
+    supersedes it. **The effective rule is exactly `superseded_at IS NULL` -- an explicit relational
+    fact, never inferred from `recorded_at` ordering, list position, or API call order.** A
+    ``UNIQUE`` constraint on ``supersedes_observation_id`` (see ``__table_args__``) makes "at most
+    one row may ever supersede a given observation" a database-enforced fact, not merely an
+    application check -- the real defense against two concurrent corrections of the same effective
+    observation both succeeding (the `LabOrder FOR UPDATE` lock already serializes this in the
+    common case; the constraint is the backstop for anything that reaches this table any other
+    way). A ``CHECK`` constraint additionally refuses literal self-supersession
+    (``id = supersedes_observation_id``). Cross-container supersession (correcting an observation
+    that belongs to a *different* ``LabResult``) and correcting a non-effective (already-superseded)
+    observation are both application-layer checks, not database constraints -- see
+    ``LabResultRepository.correct_observation``'s own docstring for why a DB-level guard is not
+    practical for either without a trigger, which this ticket's own instruction against "brittle
+    database tricks" weighs against introducing for these two specific cases.
+
+    ``recorded_by_identity_id`` is the exact persistent actor for *this* observation row -- who
+    entered it (native `record_observation`/the single-observation convenience path) or who
+    corrected it (`correct_observation`). **Nullable for the identical reason
+    `LabResult.entry_completed_by_identity_id` is nullable**: a pre-DH-EX-013 observation (recorded
+    by DH-EX-012C, or migrated from the pre-DH-EX-012C scalar `LabResult` shape by migration
+    `0016_exchange_observations`) was never asked to carry this fact and DH-EX-013 does not
+    retroactively fabricate one -- see migration `0017_observation_revisions`'s own
+    docstring. Every *new* observation created through the API from this ticket forward populates
+    it, whether an original entry or a correction.
 
     Value shape (``result_type``, `numeric_value`/`numeric_unit`/`reference_range_low`/
     `reference_range_high`, `text_value`) is the identical CHECK-constrained NUMERIC-xor-TEXT
@@ -586,7 +630,15 @@ class LabObservation(Base):
             "(result_type = 'TEXT' AND text_value IS NOT NULL AND numeric_value IS NULL)",
             name="ck_exchange_lab_observations_value_matches_type",
         ),
+        CheckConstraint(
+            "supersedes_observation_id IS NULL OR supersedes_observation_id != id",
+            name="ck_exchange_lab_observations_no_self_supersede",
+        ),
         Index("ix_exchange_lab_observations_lab_result_id", "lab_result_id"),
+        UniqueConstraint(
+            "supersedes_observation_id",
+            name="uq_exchange_lab_observations_supersedes_observation_id",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -605,6 +657,13 @@ class LabObservation(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    recorded_by_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    supersedes_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_observations.id", ondelete="RESTRICT"), nullable=True
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result: Mapped[LabResult] = relationship(back_populates="observations")
 
 
@@ -920,7 +979,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
             "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
             "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded', "
-            "'lab_results_released', 'lab_observation_recorded', 'lab_result_entry_completed'"
+            "'lab_results_released', 'lab_observation_recorded', 'lab_result_entry_completed', "
+            "'lab_observation_corrected'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

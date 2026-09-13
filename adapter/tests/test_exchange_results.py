@@ -37,11 +37,13 @@ from daher_adapter.exchange.results import (
     LabResultReleaseRepository,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
+    ObservationNotFound,
     OrderItemNotFound,
     ResultDeliveryRepository,
     ResultsNotReadyForRelease,
     ReviewAlreadyFinalized,
     ReviewNotAllowedYet,
+    StaleObservationVersion,
 )
 from daher_adapter.exchange.selection import LabSelectionRepository
 
@@ -477,6 +479,7 @@ def test_multiple_observations_recorded_under_one_item_before_completion(
     actor = _labtech_identity_id(repos)
 
     first = repos.results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -487,6 +490,7 @@ def test_multiple_observations_recorded_under_one_item_before_completion(
         numeric_unit="10^9/L",
     )
     second = repos.results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -541,6 +545,7 @@ def test_completion_is_idempotent_and_never_overwrites_first_actor(
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="complete-idem")
     item_id = order.items[0].id
     repos.results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -582,6 +587,7 @@ def test_observation_after_completion_is_frozen_and_refused(
     order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="freeze")
     item_id = order.items[0].id
     repos.results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(repos),
         order_id=order.id,
         lab_order_item_id=item_id,
         lab_organization_id=lab.id,
@@ -599,6 +605,7 @@ def test_observation_after_completion_is_frozen_and_refused(
 
     with pytest.raises(EntryAlreadyCompleted):
         repos.results.record_observation(
+            recorded_by_identity_id=_labtech_identity_id(repos),
             order_id=order.id,
             lab_order_item_id=item_id,
             lab_organization_id=lab.id,
@@ -644,6 +651,400 @@ def test_release_refuses_malformed_zero_observation_complete_container(
     refreshed = repos.orders.get(order.id)
     assert refreshed.status == "IN_PROGRESS"
     assert repos.releases.get_for_order(order.id) is None
+
+
+# -- DH-EX-013/ADR-045: pre-release observation correction ------------------------------------
+
+
+def test_numeric_observation_corrected_to_new_numeric_value(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="correct-numeric")
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.1"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+    corrector = _labtech_identity_id(repos, subject="correct-numeric-corrector")
+
+    corrected = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=original.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.9"),
+        corrected_by_identity_id=corrector,
+    )
+
+    assert corrected.id != original.id
+    assert corrected.numeric_value == Decimal("5.9")
+    assert corrected.supersedes_observation_id == original.id
+    assert corrected.superseded_at is None
+    assert corrected.recorded_by_identity_id == corrector
+
+    # Original row is untouched.
+    with sessions() as session:
+        from daher_adapter.exchange.models import LabObservation as _LabObservation
+
+        original_row = session.get(_LabObservation, original.id)
+        assert original_row.numeric_value == Decimal("5.1")
+        assert original_row.superseded_at is not None
+
+    stored = repos.results.get_for_item(item_id)
+    assert len(stored.observations) == 1
+    assert stored.observations[0].id == corrected.id
+    assert stored.observations[0].numeric_value == Decimal("5.9")
+
+
+def test_text_observation_corrected_to_new_text_value(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="correct-text")
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.TEXT,
+        source_code="MORPH",
+        display_label_snapshot="Morphology",
+        text_value="Normal",
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+
+    corrected = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=original.id,
+        result_type=LabResultType.TEXT,
+        source_code="MORPH",
+        display_label_snapshot="Morphology",
+        text_value="Abnormal -- see correction",
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="correct-text-corrector"),
+    )
+
+    assert corrected.text_value == "Abnormal -- see correction"
+    assert corrected.supersedes_observation_id == original.id
+
+    stored = repos.results.get_for_item(item_id)
+    assert stored.observations[0].text_value == "Abnormal -- see correction"
+
+
+def test_correction_can_change_unit_and_reference_bounds_without_mutating_original(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="correct-bounds")
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="HGB",
+        display_label_snapshot="Hemoglobin",
+        numeric_value=Decimal("13.5"),
+        numeric_unit="g/dL",
+        reference_range_low=Decimal("12.0"),
+        reference_range_high=Decimal("15.5"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+
+    corrected = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=original.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="HGB",
+        display_label_snapshot="Hemoglobin",
+        numeric_value=Decimal("135"),
+        numeric_unit="g/L",
+        reference_range_low=Decimal("120"),
+        reference_range_high=Decimal("155"),
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="correct-bounds-corrector"),
+    )
+
+    assert corrected.numeric_unit == "g/L"
+    assert corrected.reference_range_low == Decimal("120")
+    assert corrected.reference_range_high == Decimal("155")
+
+    with sessions() as session:
+        from daher_adapter.exchange.models import LabObservation as _LabObservation
+
+        original_row = session.get(_LabObservation, original.id)
+        assert original_row.numeric_unit == "g/dL"
+        assert original_row.reference_range_low == Decimal("12.0")
+        assert original_row.reference_range_high == Decimal("15.5")
+
+
+def test_second_correction_creates_a_three_version_chain(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="correct-chain")
+    item_id = order.items[0].id
+    v1 = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="K",
+        display_label_snapshot="Potassium",
+        numeric_value=Decimal("4.0"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+    v2 = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=v1.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="K",
+        display_label_snapshot="Potassium",
+        numeric_value=Decimal("4.5"),
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="chain-corrector-1"),
+    )
+    v3 = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=v2.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="K",
+        display_label_snapshot="Potassium",
+        numeric_value=Decimal("4.7"),
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="chain-corrector-2"),
+    )
+
+    assert v3.supersedes_observation_id == v2.id
+    assert v2.supersedes_observation_id == v1.id
+
+    stored = repos.results.get_for_item(item_id)
+    assert len(stored.observations) == 1
+    assert stored.observations[0].id == v3.id
+    assert stored.observations[0].numeric_value == Decimal("4.7")
+
+    history = repos.results.get_correction_history(item_id)
+    assert [o.id for o in history.observations] == [v1.id, v2.id, v3.id]
+    assert history.observations[0].superseded_at is not None
+    assert history.observations[1].superseded_at is not None
+    assert history.observations[2].superseded_at is None
+
+
+def test_correcting_stale_superseded_observation_refused(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="correct-stale")
+    item_id = order.items[0].id
+    v1 = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="NA",
+        display_label_snapshot="Sodium",
+        numeric_value=Decimal("140"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+    repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=v1.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="NA",
+        display_label_snapshot="Sodium",
+        numeric_value=Decimal("141"),
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="stale-corrector-1"),
+    )
+
+    with pytest.raises(StaleObservationVersion):
+        repos.results.correct_observation(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            observation_id=v1.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="NA",
+            display_label_snapshot="Sodium",
+            numeric_value=Decimal("999"),
+            corrected_by_identity_id=_labtech_identity_id(repos, subject="stale-corrector-2"),
+        )
+
+
+def test_correction_allowed_after_entry_completion_before_release(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="correct-postcomplete"
+    )
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="CA",
+        display_label_snapshot="Calcium",
+        numeric_value=Decimal("9.5"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+    completion, _created = repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=_labtech_identity_id(repos, subject="postcomplete-completer"),
+    )
+    original_completed_at = completion.entry_completed_at
+
+    corrected = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=original.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="CA",
+        display_label_snapshot="Calcium",
+        numeric_value=Decimal("9.8"),
+        corrected_by_identity_id=_labtech_identity_id(repos, subject="postcomplete-corrector"),
+    )
+
+    assert corrected.numeric_value == Decimal("9.8")
+    stored = repos.results.get_for_item(item_id)
+    # Entry-completion timestamp/actor are never touched by a correction.
+    assert stored.entry_completed_at == original_completed_at.replace(
+        tzinfo=stored.entry_completed_at.tzinfo
+    )
+    assert stored.entry_completed_by_identity_id is not None
+
+
+def test_correction_after_release_refused(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="correct-postrelease"
+    )
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="CL",
+        display_label_snapshot="Chloride",
+        numeric_value=Decimal("100"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=_labtech_identity_id(repos, subject="postrelease-completer"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="correct-postrelease")
+
+    with pytest.raises(InvalidResultSubmissionState):
+        repos.results.correct_observation(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab.id,
+            observation_id=original.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="CL",
+            display_label_snapshot="Chloride",
+            numeric_value=Decimal("101"),
+            corrected_by_identity_id=_labtech_identity_id(repos, subject="postrelease-corrector"),
+        )
+
+    # No new observation was created, and the original remains effective/unchanged.
+    with sessions() as session:
+        from daher_adapter.exchange.models import LabObservation as _LabObservation
+
+        original_row = session.get(_LabObservation, original.id)
+        assert original_row.numeric_value == Decimal("100")
+        assert original_row.superseded_at is None
+
+
+def test_cross_lab_correction_refused(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab_selected = make_lab(repos.organizations, name="Correct Lab Selected")
+    lab_impostor = make_lab(repos.organizations, name="Correct Lab Impostor")
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab_selected.id, key="correct-crosslab"
+    )
+    item_id = order.items[0].id
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab_selected.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="MG",
+        display_label_snapshot="Magnesium",
+        numeric_value=Decimal("2.0"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+
+    with pytest.raises(LabOrderNotAssigned):
+        repos.results.correct_observation(
+            order_id=order.id,
+            lab_order_item_id=item_id,
+            lab_organization_id=lab_impostor.id,
+            observation_id=original.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="MG",
+            display_label_snapshot="Magnesium",
+            numeric_value=Decimal("2.1"),
+            corrected_by_identity_id=_labtech_identity_id(repos, subject="crosslab-corrector"),
+        )
+
+
+def test_correcting_observation_from_a_different_item_refused(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select_two_items(
+        repos, sessions, lab_id=lab.id, key="correct-wrongitem"
+    )
+    item_a, item_b = order.items[0].id, order.items[1].id
+    observation_on_a = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_a,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="A",
+        display_label_snapshot="Item A observation",
+        numeric_value=Decimal("1"),
+        recorded_by_identity_id=_labtech_identity_id(repos),
+    )
+
+    with pytest.raises(ObservationNotFound):
+        repos.results.correct_observation(
+            order_id=order.id,
+            lab_order_item_id=item_b,
+            lab_organization_id=lab.id,
+            observation_id=observation_on_a.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="A",
+            display_label_snapshot="Item A observation",
+            numeric_value=Decimal("2"),
+            corrected_by_identity_id=_labtech_identity_id(repos, subject="wrongitem-corrector"),
+        )
 
 
 def test_delivery_state_independent_of_result_and_destination_explicit(

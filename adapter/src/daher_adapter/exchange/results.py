@@ -1,6 +1,19 @@
 """DH-EX-001 models, DH-EX-007 workflow, DH-EX-012/ADR-044 release, DH-EX-012C/ADR-047
-multi-observation result domain: lab results, explicit order-level result release, order
-completion, result delivery, and doctor review.
+multi-observation result domain, DH-EX-013/ADR-045 pre-release observation correction: lab results,
+explicit order-level result release, order completion, result delivery, and doctor review.
+
+**DH-EX-013/ADR-045 (pre-release correction only).** A `LAB_TECH` at the selected lab may correct
+an *effective* (not yet superseded) observation while the order is still `IN_PROGRESS` -- before or
+after the item's own entry is marked complete, but never after the order is released
+(`COMPLETED`). `LabResultRepository.correct_observation` never mutates an existing observation's
+value: it inserts one new immutable `LabObservation` row (`supersedes_observation_id` pointing at
+the corrected row) and sets `superseded_at` on the row it replaces, in the same transaction. Every
+ordinary read (`get_for_item`, `list_for_order`, `get_for_lab`, and the completeness query) now
+returns only *effective* observations (`superseded_at IS NULL`) -- the full chain, including every
+superseded historical version, is available only through `get_correction_history`, a dedicated
+read never used by the provider- or release-facing paths. See `LabObservation`'s own `models.py`
+docstring for the full chain-integrity/database-enforcement reasoning, and `correct_observation`'s
+own docstring below for why this does not "reopen" a completed entry.
 
 Three deliberately independent state machines (DH-EX-001's own instruction): a ``LabResult``
 existing does not move ``ResultDelivery`` out of ``PENDING``, and ``ResultDelivery`` reaching
@@ -79,7 +92,7 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.lab_workflow import LabOrderNotAssigned
 from daher_adapter.exchange.models import (
@@ -107,6 +120,7 @@ __all__ = [
     "EntryNotReadyForCompletion",
     "InvalidResultSubmissionState",
     "LabOrderNotAssigned",
+    "LabObservationHistoryRecord",
     "LabObservationRecord",
     "LabResultEntryCompletionRecord",
     "LabResultInspectionItemRecord",
@@ -117,6 +131,7 @@ __all__ = [
     "LabResultRepository",
     "LegacyCompletedOrderHasNoRelease",
     "MalformedZeroObservationEntry",
+    "ObservationNotFound",
     "OrderItemNotFound",
     "ResultDeliveryRecord",
     "ResultDeliveryRepository",
@@ -125,6 +140,7 @@ __all__ = [
     "ReviewAlreadyFinalized",
     "ReviewNotAllowedYet",
     "ReviewNotFound",
+    "StaleObservationVersion",
 ]
 
 # DH-EX-012C: the self-asserted source-system value for every observation DHealth itself records
@@ -183,6 +199,22 @@ class MalformedZeroObservationEntry(RuntimeError):
     operation, but release refuses to trust the absence of such a row rather than assuming it."""
 
 
+class ObservationNotFound(RuntimeError):
+    """DH-EX-013: no ``LabObservation`` matches the given id *under this exact item's container* --
+    identical response whether the observation id is entirely bogus, belongs to a different item's
+    container, or belongs to a different lab's order entirely, so a caller can never use this
+    endpoint to probe which item or container a real observation id actually belongs to."""
+
+
+class StaleObservationVersion(RuntimeError):
+    """DH-EX-013/ADR-045: a correction was attempted against an observation that is no longer
+    *effective* (``superseded_at`` is already set) -- either because it was already corrected by an
+    earlier request, or (structurally unreachable via any code path holding the ``LabOrder`` lock
+    correctly, but checked anyway as the database-constraint backstop) a genuine concurrent race.
+    A correction must always start from the currently effective observation; this is the controlled
+    conflict a caller sees instead of silently creating a second, ambiguous "current" value."""
+
+
 class ReviewNotFound(RuntimeError):
     pass
 
@@ -221,6 +253,12 @@ class DeliveryNotFound(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LabObservationRecord:
+    """DH-EX-013: ``recorded_by_identity_id`` is ``None`` only for a pre-DH-EX-013 observation
+    (never fabricated retroactively). ``supersedes_observation_id`` is ``None`` for an original
+    observation; ``superseded_at`` is ``None`` exactly when this is the chain's current *effective*
+    value -- the single explicit rule every ordinary read filters on, never inferred from
+    ``recorded_at`` ordering."""
+
     id: uuid.UUID
     lab_result_id: uuid.UUID
     source_code: str
@@ -233,6 +271,9 @@ class LabObservationRecord:
     reference_range_high: Decimal | None
     text_value: str | None
     recorded_at: datetime
+    recorded_by_identity_id: uuid.UUID | None
+    supersedes_observation_id: uuid.UUID | None
+    superseded_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +292,17 @@ class LabResultRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LabObservationHistoryRecord:
+    """DH-EX-013: every observation that has ever existed under one ordered item's container,
+    superseded and effective alike, ordered oldest to newest -- the one place a lab-authorized
+    caller may see historical (non-effective) observations at all. Never used by any
+    provider-facing or release-facing read."""
+
+    item_id: uuid.UUID
+    observations: tuple[LabObservationRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LabResultEntryCompletionRecord:
     id: uuid.UUID
     lab_order_item_id: uuid.UUID
@@ -261,16 +313,20 @@ class LabResultEntryCompletionRecord:
 
 @dataclass(frozen=True, slots=True)
 class LabResultInspectionItemRecord:
-    """DH-EX-012, extended by DH-EX-012C: one ordered item's entry state for the lab's own
-    pre-release inspection read -- ``entry_completed_at`` is ``None`` and ``observations`` may be
-    empty while entry is not yet complete, so a releaser can see exactly what remains missing, not
-    only what has already been entered."""
+    """DH-EX-012, extended by DH-EX-012C/DH-EX-013: one ordered item's entry state for the lab's
+    own pre-release inspection read -- ``entry_completed_at`` is ``None`` and ``observations`` may
+    be empty while entry is not yet complete, so a releaser can see exactly what remains missing,
+    not only what has already been entered. ``observations`` here is always the *effective* set
+    only; ``has_correction_history`` is a cheap, batched boolean signal (never the full chain) that
+    at least one observation under this item has been corrected at least once -- a caller who needs
+    the actual history calls ``get_correction_history`` separately."""
 
     item_id: uuid.UUID
     catalog_code_snapshot: str
     catalog_display_name_snapshot: str
     entry_completed_at: datetime | None
     observations: tuple[LabObservationRecord, ...]
+    has_correction_history: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +408,7 @@ class LabResultRepository:
         result_type: LabResultType,
         source_code: str,
         display_label_snapshot: str,
+        recorded_by_identity_id: uuid.UUID,
         numeric_value: Decimal | None = None,
         numeric_unit: str | None = None,
         reference_range_low: Decimal | None = None,
@@ -368,6 +425,7 @@ class LabResultRepository:
                 result_type=result_type,
                 source_code=source_code,
                 display_label_snapshot=display_label_snapshot,
+                recorded_by_identity_id=recorded_by_identity_id,
                 numeric_value=numeric_value,
                 numeric_unit=numeric_unit,
                 reference_range_low=reference_range_low,
@@ -383,6 +441,7 @@ class LabResultRepository:
                 result_type=result_type,
                 source_code=source_code,
                 display_label_snapshot=display_label_snapshot,
+                recorded_by_identity_id=recorded_by_identity_id,
                 numeric_value=numeric_value,
                 numeric_unit=numeric_unit,
                 reference_range_low=reference_range_low,
@@ -400,6 +459,7 @@ class LabResultRepository:
         result_type: LabResultType,
         source_code: str,
         display_label_snapshot: str,
+        recorded_by_identity_id: uuid.UUID,
         numeric_value: Decimal | None,
         numeric_unit: str | None,
         reference_range_low: Decimal | None,
@@ -448,6 +508,7 @@ class LabResultRepository:
             reference_range_low=reference_range_low,
             reference_range_high=reference_range_high,
             text_value=text_value,
+            recorded_by_identity_id=recorded_by_identity_id,
         )
         session.add(observation)
         session.flush()
@@ -522,6 +583,190 @@ class LabResultRepository:
         container.entry_completed_by_identity_id = completed_by_identity_id
         session.flush()
         return _to_completion_record(container), True
+
+    # -- DH-EX-013/ADR-045: pre-release observation correction -----------------------------------
+
+    def correct_observation(
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        result_type: LabResultType,
+        source_code: str,
+        display_label_snapshot: str,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None = None,
+        numeric_unit: str | None = None,
+        reference_range_low: Decimal | None = None,
+        reference_range_high: Decimal | None = None,
+        text_value: str | None = None,
+        session: Session | None = None,
+    ) -> LabObservationRecord:
+        """DH-EX-013/ADR-045 (pre-release correction only): supersedes the currently *effective*
+        ``observation_id`` with one new immutable ``LabObservation`` row, never mutating the
+        original row's value in any way -- the only field ever written on the superseded row is
+        ``superseded_at`` (a supersession marker, not a result-value change; see this method's own
+        "no destructive update" discipline below). Reuses the identical ``LabOrder FOR UPDATE``
+        lock-and-``IN_PROGRESS``-check preamble every other entry mutation in this module uses
+        (``_lock_order_and_item_for_entry``) -- this is exactly what makes "correction after
+        release" structurally refuse: once ``LabResultReleaseRepository.release`` has moved the
+        order to ``COMPLETED``, this same preamble raises ``InvalidResultSubmissionState`` before
+        this method ever touches an observation row, identical to how it already refuses a new
+        ``record_observation`` call on a released order.
+
+        **Deliberately does NOT check ``LabResult.entry_completed_at``** -- unlike
+        ``record_observation``'s freeze check, a correction of an *existing effective* observation
+        is permitted whether or not the item's entry is already complete. This is not "reopening"
+        entry: ``entry_completed_at``/``entry_completed_by_identity_id`` are never read, cleared, or
+        rewritten here, so the historical fact "entry was completed at this instant" stays exactly
+        as true after a correction as before it. What changes is only which observation row is
+        currently effective for an item whose entry-completion fact is untouched.
+
+        **Chain integrity, application-layer checks (see ``LabObservation``'s own ``models.py``
+        docstring for why a database-level guard is impractical for these two without a trigger):**
+        the predecessor observation must belong to *this exact item's container*
+        (``ObservationNotFound`` otherwise, non-enumerating across containers/labs/orders) and must
+        be currently effective (``StaleObservationVersion`` if ``superseded_at`` is already set --
+        correction always starts from the currently effective observation, never an older one).
+
+        **Concurrency:** two concurrent corrections of the same effective observation, for the same
+        order, fully serialize at the ``LabOrder FOR UPDATE`` lock acquired by
+        ``_lock_order_and_item_for_entry`` -- the second caller, after acquiring the lock, re-reads
+        the predecessor fresh and finds it already superseded by the first, raising
+        ``StaleObservationVersion`` before ever attempting an insert. The database's own ``UNIQUE``
+        constraint on ``supersedes_observation_id`` is the defense-in-depth backstop for this
+        identical invariant, translated from ``IntegrityError`` to the same
+        ``StaleObservationVersion`` conflict -- structurally unreachable in practice given the
+        lock, but never assumed absent."""
+        if session is not None:
+            return self._correct_observation_in_session(
+                session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                result_type=result_type,
+                source_code=source_code,
+                display_label_snapshot=display_label_snapshot,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                numeric_unit=numeric_unit,
+                reference_range_low=reference_range_low,
+                reference_range_high=reference_range_high,
+                text_value=text_value,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._correct_observation_in_session(
+                owned_session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                result_type=result_type,
+                source_code=source_code,
+                display_label_snapshot=display_label_snapshot,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                numeric_unit=numeric_unit,
+                reference_range_low=reference_range_low,
+                reference_range_high=reference_range_high,
+                text_value=text_value,
+            )
+
+    def _correct_observation_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        result_type: LabResultType,
+        source_code: str,
+        display_label_snapshot: str,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None,
+        numeric_unit: str | None,
+        reference_range_low: Decimal | None,
+        reference_range_high: Decimal | None,
+        text_value: str | None,
+    ) -> LabObservationRecord:
+        item, _order = _lock_order_and_item_for_entry(
+            session,
+            order_id=order_id,
+            lab_order_item_id=lab_order_item_id,
+            lab_organization_id=lab_organization_id,
+        )
+
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item.id))
+        if container is None:
+            raise ObservationNotFound(str(observation_id))
+
+        predecessor = session.scalar(
+            select(LabObservation).where(LabObservation.id == observation_id)
+        )
+        if predecessor is None or predecessor.lab_result_id != container.id:
+            raise ObservationNotFound(str(observation_id))
+        if predecessor.superseded_at is not None:
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective -- a correction must "
+                f"start from the currently effective observation"
+            )
+
+        successor = LabObservation(
+            lab_result_id=container.id,
+            source_code=source_code,
+            source_system=NATIVE_OBSERVATION_SOURCE_SYSTEM,
+            display_label_snapshot=display_label_snapshot,
+            result_type=result_type.value,
+            numeric_value=numeric_value,
+            numeric_unit=numeric_unit,
+            reference_range_low=reference_range_low,
+            reference_range_high=reference_range_high,
+            text_value=text_value,
+            recorded_by_identity_id=corrected_by_identity_id,
+            supersedes_observation_id=predecessor.id,
+        )
+        try:
+            with session.begin_nested():
+                session.add(successor)
+                predecessor.superseded_at = utc_now()
+                session.flush()
+        except IntegrityError:
+            # Defensive last line only, mirroring `_record_observation_in_session`'s identical
+            # pattern -- the LabOrder FOR UPDATE lock above already serializes concurrent
+            # corrections of this exact observation down to one winner, so this should never
+            # actually fire in practice.
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective (constraint-detected)"
+            ) from None
+        return _to_observation_record(successor)
+
+    def get_correction_history(
+        self, lab_order_item_id: uuid.UUID
+    ) -> LabObservationHistoryRecord | None:
+        """DH-EX-013: every observation that has ever existed under this item's container,
+        superseded and effective alike, ordered oldest to newest -- the one supported way to
+        reconstruct a correction chain. Never used by any provider-facing or release-facing read;
+        callers are responsible for their own lab-authorization check before calling this, exactly
+        mirroring ``get_for_lab``'s own convention."""
+        with self._sessions() as session:
+            container = session.scalar(
+                select(LabResult).where(LabResult.lab_order_item_id == lab_order_item_id)
+            )
+            if container is None:
+                return None
+            observations = session.scalars(
+                select(LabObservation)
+                .where(LabObservation.lab_result_id == container.id)
+                .order_by(LabObservation.recorded_at)
+            ).all()
+            return LabObservationHistoryRecord(
+                item_id=lab_order_item_id,
+                observations=tuple(_to_observation_record(o) for o in observations),
+            )
 
     # -- DH-EX-007/DH-EX-012C: backward-compatible single-observation convenience path ----------
 
@@ -677,6 +922,7 @@ class LabResultRepository:
             reference_range_low=reference_range_low,
             reference_range_high=reference_range_high,
             text_value=text_value,
+            recorded_by_identity_id=recorded_by_identity_id,
         )
         session.add(observation)
         session.flush()
@@ -701,30 +947,60 @@ class LabResultRepository:
     # -- Reads -----------------------------------------------------------------------------------
 
     def get_for_item(self, lab_order_item_id: uuid.UUID) -> LabResultRecord | None:
+        """DH-EX-013: returns *effective* observations only (``superseded_at IS NULL``) -- a
+        superseded historical version is never mixed into this ordinary read. Use
+        ``get_correction_history`` to see every version."""
         with self._sessions() as session:
             container = session.scalar(
-                select(LabResult)
-                .options(selectinload(LabResult.observations))
-                .where(LabResult.lab_order_item_id == lab_order_item_id)
+                select(LabResult).where(LabResult.lab_order_item_id == lab_order_item_id)
             )
-            return None if container is None else _to_result_record(container)
+            if container is None:
+                return None
+            observations = session.scalars(
+                select(LabObservation)
+                .where(
+                    LabObservation.lab_result_id == container.id,
+                    LabObservation.superseded_at.is_(None),
+                )
+                .order_by(LabObservation.recorded_at)
+            ).all()
+            return _to_result_record(container, observations)
 
     def list_for_order(self, order_id: uuid.UUID) -> list[LabResultRecord]:
         """Read-only, tenant-unsafe by itself -- the caller (the provider result-read API route)
         is responsible for proving the requesting provider owns this order and that it has
         reached ``COMPLETED`` *before* calling this, exactly mirroring how
         ``orders.get_for_organization`` is the tenant check that already gates every other
-        provider-scoped order read in this package. ``selectinload`` avoids one observation query
-        per item -- a single second query loads every observation for every container this order
-        has, rather than N+1."""
+        provider-scoped order read in this package. Two queries total regardless of item/
+        observation count -- no N+1. DH-EX-013: the second query is filtered to *effective*
+        observations only (``superseded_at IS NULL``); a superseded historical version can never
+        reach a provider through this path, before or after release -- correction is refused
+        outright once the order is released (see ``correct_observation``'s own docstring), so the
+        effective set this query reads is exactly what release itself already saw."""
         with self._sessions() as session:
             containers = session.scalars(
                 select(LabResult)
-                .options(selectinload(LabResult.observations))
                 .join(LabOrderItem, LabResult.lab_order_item_id == LabOrderItem.id)
                 .where(LabOrderItem.lab_order_id == order_id)
             ).all()
-            return [_to_result_record(container) for container in containers]
+            container_ids = [c.id for c in containers]
+            observations_by_result: dict[uuid.UUID, list[LabObservation]] = {}
+            if container_ids:
+                for observation in session.scalars(
+                    select(LabObservation)
+                    .where(
+                        LabObservation.lab_result_id.in_(container_ids),
+                        LabObservation.superseded_at.is_(None),
+                    )
+                    .order_by(LabObservation.recorded_at)
+                ):
+                    observations_by_result.setdefault(observation.lab_result_id, []).append(
+                        observation
+                    )
+            return [
+                _to_result_record(container, observations_by_result.get(container.id, []))
+                for container in containers
+            ]
 
     def get_for_lab(
         self, order_id: uuid.UUID, lab_organization_id: uuid.UUID
@@ -733,9 +1009,13 @@ class LabResultRepository:
         releaser must not be forced to release results they cannot inspect." Read-only,
         tenant-safe: returns ``None`` both when the order does not exist and when it exists but is
         not assigned to this lab, never disclosing which is true. One outer-joined query returns
-        every ordered item together with its container (if any); a second, ``selectin``-batched
-        query loads every observation for every container found, so this stays two queries total
-        regardless of how many items or observations exist -- no N+1."""
+        every ordered item together with its container (if any); a second, batched query loads
+        every observation for every container found, so this stays two queries total regardless of
+        how many items or observations exist -- no N+1. DH-EX-013: the second query is filtered to
+        *effective* observations only (``superseded_at IS NULL``) -- the normal inspection view
+        never mixes a superseded historical value in alongside the current one; a releaser sees
+        exactly what they are about to release. ``get_correction_history`` is the dedicated,
+        separate read for the full chain."""
         with self._sessions() as session:
             order = session.get(LabOrder, order_id)
             if order is None:
@@ -752,15 +1032,34 @@ class LabResultRepository:
             ).all()
             container_ids = [container.id for _item, container in rows if container is not None]
             observations_by_result: dict[uuid.UUID, list[LabObservation]] = {}
+            corrected_container_ids: set[uuid.UUID] = set()
             if container_ids:
                 for observation in session.scalars(
                     select(LabObservation)
-                    .where(LabObservation.lab_result_id.in_(container_ids))
+                    .where(
+                        LabObservation.lab_result_id.in_(container_ids),
+                        LabObservation.superseded_at.is_(None),
+                    )
                     .order_by(LabObservation.recorded_at)
                 ):
                     observations_by_result.setdefault(observation.lab_result_id, []).append(
                         observation
                     )
+                # DH-EX-013: a third, still-batched query -- which containers have ever had a
+                # correction, regardless of how many. Only the effective observation's own
+                # `supersedes_observation_id` needs checking (an effective row that itself
+                # supersedes something is proof a correction happened in this container at least
+                # once); this stays O(1) queries, not one per item.
+                corrected_container_ids = set(
+                    session.scalars(
+                        select(LabObservation.lab_result_id)
+                        .where(
+                            LabObservation.lab_result_id.in_(container_ids),
+                            LabObservation.supersedes_observation_id.isnot(None),
+                        )
+                        .distinct()
+                    )
+                )
             release = session.scalar(
                 select(LabResultRelease).where(LabResultRelease.lab_order_id == order_id)
             )
@@ -774,7 +1073,9 @@ class LabResultRepository:
                 released=release is not None,
                 released_at=release.released_at if release is not None else None,
                 items=tuple(
-                    _to_inspection_item(item, container, observations_by_result)
+                    _to_inspection_item(
+                        item, container, observations_by_result, corrected_container_ids
+                    )
                     for item, container in rows
                 ),
             )
@@ -1030,10 +1331,13 @@ def _lock_order_and_item_for_entry(
     lab_organization_id: uuid.UUID,
 ) -> tuple[LabOrderItem, LabOrder]:
     """Shared lock-and-validate preamble for every result-entry mutation
-    (`record_observation`/`complete_entry`/`_submit_in_session`) -- ``LabOrder`` locked
-    ``FOR UPDATE`` first, exactly matching this module's own established lock-order discipline, so
-    two concurrent calls for the same order fully serialize here before either touches
-    `LabResult`/`LabObservation`."""
+    (`record_observation`/`complete_entry`/`_submit_in_session`/`correct_observation`) --
+    ``LabOrder`` locked ``FOR UPDATE`` first, exactly matching this module's own established
+    lock-order discipline, so two concurrent calls for the same order fully serialize here before
+    either touches `LabResult`/`LabObservation`. DH-EX-013: this is also exactly what makes
+    correction-after-release structurally refuse -- once release moves the order to `COMPLETED`,
+    this same `IN_PROGRESS` check raises before `correct_observation` ever reads an observation
+    row, identical to how it already refuses a new `record_observation` call."""
     order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
     if order is None:
         raise LabOrderNotAssigned(str(order_id))
@@ -1045,8 +1349,8 @@ def _lock_order_and_item_for_entry(
     if LabOrderStatus(order.status) != LabOrderStatus.IN_PROGRESS:
         raise InvalidResultSubmissionState(
             f"LabOrder {order_id} is {order.status!r}, not 'IN_PROGRESS' -- a result entry may "
-            f"only be recorded or completed while the selected lab is actively processing the "
-            f"order"
+            f"only be recorded, corrected, or completed while the selected lab is actively "
+            f"processing the order"
         )
 
     item = session.get(LabOrderItem, lab_order_item_id)
@@ -1067,7 +1371,10 @@ def _count_missing_or_malformed_results(session: Session, order_id: uuid.UUID) -
     ``LabOrder`` row's ``FOR UPDATE`` lock first; this function does not acquire one itself."""
     has_observation = (
         select(LabObservation.id)
-        .where(LabObservation.lab_result_id == LabResult.id)
+        .where(
+            LabObservation.lab_result_id == LabResult.id,
+            LabObservation.superseded_at.is_(None),
+        )
         .correlate(LabResult)
         .exists()
     )
@@ -1098,17 +1405,20 @@ def _to_observation_record(observation: LabObservation) -> LabObservationRecord:
         reference_range_high=observation.reference_range_high,
         text_value=observation.text_value,
         recorded_at=observation.recorded_at,
+        recorded_by_identity_id=observation.recorded_by_identity_id,
+        supersedes_observation_id=observation.supersedes_observation_id,
+        superseded_at=observation.superseded_at,
     )
 
 
-def _to_result_record(container: LabResult) -> LabResultRecord:
+def _to_result_record(container: LabResult, observations: list[LabObservation]) -> LabResultRecord:
     return LabResultRecord(
         id=container.id,
         lab_order_item_id=container.lab_order_item_id,
         lab_organization_id=container.lab_organization_id,
         entry_completed_at=container.entry_completed_at,
         entry_completed_by_identity_id=container.entry_completed_by_identity_id,
-        observations=tuple(_to_observation_record(o) for o in container.observations),
+        observations=tuple(_to_observation_record(o) for o in observations),
     )
 
 
@@ -1130,6 +1440,7 @@ def _to_inspection_item(
     item: LabOrderItem,
     container: LabResult | None,
     observations_by_result: dict[uuid.UUID, list[LabObservation]],
+    corrected_container_ids: set[uuid.UUID],
 ) -> LabResultInspectionItemRecord:
     observations = (
         ()
@@ -1142,6 +1453,7 @@ def _to_inspection_item(
         catalog_display_name_snapshot=item.catalog_display_name_snapshot,
         entry_completed_at=None if container is None else container.entry_completed_at,
         observations=observations,
+        has_correction_history=container is not None and container.id in corrected_container_ids,
     )
 
 

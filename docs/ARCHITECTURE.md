@@ -1067,7 +1067,7 @@ WhatsApp/SMS integration — none of this is equivalent to a completed Exchange 
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
 PROJECT_STATE.md's DH-EX-001 through DH-EX-007 entries.
 
-**DH-EX-008 (deployment wiring) through DH-EX-012C (multi-observation result domain) extend
+**DH-EX-008 (deployment wiring) through DH-EX-013 (pre-release observation correction) extend
 the Exchange well past DH-EX-007** — reconciled into this document 2026-09-13 (DH-FIELD-001; full
 per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not restated here):
 
@@ -1100,11 +1100,11 @@ per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not r
   `LabSampleCollection`'s own shape) records who released and when; a pre-DH-EX-012 order already
   `COMPLETED` is grandfathered with no fabricated release row. Provider/clinician visibility gates
   and `ResultDelivery` are unchanged — only the *producer* of `COMPLETED` moved.
-- **DH-EX-012A (ADR-045, OPEN)** audited the gap DH-EX-012 sharpened rather than created: `LabResult`
+- **DH-EX-012A (ADR-045)** audited the gap DH-EX-012 sharpened rather than created: `LabResult`
   was, at that point, strictly insert-only — no `UPDATE` path anywhere in the package, no
   entering-actor column, no revision/version/supersedes metadata. It distinguished pre-release
   *correction* from post-release *amendment* as two separate, unresolved problems and evaluated
-  options for each without adopting any. **Neither is implemented; ADR-045 remains OPEN.**
+  options for each without adopting any.
 - **DH-EX-012C (ADR-047, IMPLEMENTED, 2026-09-13)** replaces the `LabOrderItem → one LabResult`
   shape with `LabOrderItem → LabResult` (now a per-item *container* — identity plus one explicit
   `entry_completed_at`/`entry_completed_by_identity_id` completion signal, no value columns) `→
@@ -1121,10 +1121,30 @@ per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not r
   demonstrated via a real-PostgreSQL negative control. Migration `0016_exchange_observations`
   migrates every legacy scalar `LabResult` row losslessly into one container plus one observation,
   with four independent downgrade guards, each demonstrated against real PostgreSQL — including a
-  guard-removal control proving real, silent data loss occurs without them. **ADR-045's correction/
-  amendment work remains paused for its own five independently unresolved questions, no longer for
-  the schema-cardinality reason above.** No panel composition, analyte vocabulary, or clinical
-  content of any kind was invented — observation identity is caller-supplied or, for the simple
-  case, reused from the ordered item's own catalog snapshot.
+  guard-removal control proving real, silent data loss occurs without them. No panel composition,
+  analyte vocabulary, or clinical content of any kind was invented — observation identity is
+  caller-supplied or, for the simple case, reused from the ordered item's own catalog snapshot.
+- **DH-EX-013 (ADR-045 Questions 1–3, IMPLEMENTED, 2026-09-13)** resolves pre-release correction
+  now that the underlying schema is stable: a `LabObservation` may be corrected before release via
+  an immutable supersession chain (`supersedes_observation_id`, self-referential and `UNIQUE`;
+  `superseded_at`, `NULL` iff effective — an explicit relational fact, never inferred from timestamp
+  ordering). `POST .../observations/{observation_id}/correct` inserts the new effective observation
+  and marks its predecessor superseded in one transaction; `LAB_TECH`-only, matching entry authority
+  (`LAB_RESULT_RELEASER` not required), no reason field accepted or stored. The same `LabOrder`-
+  locked `IN_PROGRESS` gate every other entry mutation already uses is what makes correction
+  structurally refuse once the order is released — one shared mechanism, not a second bolted-on
+  check. Every new observation (entry or correction) now carries `recorded_by_identity_id`;
+  pre-existing rows keep it `NULL`, never backfilled. Release, provider reads, and lab inspection all
+  filter to the effective observation only (`superseded_at IS NULL`); a new
+  `GET .../observations/history` endpoint, `LAB_TECH`/`LAB_RESULT_RELEASER`-only, is the one place
+  the full chain (superseded and effective alike) may be read. Migration `0017_observation_revisions`
+  adds a full `UNIQUE` constraint on `supersedes_observation_id` as the database-level concurrency
+  backstop behind the existing `LabOrder FOR UPDATE` lock (no partial index needed — PostgreSQL
+  treats every `NULL` as distinct under `UNIQUE`, so the never-corrected majority of observations
+  are unconstrained by it) — confirmed necessary, not redundant, by a
+  negative control that reproduced real corruption (10 concurrent successors of one predecessor) only
+  once *both* defenses were removed together. **Post-release amendment (ADR-045 Questions 4–5)
+  remains OPEN, deferred to DH-EX-014** — nothing here moves `LabOrderStatus` out of `COMPLETED` or
+  touches an already-released result.
 
-Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-012C entries.
+Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-013 entries.

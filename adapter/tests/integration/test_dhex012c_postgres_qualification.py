@@ -187,6 +187,9 @@ def test_concurrent_observation_inserts_do_not_corrupt_the_container(
         try:
             barrier.wait(timeout=15)
             results.record_observation(
+                recorded_by_identity_id=_labtech_identity_id(
+                    sessions, f"pg12c-actor-1-{uuid.uuid4().hex[:6]}"
+                ),
                 order_id=order_id,
                 lab_order_item_id=item_id,
                 lab_organization_id=lab_id,
@@ -234,6 +237,9 @@ def test_observation_never_sneaks_in_after_completion_wins_the_race(
     # Seed one observation up front so completion is always valid to attempt regardless of race
     # outcome (EntryNotReadyForCompletion would otherwise conflate with the property under test).
     results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(
+            sessions, f"pg12c-actor-2-{uuid.uuid4().hex[:6]}"
+        ),
         order_id=order_id,
         lab_order_item_id=item_id,
         lab_organization_id=lab_id,
@@ -251,6 +257,9 @@ def test_observation_never_sneaks_in_after_completion_wins_the_race(
         try:
             barrier.wait(timeout=15)
             outcomes["observe"] = results.record_observation(
+                recorded_by_identity_id=_labtech_identity_id(
+                    sessions, f"pg12c-actor-3-{uuid.uuid4().hex[:6]}"
+                ),
                 order_id=order_id,
                 lab_order_item_id=item_id,
                 lab_organization_id=lab_id,
@@ -320,6 +329,9 @@ def test_completion_cannot_succeed_before_release_and_release_waits_for_completi
     releases = LabResultReleaseRepository(sessions)
     for item_id in item_ids:
         results.record_observation(
+            recorded_by_identity_id=_labtech_identity_id(
+                sessions, f"pg12c-actor-4-{uuid.uuid4().hex[:6]}"
+            ),
             order_id=order_id,
             lab_order_item_id=item_id,
             lab_organization_id=lab_id,
@@ -393,6 +405,9 @@ def test_concurrent_completion_calls_converge_to_one_provenance(sessions: sessio
     item_id = item_ids[0]
     results = LabResultRepository(sessions)
     results.record_observation(
+        recorded_by_identity_id=_labtech_identity_id(
+            sessions, f"pg12c-actor-5-{uuid.uuid4().hex[:6]}"
+        ),
         order_id=order_id,
         lab_order_item_id=item_id,
         lab_organization_id=lab_id,

@@ -13040,3 +13040,236 @@ now that the underlying schema is stable — not started here, per this ticket's
 instruction.
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+### DH-EX-013 · Immutable pre-release observation correction (ADR-045 Questions 1–3) · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+
+**Ticket:** DH-EX-013. Implements ADR-045's Questions 1–3 exactly as accepted (see DECISIONS.md's
+ADR-045 addendum): a supported, non-destructive workflow for correcting an entered
+`LabObservation` **before** order release. Post-release amendment (Questions 4–5) is explicitly out
+of scope — deferred to DH-EX-014 — and remains forbidden here, unchanged from ADR-045's own already-
+established "no in-place mutation of an already-released result" conclusion.
+
+**Starting HEAD/CI:** `c3c8646927fe5866730417eb6a2c6c5fbd447400` (DH-EX-012C), fetched and audited
+fresh, working tree clean before this ticket began. All 9 CI check runs on that SHA independently
+re-verified `success` via GitHub's check-runs API, not trusted from the ticket prompt.
+
+**Environment note (unchanged from every prior ticket this session):** Windows Git Bash has no
+working Python interpreter (`daher_adapter.audit` imports `fcntl` unconditionally) and no Docker.
+All adapter test/lint/migration/qualification work ran inside WSL2 Ubuntu against its native
+PostgreSQL 18 install and the adapter's existing `.venv`.
+
+#### Schema implemented
+
+Three new columns on `LabObservation`, no new table:
+
+```text
+LabObservation
+  ├─ recorded_by_identity_id      FK → exchange_identities, nullable (legacy rows stay NULL,
+  │                                 never fabricated; every new observation from this ticket
+  │                                 forward — ordinary entry AND correction — sets it)
+  ├─ supersedes_observation_id    FK → exchange_lab_observations.id, nullable, self-referential,
+  │                                 UNIQUE (at most one successor per predecessor)
+  └─ superseded_at                nullable DateTime — NULL means effective; non-NULL means this
+                                    row has been corrected and superseded
+```
+
+**Effective rule, stated once and enforced everywhere:** `superseded_at IS NULL`. An explicit
+relational fact, never inferred from `recorded_at` ordering. A `CHECK` constraint
+(`ck_exchange_lab_observations_no_self_supersede`) forbids an observation from superseding itself.
+
+#### Migration
+
+`0017_observation_revisions`, revises `0016_exchange_observations`. **Naming note:** the originally
+planned revision id `0017_exchange_observation_revisions` (35 characters) exceeded Alembic's own
+`alembic_version.version_num` `VARCHAR(32)` column — this was not caught by inspection, it was
+caught by actually running the migration against real PostgreSQL and observing a genuine
+`psycopg.errors.StringDataRightTruncation`/`DataError`. Renamed to `0017_observation_revisions` (26
+characters) everywhere (migration file, `models.py` docstring reference, `.github/workflows/
+ci.yml`'s `EXPECTED_HEAD`). No legacy data migration loop is needed — the three new columns simply
+default `NULL`, which truthfully represents every pre-existing observation.
+
+**Downgrade guards, each independently demonstrated against real PostgreSQL:**
+`DowngradeBlockedByCorrectionHistory`, `DowngradeBlockedByObservationActorProvenanceHistory`,
+`DowngradeBlockedByObservationCorrectionAuditVocabularyHistory` — each triggered one at a time by
+seeding the exact real condition it guards (a correction chain; a real `recorded_by_identity_id`;
+a real `lab_observation_corrected` audit row), confirmed to fire with the exact expected exception
+and leave the database unchanged at `0017_observation_revisions` after each refusal.
+
+**Guard-removal data-loss demonstration (required negative control 10), on disposable database
+`dhex013_control10`:** with all three guards disabled and a real two-version correction chain
+present (original value 5.1, corrected value 5.9), the forced downgrade did **not** delete either
+row — a more subtle failure than DH-EX-012C's equivalent demonstration. Both the original and
+corrected values survived as two independent, structurally identical rows in the flat 0016 schema,
+with the supersession relationship silently discarded and no remaining way to tell which value was
+ever authoritative. Documented precisely as this distinct, arguably worse failure mode (looks fine,
+silently wrong) rather than described as simple deletion. Guards restored immediately after; the
+disposable database dropped.
+
+#### Correction workflow
+
+- **`POST .../items/{item_id}/observations/{observation_id}/correct`** (new) —
+  `correct_observation`: locks the parent `LabOrder` `FOR UPDATE` (the same shared preamble already
+  used by `record_observation`/`complete_entry`/the compat path), verifies the observation belongs
+  to the addressed item/order/lab, refuses (409, `StaleObservationVersion`) if the target is already
+  superseded, then in one nested transaction inserts a new effective observation
+  (`supersedes_observation_id` = predecessor) and marks the predecessor `superseded_at`. `LAB_TECH`
+  only (ADR-045 Question 2 — matches entry authority, `LAB_RESULT_RELEASER` not required). No reason
+  field accepted or stored (ADR-045 Question 3). Deliberately does **not** check
+  `LabResult.entry_completed_at` — correction is permitted whether or not entry is already complete,
+  and never clears that field.
+- **Refuses after release, by construction, not by a bolted-on extra check:** the same
+  `LabOrder`-locked `IN_PROGRESS` gate in `_lock_order_and_item_for_entry` that already refuses a new
+  `record_observation` call after `COMPLETED` refuses `correct_observation` identically — one shared
+  mechanism, not two independent ones that could drift apart.
+- **`GET .../items/{item_id}/observations/history`** (new) — `get_correction_history`: returns every
+  observation that has ever existed under the item's container, superseded and effective alike,
+  ordered oldest to newest. The one place a lab-authorized caller may see historical
+  (non-effective) values at all. `LAB_TECH` or `LAB_RESULT_RELEASER`; never exposed to any
+  provider-facing or patient-facing route.
+- **Zero-effective-observation safety:** argued from the transaction shape, not covered by a
+  dedicated test — a correction always inserts exactly one new effective row in the same transaction
+  it marks exactly one predecessor superseded, so net effective count is unchanged by construction.
+  No test asserts this directly; it follows from `correct_observation`'s code shape, not from
+  independent verification.
+- **Chain integrity enforced at the database, not only in application code:** a full `UNIQUE`
+  constraint on `supersedes_observation_id` is the concurrency backstop behind the `LabOrder FOR
+  UPDATE` lock — confirmed necessary, not redundant, by negative control 4 (see below). No partial
+  index was needed: PostgreSQL treats every `NULL` as distinct under `UNIQUE`, so the never-corrected
+  majority of observations (`supersedes_observation_id IS NULL`) are left unconstrained by it.
+
+#### Read-path changes
+
+- `get_for_item`, `list_for_order`, `get_for_lab` (lab inspection) all now filter observations to
+  `superseded_at.is_(None)` — effective-only. Release and provider visibility are unaffected in
+  every other respect: release still sees exactly the effective set at the moment of release,
+  post-release provider re-queries still return only what was effective at release time (DH-EX-012A's
+  original re-query-safety concern is unaffected because release never freezes a snapshot — it
+  simply reads live effective rows, which is exactly what "no superseded row is ever effective"
+  guarantees stays correct after release too, since nothing can be corrected post-release).
+- `_count_missing_or_malformed_results`'s completeness check now requires an *effective* observation
+  to exist — a container whose only observation was corrected away still correctly counts as having
+  content, via its new effective successor.
+- Lab inspection (`get_for_lab`) gained `has_correction_history: bool` per item — `True` iff any
+  observation under that container has ever been superseded — computed via one batched query, not
+  N+1.
+- `LabObservationResponse` now includes `recorded_by_identity_id`, `supersedes_observation_id`,
+  `superseded_at` on every observation returned anywhere.
+
+#### Audit
+
+New `lab_observation_corrected` security-audit event type, added to
+`ExchangeSecurityAuditEvent`'s `event_type` CHECK constraint and `SecurityEventType` Literal.
+Recorded in the **same transaction** as the correction/supersession write — verified atomic by
+negative control 9 (see below), not merely asserted.
+
+#### Required negative controls — the ticket's own 10, executed against real code in that order, every mutation reverted and re-verified green afterward
+
+1. **Replace revision creation with destructive UPDATE → immutable-history tests must fail.**
+   Replaced `correct_observation`'s insert-new-row-plus-mark-predecessor-superseded logic with an
+   in-place `UPDATE` of the existing observation's value column, no new row, no `superseded_at`.
+   Confirmed red: all three immutable-history tests failed (the destructive path also left the method
+   returning `None` where a `LabObservationRecord` was expected — a second, independent symptom of
+   how wrong this path is). Reverted, re-passed.
+2. **Permit correction after release → post-release refusal test must fail.** Removed the
+   `IN_PROGRESS` status check from the shared `_lock_order_and_item_for_entry` preamble. Confirmed
+   red: `test_correction_after_release_refused` failed — a correction succeeded (`201`) against an
+   already-`COMPLETED`/released order instead of being refused. Reverted, re-passed.
+3. **Remove effective-observation check → stale-observation correction test must fail.**
+   **Genuine defense-in-depth finding, not a fabricated failure:** removing the application-level
+   `if predecessor.superseded_at is not None: raise StaleObservationVersion` check did **not** turn
+   the stale-correction tests red, because the database-level `UNIQUE` constraint on
+   `supersedes_observation_id` independently catches the identical case via `IntegrityError` →
+   `StaleObservationVersion` translation, in both SQLite and PostgreSQL. Reported exactly as
+   observed, not forced red artificially — a second, independent layer already covers this case
+   on its own. Reverted.
+4. **Remove sibling-revision uniqueness/concurrency defense → concurrent correction test must
+   expose dual effective revisions.** Removing the DB `UNIQUE` constraint **alone** was insufficient
+   — the `LabOrder FOR UPDATE` lock still fully serialized every correction attempt, so no exposure
+   occurred. Only after removing **both** the lock and the constraint together did real corruption
+   appear: 5/5 runs against real PostgreSQL, 10 concurrent correction attempts on the same
+   observation all succeeded, producing 10 sibling revisions superseding one predecessor — exactly
+   the dual-effective-revisions failure this control requires. Both defenses restored; the corrupted
+   qualification database (`dhex013_qual`) could not have the constraint re-added over corrupted
+   data and was recreated from scratch.
+5. **Include superseded observations in provider read → effective-only test must fail.** Removed
+   the effective-only filter from the provider-facing read path. Confirmed red: the golden-flow
+   test's post-release provider-observation-count assertion failed (both the superseded and
+   effective observation were returned). Reverted, re-passed.
+6. **Include superseded observations in lab current inspection → test must fail.** Removed the
+   effective-only filter from the lab-inspection read path (`get_for_lab`). Confirmed red:
+   `test_correction_golden_flow_history_and_release`'s `len(item_line["observations"]) == 1`
+   assertion failed (`2 == 1`, both the original and corrected value visible). Reverted, re-passed.
+7. **Remove LAB_TECH authorization → auth test must fail.** Removed the `_require_lab_tech` call
+   from the correction route. Confirmed red: both `test_clinician_cannot_correct_or_view_history`
+   and `test_releaser_alone_cannot_correct` failed (a `LAB_RESULT_RELEASER`-only token successfully
+   corrected an observation, `201` instead of the expected `403`). Reverted, re-passed.
+8. **Remove lab ownership check → cross-lab test must fail.** Removed the
+   `selection.lab_organization_id != lab_organization_id` check from `_lock_order_and_item_for_entry`'s
+   shared preamble. Confirmed red: both `test_wrong_lab_cannot_correct_or_view_history_and_is_non_enumerating`
+   (HTTP layer) and `test_cross_lab_correction_refused` (repository layer) failed — a lab could
+   correct an observation belonging to a different lab's order entirely. Reverted, re-passed.
+9. **Split correction/audit transaction → atomicity test must detect inconsistent correction.**
+   Moved the audit-event write into its own separate `session_factory.begin()` block, after the
+   correction's own transaction had already committed. Confirmed red: `test_correction_audit_atomicity`
+   failed — when the audit write was made to fail (monkeypatched), the correction had already
+   committed on its own (`original_row.superseded_at` was a real timestamp, not `None` as the test
+   requires). Reverted, re-passed — confirming the single shared `session_factory.begin()` block is
+   load-bearing, not cosmetic.
+10. **Remove downgrade guard → real PostgreSQL control must demonstrate correction history loss.**
+    Satisfied by the migration guard-removal demonstration above (`dhex013_control10`): with all
+    three downgrade guards disabled and a real two-version correction chain present, the forced
+    downgrade did not delete either row, but did silently discard the supersession relationship
+    between them — both the original and corrected values survived as two indistinguishable rows,
+    with no remaining way to tell which one had ever been authoritative. This is real, observed
+    correction-history loss, not merely asserted to be prevented.
+
+`grep -rn "NEGATIVE CONTROL" adapter/src adapter/tests adapter/migrations` returns nothing —
+every control fully reverted before proceeding.
+
+#### Test matrix coverage
+
+~13 new repository-level tests (`test_exchange_results.py`) and ~10 new HTTP-level tests
+(`test_exchange_results_api.py`) cover: numeric correction, text correction, unit/reference-range
+change without mutating the original, a three-version correction chain, stale-superseded-correction
+refused, correction permitted after entry completion but before release, correction refused after
+release, cross-lab correction refused (both layers), correction on an observation from a different
+item refused, the full golden flow (correct → history shows both versions → lab inspection shows
+effective-only with `has_correction_history` → release ships only the effective value → provider
+sees only the effective value), auth matrix (clinician and lone releaser both refused), non-
+enumerating cross-lab 404s for both correction and history, correction/audit atomicity, and patient-
+bearer tokens never seeing correction or history endpoints. Plus 4 new real-PostgreSQL concurrency
+tests: concurrent corrections of the same observation (exactly one winner), correction-vs-release
+race (release never ships a stale value), concurrent corrections on independent observations (both
+succeed independently), correction-vs-ordinary-add (the post-release freeze applies identically to
+both actions).
+
+#### Validation
+
+`ruff check`/`ruff format --check` on `src tests migrations scripts`: clean. Full SQLite suite:
+**766 passed, 74 skipped** (up from DH-EX-012C's baseline 748/70 — net new tests after the
+negative-control-driven additions, full pre-existing suite re-passing unchanged under the new
+schema). Real-PostgreSQL, all four qualification files re-run together in one final pass for
+stability: `test_dhex007_postgres_qualification.py` (6 passed), `test_dhex012_postgres_
+qualification.py` (9 passed), `test_dhex012c_postgres_qualification.py` (4 passed, fixed for the new
+required `recorded_by_identity_id` parameter), `test_dhex013_postgres_qualification.py` (4 passed) —
+**23 passed, 0 failures** across all four files on this final run.
+
+#### Known remaining gaps, stated plainly
+
+- **ADR-045 Questions 4–5 (post-release amendment) remain fully OPEN** — nothing here begins that
+  work. DH-EX-014 is the ticket that must take it up.
+- No mandatory correction reason exists (accepted as Question 3's resolution, not an oversight) — a
+  correction's "why" is not captured anywhere beyond actor and timestamp.
+- Manual/live browser demonstration and real Keycloak qualification remain unperformed, unchanged
+  from every prior Exchange ticket's own disclosed boundary.
+
+**Human Decision Required: NO** — this ticket implements ADR-045 Questions 1–3 exactly as already
+accepted; it does not itself raise a new question. Questions 4–5 stay open for DH-EX-014, not
+answered here.
+
+**Next:** DH-EX-014 — post-release amendment (ADR-045 Questions 4–5) — is the natural next ticket.
+Not started here, per this ticket's own explicit final instruction to stop after DH-EX-013.
+
+**READY FOR LIBAN REVIEW: YES**

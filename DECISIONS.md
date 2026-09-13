@@ -5125,6 +5125,83 @@ directly, in addition to the existing order-centric audit event.
 
 ---
 
+**Decision accepted by Liban — 2026-09-13 (DH-EX-013).** Questions 1–3 are resolved, **for
+pre-release correction only**. This section is an append, not a revision — the OPEN packet above
+(questions, options, flagged risk) stands unchanged as the record of what was evaluated and why;
+this is the record of what was chosen. Questions 4 and 5, and post-release amendment as a whole,
+remain fully OPEN — nothing below narrows them, and post-release mutation of an already-released
+result remains forbidden, exactly as this ADR's own "confirmed by DH-EX-012A's audit" paragraph
+already established.
+
+**Question 1 answered: Option C** — an immutable revision that supersedes the original observation
+without ever deleting or overwriting it. Implemented as a self-referential supersession chain on
+`LabObservation` (`supersedes_observation_id` → the corrected predecessor, `superseded_at` marking
+when a row stopped being effective), matching the same append-only-immutable-fact pattern this
+codebase already used for `LabPrice.superseded_at` and `LabResultRelease`. The **effective**
+observation for any container is defined as `superseded_at IS NULL` — an explicit relational fact,
+never inferred from timestamp ordering. All versions remain in the database permanently; the full
+chain is reconstructable via a dedicated history read, never destroyed.
+
+**Question 2 answered: Option A** — `LAB_TECH`, symmetric with entry authority. A correction does
+not require `LAB_RESULT_RELEASER`; the same `LabOrder`-locked `IN_PROGRESS` gate that already backs
+every other entry mutation is what makes correction structurally refuse once the order is released
+(ADR-044's `LAB_RESULT_RELEASER` role is unaffected and untouched by this decision).
+
+**Question 3 answered: Option C** — no reason required. A correction row carries only the new
+value, the correcting actor (`recorded_by_identity_id`, populated on every new observation from
+DH-EX-013 forward — both ordinary entries and corrections; pre-existing observations keep this
+column `NULL` rather than a fabricated backfill), and the server timestamp, plus the supersession
+link to the observation it replaces. No reason field exists anywhere in the request, model, or
+audit event — no closed reason-code vocabulary was invented, matching Question 3's own flagged
+tension with `docs/MVP-1.0.md` §13's "no free-text clinical notes" boundary.
+
+**Implemented exactly as this ADR's own audit evidence recommended, now binding, not merely
+recommended:**
+
+- Correction is scoped strictly pre-release: permitted whether or not the item's own entry is
+  already complete, refused outright (409) once the order reaches `COMPLETED`/is released — enforced
+  by the database-locked order-status check, not an application-layer timestamp comparison alone.
+- No destructive overwrite anywhere: a correction always inserts a new `LabObservation` row and
+  marks its predecessor `superseded_at`, in one transaction; it never updates an existing
+  observation's value columns in place.
+- Chain integrity is enforced at the database, not only in application code: a full `UNIQUE`
+  constraint on `supersedes_observation_id` prevents two successors from ever superseding the same
+  predecessor (the concurrency backstop behind the existing `LabOrder FOR UPDATE` lock) — no partial
+  index was needed, since PostgreSQL already treats `NULL` as distinct from every other `NULL` under
+  `UNIQUE`, so the never-corrected majority of observations (`supersedes_observation_id IS NULL`)
+  are left unconstrained by this same column — and a
+  `CHECK` constraint forbids an observation from superseding itself.
+- Release, provider visibility, and lab inspection all read the effective set only
+  (`superseded_at IS NULL`); superseded versions never appear as current anywhere outside the new,
+  lab-authorized-only correction-history endpoint. Lab inspection additionally surfaces a
+  `has_correction_history` indicator without exposing the historical values inline.
+- `LabResult.entry_completed_at` is never cleared or touched by a correction.
+- `DoctorReview`, `ResultDelivery`, and every patient-facing surface are unaffected — none of them
+  read `LabObservation` directly, so none of them required any change for this ticket.
+- Real-PostgreSQL qualification (not merely SQLite) exercised: concurrent corrections of the same
+  observation (exactly one winner), correction-vs-release race (release never ships a stale value),
+  concurrent corrections on independent observations (both succeed independently), and
+  correction-vs-ordinary-add (the post-release freeze applies identically to both).
+- Downgrade of migration `0017_observation_revisions` fails closed if any correction history, actor
+  provenance, or the new `lab_observation_corrected` audit vocabulary exists in the target database
+  — verified against real PostgreSQL, not merely asserted.
+- **Post-release amendment (Questions 4–5) is explicitly out of scope for DH-EX-013 and remains
+  OPEN, to be picked up by DH-EX-014.** Nothing in this implementation moves `LabOrderStatus` out of
+  `COMPLETED`, reopens a `DoctorReview` disposition, or creates any second release-like record —
+  this ADR's own "hard structural fact" about `COMPLETED` being terminal is unchanged and unaffected.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-EX-013 entry (migration
+`0017_observation_revisions`, `exchange/results.py`'s `correct_observation`/
+`get_correction_history`, the correction and correction-history endpoints, real-PostgreSQL
+concurrency qualification, downgrade-guard qualification, and full test evidence).
+
+**Status: Questions 1–3 are now RESOLVED for pre-release correction.** Questions 4–5 and
+post-release amendment as a whole remain **OPEN**, recorded here rather than editing the header
+above, so the original question/evidence packet remains legible as written at the time it was
+raised.
+
+---
+
 ## ADR-046 — ACCEPTED (architectural requirement only): orderable diagnostic service and returned observation cardinality
 
 **Date:** 2026-09-13 · **Status:** ACCEPTED for the single requirement stated below — **everything
