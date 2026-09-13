@@ -5586,3 +5586,360 @@ proposed, exactly matching ADR-044's own append-don't-rewrite precedent.
 **ADR-045 (pre-release correction vs. post-release amendment) remains OPEN and its implementation
 remains paused**, unaffected and unresolved by this decision — nothing in DH-EX-012C's
 implementation begins correction/amendment work.
+
+---
+
+## ADR-048 — RECOMMENDED / OPEN — Human Decision Required: post-release amendment and release-version architecture
+
+**Date raised:** 2026-09-13 · **Status:** RECOMMENDED (technical architecture) — **NOT ACCEPTED**;
+several embedded questions are OPEN, Human Decision Required: Yes · **Ticket:** DH-EX-014D,
+audit/decision packet only, per its own explicit instruction — no migration, no model change, no
+API change, no `DoctorReview`/`ResultDelivery` mutation implements any of this yet.
+
+**Relationship to ADR-044/ADR-045/ADR-046/ADR-047.** Does not reopen ADR-044 (release stays
+order-level; `LAB_RESULT_RELEASER`, additive to `LAB_TECH`, same human may hold both, no
+second-person requirement — unaffected). Does not touch pre-release correction, resolved and
+implemented by DH-EX-013 (ADR-045 Questions 1–3) — that mechanism is reused, not redesigned, as the
+value-level primitive an amendment's own release step ultimately relies on. **This ADR is the
+decision packet for ADR-045's Questions 4–5 and the amendment-model sub-questions ADR-045 itself
+named but left unanswered** — ADR-045's own OPEN packet and its DH-EX-013 addendum are unedited by
+this entry; this is a new, separate, linked decision, not a revision of either.
+
+### 1 — Current-state evidence, audited fresh against commit `8328d2e400217837aae6cca8cf17fde7e54dea47`
+
+- **Release** (`models.py:670-706`): `LabResultRelease` is one immutable row per `LabOrder`
+  (`lab_order_id` UNIQUE) — `released_by_identity_id`, `released_at` only. No revision, no
+  un-release, no delete method anywhere in `LabResultReleaseRepository` (`results.py:1084-1188`).
+  `release()` re-checks `_count_missing_or_malformed_results` against live DB state, then inserts
+  the release row and flips `LabOrder.status` to `COMPLETED` in the same transaction
+  (`results.py:1171-1181`). `LabResultRelease` stores **no reference to which `LabObservation` rows
+  were effective at that moment** — it is a pure authorization fact, not a value snapshot.
+- **Provider read** (`api.py:3018-3071`, `get_lab_order_results`): gated solely on
+  `order.status == COMPLETED`; on every call it re-queries `results.list_for_order(order_id)` live,
+  which itself queries `LabObservation` filtered to `superseded_at IS NULL` (effective-only, per
+  DH-EX-013). **There is no join, snapshot, or manifest binding a specific `LabResultRelease` row to
+  the specific observation rows it authorized.** A provider re-reading the same order always sees
+  today's effective set, not "the set that existed at release time."
+- **Pre-release correction** (`results.py:589-745`, DH-EX-013, unchanged by this ticket): a
+  correction inserts one new `LabObservation` superseding a predecessor, in the same transaction,
+  reusing `_lock_order_and_item_for_entry`'s `LabOrder FOR UPDATE` + `IN_PROGRESS` gate — this is
+  exactly what makes correction refuse once the order is `COMPLETED`. **Load-bearing constraint,
+  verified directly, not assumed:** `uq_exchange_lab_observations_supersedes_observation_id`
+  (`models.py:638-641`) is a full, unconditional `UNIQUE` constraint — **at most one successor may
+  ever supersede a given observation, permanently, with no way to reset it.** This is the single
+  most consequential existing constraint for this ADR's design space; see §3's risk analysis below.
+- **Order state machine** (`orders.py:57-66`): `_ALLOWED_TRANSITIONS[LabOrderStatus.COMPLETED] ==
+  frozenset()` — confirmed genuinely terminal; no outbound transition exists from `COMPLETED`
+  through any code path.
+- **`DoctorReview`** (`models.py:737-761`): one row per order, `lab_order_id` **`unique=True` at the
+  database level** — not merely an application check. Created `PENDING` at order-creation time
+  (`orders.py`). `_mark_in_session` (`results.py:1278-1314`) requires `order.status == COMPLETED`,
+  locks the review row `FOR UPDATE`, and refuses (`ReviewAlreadyFinalized`) any second mutation once
+  the status leaves `PENDING`. **No review-reset, review-revision, or review-history mechanism
+  exists anywhere in this codebase.**
+- **`ResultDelivery`** (`models.py:709-734`): one row per order, `PENDING`/`DELIVERED`/`FAILED`.
+  Confirmed by grep of the full `exchange/` package: no code path anywhere calls
+  `mark_delivered`/`mark_failed` as a side effect of anything; `DELIVERED`'s exact semantic remains
+  an explicit, separate, still-undecided product question (ADR-043, unaffected and not reopened
+  here).
+- **Patient surface** (`api.py:657-667`, `PatientOrderResponse`): `extra="forbid"`, no result field
+  of any kind. Confirmed unaffected by anything audited in this ticket.
+- **Authorization primitives already exist, independently, today** (`api.py:1238-1287`):
+  `_require_lab_tech`, `_require_lab_result_releaser`, and `_require_lab_tech_or_releaser` are three
+  separate, already-shipped checks. A future "`LAB_TECH` prepares, `LAB_RESULT_RELEASER` releases"
+  amendment flow requires **zero new authorization primitives** — it is a new call sequence over
+  existing ones, exactly mirroring ADR-044's own entry/release split one level higher.
+- **Security-audit vocabulary** (`security_audit.py:24-99`): `event_type` is a DB-enforced `CHECK`
+  constraint, widened per migration with a downgrade guard keyed to existing rows using the new
+  vocabulary (DH-EX-013's `0017_observation_revisions` did exactly this for
+  `lab_observation_corrected`). `resource_type`, by contrast, does **not** need widening for an
+  amendment event — `"lab_order"` is already the established convention for every per-item-but-
+  order-scoped event (`security_audit.py`'s own "audit stays order-centric" comment, reused
+  unmodified by every event type added since). This asymmetry makes a future migration's audit-
+  vocabulary cost smaller than it might first appear: one `CHECK` widening plus matching downgrade
+  guards, no new `resource_type` value.
+- **Migration head confirmed:** `0017_observation_revisions` (`down_revision` chain verified:
+  `0017` ← `0016_exchange_observations`, no forks).
+
+### 2 — Risk statement: what goes wrong if DH-EX-013 correction were simply allowed after `COMPLETED`
+
+Concrete sequence, using only mechanisms that exist today: an order releases with observation V2
+effective (5.1) → `LabResultRelease` is inserted, `LabOrder.status = COMPLETED` → the provider reads
+the order, sees 5.1, and the ordering clinician calls `mark_no_follow_up_required` — `DoctorReview`
+becomes terminal, `NO_FOLLOW_UP_REQUIRED` → a lab tech later notices 5.1 was wrong and (hypothetically,
+if DH-EX-013's `IN_PROGRESS` gate were removed) corrects it to 5.9, inserting V3 superseding V2 → the
+**same, unchanged** `LabResultRelease` row still says "released," the **same, unchanged**
+`DoctorReview` row still says `NO_FOLLOW_UP_REQUIRED`, and the very next provider read of
+`GET .../results` (`api.py:3018`, unmodified, still a live query over the effective set) **silently
+returns 5.9 instead of 5.1**, with nothing in any API response, audit event, or database row
+distinguishing "this is what was originally released and reviewed" from "this is a later, unreviewed
+value now appearing under the same release." No trace exists anywhere that a change occurred. This is
+not a hypothetical failure mode — it is the literal, verified behavior of `get_lab_order_results`
+and `DoctorReview` today, evaluated against a naive change that merely deletes DH-EX-013's own
+`IN_PROGRESS` gate. **This is exactly what ADR-045's "may an already-released result be changed in
+place — evaluated as NO" already forbids**, and it is the reason this ADR treats "bind release to
+exact observation versions" as the load-bearing requirement, not an optional refinement.
+
+### 3 — The one-successor-per-predecessor constraint's consequence for amendment preparation
+
+`uq_exchange_lab_observations_supersedes_observation_id` guarantees at most one row may ever
+supersede a given predecessor. This is exactly sufficient for DH-EX-013's own pre-release model,
+where a correction is inserted, permanent, and immediately effective, mirroring the same
+no-undo philosophy this codebase already applies to `LabPrice.superseded_at`/`LabSampleCollection`/
+`LabResultRelease`. **It becomes a real constraint on amendment design if "prepare an amendment" is
+allowed to insert a `LabObservation` successor row before the amendment is released, and a "discard
+this draft, start over" operation is also wanted** — a discarded draft successor still permanently
+occupies the one-and-only supersession slot for its predecessor (rows are never deleted, per this
+codebase's own immutability discipline), permanently blocking any future correction of that same
+predecessor. **Two structurally different resolutions exist, not silently chosen here:**
+
+- **(a) Immediate-permanent insert, no draft/discard concept** — an amendment's observation
+  correction is entered exactly like a pre-release correction: the moment it is entered, it is a
+  real, permanent revision (mirroring ADR-045 Question 1's own no-undo philosophy exactly). An
+  "amendment episode" groups one or more such corrections and its own **release** step is what
+  first exposes them to a provider — nothing about "preparing" ever creates something later
+  discarded. Simplest; requires no schema change to the existing `UNIQUE` constraint; but means
+  there is no way to correct a value, reconsider, and correct it back before anyone sees it, without
+  that reconsideration itself becoming a second permanent, audited revision.
+- **(b) Staged draft, explicit discard** — an amendment's proposed values live in a separate
+  structure until release-time, and only release-time promotion actually inserts the
+  `LabObservation` successor row(s). Preserves a true "discard this draft" operation, but is a
+  materially larger design (a second, temporary value-holding shape parallel to `LabObservation`
+  itself) for a capability real laboratory workflow evidence has not yet demonstrated is needed.
+
+**This is a genuine open sub-question, not decided here** — it has real operational-workflow
+consequences (can a `LAB_TECH` safely reconsider mid-preparation) that AGENTS.md's "obviously should"
+guard applies to directly. **Recommended for technical soundness, not adopted:** (a), because it
+requires no relaxation of an already-shipped, already-qualified database constraint, and because it
+extends DH-EX-013's own established philosophy rather than introducing a second one. If Liban selects
+(b) instead, the `UNIQUE` constraint on `supersedes_observation_id` would need to become a partial
+index scoped to *released* successors only — a real future migration, not a minor addition.
+
+### 4 — Architecture alternatives (at least three, as required)
+
+**Model 1 — Release manifest.** A new immutable `LabResultReleaseVersion`-equivalent row per release
+event (original or amendment), plus immutable membership rows, each naming exactly
+`(lab_order_item_id, lab_observation_id)` — the exact effective observation, per item, that this
+release authorized. Release #1's manifest names every item's observation as it stood at that moment;
+release #2 (post-amendment) is a **new** manifest naming the corrected item's new observation id and
+the **same, unduplicated** observation ids for every unaffected item. Reconstruction of any release is
+a single join from that release's manifest rows to `LabObservation` by id — exact, immutable, and
+never dependent on live "current effective" state. **Does not itself resolve who prepares/releases an
+amendment, `DoctorReview` behavior, or provider display** — purely a binding mechanism.
+
+**Model 2 — Result-set/version entity.** Introduce a first-class result-set-version aggregate
+underneath the order (e.g., `LabResultSetVersion`), and re-point observations, releases, and reviews
+to bind through it rather than through the order directly. More general — could eventually
+accommodate future needs Model 1 does not anticipate — but is a heavier structural change: every
+existing per-item read path (`get_for_item`, `list_for_order`, `get_for_lab`) would need to learn a
+new intermediate aggregate that does not exist today, for a generality this evidence does not yet
+demonstrate is needed. Evaluated as disproportionate to the problem actually audited.
+
+**Model 3 — Amendment episode + release manifest.** An `LabResultAmendment` (or equivalent) row
+tracks the amendment *workflow* (`PREPARING`→`RELEASED`, `prepared_by_identity_id`,
+`released_by_identity_id`, `released_at`) — the natural home for §3's prepare/release split and for
+§7's authority split below. Its **release** step is exactly Model 1's manifest mechanic: creates one
+new immutable release-version + manifest naming the exact effective observation per item at that
+moment. `LabResultRelease` itself is **never mutated, never replaced, and never reinterpreted** — it
+remains, permanently, "release #1," exactly as ADR-044 shipped it; every subsequent amendment release
+is a **new**, additive row of the same manifest shape, chained by order and by a sequence/version
+number. This is Model 1 plus an explicit workflow container for the parts of the problem Model 1
+alone leaves unanswered.
+
+**A fourth design was considered and rejected**, per the ticket's own invitation to name one if
+cleaner: reusing `LabResultRelease` itself as a self-referential chain (mirroring `LabObservation`'s
+own `supersedes_observation_id` pattern) rather than a new table. Rejected because `LabResultRelease`
+is explicitly documented and tested today as "immutable once created: no revision... anywhere in this
+codebase" (`models.py:679`) — adding a supersession column to it would be a materially different kind
+of change than adding a new, purely additive table, and would require re-auditing every existing
+`LabResultRelease` read path (`get_for_order`, the grandfather-rule check in `release()`) for
+"effective release" semantics that do not exist today. A new, additive table achieves the identical
+result with zero risk to DH-EX-012's already-shipped, already-qualified invariants.
+
+### 5 — Recommended architecture
+
+**Model 3, technically recommended, not accepted.** It subsumes Model 1's exact reconstruction
+mechanism (the manifest) as its own release step's output, avoids Model 2's disproportionate
+structural weight, and gives §7/§8's authority split, §9's `DoctorReview` versioning, and §12's
+concurrency invariants a single natural home (the amendment-episode row) rather than scattering
+workflow state across ad hoc columns on other tables. `LabResultRelease` remains untouched forever,
+preserving ADR-044's shipped immutability guarantee with zero risk to existing tests or behavior.
+
+### 6 — `DoctorReview` recommendation (ADR-045 Question 4)
+
+**Option C, evaluated as the only option that satisfies the ticket's own load-bearing invariant**
+("clinician review applies to a specific released version"). Options A and B are re-evaluated, not
+newly invented, from DH-EX-012A's own packet: **(A) leave unchanged** — confirmed to reproduce
+exactly §2's naive-failure-mode risk (a terminal disposition silently describing content it never
+saw); rejected. **(B) reset to `PENDING`** — destroys the historical fact that the *original* content
+was reviewed and what that review concluded; a real, disclosed regression against `DoctorReview`'s
+own already-shipped `ReviewAlreadyFinalized` invariant and its existing test coverage; rejected.
+**(C) preserve history, create a new review obligation per amended release** — requires a real
+migration (`DoctorReview.lab_order_id`'s `unique=True` constraint must be widened or dropped; this is
+not an application-code-only change), and each `DoctorReview` row must bind to the specific
+release/manifest version id it reviews — **never inferred from timestamp proximity or "most recent
+row," an explicit foreign key**, exactly as the ticket requires. **(D) unsupported for MVP** remains a
+live, non-technical alternative to (C) — see §16 below; it is not technically inferior, it is a scope
+decision.
+
+### 7 — Pilot recommendation (ADR-045 Question 5)
+
+Not decided here — DH-EX-012A's own instruction stands: this must not be answered by timeline
+pressure. **Technical recommendation, explicitly mine, pending Liban, not a resolution:** Option 2
+(a documented facility fallback entirely outside DHealth) accepts that DHealth's own record can become
+known-wrong with no in-system trace — a real compromise of the core trust proposition of "an
+interoperable diagnostic network" whose entire value is a reconstructable, trustworthy record.
+Options 1 (block the pilot) and 3 (implement amendment first) both preserve that trust proposition;
+between them, the cost is pilot timing, not correctness. I recommend against Option 2 specifically,
+without picking between 1 and 3 — that tradeoff (how much amendment capability is minimally
+sufficient before a real-patient pilot, versus delaying the pilot further) is a product-timeline
+decision only Liban can make.
+
+### 8 — Amendment roles (§C/§D)
+
+**Preparation: `LAB_TECH`**, matching entry and pre-release-correction authority exactly (no new
+role). **Release: `LAB_RESULT_RELEASER`**, explicitly required — unlike pre-release correction (which
+deliberately does not require it, per ADR-045 Question 2's own resolution), an amendment changes
+content a provider and clinician have already acted on, which is a materially higher-consequence
+event than a pre-release typo fix. Same human may hold both roles simultaneously, consistent with
+ADR-044's Question 2 resolution, unless Liban states a new reason to require a second person — not
+invented here. **Both authorization primitives already exist** (`_require_lab_tech`,
+`_require_lab_result_releaser`) — this requires no new role, only a new call sequence.
+
+### 9 — Release/version binding (§B)
+
+**Exact recommended mechanism:** Model 3's release-version + manifest, per §4/§5 above — each release
+(original or amendment) is one immutable row naming its own effective `(item, observation_id)` set.
+**Explicitly rejected:** duplicating clinical scalar values into the manifest for convenience — the
+manifest binds by `LabObservation.id` only; the value itself is read through that id, exactly once,
+never copied. This directly satisfies the ticket's own instruction not to duplicate scalar values
+when an immutable id can bind content safely.
+
+### 10 — Provider display (§G)
+
+**Option B, recommended:** the latest release-version shown prominently, explicitly labeled
+`AMENDED` once more than one release-version exists for an order, with the prior release-version(s)
+accessible as history via the same order. Option A (latest-only, no flag) is expressly forbidden by
+the ticket's own rule against silently replacing previously-shown content. Option C (every release as
+a fully separate equal report) is the most complete but the largest response-shape and UX cost, with
+no field evidence yet that it is required rather than merely thorough.
+
+### 11 — Legacy behavior (§L)
+
+**Explicit DH-EX-012 releases:** amend cleanly under Model 3 — `LabResultRelease` becomes,
+implicitly, "release-version 1," untouched, with every subsequent amendment release adding version
+2, 3, ... alongside it, never replacing it.
+
+**Grandfathered `COMPLETED` orders with no `LabResultRelease` row at all:** no version-1 anchor
+exists to extend from. **Recorded as an explicit Human Decision, not resolved here** — fabricating a
+synthetic "release-version 1" for a grandfathered order would violate this codebase's own established
+no-retroactive-fabrication discipline (`LegacyCompletedOrderHasNoRelease`'s entire reason for
+existing). The safe default, evaluated not adopted, is that grandfathered orders remain outside
+amendment support entirely until Liban decides otherwise.
+
+### 12 — ResultDelivery interaction (§J)
+
+**Required for data correctness: none.** `ResultDelivery` already carries no reference to result
+content of any kind (confirmed: no code path ever sets it based on a value) — amendment does not
+make its existing shape any less correct than it already is. **Deferable to a later notification-UX
+ticket:** distinguishing "delivered the original" from "delivered an amendment" as a *notification*
+concept is real future work, but is not required for DHealth's own record to remain accurate — the
+release-version manifest already carries that fact independently of whatever `ResultDelivery`
+eventually represents.
+
+### 13 — Multi-observation panels (§M)
+
+An amendment episode may correct one or several observations, across one or several items, in a
+single episode. **Unchanged observations are never duplicated** — a release-version manifest simply
+references their existing, still-effective observation ids directly; only genuinely corrected items
+gain a new observation id in the new manifest. This is the same mechanism that makes exact
+reconstruction of any release trivial (§9) and multi-observation-safe by construction, with zero new
+schema needed beyond the manifest table itself.
+
+### 14 — Multiple sequential amendments (§N)
+
+The architecture must not, and under Model 3 does not, assume only one amendment can occur: each
+release (original or amendment) produces one more manifest row in the same append-only chain,
+indexed by an order-scoped sequence number. Release #3 (a second amendment) reconstructs identically
+to release #2 — a new manifest, referencing whichever observation ids are effective for each item at
+that moment, some unchanged since release #1, some now on their second correction.
+
+### 15 — Concurrency and locking invariants for future implementation (§O)
+
+Described as required invariants, no runtime code written:
+
+- **Two amendment preparations racing on the same observation:** if §3's resolution (a) is chosen,
+  identical to DH-EX-013's own existing defense — the (still-`COMPLETED`-but-lockable) `LabOrder`
+  row's `FOR UPDATE` lock serializes attempts, with the existing `UNIQUE` constraint as backstop.
+- **Two releasers attempting to release the same amendment episode:** must mirror
+  `LabResultReleaseRepository.release`'s own existing idempotent-replay pattern exactly — a second
+  release attempt on an already-released episode returns the existing version/manifest
+  (`created=False`), never creates two release-versions for one episode.
+- **Amendment release vs. provider read:** the provider-read path must stop reading live "current
+  effective" state (§2's risk) and instead join through the order's **latest release-version
+  manifest** — a real, disclosed query-shape change any future implementation must make, not an
+  optional refinement.
+- **A second amendment beginning while a first is unreleased:** recommended invariant — at most one
+  open (unreleased) amendment episode per order at a time, enforced the same way `LabResultRelease`
+  already enforces "at most one release per order" (a `UNIQUE`-backed constraint on an
+  "open episode" marker), so no ambiguity ever exists about which pending corrections belong to
+  which future release.
+- **Re-review race:** structurally eliminated by §6's binding — each `DoctorReview` row keyed to its
+  own release-version id can never collide with another version's review row; `_mark_in_session`'s
+  existing `FOR UPDATE` + terminal-status check applies unchanged, once per version.
+
+### 16 — Security/tenancy findings (§ security audit)
+
+No new authorization surface is required beyond what §8 names: `_require_lab_tech` for preparation,
+`_require_lab_result_releaser` for release, exactly mirroring today's entry/release split. A future
+versioned-review endpoint needs the identical lab-ownership/non-enumerating-404 discipline every
+existing lab-scoped route already applies (`_lock_order_and_item_for_entry`'s
+`selection.lab_organization_id` check is the exact precedent). Patient-bearer access requires no new
+boundary — confirmed unaffected (§1). Audit vocabulary: a future amendment implementation needs new
+`event_type` values (e.g. an amendment-prepared, amendment-released, amendment-review-recorded
+family — **illustrative only, not adopted, real naming is an implementation-ticket decision**),
+each requiring the identical `CHECK`-widen-plus-downgrade-guard migration pattern DH-EX-013's
+`0017_observation_revisions` already established; `resource_type` needs no new value (§1).
+
+### 17 — Performance/query findings
+
+Model 3's manifest read is a single join (`release_version → manifest rows → LabObservation`,
+batched exactly as `get_for_lab`'s existing two/three-query pattern already batches observations
+today) — one query for the release-version, one batched query for its manifest-plus-observations,
+regardless of item or observation count. No per-item or per-observation query is introduced by this
+design; the existing O(1)-queries-per-request discipline (`get_for_item`/`list_for_order`/
+`get_for_lab`) is preserved by construction, not merely hoped for.
+
+### 18 — Amendment reason (§E)
+
+`Human Decision / Field Workflow Input Required.` Pre-release correction requires no reason
+(ADR-045 Question 3, Option C, already accepted). Post-release amendment is evaluated as a
+*materially different* event — clinical content has already been exposed to a provider and possibly
+acted on by a clinician — but `docs/MVP-1.0.md` §13's existing "no free-text clinical notes" boundary
+applies identically to an amendment reason as it did to a correction reason, and closed reason codes
+would constitute real laboratory-workflow content this ADR is not positioned to invent (the identical
+constraint ADR-045 Question 3 already named for pre-release correction). Options recorded, none
+adopted: no reason; free-text (in tension with §13); closed reason code (requires real laboratory
+input to design the code list itself); optional non-clinical annotation (an operational/administrative
+note only, e.g. "specimen re-run," never a clinical judgment — evaluated as the least-risky option if
+a reason is wanted at all, not adopted).
+
+### 19 — Human Decisions required from Liban, smallest possible numbered list
+
+1. **ADR-045 Question 4 — `DoctorReview` after amendment:** Option C (recommended, §6) vs. Option D
+   (unsupported for MVP) — Options A/B are evaluated and not recommended.
+2. **ADR-045 Question 5 — pilot sufficiency:** Option 1, 2, or 3 (§7) — recommendation given against
+   Option 2 only, not a full resolution.
+3. **§3 — amendment preparation semantics:** immediate-permanent insert (a, recommended) vs. a
+   staged/discardable draft (b, requires a future schema change to the existing `UNIQUE` constraint).
+4. **§18 — amendment reason:** none / free-text (in tension with an existing decision) / closed
+   reason code (requires real laboratory input) / optional non-clinical annotation.
+5. **§11 — grandfathered `COMPLETED` orders with no `LabResultRelease`:** excluded from amendment
+   support until further decided (recommended default) vs. some other explicit treatment.
+6. **Whether to proceed with implementation at all**, and if so, whether Model 3 (§5, recommended)
+   is accepted as the architecture DH-EX-014 (a future implementation ticket) builds against.
+
+**Full audit, evidence, and reasoning:** `PROJECT_STATE.md`'s DH-EX-014D entry.
+
+**ADR-045's Questions 4–5 remain OPEN**, unedited by this entry — this ADR is the linked decision
+packet answering them, not a revision of ADR-045 itself.

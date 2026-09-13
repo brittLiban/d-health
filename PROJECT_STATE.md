@@ -13273,3 +13273,129 @@ answered here.
 Not started here, per this ticket's own explicit final instruction to stop after DH-EX-013.
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+### DH-EX-014D · Post-release amendment + clinician re-review architecture decision audit · P0 · 📋 DECISION PACKET DELIVERED — NO CODE CHANGED
+
+**Ticket:** DH-EX-014D. Audit/decision packet only, per its own explicit instruction — no runtime
+implementation, no migration, no API, no model, no test change. Resolves ADR-045's Questions 4–5 and
+its own named amendment-model sub-questions into a linked, RECOMMENDED-not-ACCEPTED architecture
+(`DECISIONS.md`'s new **ADR-048**), without implementing any of it.
+
+**Starting HEAD/CI:** `8328d2e400217837aae6cca8cf17fde7e54dea47` (DH-EX-013's own doc-follow-up
+commit), fetched via `git fetch origin master` and audited fresh — parent confirmed `05ebe22...`
+(DH-EX-013's implementation commit), working tree clean before this ticket began. CI run
+`34777867014` independently re-verified via GitHub's check-runs API (not trusted from the ticket
+prompt): 9/9 jobs `success`. Both values matched the ticket's own stated expectation exactly.
+
+**Migration head confirmed:** `0017_observation_revisions`, `down_revision` chain traced to
+`0016_exchange_observations` with no forks — matches the ticket's stated expectation.
+
+#### Current-state evidence, re-audited directly from code, not from a prior ticket's summary
+
+- `LabResultRelease` (`models.py:670-706`): one immutable row per order, no revision/un-release/
+  delete method anywhere in `LabResultReleaseRepository`. Stores no reference to which
+  `LabObservation` rows were effective at release time — an authorization fact, not a value
+  snapshot.
+- `get_lab_order_results` (`api.py:3018-3071`): gated only on `order.status == COMPLETED`; queries
+  `results.list_for_order` live on every call, which itself filters to `superseded_at IS NULL`.
+  **No binding exists between a specific release and the specific observations it authorized.**
+- `correct_observation`/`_lock_order_and_item_for_entry` (`results.py:589-745`, `1326-1360`,
+  DH-EX-013, unchanged): the same `LabOrder FOR UPDATE` + `IN_PROGRESS` gate that serializes
+  concurrent corrections is exactly what makes correction refuse once `COMPLETED`.
+  **`uq_exchange_lab_observations_supersedes_observation_id` is a full, unconditional `UNIQUE`
+  constraint — at most one successor may ever supersede a given observation, permanently.** This is
+  the single most consequential existing constraint for any amendment design; full analysis in
+  ADR-048 §3.
+- `orders.py:57-66`: `_ALLOWED_TRANSITIONS[COMPLETED] == frozenset()` — confirmed genuinely
+  terminal, re-verified directly, not assumed from a prior audit.
+- `DoctorReview` (`models.py:737-761`): `lab_order_id` is `unique=True` **at the database level** —
+  Question 4's Option C is therefore a real migration, not an application-code-only change. No
+  review-reset/revision/history mechanism exists anywhere in this codebase.
+- `ResultDelivery` (`models.py:709-734`): one row per order; confirmed by grep that no code path
+  anywhere calls `mark_delivered`/`mark_failed` as a side effect of anything.
+- `PatientOrderResponse` (`api.py:657-667`): `extra="forbid"`, no result field of any kind —
+  confirmed unaffected by anything in this audit.
+- `_require_lab_tech`/`_require_lab_result_releaser`/`_require_lab_tech_or_releaser`
+  (`api.py:1238-1287`): three independent, already-shipped authorization primitives. A future
+  "`LAB_TECH` prepares, `LAB_RESULT_RELEASER` releases" amendment flow requires **zero new
+  authorization primitives**.
+- `security_audit.py:24-99`: `event_type` is a DB-enforced `CHECK`, widened per migration with a
+  downgrade guard keyed to existing rows (exactly DH-EX-013's own `0017_observation_revisions`
+  pattern for `lab_observation_corrected`). `resource_type` needs no widening — `"lab_order"` is
+  already the established convention reused by every per-item-but-order-scoped event; this asymmetry
+  makes a future audit-vocabulary migration smaller than it might first appear.
+
+#### Risk statement (required acceptance criterion 2/7)
+
+A concrete, verified sequence, not a hypothetical: release with observation V2 effective (5.1) →
+provider reads 5.1 → clinician calls `mark_no_follow_up_required`, `DoctorReview` becomes terminal
+→ if DH-EX-013's `IN_PROGRESS` gate were simply removed, a later correction to 5.9 would insert V3
+superseding V2 → the same, unchanged `LabResultRelease` row still says "released," the same,
+unchanged `DoctorReview` row still says `NO_FOLLOW_UP_REQUIRED`, and the very next
+`GET .../results` call — unmodified — silently returns 5.9 instead of 5.1, with nothing anywhere
+distinguishing "originally released and reviewed" from "changed since, unreviewed." This is the
+literal, verified behavior of today's code under that one naive change, not a worst-case guess — see
+ADR-048 §2 for the full statement.
+
+#### Architecture alternatives evaluated (required acceptance criterion 8/25: at least three)
+
+**Model 1 — release manifest**: an immutable release-version row plus immutable membership rows
+naming exactly `(item, observation_id)` per release. **Model 2 — result-set/version entity**: a new
+first-class aggregate underneath the order that observations/releases/reviews all bind through —
+evaluated as disproportionately heavy for what current evidence demonstrates is needed. **Model 3 —
+amendment episode + release manifest**: a workflow row (`PREPARING`→`RELEASED`) whose release step
+produces exactly Model 1's manifest, while `LabResultRelease` itself is never mutated, replaced, or
+reinterpreted — remains permanently "release #1." A fourth option (a self-referential supersession
+chain on `LabResultRelease` itself, mirroring `LabObservation`'s own pattern) was considered and
+rejected: `LabResultRelease` is explicitly documented and tested today as immutable with no revision
+mechanism of any kind, and retrofitting one would risk every existing release read path far more than
+a new, purely additive table does.
+
+**Recommended (not accepted): Model 3** — full reasoning, and answers to every one of the ticket's
+lettered sub-questions (A–P) and the required data-model comparison (entities, keys, cardinalities,
+immutability, reconstruction of release #1 vs #2, review #1 vs #2 binding, migration impact, legacy
+compatibility, concurrency impact, API complexity), live in `DECISIONS.md`'s new **ADR-048**, not
+duplicated here in full.
+
+#### The one finding this audit adds beyond what DH-EX-012A/ADR-045 already established
+
+DH-EX-012A's own packet evaluated the amendment-model sub-questions in the abstract; this audit adds
+one concrete, verified, load-bearing constraint neither DH-EX-012A nor ADR-045/046/047 could have
+named, since it did not exist until DH-EX-013 shipped it: the full `UNIQUE` constraint on
+`supersedes_observation_id` means an amendment design that lets a `LAB_TECH` "prepare" a correction
+(inserting a real successor row) and later **discard** it without releasing permanently blocks any
+future correction of that same predecessor, since rows are never deleted. Two structurally different
+resolutions exist (immediate-permanent insert, mirroring DH-EX-013's own no-undo philosophy exactly;
+or a staged/discardable draft, requiring a future relaxation of the existing constraint to a partial
+index) — recorded as Human Decision 3 in ADR-048 §19, not silently resolved by this audit, since it
+carries real operational-workflow consequences AGENTS.md's "obviously should" guard applies to
+directly.
+
+#### Files changed
+
+`DECISIONS.md` (new **ADR-048**, RECOMMENDED/OPEN — Human Decision Required, appended after ADR-047;
+**ADR-045 itself left completely untouched**, per the ticket's explicit instruction — this is a
+linked decision, not a revision); `PROJECT_STATE.md` (this entry). **No other file changed** —
+confirmed by `git status --short` before committing: no runtime model, migration, API route, test
+file, or other documentation file was touched, since nothing implementation-status-related changed
+for this audit-only ticket.
+
+#### What remains NOT decided by this ticket (by design)
+
+Every item in ADR-048 §19's numbered Human Decision list: `DoctorReview` post-amendment behavior
+(ADR-045 Question 4), pilot sufficiency (ADR-045 Question 5), amendment-preparation semantics
+(immediate-permanent vs. staged/discardable), amendment reason requirement, grandfathered-order
+treatment, and whether to proceed with implementation (and Model 3) at all. **No clinical content,
+reason code, critical-result policy, or notification deadline was invented anywhere in this packet.**
+
+**Human Decision Required: YES** — the six items in ADR-048 §19, specifically; the packet as a whole
+cannot proceed to implementation without them.
+
+**Next:** once Liban resolves the Human Decisions above, a DH-EX-014 implementation ticket can
+proceed against an accepted architecture without inventing amendment workflow policy. Per this
+ticket's own final instruction, implementation is **not started here** — no post-release amendment
+code, migration, or API exists as a result of this ticket.
+
+**READY FOR LIBAN DECISION: YES**
