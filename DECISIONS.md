@@ -5180,3 +5180,274 @@ DH-EX-012B's outcome, but their *implementation* should wait for a stable underl
 
 **Full evidence, generalized field findings, and the full reconciliation this ADR triggered:**
 `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` and `PROJECT_STATE.md`'s DH-FIELD-001 entry.
+
+---
+
+## ADR-047 — RECOMMENDED, NOT YET ACCEPTED: result-domain schema to satisfy ADR-046 (`LabOrderItem`
+→ container → `LabObservation[]`)
+
+**Date raised:** 2026-09-13 · **Status:** RECOMMENDED (technical architecture) — **NOT ACCEPTED**;
+one embedded question is **OPEN, Human Decision Required: Yes** · **Ticket:** DH-EX-012B, decision/
+architecture only, per its own explicit instruction — no migration, no model change, no API change
+implements any of this yet.
+
+**Relationship to ADR-046/ADR-044/ADR-045.** ADR-046 accepted the requirement (one ordered
+diagnostic service may produce zero, one, or many observations) without choosing a schema — this is
+the schema recommendation ADR-046 named as DH-EX-012B's job. It does not reopen ADR-044 (release
+stays order-level, unchanged) and does not resolve ADR-045 (pre-release correction / post-release
+amendment remain OPEN and paused — see "ADR-045 compatibility" below for why this schema does not
+make either harder). Mirrors ADR-044's own two-phase shape: this entry is the evaluated packet,
+pending Liban's confirmation, not a decision this ticket makes on its own.
+
+### Current model, audited precisely before recommending anything
+
+`LabOrderItem.result` is a one-to-one relationship (`models.py:406`); `LabResult.lab_order_item_id`
+carries a database-level `unique=True` (`models.py:510-514`), not merely an application check — the
+one-result-per-item assumption is enforced by PostgreSQL itself. `LabResult` today is a single row
+holding both identity (`lab_order_item_id`, `lab_organization_id`) and value (`result_type`,
+`numeric_value`/`numeric_unit`/`reference_range_low`/`reference_range_high`, `text_value`,
+`completed_at`) — container and content are the same row. The **one function that must change**,
+found by tracing every one-result-per-item assumption package-wide (not `results.py` alone):
+`_count_missing_results` (`results.py:726-737`) — a single `LabOrderItem OUTER JOIN LabResult ...
+WHERE LabResult.id IS NULL` aggregate, shared verbatim by result submission's `ready_for_release`
+computation and `LabResultReleaseRepository.release`'s own re-check (`results.py:420`, `results.py:
+564`). This is the sole choke point where "every item has a result" is asked; nothing else
+duplicates the query. Every other place inspected assumes the same 1:1 shape only *because* this
+query enforces it upstream: `DuplicateResult` (`results.py:115`, raised at `results.py:381` and
+`results.py:406` from the DB `IntegrityError` translation), `get_for_item`/`list_for_order`/
+`get_for_lab` (`results.py:429-483`, each a plain `WHERE lab_order_item_id = ...` expecting ≤1 row),
+`ProviderOrderResultsResponse`/`ProviderResultItemResponse` and `LabResultInspectionResponse`/
+`LabResultInspectionItemResponse` (`api.py:832-893`, one flat item per ordered item, no nesting), and
+the migration chain itself (`0010_exchange_results_workflow` created the unique FK; no later
+migration through `0015` relaxes it). Checked directly, not assumed: every `LabResult`-referencing
+test file in the package (`test_exchange_results_api.py`, `test_exchange_lab_workflow.py`,
+`test_exchange_patient_access.py`, `test_dhex007_postgres_qualification.py`) — the only count-based
+assertions found (`test_exchange_lab_workflow.py:345,392`, both `select(func.count()).select_from(
+LabResult) == 0`, asserting no result exists yet at a given workflow stage) are consistent with 0-or-1
+per item, not a wider count. The one-result-per-item shape is narrow and consistent, not scattered
+speculation, which is exactly why introducing a child table is a bounded change: it needs to replace
+exactly this one query's predicate and the four read paths listed above, not an unbounded search.
+
+**Measured, not estimated, test-migration cost.** `adapter/tests/test_exchange_results_api.py` (47
+test functions) contains 8 assertion sites indexing a flat `results[i]` item shape by position or
+key-set (e.g. lines 355, 379–380, 1025: `inspection_body["results"][0]["numeric_value"]`,
+`results_body["results"][0]`, `set(body["results"][0].keys())`). `adapter/tests/integration/
+test_dhex007_postgres_qualification.py` makes zero such assertions. Any provider/lab-inspection API
+reshape has a concrete, small, known cost — not an open-ended one.
+
+### Options evaluated
+
+**Option A — `LabOrderItem` has many `LabObservation` rows directly, no container.** Rejected.
+`LabOrderItem` is today a frozen order-time snapshot — `catalog_code_snapshot`,
+`catalog_display_name_snapshot`, `selected_price_amount`/`selected_price_currency` are all written
+exactly once, at order/selection time, and never rewritten (`models.py:376-406`). The result-domain
+needs a mutable, per-item *workflow* fact — "has this item's result entry been explicitly marked
+complete" — and nothing about `LabOrderItem`'s existing role makes it the right place to bolt that
+on; doing so would mix an immutable ordering snapshot with mutable result-workflow state on the same
+row, the exact kind of overload this ticket's own Option C discussion warns against, just moved to a
+different table. Option A also has no natural attachment point for per-item source provenance (a
+source report id, a source-declared finality flag) without either repeating it on every observation
+or, again, bolting it onto `LabOrderItem`.
+
+**Option B — a distinct `LabResultSet` entity between item and observations.** Rejected, not
+because the idea is wrong but because nothing distinguishes it from a container: the "grouping"
+`LabResultSet` would exist in a strict one-to-one relationship with `LabOrderItem` doing exactly the
+job a renamed `LabResult` already does. A distinct result-set identity earns its keep only once a
+single reported artifact can span *multiple* ordered items (Finding 14's multi-page report, Finding 4's
+source-owned report reference) — that is document/report modeling, explicitly out of this ticket's
+scope and not required by ADR-046's own narrow requirement (one *item* → 0..N observations, not one
+*report* → many items). Introducing the extra level now, before that need is real, is exactly the
+"don't add an entity because the word sounds natural" trap this ticket warns against.
+
+**Option C — keep `LabResult` as a container, add child `LabObservation` rows. RECOMMENDED**, with
+its own open question ("would it become a container? would it overload one table with incompatible
+meanings?") resolved as follows: **`LabResult` becomes purely a container — every scalar value
+column (`result_type`, `numeric_value`, `numeric_unit`, `reference_range_low`,
+`reference_range_high`, `text_value`) moves to the new `LabObservation` child table.** Nothing stays
+behind to overload the container with two meanings; the container is *only* identity
+(`lab_order_item_id`, still unique — one container per item, matching today's cardinality exactly)
+plus the new explicit workflow fact below. This keeps the name "the result for this item" true under
+its new, correct meaning ("this item's result entry, possibly containing several observations")
+rather than its old one ("this item's one scalar value").
+
+**Option D.** Not needed — Option C, resolved this way, already satisfies every required capability
+without further alternatives.
+
+### Recommended entity relationship
+
+```text
+LabOrder
+  └─ LabOrderItem            (unchanged: frozen order-time snapshot)
+       └─ LabResult          (container, renamed meaning: identity + workflow fact only)
+            ├─ entry_completed_at: timestamp | NULL
+            ├─ entry_completed_by: identity or source-declared, see below
+            └─ LabObservation[]   (0..N; each row = one returned value)
+                 ├─ result_type (NUMERIC | TEXT, same CHECK pattern as today)
+                 ├─ numeric_value / numeric_unit / reference_range_low / reference_range_high
+                 ├─ text_value
+                 ├─ identity: hybrid namespace (see below)
+                 └─ recorded_at
+```
+
+**Simple, one-observation service.** Exactly today's UX: one API call records one
+`LabObservation` under the item's (lazily created, on first observation) `LabResult` container. No
+extra step is *required* to reach `ready_for_release` beyond the existing explicit-completion signal
+below — for a native DHealth Lab UI, that signal can default to "on" in the same screen/call for a
+service the UI otherwise treats as simple, which is a UI default, not a schema requirement or a
+DHealth-inferred fact.
+
+**Multi-observation / panel service.** Each returned value is its own `LabObservation` row under the
+same container, added by however many calls the native UI or a Connect import needs; the container's
+explicit completion signal is set once entry is genuinely finished, independent of how many
+observation rows exist.
+
+### Observation identity — hybrid namespace (Option D from the ticket's own framing)
+
+Every `LabObservation` carries a mandatory source/display identity — `source_code`,
+`source_system`, `display_label_snapshot` — sufficient for a freeform DHealth Lab native entry or a
+dynamically-arriving LIS-reported observation with no DHealth-side template at all. An **optional**
+`catalog_observation_entry_id` may point at a future DHealth-owned observation-catalog table
+(mirroring `TestCatalogEntry`'s existing versioned-catalog pattern) — not created by this ticket, and
+never required. This is the identical shape this codebase already uses twice for the same class of
+problem: `PatientReference`/`PractitionerReference` (mandatory source-identity binding, no DHealth
+demographic layer required) and `TestCatalogEntry` vs. a lab's own `local_test_code`
+(`LabOffering.local_test_code`, optional). No real observation code, unit, or vocabulary is invented
+by naming this shape.
+
+### Configured vs. dynamic observations
+
+Not a schema fork — both populate the identical `LabObservation` table. A future, separately-decided
+catalog-level concept ("this diagnostic service has N configured observation templates") would only
+change what a native DHealth Lab UI pre-renders; a Connect import populates the same rows keyed by
+whatever the source reports, matching or not matching any template. No panel composition, template
+count, or template content is defined here.
+
+### Completeness — the single most important question, answered once, not by counting
+
+**One explicit `entry_complete` signal per `LabOrderItem`'s container, and only one mechanism, used
+identically by both sources:** a human action in DHealth Lab's native UI, or a source system's own
+declared finality flag on Connect import. **Never inferred by DHealth from how many `LabObservation`
+rows exist.** This directly answers the ticket's own warning against letting "some observations
+exist" imply clinical completeness: it does not — only an explicit signal does, matching the same
+discipline `LabSampleCollection`/`LabResultRelease` already apply to physical-world/authorization
+facts DHealth must record but never infer. `_count_missing_results`'s predicate becomes "does this
+item have a container with `entry_completed_at IS NOT NULL`" in place of today's "does this item
+have a `LabResult` row" — the identical shared-by-submission-and-release choke point, re-pointed at
+one column instead of row existence.
+
+### Order-ready-for-release / ADR-044 compatibility
+
+**ADR-044's order-level release is unaffected and remains valid as recommended, not reopened.**
+Release still requires every ordered item to satisfy the same kind of DB-grounded aggregate check it
+already re-derives itself, never trusting a prior response — only the predicate's target column
+changes (see above). `LabResultRelease` itself needs no structural change: it is already an
+order-level, immutable, single-row-per-order fact, orthogonal to how many observations exist
+underneath.
+
+**Immutable release-state binding.** Observations remain insert-only, exactly like today's
+`LabResult` rows are — release still binds to "whatever the current, unamended set of observation
+rows is at release time," the identical binding today's release already has to "whatever the current
+set of `LabResult` rows is." Nothing about adding a child table weakens this.
+
+### ADR-045 (correction/amendment) compatibility — not resolved, not made harder
+
+DH-EX-012A already evaluated an immutable-revision pattern (`supersedes_result_id`/`superseded_at`,
+explicitly analogized there to `LabPrice.superseded_at`) as the architecturally consistent choice for
+correction, without adopting it. This schema gives that exact pattern a clean, narrow attachment
+point: a future revision mechanism can supersede individual `LabObservation` rows (add
+`superseded_at`/`supersedes_observation_id` to that table alone) without touching the container or
+`LabOrderItem` at all, and without needing a per-item "version number" concept. This is *more*
+narrowly scoped than correcting a whole-item scalar `LabResult` row today, not less — a correction to
+one observation in a five-observation panel need not touch the other four. **ADR-045's five
+questions remain entirely unanswered by this ADR** — role, reason requirement, and post-release
+`DoctorReview` handling are unaffected by which table an observation lives in.
+
+### Source-time, external-reference, and reference-range compatibility
+
+Not implemented now; each has a natural, non-forcing attachment point this shape does not block.
+Nullable `source_resulted_at`/`source_validated_at`/`source_released_at` could land on the container
+(one per-item source timeline) and/or per-observation, if a future ticket finds real evidence they
+differ at that granularity — not decided here. Source-owned external references
+(`source_report_id`/per-observation LIS codes, per Finding 4) attach most naturally at the
+observation level, the finest-grained real-world identity a source system reports. A future
+`reference_range_text` (nullable) column on `LabObservation`, alongside the existing numeric
+low/high pair, is the natural extension for Finding 8's inequality-style/textual ranges — no
+interpretation of any range is added by having a place to store it verbatim.
+
+### Provider API / Lab inspection target shape
+
+**`ProviderOrderResultsResponse` should nest, not stay flat** — the ticket's own instruction ("do
+not preserve a flat scalar API merely for backward compatibility if doing so makes panel results
+fundamentally wrong") applies directly once one ordered item can carry several observations; a flat
+per-item response cannot represent that at all. Target shape: one entry per ordered item (item id,
+catalog snapshot, `entry_completed_at`) containing a list of its observations (each with its own
+identity/value/range). `LabResultInspectionResponse` takes the identical reshape, since it already
+mirrors `ProviderOrderResultsResponse`'s per-item structure one-for-one today. **Compatibility
+strategy:** this is a breaking response-shape change for exactly the 8 measured assertion sites in
+`test_exchange_results_api.py` above — small, known, and worth paying once rather than carrying a
+flat shape that cannot honestly represent a panel; not performed in this ticket.
+
+### Native DHealth Lab and DHealth Connect compatibility
+
+**Native:** one item, one container (created lazily on first observation), 1..N observation calls,
+one explicit completion action — the same shape whether the service is simple or a panel, so the
+native Lab screen sketch in this ticket's own prompt (single field vs. a list of fields) maps
+directly onto "how many observation rows does this container have," decided by the UI/catalog, not
+the schema.
+
+**Connect:** an LIS-imported report's observations populate the same `LabObservation` rows under the
+same container, keyed by the source's own codes (hybrid namespace above), with the source's own
+finality flag driving the identical `entry_complete` signal native entry uses. No LIS protocol,
+interface type, or analyzer-automation claim is made or required by this schema.
+
+### Legacy migration strategy (not performed in this ticket)
+
+Lossless, fabricates nothing: each existing `LabResult` row becomes one container row (reusing its
+existing `lab_order_item_id`/`lab_organization_id`) plus exactly one child `LabObservation` row
+carrying its existing `result_type`/`numeric_value`/`numeric_unit`/`reference_range_low`/
+`reference_range_high`/`text_value` verbatim, with the observation's own timestamp set from the
+existing `completed_at`. The container's `entry_completed_at` is backfilled to that same
+`completed_at` — not a fabricated new fact, since under the old model that single observation was, in
+fact, the entirety and totality of what would ever be entered for that item; re-expressing that as
+"entry complete at the moment it was recorded" states nothing the old row did not already truthfully
+imply. No actor, source, or additional timestamp is invented beyond what already exists in the row
+being migrated.
+
+### Human Decision Required — the one genuinely open question inside this recommendation
+
+**May an ordered item ever reach `entry_complete` with zero `LabObservation` rows, and if the answer
+is yes, what does a provider see in place of a value?** This is not academic: today,
+`_count_missing_results` guarantees every released order's every item has *exactly one* recorded
+result before `COMPLETED` is reachable at all (`results.py:726-737`) — a real, currently-true
+guarantee. Allowing a zero-observation "complete" item would let an order reach `COMPLETED` and
+become provider-visible (`ProviderOrderResultsResponse`, gated only on `order.status ==
+'COMPLETED'`) with an ordered item that produced no value at all — a new reachable state that
+requires *representing* something (`"not performed"`, `"specimen rejected"`, or similar) in place of
+a value, and the exact content of that representation is real laboratory-workflow content this ADR
+is not positioned to invent, per `AGENTS.md`'s "never invent clinical content" rule.
+
+**Options, not adopted here:**
+(a) **No** — every item must carry ≥1 observation before its container can be marked
+`entry_complete`; a genuinely zero-result outcome is only ever the pre-entry state, never a
+terminal one, in MVP. Narrowest option: preserves today's "every released item has a value" guarantee
+exactly, unchanged. **Recommended as the MVP-safe default**, but not decided by this ADR.
+(b) **Yes**, with a not-performed/no-result representation — the representation's real content (a
+status code, its meaning, whether it requires a reason) is explicitly deferred to real laboratory
+input, not designed here, matching Decision 3's identical deferral in ADR-045/DH-EX-012A for
+correction-reason codes.
+(c) **Defer entirely** — make zero-observation completion structurally unreachable for MVP (i.e.,
+option (a) in practice) and revisit only if real pilot evidence shows it is needed.
+
+**Human Decision Required: Yes**, specifically this question. Nothing else in this ADR requires a
+human decision beyond ADR-045's own, already-recorded, unresolved question set — the schema shape
+itself is recommended architecture, not a product-policy call.
+
+### Explicitly out of scope (unchanged from this ticket's own instructions)
+
+No migration, no model change, no API change is implemented by this ADR. Full FHIR `Observation`
+modeling, LOINC/universal terminology mapping, an analyzer interface engine, lab QC, reagent
+inventory, microbiology isolate/susceptibility modeling, pathology narratives, imaging, a universal
+report/PDF repository, and a national terminology service are all explicitly not required by
+anything recommended here, and none is proposed.
+
+**Full evidence, dependency map, and options analysis:** `PROJECT_STATE.md`'s DH-EX-012B entry.

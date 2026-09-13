@@ -12571,3 +12571,183 @@ final instruction, it is **not started here**.
 this ticket); it does not itself ask a new question.
 
 **READY FOR REVIEW: YES**
+
+---
+
+### DH-EX-012B · Design the production result domain for one ordered service → 0..N observations · P0 · 📋 ARCHITECTURE RECOMMENDATION DELIVERED — NO CODE/SCHEMA CHANGED
+
+**Ticket:** DH-EX-012B. Decision/architecture ticket only, per its own explicit instruction — no
+migration, no model change, no API endpoint, no correction/amendment implementation. Resolves *how*
+to satisfy ADR-046's already-accepted requirement (one ordered diagnostic service may produce zero,
+one, or many returned observations), which ADR-046 itself deliberately left unresolved.
+
+**Starting HEAD/CI:** fetched `origin/master` fresh before touching anything — `cc02cd7c55e3b3d6c
+aa7e04e5db1d5b8257f0d60`, matching this ticket's own stated expectation exactly, working tree clean.
+CI independently re-queried via GitHub's check-runs API for this exact commit (no `gh` CLI available
+on this host; used `git credential fill` + `curl` against `api.github.com`) — run `34759903189`,
+9/9 required jobs `success`, matching this ticket's stated expectation. Note: this same commit is
+DH-FIELD-001's own commit — this ticket starts from work already reviewed and closed in the prior
+session, not from any newer commit.
+
+#### Audit performed before recommending anything
+
+Read in required order: `AGENTS.md`, `DECISIONS.md` (ADR-042 through ADR-046 in full), this file's
+own DH-EX-012A entry (correction/amendment audit — the "canonical thing per item" language and the
+`LabPrice.superseded_at` analogy both come from there, not invented fresh here), `docs/
+ARCHITECTURE.md` §17, `CURRENT_STATE.md`, `docs/MVP-1.0.md`, `docs/FIELD-DIAGNOSTIC-WORKFLOW.md`,
+then source: `exchange/models.py` (all of it, not a subset), `exchange/results.py` (all of it),
+`exchange/orders.py` (state-machine transitions and every reference to `LabResult`), `exchange/
+api.py` (every result/release/inspection request and response model and route), the exchange
+migration chain (`0004` through `0015`, and `.github/workflows/ci.yml`'s `EXPECTED_HEAD` guard
+confirming `0015_exchange_result_release` is genuinely current head), and the test files touching
+`LabResult` (`test_exchange_results_api.py`, `test_exchange_lab_workflow.py`, `test_exchange_
+patient_access.py`, `test_dhex007_postgres_qualification.py`).
+
+**Exact current-model facts, not summarized from memory:**
+
+- `LabOrderItem.result` is a one-to-one ORM relationship (`models.py:406`).
+- `LabResult.lab_order_item_id` carries a database-level `UNIQUE` constraint (`models.py:510-514`,
+  `unique=True`) — the one-result-per-item rule is enforced by PostgreSQL itself, not merely
+  application logic.
+- `LabResult` today holds both identity and value in one row: `lab_order_item_id`,
+  `lab_organization_id`, `result_type` (CHECK `NUMERIC`/`TEXT`), `numeric_value`/`numeric_unit`/
+  `reference_range_low`/`reference_range_high` (`Numeric(18,4)`, `NUMERIC`-only), `text_value`
+  (`String(2048)`, `TEXT`-only), `completed_at` (server-generated, "entered" not "released").
+- **The single choke point where "every item has a result" is asked, shared verbatim by two
+  callers:** `_count_missing_results` (`results.py:726-737`) — one `LabOrderItem OUTER JOIN
+  LabResult ... WHERE LabResult.id IS NULL` aggregate query, called by `_submit_in_session`
+  (`results.py:420`, produces `ready_for_release`) and by `LabResultReleaseRepository.
+  _release_in_session` (`results.py:564`, re-checked, never trusted from a prior response). No
+  other query duplicates this logic anywhere in the package.
+- `DuplicateResult` (`results.py:115`) is raised twice for the same underlying fact: a pre-insert
+  `SELECT` check (`results.py:379-384`) and a defensive `IntegrityError` translation
+  (`results.py:396-408`) if the `UNIQUE` constraint itself fires — belt-and-suspenders on the
+  identical 1:1 assumption.
+- Every read path assumes ≤1 row per item: `get_for_item`, `list_for_order`, `get_for_lab`
+  (`results.py:429-483`) all query `WHERE lab_order_item_id = ...` expecting at most one match.
+- `ProviderResultItemResponse`/`ProviderOrderResultsResponse` and `LabResultInspectionItemResponse`/
+  `LabResultInspectionResponse` (`api.py:832-893`) are both **flat**: one item, one set of value
+  fields, no nesting — structurally incapable of representing more than one observation per item.
+- `orders.py`'s `_ALLOWED_TRANSITIONS` (`orders.py:57-68`) and its own duplicated
+  `IN_PROGRESS→COMPLETED` guard (`orders.py:349-390`, referenced from `results.py`'s module
+  docstring) contain no `LabResult`-cardinality assumption themselves — they gate on `LabOrder`
+  status only; the cardinality assumption lives entirely in `_count_missing_results` and the
+  response models above, not scattered through the state machine.
+- Migration chain: `0010_exchange_results_workflow` introduced the `unique=True` FK; no migration
+  through the current head `0015_exchange_result_release` relaxes it. `EXPECTED_HEAD` in
+  `.github/workflows/ci.yml` (`0015_exchange_result_release`) confirmed current — no drift.
+- **Measured, not estimated, test-migration cost:** `adapter/tests/test_exchange_results_api.py`
+  (47 `test_` functions) contains 8 assertion sites indexing a flat `results[i]` item by position or
+  key-set (e.g. `inspection_body["results"][0]["numeric_value"]` at line 355,
+  `results_body["results"][0]` at lines 379–380, `set(body["results"][0].keys())` at line 1025).
+  `adapter/tests/integration/test_dhex007_postgres_qualification.py` makes zero such assertions.
+
+**Dependency map — every one-result-per-item assumption package-wide, not scoped to `results.py`
+alone:** ORM relationship (`models.py:406`), DB `UNIQUE` constraint (`models.py:510-514`), the
+shared completeness query (`results.py:726-737`), duplicate-detection at both the pre-insert and
+constraint-translation layers (`results.py:115,379-384,396-408`), three read methods
+(`results.py:429-483`), four Pydantic response models (`api.py:832-893`), and the migration chain
+that created the constraint. **Not found anywhere:** any assumption in `orders.py`'s state machine,
+`security_audit.py`, `audit.py`, or any DH-EX-011/012 (`LabSampleCollection`/`LabResultRelease`)
+code — both of those are already order-level facts, unaffected by item-level result cardinality.
+
+#### Architecture options evaluated and recommendation
+
+Full option analysis, rejections, and the complete technical recommendation are recorded in
+**`DECISIONS.md`'s new ADR-047** (status: RECOMMENDED, NOT YET ACCEPTED) rather than duplicated here
+verbatim. Summary:
+
+- **Option A** (item → observations directly, no container) — rejected: no attachment point for a
+  mutable per-item completion signal without overloading `LabOrderItem`'s existing frozen
+  order-time-snapshot role.
+- **Option B** (a distinct `LabResultSet` entity between item and observations) — rejected: adds an
+  entity level with no distinguishable job from a container until a report can span *multiple*
+  ordered items, which is out of this ticket's scope.
+- **Option C, recommended:** `LabResult` becomes a pure container (identity +
+  `entry_completed_at`/`entry_completed_by`, no value columns) with 0..N child `LabObservation` rows
+  carrying every value field `LabResult` holds today. Resolves the option's own "would it overload
+  one table?" concern by moving every scalar column out, not by leaving them in place.
+
+**The completeness question, answered once:** one explicit `entry_complete` signal per item's
+container, set by either a native-UI human action or a source system's own declared finality flag on
+Connect import — **never inferred by DHealth from how many `LabObservation` rows exist.**
+`_count_missing_results`'s predicate becomes "container missing, or `entry_completed_at IS NULL`" in
+place of today's "no `LabResult` row" — the identical shared choke point, re-pointed at one column.
+
+**ADR-044 (release) compatibility:** unaffected, not reopened — release keeps its existing
+order-level, immutable, single-row shape; only the item-readiness predicate's target column changes.
+
+**ADR-045 (correction/amendment) compatibility:** not resolved, not made harder — DH-EX-012A's own
+evaluated immutable-revision pattern (`supersedes_result_id`/`superseded_at`, analogized there to
+`LabPrice.superseded_at`) now has a narrower, cleaner attachment point at the individual
+`LabObservation` row, without needing a whole-item version concept.
+
+**Observation identity:** hybrid namespace — mandatory `source_code`/`source_system`/
+`display_label_snapshot`, plus an optional future `catalog_observation_entry_id` — mirroring the
+identical optional-DHealth-layer-plus-mandatory-source-layer pattern this codebase already uses for
+`PatientReference`/`PractitionerReference` and `TestCatalogEntry`/`LabOffering.local_test_code`. No
+real observation code, unit, or vocabulary is invented.
+
+**Provider API target:** `ProviderOrderResultsResponse`/`LabResultInspectionResponse` should nest
+observations per item rather than stay flat — a flat shape cannot represent a panel at all, and the
+ticket's own instruction is not to preserve a flat shape merely for compatibility once doing so makes
+panel results wrong. Cost of the reshape is the 8 measured assertion sites above, not an estimate.
+
+**Legacy migration (not performed in this ticket):** lossless — each existing `LabResult` row becomes
+one container (reusing its `lab_order_item_id`/`lab_organization_id`) plus exactly one child
+`LabObservation` carrying its existing value fields verbatim, with `entry_completed_at` backfilled
+to the existing `completed_at` — truthful, since under the old model that one observation was the
+entirety of what would ever be entered for that item. No actor, source, or timestamp is fabricated.
+
+**Out of scope, explicitly:** full FHIR `Observation` modeling, LOINC/universal terminology mapping,
+an analyzer interface engine, lab QC, reagent inventory, microbiology isolate/susceptibility
+modeling, pathology narratives, imaging, a universal report/PDF repository, a national terminology
+service. None is required by anything recommended here.
+
+#### Human Decision Required
+
+**Yes — one question, embedded in ADR-047, not decided by this ticket:** may an ordered item ever
+reach `entry_complete` with zero `LabObservation` rows, and if so, what does a provider see in place
+of a value? Today's `_count_missing_results` guarantees every released order's every item carries
+*exactly one* recorded result before `COMPLETED` is reachable at all — allowing a zero-observation
+"complete" item would let an order reach `COMPLETED` and become provider-visible with an item that
+produced no value, which requires representing something (`"not performed"`, `"specimen rejected"`,
+or similar) whose exact content is real laboratory-workflow content this ticket is not positioned to
+invent (`AGENTS.md`'s "never invent clinical content" rule). Three options recorded in ADR-047, none
+adopted: (a) no — every item needs ≥1 observation to be completable, MVP-safe default, recommended,
+not decided; (b) yes, with a not-performed representation whose content is separately deferred; (c)
+defer entirely, revisit only with real pilot evidence. **Everything else in ADR-047 is a technical
+architecture recommendation, not a product-policy question** — it does not require Liban's decision
+to be internally coherent, only to be accepted before implementation begins.
+
+#### Files changed
+
+`DECISIONS.md` (ADR-047 appended; ADR-042 through ADR-046 untouched); `PROJECT_STATE.md` (this
+entry). **No Python application code, database model, migration, API, frontend code, or test file
+was touched** — confirmed by `git status --short` before committing. `docs/ARCHITECTURE.md` was
+read but not touched by this ticket: its existing §17 already ends by naming DH-EX-012B as the
+ticket that would resolve the schema shape (added by DH-FIELD-001), and that pointer remains
+accurate without restating ADR-047's content there.
+
+#### Validation
+
+`git status --short` confirmed only `DECISIONS.md` and `PROJECT_STATE.md` changed before staging. No
+runtime code, model, migration, or API was touched, so no adapter test run applies to this ticket's
+own diff. **The CI doc-link-resolution check itself was not reproduced locally this time** — this
+session's shell had no working Python interpreter (the Microsoft Store `python`/`python3` aliases
+refuse to run; the repository's `adapter/.venv` is WSL2-built, and its `bin/python` is a symlink that
+does not resolve inside this Windows Git Bash session) — recorded honestly rather than claimed done.
+Instead, the diff was grepped directly for the check's own link syntax (`\]\([^)]*\)`) across every
+added line in both changed files: zero matches, so this ticket adds no new relative link for the
+check to evaluate and the check is structurally unaffected by this diff. The pushed commit's own CI
+run is therefore the sole confirmation that the check still passes, not a re-derivation of a local
+result.
+
+**Next:** implementation of this schema (a migration, model changes, and API reshape) is a future
+ticket, contingent on Liban accepting ADR-047 and answering its one open question — not started here,
+per this ticket's own final instruction. ADR-045's correction/amendment implementation remains
+paused behind that same future ticket, unchanged from DH-FIELD-001's framing.
+
+**Human Decision Required: YES** — the zero-observation-completion question above.
+
+**READY FOR LIBAN DECISION/REVIEW: YES**
