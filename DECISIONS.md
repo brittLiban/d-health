@@ -4936,3 +4936,56 @@ evidence, not something rewritten to look as though the current vision always ex
 **Full audit, gap analysis, product-family detail, golden-journey diagram, pilot shape, success
 metrics, and the complete out-of-scope/known-gaps/follow-up lists:** `docs/MVP-1.0.md`. Ticket and
 follow-up-backlog record: `PROJECT_STATE.md`'s DH-MVP-001 entry.
+
+---
+
+## ADR-044 — OPEN: the result-entry → release contract (who may release, and whether the same
+human may enter and release)
+
+**Date raised:** 2026-09-13 · **Status:** OPEN — blocks the next result-workflow implementation
+ticket · **Human Decision Required:** Yes (the two questions below specifically)
+
+**Relationship to ADR-042/ADR-043.** Not a new architecture decision. ADR-043 already recorded, and
+this entry does not reopen, that "result validation/release" is an unresolved product gap distinct
+from result entry, and that "exact roles and semantics must come from real laboratory workflow
+input, not be invented here." DH-EX-012D (`PROJECT_STATE.md`) is the full audit and decision packet
+this ADR summarizes; that entry is authoritative on evidence and reasoning, this entry is the
+durable pointer and the explicit question set.
+
+**Recommended by DH-EX-012D's audit — pending Liban's confirmation, not yet accepted** (see
+DH-EX-012D for the full reasoning behind each): release should be named `RELEASED`, never
+"validated" (`docs/MVP-1.0.md` §13 already forbids DHealth claiming to validate/interpret); release
+should be order-level, matching `ResultDelivery`, the provider result API, and `DoctorReview`'s
+existing order-level shape; no new `LabOrderStatus` is needed — readiness is exactly the
+`missing_count == 0` aggregate `results.py` already computes; a separate immutable
+`LabResultRelease` row (mirroring DH-EX-011's `LabSampleCollection`) fits the existing model
+cleanly; a pre-DH-EX-012 `COMPLETED` order should be grandfathered with no fabricated release row,
+exactly matching DH-EX-011's own no-retroactive-fabrication rule; `LabResult.completed_at` should
+keep its name (an API-contract field on two response models already) with its "entered," not
+"released," meaning documented precisely. None of these six is binding until Liban says so —
+recorded here as the audit's recommendation, not as a decision this ADR makes on its own.
+
+**Question 1 — who may release a lab order's results?** Options on record (full operational
+tradeoffs in DH-EX-012D): (A) the existing `LAB_TECH` role may enter and release; (B) a new
+dedicated release role (e.g. `LAB_RESULT_RELEASER`), with the same human permitted to hold both
+roles where a facility allows it; (C) `ORG_ADMIN` releases — evaluated and cautioned against absent
+a stated operational reason; (D) facility-configurable policy — evaluated as likely premature before
+any real pilot has run.
+
+**Question 2 — may the same human who entered a result also release it?** (A) always permitted; (B)
+strict second-person release; (C) facility policy determines it. **Why this is not a coin flip:** a
+strict second-person rule in a small lab with one `LAB_TECH` on shift means results already entered
+sit unreleased until a second qualified person is present — a real patient-care-timeliness cost a
+software preference cannot weigh on its own.
+
+**Flagged risk, not a question requiring a vote:** V1 has no result amendment/correction path
+(`DuplicateResult` — one immutable result per item). Adding release does not create this gap, but it
+sharpens it: today "entered wrong" and "visible wrong" are the same instant; after release they
+become separable, which is the point of adding it, but there is still no way to correct a result
+already found wrong. Recorded here so it is not rediscovered as a surprise later.
+
+**Not decided here, not implementation-blocking on their own:** the exact `LabResultRelease` schema
+and the `lab_result_released` audit event are evaluated, not built — implementation follows once
+Questions 1 and 2 are answered, per DH-EX-012D's own "decision/audit ticket only" scope.
+
+**Full audit, evidence, and reasoning:** `PROJECT_STATE.md`'s DH-EX-012D entry.

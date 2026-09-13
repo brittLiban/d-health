@@ -11382,3 +11382,254 @@ new code required; also confirmed no HTTP cancel endpoint exists in production t
 "patient/provider surfaces" claim's "confirmed by grep" was vague about what was actually checked —
 corrected to name the exact three response models re-read (`PatientOrderResponse`,
 `LabOrderResponse`, `LabOrderSummaryResponse`) and confirm none gained a field.
+
+### DH-EX-012D · Audit and resolve the result-entry → release contract before implementation · P0 · 📋 DECISION PACKET DELIVERED — NO CODE CHANGED
+
+**Ticket:** DH-EX-012D. Decision/audit ticket only, per its own explicit instruction — no runtime
+implementation. ADR-043 and `docs/MVP-1.0.md` already recorded "result validation/release" as an
+unresolved product gap distinct from result entry; this ticket's job is to turn that one-line gap
+into a precise decision packet so the next implementation ticket does not invent laboratory policy,
+per `AGENTS.md`'s "never assume-and-continue on anything with clinical or scope surface" rule.
+
+**Starting HEAD/CI:** `b9ec1920a74e31b079cb343a3e035d29e747d1cf` — fetched and audited fresh, matched
+the ticket's stated expectation exactly. CI run `34736395564`: success, all 9 jobs green.
+
+**Repository-rule check (performed before anything else, per the ticket's own instruction):**
+searched `DECISIONS.md` for any ADR after ADR-043 (2026-09-12) that might have resolved this — none
+exists; ADR-043 (line 4804) is the last entry in the file. ADR-043 itself states the gap has not
+been resolved (quoted verbatim below). Therefore **`Human Decision Required: YES`** stands exactly
+as the ticket predicted, confirmed by fresh audit rather than assumed.
+
+---
+
+#### Current reality, reported exactly as found
+
+**1. Result entry.** `LAB_TECH` only, confirmed in code (not merely expected): `submit_lab_result`
+(`api.py:2321`) calls `_require_lab_tech(principal, lab_id)` (`api.py:2328`), which
+(`authorization.py:171-205`) denies `ORG_ADMIN`-alone and platform-admin-alone at the lab, matching
+`require_clinician`'s identical "network administration is not clinical authority" reasoning.
+**Endpoint:** `POST /organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/result`.
+**Allowed order state:** `LabOrder.status == IN_PROGRESS` only (`results.py:273-277`,
+`InvalidResultSubmissionState` otherwise). **Result types:** `NUMERIC` (value + optional unit +
+optional reference range) and `TEXT` (`LabResultType`, `models.py:113-116`) — mutually exclusive,
+enforced by a database CHECK (`ck_exchange_lab_results_value_matches_type`, `models.py:500-503`).
+**Duplicate-result behavior:** one immutable `LabResult` per `LabOrderItem` — a second submission
+attempt raises `DuplicateResult` (409), both at a pre-insert check and, defensively, on the
+UNIQUE-constraint path (`results.py:283-312`). **Amendment/correction behavior:** none exists —
+confirmed by grep of the full `exchange/` package for "amend"/"correct" (only docstring prose
+describing the *absence* of such a workflow, no code implementing one).
+
+**2. Automatic completion.** Occurs in `LabResultRepository._submit_in_session`
+(`results.py:249-335`), the same method that inserts the `LabResult` row — not a separate step.
+**Lock behavior:** `LabOrder` is locked `FOR UPDATE` first (`results.py:263`), before the
+`LabSelection` ownership check, before the lifecycle check, before the item lookup, matching
+DH-EX-005/DH-EX-006's own established lock-ordering discipline; this is what serializes two
+different, final, order-completing submissions arriving at the same instant down to one coherent
+outcome. **Completeness query:** an explicit `SELECT count(*) FROM LabOrderItem OUTER JOIN
+LabResult ... WHERE LabResult.id IS NULL` (`results.py:319-324`), re-queried from the database
+inside the same lock — deliberately never read off an already-loaded
+`order.items[*].result` relationship. **Transaction boundary:** the result insert, the
+completeness check, and (if `missing_count == 0`) `order.status = COMPLETED` all happen inside the
+one transaction the `FOR UPDATE` lock covers, committed together by the HTTP route's own
+`session_factory.begin()` block (`api.py:2330`). **Audit events generated:** `lab_result_recorded`
+unconditionally, plus `lab_order_completed` only on the exact submission that completes the order
+(`api.py:2355-2373`) — both added to the identical session, so a rollback of one rolls back both.
+
+**3. Provider visibility.** `GET /organizations/{provider_id}/orders/{order_id}/results`
+(`api.py:2396-2440`), gated by `_require_clinician` then an explicit
+`order.status != LabOrderStatus.COMPLETED.value` check that returns 409 (not 404 — the order
+genuinely exists and genuinely belongs to this provider, so a bare 404 would misrepresent that,
+per the route's own comment). **Confirmed: `COMPLETED` alone is the entire visibility gate today**
+— there is no independent release/validation check anywhere in this path.
+
+**4. Clinician review.** Confirmed gated on `COMPLETED` only, in `DoctorReviewRepository._mark_in_
+session` (`results.py:446-482`): `LabOrderStatus(order.status) != COMPLETED` raises
+`ReviewNotAllowedYet`. `NO_FOLLOW_UP_REQUIRED`/`FOLLOW_UP_REQUIRED` behavior confirmed unchanged and
+not touched by this audit: a `DoctorReview` row is created `PENDING` at order-creation time
+(`orders.py`, per DH-EX-001), and exactly one terminal mutation is permitted — a second attempt
+raises `ReviewAlreadyFinalized` (409), since V1 has no review-revision model.
+
+**5. Current roles.** Confirmed exactly `ORG_ADMIN`, `CLINICIAN`, `LAB_TECH`
+(`OrganizationRole`, `models.py:597-606`) — no `LAB_VALIDATOR`, `RESULT_RELEASER`, or
+`LAB_SUPERVISOR` exists anywhere in the codebase (confirmed by grep, zero matches beyond this
+ticket's own prompt). `_ORG_TYPE_ALLOWED_ROLES` (`membership.py:45-46`) permits only
+`{ORG_ADMIN, CLINICIAN}` for `PROVIDER` organizations and `{ORG_ADMIN, LAB_TECH}` for `LAB`
+organizations — a new lab-side role would need this matrix widened, a real (if small) schema-
+adjacent change, not merely an authorization-layer addition.
+
+**6. `completed_at` semantic finding (Decision 8, reported here since it's a fact, not a choice).**
+`LabResult.completed_at` (`models.py:523-525`) is set via `default=utc_now` **at insert time** —
+it means "this result was entered," not "this result was released/validated." The same name
+appears in two API response models (`LabResultSubmitResponse`, `ProviderResultItemResponse`), so
+renaming it is an API-contract break, not a private refactor.
+
+---
+
+#### The governing decision already on record (quoted, not paraphrased)
+
+ADR-043 (`DECISIONS.md`, "Other semantics explicitly left open by this ADR"): *"**Result
+validation/release.** DH-EX-007 implements `RESULT ENTERED` → automatic `COMPLETED` (every ordered
+item has a result). DHealth Lab's MVP direction distinguishes `RESULT ENTERED` from a separate
+`RESULT VALIDATED / RELEASED` step. **No such separate authorization step exists in the current
+implementation** — recorded as a product gap, not silently assumed to exist. Exact roles and
+semantics must come from real laboratory workflow input, not be invented here."* `docs/MVP-1.0.md`
+§10 gap #5 restates the identical finding. Nothing on current `master` supersedes this.
+
+---
+
+#### Decision packet
+
+**Decision 1 — what does "release" mean?** `ENTERED`/`RELEASED` terminology is **recommended**,
+not "validated" — this is a correctness finding, not a policy preference: `docs/MVP-1.0.md` §13's
+"DHealth does not independently diagnose, interpret, or recommend treatment" makes "DHealth
+validates the result" a false claim about what the software does. "Release" — an authorized lab
+user explicitly authorizes an already-entered result set to leave the lab workflow and become
+visible to the ordering provider — accurately describes a workflow-authorization action without
+claiming DHealth performs any clinical verification. Facilities remain responsible for whatever
+professional validation their own policy requires *before* clicking release; DHealth's own claim is
+limited to "an authorized human explicitly released this."
+
+**Decision 2 — order-level or item-level release?** **Order-level release is structurally simpler
+for MVP**, and the codebase already commits to order-level framing in three independent places:
+`ResultDelivery` is one row per order (unique FK, `models.py:529-534`, "doctor receives the order's
+result(s) as one unit"), the provider result-read endpoint returns the whole order's results in one
+response (`ProviderOrderResultsResponse`), and `DoctorReview` is one row per order. Item-level
+release would require redesigning all three, plus inventing partial-result visibility semantics
+nothing in the current product direction asks for. **Cost, stated plainly, not hidden:** one slow
+item blocks release of every item on the order — a real operational tradeoff, not merely a
+software-simplicity win. No recommendation is withheld here because the current architecture's own
+shape already answers this question; item-level release would be new work in three places that
+today assume order-level, not simply "harder."
+
+**Decision 3 — who may release?** **`Human Decision Required: YES` — no agent recommendation.**
+This is exactly the class of question `AGENTS.md` reserves for Liban ("real laboratory workflow
+input," per ADR-043's own text). Options, with operational consequences stated for a small
+Djiboutian lab, not just software cost:
+- **Option A — `LAB_TECH` enters and releases (same role).** Simplest; imposes no second-person
+  dependency if a facility runs with only one lab tech on a given shift — whether that staffing
+  pattern is realistic for a given Djiboutian facility is exactly the kind of real laboratory
+  workflow input ADR-043 says must come from Liban, not be assumed here. Cost: no explicit
+  separation-of-duties signal — every result-entering tech is automatically release-authorized.
+- **Option B — new dedicated role** (e.g. `LAB_RESULT_RELEASER`). Makes release authority explicit;
+  the same human may hold both roles where a facility's policy permits, so it does not *force* a
+  two-person workflow — but it does add a new `OrganizationRole` value, widens
+  `_ORG_TYPE_ALLOWED_ROLES` for `LAB` orgs, and adds onboarding/membership-assignment UI/API work
+  that does not exist today.
+- **Option C — `ORG_ADMIN` releases.** **Recommend against absent a stated operational reason.**
+  Administrative authority over an organization's membership/roles is a different authority than
+  clinical laboratory sign-off; nothing in the current codebase or ADR record establishes that an
+  `ORG_ADMIN` should hold clinical release authority, and every existing lab-side gate
+  (`require_lab_tech`) already treats "`ORG_ADMIN` alone" as insufficient for clinical actions.
+- **Option D — facility-configurable policy.** Real small-lab operational flexibility, but a real
+  new piece of persistent configuration state and a new authorization branch per facility — likely
+  premature for an MVP that has not yet run a single real pilot (`docs/MVP-1.0.md` §8: "no manual/
+  browser demonstration, real Keycloak qualification, production deployment, or real-patient pilot
+  exists"). Evaluated, not chosen.
+
+**Decision 4 — may the same human enter and release?** **`Human Decision Required: YES` — no agent
+recommendation**, for the identical reason as Decision 3. Options as given: (A) always permitted,
+(B) strict second-person release, (C) facility policy determines it. **Operational consequence to
+weigh, stated plainly:** a strict second-person rule (B) in a lab with exactly one `LAB_TECH` on a
+given shift means every result entered on that shift sits unreleased until a second qualified person
+is present — potentially overnight in a small facility. This is not a software engineering
+preference; it is a genuine patient-care-timeliness tradeoff against whatever separation-of-duties
+value a facility's policy assigns to it, and belongs to Liban / real laboratory workflow input.
+
+**Decision 5 — status model, evaluated with the specific mechanics, not aesthetics.** Two options
+compared directly against what the code already does:
+- **New `LabOrderStatus` value** (e.g. `RESULTS_ENTERED`/`AWAITING_RELEASE`): requires a new enum
+  member, a widened `ck_exchange_lab_orders_status` CHECK constraint, a new Alembic migration, and
+  new entries in `orders.py`'s `_ALLOWED_TRANSITIONS` for every existing caller that currently
+  expects `IN_PROGRESS`→`COMPLETED` to be the only outgoing edge from a fully-resulted order.
+- **Derived readiness, no new status:** `order.status == IN_PROGRESS AND missing_count == 0 AND no
+  release row exists` — and critically, **`missing_count == 0` is not a new query to invent**: it
+  is the exact aggregate `results.py:319-324` already computes on every result submission today.
+  Release would simply skip the `order.status = COMPLETED` write on that computation and instead
+  require an explicit release action to perform it; `_ALLOWED_TRANSITIONS` needs no new key at all
+  under this option, since `IN_PROGRESS`→`COMPLETED` already exists and nothing changes about that
+  single edge.
+- **Recommended for evaluation weight (not adopted without Liban's sign-off): the derived-readiness
+  option is structurally simpler** — it reuses an existing, already-tested query, requires no
+  migration, and requires no change to the existing transition table; it is evaluated on the
+  concrete mechanics above, not chosen "because it is easier" in the abstract, per the ticket's own
+  instruction not to decide by aesthetics.
+
+**Decision 6 — release record model.** A separate immutable `LabResultRelease` row (`id`,
+`lab_order_id` UNIQUE, `lab_organization_id`, `released_by_identity_id`, `released_at`) **fits the
+current Exchange model cleanly** — it is the identical shape DH-EX-011's `LabSampleCollection` just
+established (one narrow row per order, UNIQUE FK, system-generated timestamp, no invented clinical
+content) and DH-EX-011's migration (`0014_exchange_collection`) is direct, working precedent for
+exactly this kind of purely-additive table plus a widened `SecurityEventType`/audit
+`resource_type` CHECK for a new `lab_result_released` event. Not implemented here — evaluation
+only, per the ticket's explicit "do not implement" instruction.
+
+**Decision 7 — legacy `COMPLETED` orders. Recommended: Option A (grandfather, no fake release
+row).** This is not a preference call; it is the only option consistent with two rules already
+shipped and proven in this exact sequence: DH-EX-011's own "no retroactive fabrication" rule (a
+migration must never invent a physical/workflow event a database row cannot prove happened) and
+DH-EX-010A1's downgrade-safety lesson (never silently erase or misrepresent real historical state).
+Option B (require release evidence even for historical orders) would retroactively make results a
+provider can *already read today* stop being readable — a data-availability regression inflicted on
+existing orders to satisfy a rule that did not exist when they completed, not a neutral policy
+choice. Option C (an explicit legacy marker) is evaluated and rejected as unnecessary complexity:
+"no release row exists" is already an honest, queryable legacy state under Option A — a
+pre-DH-EX-012 `COMPLETED` order simply has no `LabResultRelease` row, exactly matching how a
+pre-DH-EX-011 order simply has no `LabSampleCollection` row. No new column or flag is needed to
+express "this predates the new rule."
+
+**Decision 8 — `completed_at`.** Reported above as a fact, not re-litigated as a choice. Recommend
+**keep it for backward compatibility and document its precise meaning going forward** ("the time
+this result was entered into DHealth, not the time it was released/validated") rather than a
+rename in this ticket — `LabResultSubmitResponse` and `ProviderResultItemResponse` both expose this
+field name today, and a rename is an API-contract break the ticket explicitly forbids performing
+here ("Do NOT perform a schema rename in this ticket").
+
+**Decision 9 — amendment/correction risk, flagged plainly, not invented.** Confirmed:
+`DuplicateResult` means exactly one immutable result per `LabOrderItem` with no correction path in
+V1. Explicit release can launch while amendment/correction remains out of MVP scope, but the
+operational risk sharpens, not lessens, once release exists: today, "a wrong result was entered"
+and "a wrong result is visible to the provider" are the same instant (visibility is gated only by
+`COMPLETED`); after explicit release, those two facts become separable in time, which is the entire
+point of adding release — but there is still no path to correct a result already found wrong,
+before or after release. This ticket does not invent one; it records that the gap becomes more
+operationally significant, not less, the moment release ships.
+
+**Decision 10 — patient surface boundary.** Confirmed: this decision should initially affect lab
+workflow and provider result visibility only. `docs/MVP-1.0.md` §13's patient result-release policy
+(`PatientOrderResponse` defines no result field, `extra="forbid"`) is unrelated and untouched by
+anything in this packet — no SMS/WhatsApp/result-value policy question is opened or answered here.
+
+**Recommended MVP shape, evaluated as instructed, not silently adopted:** the ticket's own sketch
+(`LAB_TECH` enters → order stays `IN_PROGRESS` while `missing_count == 0` → an authorized releaser
+explicitly releases → immutable `LabResultRelease` recorded → `COMPLETED` → provider reads →
+clinician reviews) is coherent with everything audited above: it reuses the existing completeness
+query verbatim, needs no new `LabOrderStatus` value, follows DH-EX-011's proven separate-immutable-
+row pattern for the release record, and preserves the existing provider/review gates on `COMPLETED`
+unchanged. It is evaluated as structurally sound; it is **not adopted** here, since Decisions 3 and
+4 (who may release, same-person-or-not) — the two decisions that actually determine whether this
+shape is usable by a real small Djiboutian lab — remain open and belong to Liban.
+
+---
+
+**Files changed:** `PROJECT_STATE.md` only (this entry). `DECISIONS.md` gains a new **ADR-044**
+entry, status `OPEN`, recording the same ten decisions as explicit open questions with a pointer
+back to this entry for full evidence — following `ADR-005`'s own established precedent for an
+`OPEN`-status ADR entry that is not yet `ACCEPTED`. No ADR is marked `ACCEPTED` by this ticket; no
+runtime code, test, migration, role, membership rule, provider API, patient API, `ResultDelivery`,
+`DoctorReview`, result schema, or `LabOrderStatus` was touched, confirmed by `git status --short`
+before committing.
+
+**What remains NOT decided by this ticket (by design):** who may release (Decision 3), whether the
+same human may enter and release (Decision 4), and therefore whether/how a new organization role is
+added; the exact release-record schema is evaluated, not implemented; no migration exists; no
+`LabResultRelease` model exists; no `lab_result_released` audit event exists.
+
+**Next:** once Liban answers Decisions 3 and 4 (the two genuinely open policy questions; Decisions
+1, 2, 5, 6, 7, 8, 10 have a stated recommendation, and Decision 9 is a flagged risk rather than a
+question), a DH-EX-012 implementation ticket can proceed without inventing laboratory policy. Per
+this ticket's own final instruction, implementation is **not started here**.
+
+**Human Decision Required: YES** (Decisions 3 and 4 specifically; the packet as a whole cannot be
+closed without them).
+
+**READY FOR LIBAN DECISION: YES**
