@@ -5031,3 +5031,90 @@ real-PostgreSQL qualification, and full test evidence).
 
 **Status: this ADR is now RESOLVED**, not OPEN — recorded here rather than editing the header above,
 so the original question/evidence packet remains legible as written at the time it was raised.
+
+---
+
+## ADR-045 — OPEN: pre-release correction vs. post-release amendment of an entered lab result
+
+**Date raised:** 2026-09-13 · **Status:** OPEN — blocks the next result-workflow implementation
+ticket · **Human Decision Required:** Yes (the questions below)
+
+**Relationship to ADR-044.** Not a reopening. ADR-044 resolved who may release and whether the same
+human may enter and release; its own "flagged risk, not a question requiring a vote" section already
+named that V1 has no result amendment/correction path and that release sharpens, without creating,
+that gap. DH-EX-012A (`PROJECT_STATE.md`) is the full audit and decision packet this ADR summarizes;
+that entry is authoritative on evidence and reasoning, this entry is the durable pointer and the
+explicit question set. **This ADR treats pre-release correction and post-release amendment as two
+separate problems, per DH-EX-012A's own central instruction** — a decision on one does not answer
+the other.
+
+**Confirmed by DH-EX-012A's audit, stated as fact, not opinion:** `LabResult` has no entering-actor
+column (only the order-centric `lab_result_recorded` audit event records who acted, correlated to a
+specific result only by timestamp proximity, never an exact join); no revision/version/supersedes
+metadata exists on any result row; the provider result-read route re-queries `LabResult` live on
+every request with no snapshot taken at release time — so a hypothetical in-place mutation of an
+already-released result would silently and immediately change what a provider next sees, under the
+same unchanged `LabResultRelease` record, with no trace that anything changed. This last fact is why
+DH-EX-012A evaluates "may an already-released result ever be changed in place" as **no** — not
+undecided, a reasoned conclusion from the mechanism itself, independent of what amendment mechanism
+(if any) is chosen instead.
+
+**Question 1 — may a pre-release (not yet released) entered result be corrected, and how?** Options
+on record (full tradeoffs in DH-EX-012A): (A) no — abandon/recreate outside a supported workflow;
+(B) yes, destructive overwrite of the existing row; (C) yes, via an immutable revision that
+supersedes the original without deleting it. DH-EX-012A evaluates (C) as the architecturally
+consistent choice — the same append-only-immutable-fact pattern this codebase already uses twice
+(`LabSampleCollection`, `LabResultRelease`) — without adopting it.
+
+**Question 2 — who may perform a pre-release correction?** (A) `LAB_TECH` (symmetric with entry
+authority); (B) `LAB_RESULT_RELEASER` only; (C) a dedicated correction role (evaluated as likely
+premature); (D) `LAB_TECH` before release, a stronger authority required after. Not decided.
+
+**Question 3 — must a correction carry a reason, and in what form?** (A) free-text — flagged as in
+direct tension with `docs/MVP-1.0.md` §13's existing, already-decided "no free-text clinical notes"
+boundary, not merely undesirable in the abstract; (B) closed reason codes — the codes themselves are
+explicitly **not** designed by DH-EX-012A, since they would be real laboratory-workflow content; (C)
+no reason required, old/new value plus actor/time only. Not decided.
+
+**Question 4 — if post-release amendment is ever built, what happens to an already-terminal
+`DoctorReview` disposition?** (A) leave it unchanged — confirmed risk: nothing in today's API
+response distinguishes "reviewed the current result" from "reviewed a now-superseded result"; (B)
+reset to `PENDING` — a real, disclosed behavior change to an existing, already-shipped invariant
+(`ReviewAlreadyFinalized` exists specifically to make a terminal disposition un-overwritable); (C)
+review history/versioning, mirroring whichever schema shape Question 1 eventually chooses for
+results — blocked today by `DoctorReview.lab_order_id` being `unique=True`, so this requires a
+migration, not merely new application code; (D) post-release amendment unsupported for MVP, in
+which case this question does not need resolving yet, but the real operational fallback must be
+documented, not left implicit. Not decided.
+
+**Question 5 — is post-release amendment required before DHealth's first real-patient pilot, or can
+pre-release-correction-only ship first?** DH-EX-012A's own central finding: a real diagnostic
+laboratory result can and does sometimes require correction *after* release in ordinary operation —
+this is not an edge case invented to justify scope, and DHealth today has no supported path for it
+once release occurs. Three real options, each with a real cost, none preferred by DH-EX-012A's
+audit: (1) block the real-patient pilot until post-release amendment exists; (2) a documented
+facility fallback entirely outside DHealth, accepting that DHealth's own record can become
+known-wrong with no in-system trace; (3) implement post-release amendment before pilot. **This
+question must not be answered by timeline pressure** — DH-EX-012A's own explicit instruction,
+repeated here because it is the single highest-consequence question in this ADR.
+
+**If post-release amendment is pursued (not yet decided whether it will be), these sub-questions are
+open and not answered by Questions 1–5 above:** whether amendment produces a second, independent
+release-like record or extends the existing one (the former preserves the original release's own
+immutability completely; the latter reopens the exact mutation risk this ADR's
+Question-1-independent "no" already rejects, see below); what a provider sees for an order with
+both an original and an amended result (newest-only, a flagged newest-plus-history, or full separate
+reports — no silent replacement of already-shown clinical content, in any shape); how the existing
+one-row-per-order `ResultDelivery` model, whose own `DELIVERED` semantic ADR-043 already left
+undecided, would represent a second delivery-equivalent event; and a hard structural fact, not a
+design preference — `LabOrderStatus.COMPLETED` is terminal in today's state machine (no outbound
+transition exists from it, `orders.py:59-68`), so no amendment model can move an already-`COMPLETED`
+order back out of `COMPLETED` to re-run today's release path unmodified.
+
+**Not decided here, not implementation-blocking on their own:** the exact result-revision schema
+shape (a separate revision table vs. a supersedes-chain on the existing table — DH-EX-012A flags the
+former as the closer structural analogy to this repository's own `LabPrice.superseded_at` pattern,
+without adopting it); whether a future revision row should carry its own `entered_by_identity_id`
+directly, in addition to the existing order-centric audit event.
+
+**Full audit, evidence, and reasoning:** `PROJECT_STATE.md`'s DH-EX-012A entry.

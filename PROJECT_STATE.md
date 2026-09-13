@@ -11919,3 +11919,491 @@ this entry implements that acceptance, it does not request a new one.
 
 **Next:** amendment/correction remains the standing, disclosed gap (see above) — explicitly not
 started by this ticket, per its own final instruction.
+
+---
+
+### DH-EX-012A · Audit and resolve pre-release correction vs post-release amendment semantics · P0 · 📋 DECISION PACKET DELIVERED — NO CODE CHANGED
+
+**Ticket:** DH-EX-012A. Decision/audit ticket only, per its own explicit instruction — no runtime
+implementation. DH-EX-012/ADR-044 separated `RESULT ENTERED` from `RESULT RELEASED` but left the
+result model immutable; this ticket audits current reality precisely and produces a decision
+packet distinguishing pre-release correction from post-release amendment so a future
+implementation ticket does not invent laboratory or clinical-record-keeping policy, per
+`AGENTS.md`'s "never assume-and-continue on anything with clinical or scope surface" rule.
+
+**Starting HEAD/CI:** `ef07854a7bddea92712b47bed949783e61260882` — fetched and audited fresh,
+matched the ticket's stated expectation exactly, working tree clean. CI run `34744104043`:
+success, all 9 jobs green (`adapter — ruff + pytest`, `ui`, `static checks`, and six
+maternity/OpenMRS/OpenELIS jobs unrelated to this ticket).
+
+---
+
+#### Current reality, reported exactly as found
+
+**1. `LabResult`'s exact contract** (`models.py:484-531`). Columns: `id`, `lab_order_item_id`
+(FK to `LabOrderItem`, `unique=True` — one row per item, enforced at the database level, not just
+application logic), `lab_organization_id`, `result_type` (`NUMERIC`/`TEXT`, CHECK), `numeric_value`/
+`numeric_unit`/`reference_range_low`/`reference_range_high` (`NUMERIC`-only), `text_value`
+(`TEXT`-only), `completed_at` (server-generated on insert). **Confirmed: no `entered_by_
+identity_id` column, no revision/version/supersedes column, no `superseded_by`/`supersedes_result_
+id` column anywhere in the model.** Searched package-wide, not scoped to a guessed subset: zero
+matches for `update(LabResult)` and zero attribute-assignment mutations on any `LabResult` instance
+anywhere in `adapter/src/daher_adapter/` (the two superficially similar grep hits are unrelated —
+`result_type ==` comparisons in Pydantic validators, and an unrelated `ProcessedMessage.completed_at`
+assignment in the safety ledger, a different model entirely). The only write to a `LabResult` row of
+any kind, anywhere in this codebase, is the single `INSERT` in `_submit_in_session`
+(`results.py:386-408`); a second attempt for the same item raises `DuplicateResult`
+(`results.py:115`, raised at both `results.py:381` — pre-insert check — and `results.py:406` —
+defensive UNIQUE-constraint-translation path). This one-row-per-item, insert-only model is real,
+current, and package-wide, not a simplification of the audit.
+
+**2. Current entering-actor provenance.** `LabResult` itself carries no actor. The only record of
+who entered a given result is the `lab_result_recorded` security-audit event
+(`api.py:2455-2463`), written in the same transaction as the result insert, with
+`actor_identity_id=principal.identity_id` and **`resource_id=order_id`** — not the item id, not the
+result id. Confirmed by the module's own comment (`security_audit.py:45`): *"audit stays
+order-centric, never per-item."* Consequence, stated precisely: for a multi-item order where
+different `LAB_TECH`s enter different items, DHealth can reconstruct "someone entered a result for
+this order, at this time, as this identity" per audit row, but there is **no direct foreign key
+from any `LabResult` row to its own `lab_result_recorded` audit row** — correlating "who entered
+*this specific* result" to a specific audit row requires matching `LabResult.completed_at` against
+`ExchangeSecurityAuditEvent.created_at` by closest timestamp, an inference, not a guaranteed exact
+join. This is materially weaker provenance than a first-class `entered_by_identity_id` column would
+provide, and is exactly the gap Decision 14 below asks about.
+
+**3. Current release provenance** (`models.py:534-570`, unchanged by this audit). `LabResultRelease`
+is one immutable row per `LabOrder` (`lab_order_id` UNIQUE), carrying `lab_organization_id`,
+`released_by_identity_id`, and system-generated `released_at`. The order moves to `COMPLETED` in the
+same transaction as this insert (`results.py:571-580`). Confirmed unchanged since DH-EX-012: no
+revision, no un-release, no delete method exists anywhere in `LabResultReleaseRepository`.
+
+**4. Confirmed destructive-update hazard (Decision 7's evidentiary basis).** The provider result-read
+route (`api.py:2594-2634`) calls `results.list_for_order(order_id)` on every request — a plain,
+uncached `SELECT ... JOIN LabOrderItem WHERE lab_order_id = :order_id` (`results.py:436-448`) —
+gated only on `LabOrder.status == COMPLETED`. `LabResultRelease` stores no copy of the result
+values themselves, only the fact that release occurred. **Consequence, verified by reading both
+code paths together, not assumed:** if a `LabResult` row were ever mutated in place after release
+(nothing today does this, but nothing in the schema or the read path would prevent or even detect
+it), the very next provider read of the same, already-released order would silently return the new
+value, under the identical, unchanged `LabResultRelease` record and the identical, already-terminal
+`DoctorReview` disposition if one exists — with no audit trail distinguishing "this is what was
+originally released" from "this is what changed after." This is the precise mechanism Decision 7's
+"NO" is evaluated against below, not a hypothetical.
+
+**5. Current `DoctorReview` behavior** (`models.py:601-625`, `results.py`'s
+`DoctorReviewRepository`, unchanged by this audit). One row per order (`lab_order_id` UNIQUE),
+created `PENDING` at order-creation time. Exactly one terminal mutation permitted — `mark_no_
+follow_up_required`/`mark_follow_up_required` — enforced by `_mark_in_session`'s check that
+`DoctorReviewStatus(review.status) != PENDING` before mutating; a second attempt raises `Review
+AlreadyFinalized` (409). **Confirmed: no review-reset, review-revision, or review-history mechanism
+exists anywhere in this codebase.** Once terminal, a `DoctorReview` row never becomes `PENDING`
+again through any code path.
+
+**6. Current `ResultDelivery` state** (`models.py:573-598`, unchanged by ADR-042/DH-EX-007/DH-EX-012
+per each of their own PROJECT_STATE entries). One row per order (`lab_order_id` UNIQUE),
+`PENDING`/`DELIVERED`/`FAILED`. Confirmed by grep of the full `exchange/` package: no code path
+anywhere calls `mark_delivered`/`mark_failed` as a side effect of anything — `DELIVERED`'s exact
+meaning remains an explicit, separate, still-undecided product question per ADR-043 (`docs/MVP-
+1.0.md` §10 item 6), untouched by this audit and not reopened here.
+
+**7. Relevant existing product boundary** (`docs/MVP-1.0.md` §13, unchanged, cited for Decision 3
+below): *"[The Exchange core] may not hold free-text clinical notes, a medication list, diagnosis
+history, or general encounter data."* This is a standing, already-decided boundary this audit does
+not reopen — it directly informs, but does not by itself resolve, Decision 3's free-text-reason
+question below.
+
+**8. Documentation drift noted while auditing, not fixed (out of this ticket's allowed changes).**
+`docs/MVP-1.0.md` §10's "Known gaps" list still names item 5, "No result validation/release step,
+distinct from result entry," as an open gap — DH-EX-012 resolved exactly this via ADR-044, so item 5
+is now stale. Not edited here (`docs/MVP-1.0.md` is not in this ticket's allowed-changes list);
+disclosed for the same reason the `api.py:557`→`652` citation drift above was disclosed rather than
+silently worked around.
+
+---
+
+#### Decision 1 — may pre-release results be corrected?
+
+**Option A — No** (abandon/restart operationally outside DHealth). Consequence, not dismissed:
+a lab tech who mistypes a value before release has no in-system remedy at all — not even before a
+provider has seen anything. For a synthetic-catalog pilot this is survivable (re-enter under a new
+order); for a real-patient pilot this means a mistyped value either ships anyway or the entire
+order must be operationally abandoned and recreated. **Precisely checked, not assumed:** a
+`CANCELLED` terminal status does exist in `LabOrderStatus` and is a valid transition target from
+`SELECTED`/`ACCEPTED`/`IN_PROGRESS` in `orders.py`'s own `_ALLOWED_TRANSITIONS` table
+(`orders.py:59-68`) — but **no HTTP API route anywhere exposes it** (confirmed by grep of the full
+`exchange/` package: `CANCELLED` appears only in the state machine and in one unrelated comment,
+never in a route decorator or handler). So "abandon and recreate" is reachable today only via
+direct repository/database access, not through any supported production workflow — a real, if
+narrower, gap than "no cancellation concept exists at all." Likely unacceptable for real use,
+recorded as evaluated, not assumed away.
+
+**Option B — Yes, destructive overwrite** (mutate the existing `LabResult` row in place). Simple,
+but: destroys the original entered value with no trace; `completed_at`'s meaning becomes ambiguous
+(entry of the original, or of the correction?); the `lab_result_recorded` audit row from the
+original entry now describes a value that no longer exists in the database, so audit history and
+the live row silently diverge; there is no way to later prove what was originally entered, which
+matters for any future dispute about whether release-time review saw a value that was later changed
+before the audit was examined. Evaluated critically, not adopted here.
+
+**Option C — Yes, immutable revision history** (never mutate/delete the original clinical value;
+insert a new revision that supersedes it; the current/effective result is derived explicitly).
+Preserves the original value, actor, and time; produces an auditable correction history; is the
+same architectural pattern this repository has already used twice for a different problem
+(`LabSampleCollection`, `LabResultRelease` — both "append an immutable fact row" rather than mutate
+an existing one). Costs: a new table or a new column shape, and every read path that currently
+assumes "one `LabResult` row per item" must be re-derived to mean "one *effective* result per item,
+computed from its most recent non-superseded revision." **Evaluated as the architecturally
+consistent choice, matching this codebase's own established pattern — not adopted here, since this
+is exactly the kind of clinical-record-keeping policy decision AGENTS.md requires Liban to make,
+not an agent.**
+
+---
+
+#### Decision 2 — who may correct before release?
+
+**Option A — `LAB_TECH`.** Symmetric with today's entry authority: whoever may enter may correct,
+provided the order has not yet been released. Simplest, and does not introduce a new authority
+concept before Decision 8 (post-release amendment) even exists.
+
+**Option B — `LAB_RESULT_RELEASER` only.** Requires a releaser to be involved in every correction,
+even a pre-release typo fix — a real timeliness cost in a small lab with one `LAB_TECH` on shift and
+no releaser present, the identical operational concern ADR-044's Question 2 already weighed for
+release itself.
+
+**Option C — a dedicated correction role.** Evaluated per the ticket's own instruction: likely
+premature before any real pilot has exercised even the base `LAB_TECH`/`LAB_RESULT_RELEASER` split,
+and would add a fourth lab-side role before the first three have real-world operational evidence.
+
+**Option D — role split by phase** (`LAB_TECH` may correct before release; post-release amendment
+requires stronger authority, e.g. `LAB_RESULT_RELEASER` or a new role). Consistent with this
+ticket's own framing that pre-release and post-release are materially different risk levels;
+recorded as evaluated, not adopted.
+
+---
+
+#### Decision 3 — must a correction have a reason?
+
+**Option A — free-text reason required.** Directly in tension with `docs/MVP-1.0.md` §13's existing,
+already-decided boundary that the Exchange core "may not hold free-text clinical notes" (quoted in
+full above) — a free-text correction-reason field is exactly the shape of data that boundary was
+written to exclude, plus the stated risks (PHI leakage, inconsistent prose, poor analytics,
+French/Somali/Afar/Arabic localization burden per `docs/MVP-1.0.md` §7). Evaluated as in tension
+with an existing decision, not merely undesirable in the abstract.
+
+**Option B — closed reason codes.** Explicitly **not designed in this ticket** — the codes
+themselves ("transcription error," "wrong unit," "sample mix-up," etc.) would constitute real
+laboratory-workflow/clinical-record-keeping content, the exact kind of invention AGENTS.md
+prohibits an agent from doing unprompted. If Liban selects this option, the actual code list is a
+separate decision requiring real laboratory input, not an output of this audit.
+
+**Option C — no reason required for MVP** (preserve old value, new value, actor, and time only, no
+"why"). Sufficient to satisfy "what did the original value say and who changed it," which is the
+audit question a pre-release typo-correction actually needs answered; does not by itself explain
+*why* a value was wrong. Evaluated as plausibly sufficient for pre-release correction specifically,
+where the change is not yet clinically consequential to a provider — not evaluated as necessarily
+sufficient for post-release amendment (Decision 8), where a receiving clinician may reasonably want
+to know why a value they already acted on changed.
+
+---
+
+#### Decision 4 — result-versioning schema shape
+
+**Option A — mutate `LabResult` in place.** Same weaknesses as Decision 1's Option B; the weakest
+auditability of the three, evaluated and not favored.
+
+**Option B — a separate `LabResultRevision` table**, with `LabResult` (or an equivalent
+canonical-item-identity row) pointing at whichever revision is current/effective. Keeps the
+"one canonical thing per item" query shape most existing code already assumes, while making every
+past revision an explicit, queryable row.
+
+**Option C — each row is itself a revision**, chained via `supersedes_result_id` (or the reverse,
+`superseded_by`), removing the current strict one-row-per-item UNIQUE constraint in favor of
+"exactly one *non-superseded* row per item." Closer to how `LabResultRelease` and
+`LabSampleCollection` already model single immutable facts, but changes the meaning of
+`LabResult.lab_order_item_id`'s current UNIQUE constraint materially — every existing read path
+(`get_for_item`, `list_for_order`, the provider result-read route, the lab inspection route) would
+need to filter on "not superseded" rather than assume the FK is already 1:1.
+
+**Not chosen here.** Option B's separate-table shape appears more consistent with this codebase's
+existing convention of a stable "current record" repository method (`get_for_item`, `list_for_
+order`) backed by a append-only history table underneath, mirroring `LabPrice`'s own current/
+superseded pattern already established for pricing (`LabPrice.superseded_at`, referenced throughout
+`catalog.py`) — flagged as the closer structural analogy already living in this repository, not
+adopted as a decision.
+
+---
+
+#### Decision 5 — what does `completed_at` mean after corrections?
+
+If revisions exist, each revision should carry its own entry timestamp (mirroring `LabPrice`'s
+existing effective-dating pattern), and the current API-contract field named `completed_at`
+(`LabResultSubmitResponse`, `ProviderResultItemResponse`) should keep exposing the *active*
+revision's own entry time — never silently renamed, matching DH-EX-012's own precedent of
+preserving an existing API-contract field name across a genuine semantic narrowing. Historical
+revisions retain their own original timestamps permanently; nothing here proposes renaming or
+removing the current field. Not adopted as binding — a future implementation ticket's job once
+Decision 4's schema shape is chosen.
+
+---
+
+#### Decision 6 — `ready_for_release` after a pre-release correction
+
+Confirmed by re-reading `_count_missing_results` (`results.py:726-737`): its query counts items
+with **no** `LabResult` row at all (`LabResult.id IS NULL`) — a corrected item, under any of
+Decision 4's revision shapes, would still have an effective/current result row satisfying that same
+join, so `ready_for_release` would correctly remain `True` if it already was. No new `LabOrderStatus`
+value is implied by this evaluation, consistent with the ticket's own instruction not to invent one.
+This is a mechanical consequence of whichever Decision 4 shape is chosen, not an independent
+decision — recorded here because the ticket asked it be evaluated explicitly, not because it
+requires its own vote.
+
+---
+
+#### Decision 7 — can a released result be changed in place? Evaluated as **NO**.
+
+Strongly evaluated, per the ticket's own framing, as **no** — not as a placeholder, but because
+"Current reality" item 4 above demonstrates the concrete mechanism directly: `LabResultRelease` is
+an authorization fact, not a value snapshot, and the provider read path re-queries `LabResult` live
+on every call. **The load-bearing invariant:** the values a `LAB_RESULT_RELEASER` actually
+authorized at the moment of release must remain reconstructable forever, exactly as they were at
+that moment — an in-place mutation after release would silently retroactively change what "the
+releaser authorized" is understood to mean, with no record that it ever happened. This is not a
+recommendation to build anything (Decision 8 covers what a post-release change *should* look like)
+— it is a evaluated, reasoned "no" to the narrower question "may an existing released `LabResult`
+row ever be UPDATEd," independent of whatever amendment mechanism, if any, is eventually chosen.
+Not implemented; no code enforces this today beyond the fact that no code currently attempts it.
+
+---
+
+#### Decision 8 — post-release amendment model (evaluated separately from pre-release correction)
+
+The ticket's own candidate shape — original release → later amendment → new result revision(s) →
+new release/amendment authorization — is evaluated as structurally plausible but raises questions
+this audit does not answer, per the ticket's own instruction that these require explicit
+product/laboratory decisions, not agent inference:
+
+- **Does amendment create a second `LabResultRelease`-like record, or extend the existing one?**
+  A second record preserves the existing row's immutability totally (favors Decision 7's invariant
+  directly); extending the existing row reopens exactly the mutation risk Decision 7 evaluates
+  against. Not decided here.
+- **Naming** ("released" vs. "amended" vs. "corrected report") has real consequences for how a
+  provider is meant to read the distinction — not a cosmetic choice, given `docs/MVP-1.0.md` §13's
+  standing "does not independently diagnose, interpret, or recommend" boundary means the label
+  itself must not imply a clinical judgment DHealth is not making. Not decided here.
+- **Does the original release remain immutable?** Consistent with Decision 7's evaluation, yes —
+  but *how* a provider is shown "there is a newer version" without silently overwriting what they
+  already saw is unanswered.
+- **Provider API shape for original vs. amended** (Decision 10 below) is unanswered.
+- **Which version is "current"** for a provider who has never looked at the order before is
+  unanswered — presumably the latest, but this is exactly the kind of "obviously should" instinct
+  AGENTS.md warns against treating as a green light.
+- **Clinician re-review** (Decision 9), **`ResultDelivery` interaction** (Decision 11), and
+  **patient-surface interaction** (Decision 12) are each evaluated in their own sections below,
+  not folded into this one.
+- **A hard structural constraint any amendment model must satisfy, confirmed by re-reading
+  `orders.py:59-68` — not a design preference:** `LabOrderStatus.COMPLETED: frozenset()` — `COMPLETED`
+  is terminal in the current state machine; no outbound transition is permitted from it by any code
+  path (`orders.py`'s own comment: *"no key means no outbound transition is ever permitted"*).
+  **Consequence:** whatever amendment model is eventually chosen cannot move an already-`COMPLETED`
+  order back out of `COMPLETED` to "re-release" it through the existing release path — the
+  `IN_PROGRESS→COMPLETED` guard DH-EX-012 added (requiring a `LabResultRelease` row to exist) would
+  already be trivially satisfied by the *original* release row, so amendment cannot reuse today's
+  release mechanism unmodified. Either the state machine itself gains a new transition (a real,
+  disclosed schema/behavior change, not a minor addition) or amendment is represented entirely
+  without a `LabOrderStatus` transition (e.g., a new record type layered on top of an order that
+  simply stays `COMPLETED`). Not decided here — recorded because it is a concrete "what today's code
+  makes impossible" finding, not a hypothetical.
+
+**Not adopted, not implementation-blocking on its own** for this audit ticket — recorded as an
+evaluated shape awaiting explicit decisions on each open sub-question, exactly as flagged in
+ADR-044's own "flagged risk, not a question requiring a vote" section, now sharpened into named
+questions.
+
+---
+
+#### Decision 9 — `DoctorReview` after amendment
+
+**Option A — leave the original review unchanged.** Confirmed live risk: `DoctorReview`'s own
+`_mark_in_session` (`results.py`) has no concept of "the result this review was about has since
+changed" — a `NO_FOLLOW_UP_REQUIRED` disposition would silently continue to describe a result value
+that may no longer be the current one, with nothing in the API response distinguishing "reviewed
+the current result" from "reviewed a now-superseded result." This is a real clinical-safety
+consequence, not a cosmetic one.
+
+**Option B — reset `DoctorReview` to `PENDING`.** Directly changes a previously terminal clinical
+workflow state — `ReviewAlreadyFinalized`'s entire purpose today is to make a terminal disposition
+un-overwritable; resetting it on amendment is a real, disclosed behavior change to an existing,
+already-shipped, already-tested invariant (DH-EX-007's own `test_second_terminal_review_is_a_
+controlled_conflict_not_a_silent_overwrite` and its siblings exist specifically to prove the
+opposite of what this option would do), not a minor addition.
+
+**Option C — review history/versioning** (a new review row per amendment, mirroring whichever
+Decision 4 shape is chosen for results). More robust, larger scope — but not a small change:
+`DoctorReview.lab_order_id` is `unique=True` (`models.py:616-618`), so multiple review rows per
+order are structurally impossible today without a migration widening or removing that constraint,
+the identical class of schema change Decision 4 evaluates for `LabResult` itself.
+
+**Option D — post-release amendment unsupported for MVP.** If chosen, this decision does not need
+resolving yet — but the ticket's own instruction stands: the real-operational fallback (what a lab
+actually does today, outside DHealth, when a released result needs correcting) must be documented,
+not left implicit. **Not documented by this audit**, since it is exactly the kind of real
+laboratory-operations input AGENTS.md says must come from Liban, not be assumed here.
+
+**Not chosen here.** All four options are live; none is silently adopted.
+
+---
+
+#### Decision 10 — provider visibility
+
+**Pre-release correction:** unaffected by any of the above — the provider result-read route already
+refuses any read before `COMPLETED` (`api.py:2601-2609`, unchanged, confirmed still in force), so a
+pre-release correction is invisible to the provider by construction, regardless of which Decision 1
+option is chosen.
+
+**Post-release amendment**, evaluated, not chosen: three shapes are possible under today's response
+model (`ProviderOrderResultsResponse`/`ProviderResultItemResponse`, `api.py`) — (a) only the newest
+effective values, silently replacing what was shown before (in tension with Decision 7's own
+invariant if the API itself provides no way to distinguish versions, even though the database
+retains history); (b) the newest values plus an explicit "amended" flag/timestamp so a provider can
+tell something changed without necessarily seeing the full history inline; (c) full historical
+values or separate report objects per release/amendment event, the most complete but also the
+largest response-shape change. **No option is adopted.** The one constraint already established as
+binding by Decision 7, not merely preferred: **no shape may silently replace already-released
+clinical content with no trace that a replacement occurred.**
+
+---
+
+#### Decision 11 — `ResultDelivery` interaction
+
+Confirmed unchanged and untouched by this audit, per the ticket's own instruction. `ResultDelivery`
+is one row per order (`lab_order_id` UNIQUE) with a still-undecided `DELIVERED` semantic (ADR-043,
+`docs/MVP-1.0.md` §10 item 6, not reopened here). **Evaluated finding, not a redesign:** today's
+one-row-per-order shape has no way to represent "this order has now had two distinct delivery
+events (original result, then an amended result)" without either overloading the single row's
+meaning or adding a second dimension to it — whichever Decision 8 shape is eventually chosen for
+amendment will need to resolve this incompatibility explicitly, but that resolution is out of this
+ticket's scope, exactly as instructed.
+
+---
+
+#### Decision 12 — patient-surface boundary
+
+Confirmed unchanged: `PatientOrderResponse` (`api.py:652`, `extra="forbid"` at `api.py:657`)
+defines no result field today (re-verified at this ticket's own starting SHA — the line number
+this repository's own `docs/MVP-1.0.md` §13 cites for this class, `api.py:557`, has drifted since
+that section was written and no longer points at it; corrected here rather than propagated) —
+patient raw result values remain out of MVP scope entirely, per ADR-042/ADR-043,
+unaffected by anything in this packet. **Recorded, not solved:** if post-release amendment is ever
+built, it may eventually require reconsidering the patient's "result ready"/review-status surface
+(a patient told "your result is ready" before an amendment might need a distinct signal after one),
+new notification content, and privacy-safe messaging semantics for what "amended" even means to a
+patient without disclosing clinical detail. No patient-facing change is made or proposed by this
+audit.
+
+---
+
+#### Decision 13 — legacy results and migration implications
+
+Every existing `LabResult` row today has no revision metadata of any kind (confirmed: the column
+does not exist). Any future versioning migration must define every pre-migration row truthfully as
+"original / revision 1" **only if that framing is semantically defensible** — i.e., only because
+every such row genuinely was the first and only value ever entered for that item, which is
+mechanically true today (no other value could have existed, since no code path has ever produced a
+second one). **What must not be fabricated, per the ticket's own instruction:** a correction actor,
+a correction reason, a correction timestamp, or any amendment history for a row that never had one
+— a legacy row's revision-1 framing must carry no invented "corrected from" predecessor. This
+mirrors DH-EX-011's and DH-EX-012's own established no-retroactive-fabrication discipline, applied
+here to a third invariant.
+
+---
+
+#### Decision 14 — should a future `entered_by_identity_id` be added directly to result rows?
+
+Evaluated, not decided. **Benefits:** self-contained clinical provenance — a future revision row
+would carry its own author without requiring a timestamp-proximity join against a separate,
+order-centric audit log (the exact weakness "Current reality" item 2 above documents concretely);
+easier, exact reconstruction of a full revision's author chain if Decision 4's Option B or C is ever
+built. **Risks/duplication:** the security-audit log already records `actor_identity_id` for every
+`lab_result_recorded` event; adding the same fact to the result/revision row itself is intentional
+duplication of provenance across two systems (the audit log and the clinical record), which is a
+defensible safety margin for a fact this consequential, or an avoidable redundancy, depending on how
+much trust is placed in the audit log alone remaining complete and correctly correlated forever.
+Not implemented; not resolved here — this decision only matters if Decision 4 chooses a schema that
+would benefit from it (Options B/C), so it is properly sequenced *after* Decision 4, not before it.
+
+---
+
+#### Recommended split, evaluated as instructed, not silently adopted
+
+The ticket's own proposed MVP strategy — support pre-release correction only first (immutable
+revision history, `LAB_TECH`-authorized, no reason required, no new provider/patient visibility
+before release, release still authorizes the final effective set, full history internal/auditable)
+while post-release amendment stays explicitly **NOT BUILT** until its own separate decision packet
+resolves Decisions 8–12 above — is evaluated as coherent with everything audited in this packet: it
+reuses the exact append-only-immutable-fact pattern this codebase already applies twice
+(`LabSampleCollection`, `LabResultRelease`); it introduces no new authority question beyond
+Decision 2 (already scoped to the existing `LAB_TECH`/`LAB_RESULT_RELEASER` split); and it defers
+every genuinely hard question (`DoctorReview` reset, provider-visibility-of-amendment shape,
+`ResultDelivery` interaction) rather than answering them under this ticket's own no-implementation
+constraint. **It is evaluated as structurally sound; it is not adopted here** — Decisions 1, 2, and
+3 (correction model, correction authority, reason requirement) are the ones that actually determine
+whether even the narrower "pre-release only" shape is usable, and they remain open and belong to
+Liban, exactly as this ticket's own governance requires.
+
+---
+
+#### The pilot question, answered as a decision, not an assumption
+
+**Is pre-release correction alone sufficient for DHealth's first real-patient pilot?** Not decided
+by this audit — this is squarely a Human Decision per the ticket's own explicit instruction ("do not
+decide it because of timeline pressure"). What this audit adds, precisely, so the decision is
+informed rather than guessed at: a real laboratory result can and does require post-release
+correction in real operations (a specimen mislabeling caught late, a transcription error noticed
+after the provider already looked, an instrument recalibration invalidating an already-released
+value) — this is not a hypothetical edge case being used to justify scope creep, it is a normal
+occurrence in real diagnostic laboratory operation, and DHealth today has **no** supported path for
+it once release has occurred. The three options the ticket names are real and distinct in cost:
+(1) **block the real-patient pilot** until post-release amendment exists — safest, delays the
+pilot; (2) **a documented facility fallback outside DHealth** (e.g., a phone call plus a paper
+corrected report, DHealth's own record left honestly stale with a note) — fastest, but means
+DHealth's own record can become known-wrong with no in-system trace, a real clinical-safety
+compromise if not paired with rigorous non-DHealth process discipline at the pilot facility; (3)
+**implement post-release amendment before pilot** — safest for the system's own record integrity,
+largest scope, delays the pilot the most. **No option is chosen or implied as preferred by this
+audit.**
+
+---
+
+#### Files changed
+
+`PROJECT_STATE.md` only (this entry). `DECISIONS.md` gains a new **ADR-045** entry, status `OPEN`,
+recording five explicit numbered questions — Question 1 (Decision 1: pre-release correction model),
+Question 2 (Decision 2: correction authority), Question 3 (Decision 3: reason requirement),
+Question 4 (Decision 9: `DoctorReview` after amendment), Question 5 (the pilot-sufficiency
+question) — plus Decision 8's remaining amendment-model sub-questions (release-record shape,
+provider-visibility shape, `ResultDelivery` interaction, the `COMPLETED`-is-terminal structural
+constraint) as unnumbered open prose, since those are not independently answerable until Question 5
+is resolved. A pointer back to this entry carries full evidence and every remaining decision (4, 6,
+7, 10–14) — following ADR-044's own established precedent for an `OPEN`-status ADR entry with a
+full audit packet living in `PROJECT_STATE.md`. No ADR is marked `ACCEPTED` by this ticket; no
+runtime code, test, migration, schema, role, provider API, patient API, `ResultDelivery`,
+`DoctorReview`, or `LabResult` mutation path was touched, confirmed by `git status --short` before
+committing.
+
+**What remains NOT decided by this ticket (by design):** the correction model (Decision 1), who may
+correct (Decision 2), whether a reason is required (Decision 3), the exact revision schema shape
+(Decision 4 — evaluated, not chosen), the full post-release amendment model (Decision 8) and its
+`DoctorReview` (Decision 9) and provider-visibility (Decision 10) consequences, and — the decision
+with the most consequence for pilot timing — whether pre-release-correction-only is sufficient for
+DHealth's first real-patient pilot, or whether post-release amendment must exist first.
+
+**Next:** once Liban answers Decisions 1–3 (the pre-release correction shape) and separately
+Decisions 8–9 (whether/how post-release amendment is built at all) and the pilot-sufficiency
+question, a DH-EX-012B implementation ticket can proceed without inventing laboratory or
+clinical-record-keeping policy. Per this ticket's own final instruction, implementation is **not
+started here**.
+
+**Human Decision Required: YES** (Decisions 1, 2, 3, 8, 9, and the pilot-sufficiency question
+specifically; the packet as a whole cannot be closed without them).
+
+**READY FOR LIBAN DECISION: YES**
