@@ -13554,16 +13554,18 @@ manifest, or review-binding survives when the transaction is forced to fail.
   unchanged (order-oriented, internally version-aware), plus new `get_for_release_version` and
   `get_history_for_order` for DH-EX-014B's future use.
 - New release-version repository reads: `get_latest_release_version`, `get_release_version_history`,
-  `get_release_version`, `get_manifest_for_order`, `get_manifest_for_version` — all O(1) queries
-  regardless of item/observation count (one version-lookup query, one batched joined manifest query,
-  each wrapped in the sessionmaker's own transaction statements), matching this module's own
-  established no-N+1 discipline. **Measured, not just reasoned about** (ticket's own explicit
-  requirement): a new test
+  `get_release_version`, `get_manifest_for_order`, `get_manifest_for_version` — **two logical
+  queries** regardless of item/observation count (one version-lookup `SELECT`, one batched joined
+  manifest `SELECT`), matching this module's own established no-N+1 discipline. **Measured, not
+  just reasoned about** (ticket's own explicit requirement): a new test
   (`test_get_manifest_for_order_query_count_does_not_scale_with_item_count`) hooks SQLAlchemy's
   `before_cursor_execute` event and counts SQL statements for `get_manifest_for_order` against a
   1-item/1-observation order versus a 5-item/10-observation order, asserting the counts are
-  **identical** (3 statements measured for both) rather than asserting a hardcoded magic number —
-  so the test
+  **identical** (3 cursor executions measured for both — the two logical `SELECT`s above plus one
+  `BEGIN`, which `conftest.py:33-35`'s explicit-transaction SQLite/pysqlite workaround emits per
+  test-fixture session and which real PostgreSQL's driver does not; the statement list was printed
+  and inspected directly, not inferred) rather than asserting a hardcoded magic number — so the
+  test
   goes red if a future change introduces a per-item or per-observation query, not merely if today's
   exact count changes for an unrelated reason.
 
