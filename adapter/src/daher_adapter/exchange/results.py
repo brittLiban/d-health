@@ -1375,6 +1375,9 @@ class LabResultReleaseRepository:
     ) -> ReleaseVersionManifestRecord:
         # One joined query regardless of item/observation count -- no N+1, matching this module's
         # own established query-count discipline (`get_for_lab`'s two/three-query pattern).
+        # Joining LabResult by item (not by observation's lab_result_id) is safe only because
+        # LabResult.lab_order_item_id is database-UNIQUE (ADR-047: one container per item) -- this
+        # cannot fan out into duplicate rows per observation.
         rows = session.execute(
             select(LabOrderItem, LabResult, LabObservation)
             .select_from(LabResultReleaseManifestEntry)

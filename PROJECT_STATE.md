@@ -13478,12 +13478,15 @@ unreachable legacy shape) — verified zero version/manifest rows created; (4) a
 `reviewed_at`/`reviewed_by_practitioner_reference_id` preserved verbatim for the terminal-review
 scenario, never reset or fabricated.
 
-**Second, independent backfill validation** (beyond the four seeded scenarios above): the 0018
-migration was also run against the still-existing `dhex012c_qual` and `dhex013_qual` real-PostgreSQL
-databases from DH-EX-012C's and DH-EX-013's own qualification runs — real released-order data
-produced by prior tickets' actual code paths, not seeded for this ticket. Both migrated cleanly and
-both tickets' own qualification suites still passed afterward, confirming the backfill logic holds
-against genuine historical data, not only against this ticket's purpose-built fixtures.
+**Second, independent backfill validation** (beyond the four seeded scenarios above, added after
+advisor review): the still-existing `dhex012c_qual` and `dhex013_qual` real-PostgreSQL databases
+from DH-EX-012C's and DH-EX-013's own qualification runs — real released-order data produced by
+prior tickets' actual code paths, not seeded for this ticket — were confirmed already at
+`alembic_version = 0018_exchange_release_versions` (`SELECT version_num FROM alembic_version`,
+observed directly), and both tickets' own qualification suites (`test_dhex012c_postgres_
+qualification.py`, `test_dhex013_postgres_qualification.py`) were re-run against them: **8 passed,
+0 failures**, confirming the backfill logic holds against genuine historical data, not only against
+this ticket's purpose-built fixtures.
 
 **Downgrade guards, each independently demonstrated against real PostgreSQL:**
 `DowngradeBlockedByAmendmentReleaseVersionHistory` (any `version_number > 1` row) and
@@ -13552,13 +13555,15 @@ manifest, or review-binding survives when the transaction is forced to fail.
   `get_history_for_order` for DH-EX-014B's future use.
 - New release-version repository reads: `get_latest_release_version`, `get_release_version_history`,
   `get_release_version`, `get_manifest_for_order`, `get_manifest_for_version` — all O(1) queries
-  regardless of item/observation count (one version lookup, one batched joined manifest query),
-  matching this module's own established no-N+1 discipline. **Measured, not just reasoned about**
-  (ticket's own explicit requirement): a new test
+  regardless of item/observation count (one version-lookup query, one batched joined manifest query,
+  each wrapped in the sessionmaker's own transaction statements), matching this module's own
+  established no-N+1 discipline. **Measured, not just reasoned about** (ticket's own explicit
+  requirement): a new test
   (`test_get_manifest_for_order_query_count_does_not_scale_with_item_count`) hooks SQLAlchemy's
   `before_cursor_execute` event and counts SQL statements for `get_manifest_for_order` against a
   1-item/1-observation order versus a 5-item/10-observation order, asserting the counts are
-  **identical** (both 3 statements) rather than asserting a hardcoded magic number — so the test
+  **identical** (3 statements measured for both) rather than asserting a hardcoded magic number —
+  so the test
   goes red if a future change introduces a per-item or per-observation query, not merely if today's
   exact count changes for an unrelated reason.
 
