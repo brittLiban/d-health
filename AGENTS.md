@@ -223,3 +223,82 @@ records a *proposed*, not secured, pilot shape; §8 states plainly that no manua
 demonstration, real Keycloak qualification, production deployment, or real-patient pilot exists for
 the Exchange. Treat "CI-qualified" and "pilot-ready" as different claims — a green CI run is not a
 pilot-readiness declaration on either track.
+
+<!-- BEGIN CODEX DHEALTH ORCHESTRATION -->
+## Codex DHealth orchestration
+
+These instructions govern the PRIMARY Codex agent. For every non-trivial DHealth implementation
+ticket, the primary agent must automatically use the project-scoped `dhealth_advisor` custom agent
+as an independent reviewer twice: once before implementation and once after implementation and
+testing. A non-trivial ticket includes any ticket that changes runtime behavior, domain or database
+models, schema or migrations, authorization or tenant boundaries, patient-data handling, clinical
+or laboratory workflow, API contracts, interoperability, or materially changes the tests or
+documentation that assert those behaviors. Both advisor reviews remain part of the current ticket
+and do not authorize work on an adjacent ticket.
+
+### PHASE 1 — AUDIT
+
+- Inspect current git HEAD and the working tree before making changes.
+- Read the relevant repository instructions, ADRs, `PROJECT_STATE.md` entries, architecture docs,
+  implementation, migrations, and tests.
+- Verify that the ticket still matches current repository reality; current code and fresh evidence
+  take precedence over stale summaries.
+- Reproduce the issue first when applicable.
+
+### PHASE 2 — PLAN
+
+- Create a concrete implementation plan scoped only to the current ticket.
+- Identify assumptions and unresolved decisions explicitly. Do not silently resolve anything with
+  clinical or scope surface.
+
+### PHASE 3 — INDEPENDENT ADVISOR REVIEW
+
+- Automatically spawn the `dhealth_advisor` custom agent.
+- Give it the ticket and enough context to independently inspect the repository, including the
+  proposed plan and the relevant scope, but do not merely give it the primary agent's conclusions.
+- Ask it to attack the proposed plan and find real architecture, database, security, workflow,
+  migration, compatibility, evidence, and test risks.
+- Wait for the advisor to finish before proceeding.
+
+### PHASE 4 — RECONCILE
+
+- Evaluate every advisor finding against repository evidence; the advisor is independent, not
+  automatically correct.
+- Fix or revise the plan for every valid finding and record the disposition of every finding.
+- If any finding is `HUMAN DECISION REQUIRED`, STOP and ask Liban. The primary agent must not make
+  that decision itself.
+- If no human decision is required, continue automatically.
+
+### PHASE 5 — IMPLEMENT
+
+- Implement only the current ticket. Do not start adjacent tickets.
+- Preserve all repository invariants and existing ADR decisions.
+- Do not invent clinical semantics or fabricate historical data or provenance.
+- Perform appropriate migrations, tests, real-PostgreSQL qualification, concurrency checks, and
+  negative controls wherever relevant to the ticket and its claims.
+
+### PHASE 6 — FINAL INDEPENDENT REVIEW
+
+- After implementation and tests, automatically spawn `dhealth_advisor` again.
+- Require it to independently inspect the actual diff, migrations, implementation, tests,
+  documentation, and execution evidence.
+- Do not let it rely only on the primary agent's final report or summary.
+
+### PHASE 7 — FIX AND VERIFY
+
+- Address every valid `BLOCKER` and `SHOULD FIX` finding within the current ticket.
+- Rerun all affected tests, qualification, concurrency checks, and negative controls.
+- If addressing a finding materially changes the architecture or plan, have `dhealth_advisor`
+  re-review the changed design or implementation.
+- A `HUMAN DECISION REQUIRED` finding still stops work for Liban; the primary agent must not infer
+  the answer.
+
+### PHASE 8 — FINAL REPORT
+
+- Report the exact HEAD and commit where applicable.
+- Report every file changed and every decision made.
+- Report the tests and qualification actually executed, including exact negative controls actually
+  executed.
+- Report known remaining gaps and all advisor findings with their dispositions.
+- Clearly distinguish VERIFIED facts from assumptions and state what was not proven.
+<!-- END CODEX DHEALTH ORCHESTRATION -->

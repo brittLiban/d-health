@@ -13680,3 +13680,123 @@ build`).
 **DH-EX-014A CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+
+### Repository tooling note · 2026-09-14 · `dhealth_advisor` model pin
+
+The project-scoped Codex reviewer at `.codex/agents/dhealth_advisor.toml` now explicitly sets
+`model = "gpt-6-astra"` instead of inheriting the primary agent's model. Its existing
+`model_reasoning_effort = "high"`, `sandbox_mode = "read-only"`, description, and complete
+`developer_instructions` are unchanged. `AGENTS.md`'s existing two-review orchestration is also
+unchanged. No DHealth runtime code, schema, migration, ADR, DH-EX ticket, or primary-agent model was
+changed by this tooling update.
+
+**Validation:** read-only structural checks found exactly one explicit `gpt-6-astra` model setting,
+one `high` reasoning setting, one `read-only` sandbox setting, and one intact multiline
+`developer_instructions` block. No runtime or clinical tests were run because this change affects
+only Codex agent configuration.
+
+---
+
+### DH-EX-014B · Post-release amendment preparation/release · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+
+**Ticket:** DH-EX-014B. Implements post-release amendment preparation and release under ADR-048
+Model 3 (accepted by Liban in ADR-048 §19 items 1–6). Resolves the required real-patient-pilot
+blocker on post-release amendments.
+
+**Recovery & Continuity:** Taken over from an interrupted session where the previous agent reached
+its platform limits before completing real-PostgreSQL qualification, negative controls, and CI.
+The existing working tree was audited and preserved in place; no work was discarded, reset, or
+restarted.
+
+**Implementation:**
+- **Schema & Migration (`0019_exchange_amendments`):**
+  - Added `lab_result_amendments` table (`id`, `lab_order_id`, `amendment_number`, `state`,
+    `reason`, `prepared_by_user_id`, `released_by_user_id`, `released_version_id`, `created_at`,
+    `released_at`).
+  - Added foreign key `lab_observations.amendment_id` referencing `lab_result_amendments.id`.
+  - Added partial unique index `uq_lab_result_amendment_preparing` on `(lab_order_id)` WHERE
+    `state = 'PREPARING'`, guaranteeing at the database level that at most one active amendment
+    preparation episode can exist per order.
+  - Downgrade guards: fail-closed with `DowngradeBlockedByAmendmentHistory` if any amendment exists,
+    and with `DowngradeBlockedByAmendmentAuditVocabulary` if amendment security audit events exist.
+- **Lifecycle & Workflows (`models.py`, `results.py`, `api.py`):**
+  - Amendment lifecycle: `PREPARING` → `RELEASED`. Starting an amendment requires order `COMPLETED`
+    status and verifies no other `PREPARING` episode exists.
+  - Role separation: `LAB_TECH` initiates amendment (`POST .../amendments/start`) with non-empty reason
+    and records corrections (`POST .../amendments/{id}/observations/{obs_id}/correct`).
+  - Unchanged observation reuse: multi-item orders preserve unchanged items' latest released
+    observations into the new version manifest without copying or data duplication.
+  - Separate authorization for release: only `LAB_RESULT_RELEASER` can release an amendment
+    (`POST .../amendments/{id}/release`). Releasers alone cannot start or correct (403); techs
+    alone cannot release (403).
+  - Version creation & DoctorReview binding: releasing creates a new `LabResultReleaseVersion`
+    (e.g., Version 2), creates its immutable manifest (`LabResultReleaseManifestItem`), marks the
+    amendment `RELEASED`, and creates a fresh `PENDING` `DoctorReview` bound to the new release version.
+  - Review version targeting: once Version 2 exists, unversioned review mutations reject with
+    `ExplicitReviewVersionRequired` (409) to prevent clinicians from inadvertently reviewing an
+    unseen version. New version-targeted review endpoints (`POST .../release-versions/{v}/review/...`)
+    bind the review to the explicit version.
+  - Provider exact-version reads: `GET .../release-versions/{v}` returns the exact manifest-backed
+    observations and review status for that release version, isolated from subsequent mutations.
+  - Audit vocabulary: added `lab_result_amendment_started`, `lab_result_amendment_corrected`, and
+    `lab_result_amendment_released` security audit event types.
+
+**Independent Advisor Review (`dhealth_advisor`):**
+- Spawned `dhealth_advisor` (GPT-6 Astra, high reasoning, read-only) for Phase 6 independent review.
+- Findings and dispositions:
+  - `[BLOCKER-1]`: Real-PostgreSQL qualification, downgrade safety, and negative controls —
+    **RESOLVED**: executed full real-PostgreSQL test suite (33 passed across 6 files), clean migration
+    0018->0019->0018->0019, downgrade guard executions, and 8 mandatory negative controls.
+  - `[SHOULD-FIX-1]`: Documentation cross-references in `CURRENT_STATE.md`, `docs/MVP-1.0.md`, and
+    `docs/ARCHITECTURE.md` had stale "unimplemented/deferred to DH-EX-014B" phrases in earlier sections,
+    and `PROJECT_STATE.md` needed its final entry — **RESOLVED**: updated all three documents and
+    authored this final entry; removed draft interim entry.
+  - `[OPTIONAL-1]`: Sequential review queries in `get_provider_release_version_history` — evaluated;
+    bounded by version count (typically 1–3); retained for correctness and clarity.
+  - `HUMAN DECISION REQUIRED`: None.
+
+**Negative Controls Actually Executed:**
+1. *NC 1 / NC 2 (Released amendment manifest backing):* Defeated manifest-backed observation lookup in
+   `results.py:1841` -> `test_lab_order_inspection_shows_preparing_amendment_proposals_then_releases_cleanly`
+   failed with `AssertionError: assert Decimal('3.0000') == Decimal('2')`. Restored.
+2. *NC 3 (Clinician review version targeting):* Disabled `ExplicitReviewVersionRequired` guard in
+   `results.py:2268` -> `test_doctor_review_rejects_ambiguous_order_review_once_amendment_version_exists`
+   failed with `Failed: DID NOT RAISE ExplicitReviewVersionRequired`. Restored.
+3. *NC 4 (Releaser authorization boundary):* Weakened `release_lab_order_amendment` authorization in
+   `api.py:3397` to `_require_lab_tech` -> `test_amendment_and_version_routes_preserve_role_and_tenant_boundaries`
+   failed with `assert 409 == 403`. Restored.
+4. *NC 5 (Provider exact-version isolation):* Leaked latest order manifest into version read in
+   `api.py:3536` -> `test_provider_exact_version_content_route_returns_target_manifest_and_review`
+   failed with `AssertionError: assert Decimal('2.0000') == Decimal('1')`. Restored.
+5. *NC 6 (Amendment lifecycle terminality):* Disabled `AmendmentNotPreparing` check in `results.py:1750` ->
+   `test_amendment_lifecycle_terminality_and_replay_contracts` failed with `StaleObservationVersion`
+   instead of `AmendmentNotPreparing`. Restored.
+6. *NC 7 (Downgrade guard on amendment history):* Attempted downgrade on real PostgreSQL with an amendment
+   row -> failed closed with `DowngradeBlockedByAmendmentHistory`.
+7. *NC 8 (Downgrade guard on audit vocabulary):* Attempted downgrade on real PostgreSQL with an amendment
+   audit event row -> failed closed with `DowngradeBlockedByAmendmentAuditVocabulary`.
+
+**Validation Actually Run:**
+- SQLite focused suite: `136 passed, 6 skipped` in `test_exchange_results.py` and `test_exchange_results_api.py`.
+- Full adapter test suite: `787 passed, 78 skipped` in 27.52s.
+- Real-PostgreSQL qualification on native PostgreSQL 18 in WSL (33 passed, 0 failures across 6 files):
+  - `test_dhex014b_postgres_qualification.py`: 6 passed (repeated 4 runs, 0 flakes)
+  - `test_dhex014a_postgres_qualification.py`: 4 passed
+  - `test_dhex013_postgres_qualification.py`: 4 passed
+  - `test_dhex012c_postgres_qualification.py`: 4 passed
+  - `test_dhex012_postgres_qualification.py`: 9 passed
+  - `test_dhex007_postgres_qualification.py`: 6 passed
+- Migration qualification: clean upgrade `0018 -> 0019`, clean downgrade `0019 -> 0018`, clean re-upgrade
+  `0018 -> 0019`, and both downgrade guards verified against real PostgreSQL.
+- Static analysis: Ruff check and format 100% clean on `src tests migrations scripts`.
+
+**Known Gaps:**
+- Real Keycloak qualification remains unperformed (identical to all previous Exchange tickets).
+- Manual live/browser demonstration remains unperformed (no Exchange UI built yet).
+- Production deployment does not exist; no real-patient pilot has begun.
+
+**Human Decision Required: NO** — all work adheres to Liban's accepted ADR-048 decisions.
+
+**DH-EX-014B CLOSED: YES.**
+
+**READY FOR LIBAN REVIEW: YES**

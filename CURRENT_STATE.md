@@ -1,5 +1,11 @@
 # Current State — Daher Health
 
+> **Current Exchange status (DH-EX-014B, 2026-09-14):** post-release amendment episodes,
+> immutable release-version history, provider exact-version reads, and version-bound review routes
+> are implemented and qualified against SQLite and real PostgreSQL. Real Keycloak qualification,
+> manual live/browser demonstration, and production deployment remain unrun; this does not establish
+> pilot readiness.
+
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (re-audited 2026-09-13, DH-FIELD-001) — an interoperable diagnostic network
 > (Exchange/Clinic/Lab/Patient/Connect), not primarily the maternity/birth-centre system the
@@ -7,11 +13,12 @@
 > is an honest, unmodified implementation inventory for the **maternity/reference-connector
 > track** — real, current, and still binding wherever that track is touched, just no longer the
 > definition of DHealth's overall scope. **The DHealth Exchange backend's own current state**
-> (DH-EX-001 through **DH-EX-014A** as of this note — organization onboarding, patient/order
+> (DH-EX-001 through **DH-EX-014B** as of this note — organization onboarding, patient/order
 > creation, provider- and patient-driven lab assignment, accept/reject/processing, an explicit
 > sample-collection milestone, a multi-observation result entry/completion workflow, an explicit
 > authorized release step distinct from entry, an immutable pre-release observation-correction
-> workflow, and an immutable release-version manifest + versioned review foundation — what's
+> workflow, an immutable release-version manifest + versioned review foundation, and post-release
+> amendment preparation/release under ADR-048 Model 3 — what's
 > WRITTEN/TESTED/CI-QUALIFIED/REAL-POSTGRESQL-QUALIFIED vs. NOT BUILT) is inventoried in
 > `docs/MVP-1.0.md` §8, not duplicated here; this file's own Exchange-era entries (search "DH-EX-")
 > remain as the detailed ticket-by-ticket record behind that summary. **The result data model that
@@ -22,11 +29,11 @@
 > (ADR-045 Questions 1–3, DH-EX-013): an immutable supersession chain
 > (`supersedes_observation_id`/`superseded_at`), never a destructive overwrite. **An immutable
 > release-version manifest binding every explicit release to its exact observation set, plus a
-> version-capable `DoctorReview`, is now implemented** (ADR-048 Model 3, DH-EX-014A) — provider reads
-> of a released order now derive content from that manifest, never live state. **Post-release
-> amendment itself remains unimplemented** (ADR-045 Questions 4–5, ADR-048's amendment-episode
-> scope) — deferred to DH-EX-014B, which Liban has decided must exist before DHealth's first
-> real-patient pilot. **DHealth Clinic,
+> version-capable `DoctorReview`, is implemented** (ADR-048 Model 3, DH-EX-014A) — provider reads
+> of a released order derive content from that manifest, never live state. **Post-release
+> amendment episodes and version releases are now implemented** (ADR-045 Questions 4–5, ADR-048
+> Model 3, DH-EX-014B) — lab tech prepares corrections in an amendment episode, authorized releaser
+> releases a new version manifest, and a fresh version-bound clinician review is required. **DHealth Clinic,
 > DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named applications anywhere
 > in this repository, on either track.
 
@@ -1735,3 +1742,10 @@ production deployment does not exist, and no pilot has begun.** A green CI run p
 suite and static checks passed on GitHub's runners; it does not independently confirm the
 605/42/1 test-count itself (this session read the run's job/step metadata, not its log output line
 by line), and it proves nothing about real-world/clinical readiness.
+
+**DH-EX-014B update (2026-09-14):** Post-release amendments now preserve immutable observation
+history, release a new manifest/version, and create a fresh version-bound clinician review
+obligation. SQLite unit/API tests (136 passed) and real-PostgreSQL qualification (33 passed across
+6 test suites, migration 0018->0019 upgrade/downgrade clean, and both downgrade guards verified)
+pass. Real Keycloak qualification, manual live/browser demonstration, and production deployment
+remain not run; this is not a pilot-readiness claim.

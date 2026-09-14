@@ -1,6 +1,4 @@
-"""DH-EX-001 models, DH-EX-007 workflow, DH-EX-012/ADR-044 release, DH-EX-012C/ADR-047
-multi-observation result domain, DH-EX-013/ADR-045 pre-release observation correction: lab results,
-explicit order-level result release, order completion, result delivery, and doctor review.
+"""DH-EX result entry, release, immutable correction/amendment history, delivery, and review.
 
 **DH-EX-013/ADR-045 (pre-release correction only).** A `LAB_TECH` at the selected lab may correct
 an *effective* (not yet superseded) observation while the order is still `IN_PROGRESS` -- before or
@@ -87,7 +85,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -103,6 +101,8 @@ from daher_adapter.exchange.models import (
     LabOrderItem,
     LabOrderStatus,
     LabResult,
+    LabResultAmendment,
+    LabResultAmendmentStatus,
     LabResultRelease,
     LabResultReleaseManifestEntry,
     LabResultReleaseVersion,
@@ -114,16 +114,26 @@ from daher_adapter.exchange.models import (
 from daher_adapter.models import utc_now
 
 __all__ = [
+    "AmendmentAlreadyInProgress",
+    "AmendmentBaseVersionSuperseded",
+    "AmendmentInspectionItemRecord",
+    "AmendmentInspectionRecord",
+    "AmendmentNotFound",
+    "AmendmentNotReadyForRelease",
+    "AmendmentNotPreparing",
     "DeliveryNotFound",
     "DoctorReviewRecord",
     "DoctorReviewRepository",
     "DuplicateResult",
     "EntryAlreadyCompleted",
     "EntryNotReadyForCompletion",
+    "ExplicitReviewVersionRequired",
     "InvalidResultSubmissionState",
     "LabOrderNotAssigned",
     "LabObservationHistoryRecord",
     "LabObservationRecord",
+    "LabResultAmendmentRecord",
+    "LabResultAmendmentRepository",
     "LabResultEntryCompletionRecord",
     "LabResultInspectionItemRecord",
     "LabResultInspectionRecord",
@@ -136,8 +146,10 @@ __all__ = [
     "ReleaseVersionManifestRecord",
     "LegacyCompletedOrderHasNoRelease",
     "MalformedZeroObservationEntry",
+    "ObservationNotEligibleForAmendment",
     "ObservationNotFound",
     "OrderItemNotFound",
+    "OrderNotCompletedForAmendment",
     "ResultDeliveryRecord",
     "ResultDeliveryRepository",
     "ResultsNotReadyForRelease",
@@ -229,9 +241,22 @@ class ReviewNotAllowedYet(RuntimeError):
 
 
 class ReviewAlreadyFinalized(RuntimeError):
-    """A DoctorReview mutation was attempted on a review that has already left ``PENDING`` -- V1
-    has no review-revision/amendment model, so a second terminal mutation is a controlled
-    conflict, never a silent overwrite of the first doctor's disposition."""
+    """A DoctorReview mutation was attempted on a review that has already left ``PENDING``.
+
+    Every released version has its own immutable obligation under ADR-048. A second terminal
+    mutation of that same version is therefore a controlled conflict, never an overwrite and
+    never a request to reset the review for a later version.
+    """
+
+
+class ExplicitReviewVersionRequired(RuntimeError):
+    """An order-only review request targeted an order with an amendment release.
+
+    The legacy route remains safe for grandfathered/unversioned orders and Version 1-only orders,
+    but once Version 2 exists a caller must name the exact release version whose content it
+    reviewed. This fails closed rather than silently applying a stale screen's disposition to the
+    newest version.
+    """
 
 
 class ResultsNotReadyForRelease(RuntimeError):
@@ -254,6 +279,66 @@ class LegacyCompletedOrderHasNoRelease(RuntimeError):
 
 class DeliveryNotFound(RuntimeError):
     pass
+
+
+# -- DH-EX-014B/ADR-048: post-release amendment ---------------------------------------------------
+
+
+class OrderNotCompletedForAmendment(RuntimeError):
+    """DH-EX-014B: an amendment operation was attempted against an order that is not (yet)
+    ``COMPLETED`` -- amendment is a versioned result-lifecycle layer on top of a terminal completed
+    order; it is never a way to act on an in-progress one. Distinct from
+    ``LegacyCompletedOrderHasNoRelease`` (the order *is* ``COMPLETED`` but has no release version at
+    all, i.e. grandfathered) -- these are two different reasons an order cannot be amended, exactly
+    mirroring ``ResultsNotReadyForRelease``/``LegacyCompletedOrderHasNoRelease``'s own established
+    distinction one level up."""
+
+
+class AmendmentAlreadyInProgress(RuntimeError):
+    """DH-EX-014B: a ``PREPARING`` amendment already exists for this order -- at most one at a
+    time, enforced by ``uq_exchange_amendments_one_preparing_per_order`` at the database level, not
+    merely here. A controlled conflict, never a silent second open episode."""
+
+
+class AmendmentNotFound(RuntimeError):
+    """DH-EX-014B: no ``LabResultAmendment`` matches the given id *for this exact order* --
+    identical response whether the amendment id is entirely bogus or belongs to a genuinely
+    different order, mirroring ``ObservationNotFound``'s own non-enumerating convention."""
+
+
+class AmendmentNotPreparing(RuntimeError):
+    """DH-EX-014B: a mutation (correction or release) was attempted against an amendment that has
+    already reached ``RELEASED`` -- terminal, no discard/reopen path exists anywhere in this
+    codebase."""
+
+
+class ObservationNotEligibleForAmendment(RuntimeError):
+    """DH-EX-014B: the target observation is currently effective but is neither named in this
+    amendment's own ``base_release_version_id`` manifest nor itself a revision already created by
+    *this same* ``PREPARING`` amendment -- see
+    ``LabResultAmendmentRepository.correct_observation``'s own docstring for the full eligibility
+    predicate this guards. Refuses starting a correction from an older historical release
+    observation, an observation belonging to a different amendment episode, or (structurally
+    prevented by ``StaleObservationVersion`` first in practice, but conceptually part of the same
+    guard) an already-superseded one."""
+
+
+class AmendmentBaseVersionSuperseded(RuntimeError):
+    """DH-EX-014B: defense-in-depth only -- structurally unreachable given
+    ``uq_exchange_amendments_one_preparing_per_order`` (at most one open amendment per order) plus
+    the ``LabOrder FOR UPDATE`` lock (no other path can create a new release version while this
+    amendment is ``PREPARING``). Raised if the order's latest release version at release time is
+    somehow not the exact version this amendment recorded as its ``base_release_version_id`` at
+    creation -- release refuses rather than silently releasing against a baseline the amendment was
+    never actually prepared against."""
+
+
+class AmendmentNotReadyForRelease(RuntimeError):
+    """DH-EX-014B: amendment release was attempted with zero observation revisions belonging to
+    this exact amendment episode -- an amendment can never release with no changes. Checked against
+    the episode itself (``LabObservation.amendment_id == this amendment's id``), never against
+    "has anything changed since the original release," which would be true for reasons unrelated to
+    this episode once a second amendment exists."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +364,10 @@ class LabObservationRecord:
     recorded_by_identity_id: uuid.UUID | None
     supersedes_observation_id: uuid.UUID | None
     superseded_at: datetime | None
+    amendment_id: uuid.UUID | None
+    """DH-EX-014B: ``None`` for an original entry or a pre-release (DH-EX-013) correction --
+    unchanged meaning, no retroactive fabrication for any historical row. Non-``None`` names the
+    exact ``LabResultAmendment`` episode that created this revision."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,15 +471,16 @@ class LabResultReleaseRecord:
 
 @dataclass(frozen=True, slots=True)
 class LabResultReleaseVersionRecord:
-    """DH-EX-014A/ADR-048: one released version of an order's result set.
-    ``lab_result_release_id`` is non-``None`` for version 1 only -- see
-    ``LabResultReleaseVersion``'s own ``models.py`` docstring for why a later version
-    (DH-EX-014B, not built here) binds differently."""
+    """DH-EX-014A/ADR-048, extended by DH-EX-014B: one released version of an order's result set.
+    ``lab_result_release_id`` is non-``None`` for version 1 only; ``amendment_id`` is non-``None``
+    for version 2+ only -- the two are mutually exclusive by the model's own ``CHECK`` constraint,
+    never both set and never both ``None``."""
 
     id: uuid.UUID
     lab_order_id: uuid.UUID
     version_number: int
     lab_result_release_id: uuid.UUID | None
+    amendment_id: uuid.UUID | None
     created_at: datetime
 
 
@@ -440,6 +530,53 @@ class DoctorReviewRecord:
     status: str
     reviewed_at: datetime | None
     reviewed_by_practitioner_reference_id: uuid.UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class LabResultAmendmentRecord:
+    """DH-EX-014B/ADR-048: one amendment episode -- ``PREPARING`` or ``RELEASED``, no other status
+    (Decision 4, no discardable draft for MVP). ``released_by_identity_id``/``released_at`` are
+    both ``None`` together while ``PREPARING``, both populated together exactly when
+    ``RELEASED``."""
+
+    id: uuid.UUID
+    lab_order_id: uuid.UUID
+    amendment_number: int
+    base_release_version_id: uuid.UUID
+    status: str
+    started_by_identity_id: uuid.UUID
+    started_at: datetime
+    released_by_identity_id: uuid.UUID | None
+    released_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentInspectionItemRecord:
+    """DH-EX-014B: one ordered item's *proposed* (currently effective) observation set as seen from
+    inside a specific amendment's inspection read -- ``changed_in_this_amendment`` is ``True``
+    exactly when at least one of this item's current observations carries this exact amendment's
+    id, so a lab user can see which items this episode has actually touched so far without
+    re-deriving it client-side."""
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    entry_completed_at: datetime
+    observations: tuple[LabObservationRecord, ...]
+    changed_in_this_amendment: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentInspectionRecord:
+    """DH-EX-014B: the lab-authorized-only pre-release-of-amendment inspection read -- "a releaser
+    must not be forced to release an amendment they cannot inspect," the identical framing
+    ``LabResultInspectionRecord`` already established for the original release. ``ready_to_release``
+    is a DB-grounded fact (at least one observation carries this amendment's id), never inferred
+    from item count or client-side state."""
+
+    amendment: LabResultAmendmentRecord
+    items: tuple[AmendmentInspectionItemRecord, ...]
+    ready_to_release: bool
 
 
 class LabResultRepository:
@@ -1243,19 +1380,11 @@ class LabResultReleaseRepository:
         # DH-EX-014A: the exact effective set this release authorizes, computed inside the same
         # LabOrder-locked transaction that already re-checked completeness above -- this is what
         # makes the manifest structurally unable to diverge from what was actually released.
-        # Identical query shape to `LabResultRepository.list_for_order`'s own effective-only read,
-        # deliberately not reused directly since that method opens its own session.
-        effective_rows = session.execute(
-            select(LabOrderItem.id, LabObservation.id)
-            .select_from(LabOrderItem)
-            .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
-            .join(
-                LabObservation,
-                (LabObservation.lab_result_id == LabResult.id)
-                & (LabObservation.superseded_at.is_(None)),
-            )
-            .where(LabOrderItem.lab_order_id == order_id)
-        ).all()
+        # DH-EX-014B: extracted to a shared module function, `_effective_observation_rows`, now
+        # reused identically by `LabResultAmendmentRepository`'s amendment-release path -- same
+        # query, same "no divergence possible" guarantee, not a second implementation to keep in
+        # sync.
+        effective_rows = _effective_observation_rows(session, order_id)
 
         version = LabResultReleaseVersion(
             lab_order_id=order_id,
@@ -1373,49 +1502,587 @@ class LabResultReleaseRepository:
     def _manifest_record_for_version(
         self, session: Session, version: LabResultReleaseVersion
     ) -> ReleaseVersionManifestRecord:
-        # One joined query regardless of item/observation count -- no N+1, matching this module's
-        # own established query-count discipline (`get_for_lab`'s two/three-query pattern).
-        # Joining LabResult by item (not by observation's lab_result_id) is safe only because
-        # LabResult.lab_order_item_id is database-UNIQUE (ADR-047: one container per item) -- this
-        # cannot fan out into duplicate rows per observation.
-        rows = session.execute(
-            select(LabOrderItem, LabResult, LabObservation)
-            .select_from(LabResultReleaseManifestEntry)
-            .join(
-                LabOrderItem,
-                LabResultReleaseManifestEntry.lab_order_item_id == LabOrderItem.id,
+        return _manifest_record_for_version(session, version)
+
+
+class LabResultAmendmentRepository:
+    """DH-EX-014B/ADR-048 Model 3: post-release amendment preparation and release, layered entirely
+    on top of a ``COMPLETED`` order -- never reopens it, never touches
+    ``LabResultRelease``/Version 1, never adds a new ``LabOrderStatus``. Lock order matches every
+    other mutation in this module exactly: ``LabOrder FOR UPDATE`` first, then the amendment row,
+    then (for a correction) the item/container/observation, then (for a release) the new version/
+    manifest/review -- two concurrent callers for the same order fully serialize at the first lock,
+    identical to ``_lock_order_and_item_for_entry``'s own established discipline.
+
+    **Deliberately does not reuse ``_lock_order_and_item_for_entry``** -- that preamble requires
+    ``IN_PROGRESS`` and is exactly the DH-EX-013 pre-release gate this ticket must never loosen
+    (required negative control 3). Amendment mutations require the *opposite* order status
+    (``COMPLETED``) plus their own amendment-state checks, so they get their own preamble, parallel
+    to it, never a modified branch of it."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._sessions = session_factory
+
+    # -- start ------------------------------------------------------------------------------------
+
+    def start_amendment(
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        started_by_identity_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> LabResultAmendmentRecord:
+        if session is not None:
+            return self._start_amendment_in_session(
+                session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                started_by_identity_id=started_by_identity_id,
             )
-            .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
-            .join(
-                LabObservation,
-                LabResultReleaseManifestEntry.lab_observation_id == LabObservation.id,
+        with self._sessions.begin() as owned_session:
+            return self._start_amendment_in_session(
+                owned_session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                started_by_identity_id=started_by_identity_id,
             )
-            .where(LabResultReleaseManifestEntry.release_version_id == version.id)
-            .order_by(LabOrderItem.id, LabObservation.recorded_at)
-        ).all()
-        observations_by_item: dict[uuid.UUID, list[LabObservation]] = {}
-        item_by_id: dict[uuid.UUID, LabOrderItem] = {}
-        entry_completed_at_by_item: dict[uuid.UUID, datetime] = {}
-        for item, container, observation in rows:
-            observations_by_item.setdefault(item.id, []).append(observation)
-            item_by_id[item.id] = item
-            # Never None here -- release() only ever creates a manifest entry from an item whose
-            # entry was already proven complete by the same completeness re-check that gates
-            # release itself.
-            entry_completed_at_by_item[item.id] = container.entry_completed_at  # type: ignore[assignment]
-        items = tuple(
-            ReleaseManifestItemRecord(
-                item_id=item_id,
-                catalog_code_snapshot=item_by_id[item_id].catalog_code_snapshot,
-                catalog_display_name_snapshot=item_by_id[item_id].catalog_display_name_snapshot,
-                entry_completed_at=entry_completed_at_by_item[item_id],
-                observations=tuple(_to_observation_record(o) for o in observations),
-            )
-            for item_id, observations in observations_by_item.items()
+
+    def _start_amendment_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        started_by_identity_id: uuid.UUID,
+    ) -> LabResultAmendmentRecord:
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
         )
-        return ReleaseVersionManifestRecord(
-            version=_to_release_version_record(version), items=items
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        if LabOrderStatus(order.status) != LabOrderStatus.COMPLETED:
+            raise OrderNotCompletedForAmendment(
+                f"LabOrder {order_id} is {order.status!r}, not 'COMPLETED' -- an amendment may "
+                f"only be prepared against an order whose original results have already been "
+                f"released"
+            )
+
+        latest_version = session.scalar(
+            select(LabResultReleaseVersion)
+            .where(LabResultReleaseVersion.lab_order_id == order_id)
+            .order_by(LabResultReleaseVersion.version_number.desc())
+            .limit(1)
         )
+        if latest_version is None:
+            raise LegacyCompletedOrderHasNoRelease(
+                f"LabOrder {order_id} is 'COMPLETED' but has no release version -- a "
+                f"grandfathered order with no explicit LabResultRelease is not amendment-eligible "
+                f"(ADR-048 Decision 6); DHealth will not fabricate a historical release/version "
+                f"for it"
+            )
+
+        existing_preparing = session.scalar(
+            select(LabResultAmendment).where(
+                LabResultAmendment.lab_order_id == order_id,
+                LabResultAmendment.status == LabResultAmendmentStatus.PREPARING.value,
+            )
+        )
+        if existing_preparing is not None:
+            raise AmendmentAlreadyInProgress(
+                f"LabOrder {order_id} already has a PREPARING amendment "
+                f"({existing_preparing.id}, "
+                f"amendment_number={existing_preparing.amendment_number}) -- at most one open "
+                f"amendment may exist per order at a time"
+            )
+
+        next_number = (
+            session.scalar(
+                select(func.coalesce(func.max(LabResultAmendment.amendment_number), 0)).where(
+                    LabResultAmendment.lab_order_id == order_id
+                )
+            )
+            + 1
+        )
+
+        amendment = LabResultAmendment(
+            lab_order_id=order_id,
+            amendment_number=next_number,
+            base_release_version_id=latest_version.id,
+            status=LabResultAmendmentStatus.PREPARING.value,
+            started_by_identity_id=started_by_identity_id,
+            started_at=utc_now(),
+        )
+        try:
+            with session.begin_nested():
+                session.add(amendment)
+                session.flush()
+        except IntegrityError:
+            # Defensive last line only, mirroring every other container-creation pattern in this
+            # module -- the LabOrder FOR UPDATE lock above already serializes concurrent start
+            # attempts for this exact order down to one winner, so this should never actually fire
+            # in practice; the partial unique index is the real backstop for anything that reaches
+            # this table any other way.
+            raise AmendmentAlreadyInProgress(
+                f"LabOrder {order_id} already has a PREPARING amendment (constraint-detected)"
+            ) from None
+        return _to_amendment_record(amendment)
+
+    # -- amendment-scoped observation correction --------------------------------------------------
+
+    def correct_observation(
+        self,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        result_type: LabResultType,
+        source_code: str,
+        display_label_snapshot: str,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None = None,
+        numeric_unit: str | None = None,
+        reference_range_low: Decimal | None = None,
+        reference_range_high: Decimal | None = None,
+        text_value: str | None = None,
+        session: Session | None = None,
+    ) -> LabObservationRecord:
+        """DH-EX-014B: supersedes a currently-effective observation with one new, immutable
+        ``LabObservation`` row carrying ``amendment_id`` -- immediate/permanent revision semantics
+        (ADR-048 Decision 4), never a discardable draft. Never mutates the predecessor's value; the
+        only field ever written on it is ``superseded_at``, identical to DH-EX-013's own
+        pre-release correction.
+
+        **The eligibility predicate, in one check, not four:** the predecessor must be currently
+        effective (``superseded_at IS NULL``) *and* either (a) named in this amendment's own
+        ``base_release_version_id`` manifest, or (b) itself carry this exact amendment's id. (a)
+        covers every observation unchanged since the base release; (b) covers reconsidering an
+        already-amended-but-not-yet-released value within the same episode (B1 released -> B2
+        amendment revision -> B3 second amendment revision before release, all three permanently
+        preserved). This single predicate rejects, without a special case for each: an older
+        historical release observation (not in the base manifest, no matching amendment_id), an
+        already-superseded observation (caught by the effective check first), an observation
+        belonging to a different amendment episode (not in *this* amendment's base manifest -- it
+        may be in a later one -- and its ``amendment_id`` is not this amendment's), and any
+        cross-order/cross-item observation (rejected earlier by the item/container ownership check
+        below, before this predicate is ever evaluated)."""
+        if session is not None:
+            return self._correct_observation_in_session(
+                session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                result_type=result_type,
+                source_code=source_code,
+                display_label_snapshot=display_label_snapshot,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                numeric_unit=numeric_unit,
+                reference_range_low=reference_range_low,
+                reference_range_high=reference_range_high,
+                text_value=text_value,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._correct_observation_in_session(
+                owned_session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                result_type=result_type,
+                source_code=source_code,
+                display_label_snapshot=display_label_snapshot,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                numeric_unit=numeric_unit,
+                reference_range_low=reference_range_low,
+                reference_range_high=reference_range_high,
+                text_value=text_value,
+            )
+
+    def _correct_observation_in_session(
+        self,
+        session: Session,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        result_type: LabResultType,
+        source_code: str,
+        display_label_snapshot: str,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None,
+        numeric_unit: str | None,
+        reference_range_low: Decimal | None,
+        reference_range_high: Decimal | None,
+        text_value: str | None,
+    ) -> LabObservationRecord:
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        if LabOrderStatus(order.status) != LabOrderStatus.COMPLETED:
+            raise OrderNotCompletedForAmendment(
+                f"LabOrder {order_id} is {order.status!r}, not 'COMPLETED'"
+            )
+
+        amendment = session.get(LabResultAmendment, amendment_id)
+        if amendment is None or amendment.lab_order_id != order_id:
+            raise AmendmentNotFound(str(amendment_id))
+        if LabResultAmendmentStatus(amendment.status) != LabResultAmendmentStatus.PREPARING:
+            raise AmendmentNotPreparing(
+                f"LabResultAmendment {amendment_id} is {amendment.status!r}, not 'PREPARING'"
+            )
+
+        item = session.get(LabOrderItem, lab_order_item_id)
+        if item is None or item.lab_order_id != order_id:
+            raise OrderItemNotFound(str(lab_order_item_id))
+
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item.id))
+        if container is None:
+            raise ObservationNotFound(str(observation_id))
+
+        predecessor = session.scalar(
+            select(LabObservation).where(LabObservation.id == observation_id)
+        )
+        if predecessor is None or predecessor.lab_result_id != container.id:
+            raise ObservationNotFound(str(observation_id))
+        if predecessor.superseded_at is not None:
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective -- an amendment "
+                f"correction must start from the currently effective observation"
+            )
+
+        in_base_manifest = session.scalar(
+            select(LabResultReleaseManifestEntry.id).where(
+                LabResultReleaseManifestEntry.release_version_id
+                == amendment.base_release_version_id,
+                LabResultReleaseManifestEntry.lab_observation_id == predecessor.id,
+            )
+        )
+        eligible = in_base_manifest is not None or predecessor.amendment_id == amendment.id
+        if not eligible:
+            raise ObservationNotEligibleForAmendment(
+                f"LabObservation {observation_id} is neither part of amendment "
+                f"{amendment_id}'s base release version manifest nor a revision already created "
+                f"by this same amendment -- refusing to start a correction from it"
+            )
+
+        successor = LabObservation(
+            lab_result_id=container.id,
+            source_code=source_code,
+            source_system=NATIVE_OBSERVATION_SOURCE_SYSTEM,
+            display_label_snapshot=display_label_snapshot,
+            result_type=result_type.value,
+            numeric_value=numeric_value,
+            numeric_unit=numeric_unit,
+            reference_range_low=reference_range_low,
+            reference_range_high=reference_range_high,
+            text_value=text_value,
+            recorded_by_identity_id=corrected_by_identity_id,
+            supersedes_observation_id=predecessor.id,
+            amendment_id=amendment.id,
+        )
+        try:
+            with session.begin_nested():
+                session.add(successor)
+                predecessor.superseded_at = utc_now()
+                session.flush()
+        except IntegrityError:
+            # Defensive last line only -- see `LabResultRepository.correct_observation`'s
+            # identical pattern for why this is structurally unreachable in practice given the
+            # LabOrder FOR UPDATE lock acquired above.
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective (constraint-detected)"
+            ) from None
+        return _to_observation_record(successor)
+
+    # -- inspection -------------------------------------------------------------------------------
+
+    def get_amendment(self, amendment_id: uuid.UUID) -> LabResultAmendmentRecord | None:
+        """DH-EX-014B: fetch one amendment by its own immutable id. Callers are responsible for
+        their own lab/tenant authorization check before calling this, exactly mirroring
+        ``LabResultReleaseRepository.get_release_version``'s identical convention."""
+        with self._sessions() as session:
+            amendment = session.get(LabResultAmendment, amendment_id)
+            return None if amendment is None else _to_amendment_record(amendment)
+
+    def get_amendment_inspection(self, amendment_id: uuid.UUID) -> AmendmentInspectionRecord | None:
+        """Return the truthful inspection for one amendment episode.
+
+        A PREPARING episode shows the order's current effective proposal and may be ready to
+        release. A RELEASED episode is reconstructed from the immutable release manifest bound to
+        that exact amendment, never from later live state; its readiness is always false because
+        the release action is already complete. Callers perform the lab/tenant check first.
+        """
+        with self._sessions() as session:
+            amendment = session.get(LabResultAmendment, amendment_id)
+            if amendment is None:
+                return None
+
+            if LabResultAmendmentStatus(amendment.status) == LabResultAmendmentStatus.RELEASED:
+                version = session.scalar(
+                    select(LabResultReleaseVersion).where(
+                        LabResultReleaseVersion.amendment_id == amendment.id
+                    )
+                )
+                if version is None:
+                    raise AmendmentNotReadyForRelease(
+                        f"released LabResultAmendment {amendment.id} has no release version"
+                    )
+                manifest = _manifest_record_for_version(session, version)
+                return AmendmentInspectionRecord(
+                    amendment=_to_amendment_record(amendment),
+                    items=tuple(
+                        AmendmentInspectionItemRecord(
+                            item_id=item.item_id,
+                            catalog_code_snapshot=item.catalog_code_snapshot,
+                            catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                            entry_completed_at=item.entry_completed_at,
+                            observations=item.observations,
+                            changed_in_this_amendment=any(
+                                observation.amendment_id == amendment.id
+                                for observation in item.observations
+                            ),
+                        )
+                        for item in manifest.items
+                    ),
+                    ready_to_release=False,
+                )
+
+            rows = session.execute(
+                select(LabOrderItem, LabResult)
+                .outerjoin(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+                .where(LabOrderItem.lab_order_id == amendment.lab_order_id)
+            ).all()
+            if any(
+                container is None or container.entry_completed_at is None
+                for _item, container in rows
+            ):
+                raise AmendmentNotReadyForRelease(
+                    f"LabResultAmendment {amendment.id} cannot be inspected because its completed "
+                    f"order has a missing or incomplete result container"
+                )
+            container_ids = [container.id for _item, container in rows if container is not None]
+            observations_by_result: dict[uuid.UUID, list[LabObservation]] = {}
+            if container_ids:
+                for observation in session.scalars(
+                    select(LabObservation)
+                    .where(
+                        LabObservation.lab_result_id.in_(container_ids),
+                        LabObservation.superseded_at.is_(None),
+                    )
+                    .order_by(LabObservation.recorded_at)
+                ):
+                    observations_by_result.setdefault(observation.lab_result_id, []).append(
+                        observation
+                    )
+
+            items = tuple(
+                AmendmentInspectionItemRecord(
+                    item_id=item.id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    entry_completed_at=container.entry_completed_at,  # type: ignore[union-attr,arg-type]
+                    observations=tuple(
+                        _to_observation_record(o)
+                        for o in observations_by_result.get(container.id, [])
+                    )
+                    if container is not None
+                    else (),
+                    changed_in_this_amendment=any(
+                        o.amendment_id == amendment.id
+                        for o in (observations_by_result.get(container.id, []) if container else [])
+                    ),
+                )
+                for item, container in rows
+            )
+            return AmendmentInspectionRecord(
+                amendment=_to_amendment_record(amendment),
+                items=items,
+                ready_to_release=any(item.changed_in_this_amendment for item in items),
+            )
+
+    # -- release --------------------------------------------------------------------------------
+
+    def release_amendment(
+        self,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        released_by_identity_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> tuple[LabResultReleaseVersionRecord, bool]:
+        """Returns ``(record, created)``. ``created=False`` means an already-``RELEASED`` amendment
+        was returned as a safe idempotent replay -- unconditionally, regardless of who is retrying,
+        mirroring ``LabResultReleaseRepository.release``'s identical replay discipline exactly: the
+        fact is who actually released it first, never rewritten by a later retry."""
+        if session is not None:
+            return self._release_amendment_in_session(
+                session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                released_by_identity_id=released_by_identity_id,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._release_amendment_in_session(
+                owned_session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                released_by_identity_id=released_by_identity_id,
+            )
+
+    def _release_amendment_in_session(
+        self,
+        session: Session,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        released_by_identity_id: uuid.UUID,
+    ) -> tuple[LabResultReleaseVersionRecord, bool]:
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        amendment = session.scalar(
+            select(LabResultAmendment)
+            .where(LabResultAmendment.id == amendment_id)
+            .with_for_update()
+        )
+        if amendment is None or amendment.lab_order_id != order_id:
+            raise AmendmentNotFound(str(amendment_id))
+
+        if LabResultAmendmentStatus(amendment.status) == LabResultAmendmentStatus.RELEASED:
+            existing_version = session.scalar(
+                select(LabResultReleaseVersion).where(
+                    LabResultReleaseVersion.amendment_id == amendment.id
+                )
+            )
+            if existing_version is None:
+                # Structurally unreachable given `uq_exchange_release_versions_amendment_id` and
+                # this method's own atomic transaction -- an amendment can only ever reach
+                # RELEASED in the same transaction that created its bound version.
+                raise RuntimeError(
+                    f"LabResultAmendment {amendment_id} is RELEASED but has no bound "
+                    f"LabResultReleaseVersion -- data integrity violation"
+                )
+            return _to_release_version_record(existing_version), False
+
+        if LabOrderStatus(order.status) != LabOrderStatus.COMPLETED:
+            raise OrderNotCompletedForAmendment(
+                f"LabOrder {order_id} is {order.status!r}, not 'COMPLETED'"
+            )
+
+        has_changes = (
+            session.scalar(
+                select(func.count())
+                .select_from(LabObservation)
+                .where(LabObservation.amendment_id == amendment.id)
+            )
+            > 0
+        )
+        if not has_changes:
+            raise AmendmentNotReadyForRelease(
+                f"LabResultAmendment {amendment_id} has zero observation revisions -- an "
+                f"amendment cannot release with no changes"
+            )
+
+        latest_version = session.scalar(
+            select(LabResultReleaseVersion)
+            .where(LabResultReleaseVersion.lab_order_id == order_id)
+            .order_by(LabResultReleaseVersion.version_number.desc())
+            .limit(1)
+        )
+        if latest_version is None or latest_version.id != amendment.base_release_version_id:
+            raise AmendmentBaseVersionSuperseded(
+                f"LabResultAmendment {amendment_id}'s base_release_version_id no longer matches "
+                f"the order's latest release version -- refusing to release against a baseline "
+                f"this amendment was never actually prepared against"
+            )
+
+        # Re-checked here for the identical defense-in-depth reason the original release() checks
+        # it -- structurally unreachable (amendment corrections only ever supersede an existing
+        # effective observation, never remove one, and entry_completed_at is never cleared), but
+        # never trusted absent rather than proven absent.
+        missing_count = _count_missing_or_malformed_results(session, order_id)
+        if missing_count:
+            raise ResultsNotReadyForRelease(
+                f"cannot release amendment for LabOrder {order_id} -- {missing_count} ordered "
+                f"item(s) no longer have a completed, observation-backed result entry"
+            )
+
+        released_at = utc_now()
+        new_version_number = latest_version.version_number + 1
+        version = LabResultReleaseVersion(
+            lab_order_id=order_id,
+            version_number=new_version_number,
+            lab_result_release_id=None,
+            amendment_id=amendment.id,
+            created_at=released_at,
+        )
+        session.add(version)
+        session.flush()
+
+        # DH-EX-014B: the complete, newly-released manifest -- every unchanged observation carried
+        # forward (referenced again, never copied) plus every amendment-created revision now
+        # replacing what it superseded. Identical shared query to the original release's own
+        # manifest construction (`_effective_observation_rows`) -- structurally cannot omit an
+        # unaffected item merely because another item changed.
+        effective_rows = _effective_observation_rows(session, order_id)
+        for item_id, observation_id in effective_rows:
+            session.add(
+                LabResultReleaseManifestEntry(
+                    release_version_id=version.id,
+                    lab_order_item_id=item_id,
+                    lab_observation_id=observation_id,
+                )
+            )
+
+        amendment.status = LabResultAmendmentStatus.RELEASED.value
+        amendment.released_by_identity_id = released_by_identity_id
+        amendment.released_at = released_at
+
+        # DH-EX-014B/ADR-048 Decision 2 (ADR-045 Question 4, Option C): always a brand-new PENDING
+        # row, never a bind of an existing one -- unlike the original release (which binds the
+        # order's one pre-existing unbound row), no unbound row exists at this point, and the
+        # prior version's review row is never reset, rewritten, or reused.
+        review = DoctorReview(
+            lab_order_id=order_id,
+            release_version_id=version.id,
+            status=DoctorReviewStatus.PENDING.value,
+        )
+        session.add(review)
+        session.flush()
+
+        return _to_release_version_record(version), True
 
 
 class ResultDeliveryRepository:
@@ -1458,14 +2125,14 @@ class ResultDeliveryRepository:
 
 
 class DoctorReviewRepository:
-    """DH-EX-014A/ADR-048 (ADR-045 Question 4, Option C): every method that resolves "the" review
-    for an order now explicitly resolves the row bound to the *highest* ``version_number`` --
-    ``coalesce(version_number, 0)`` so the one legacy/unbound row (``release_version_id IS NULL``)
-    sorts lowest, never highest, once a real version exists for that order. **Never inferred from
-    ``reviewed_at`` or any other timestamp** -- the explicit `version_number` ordering is the one
-    ADR-048/this ticket's own instruction requires. In this ticket exactly one row can ever exist
-    per order, so this ordering is not yet load-bearing in practice -- it is written this way so
-    DH-EX-014B's second review row needs no change to this resolution logic at all."""
+    """ADR-048 version-bound clinician review history.
+
+    Reads may resolve the latest review by explicit ``version_number`` ordering. Mutations are
+    stricter: the version-targeted methods bind to exactly the release version the caller names;
+    legacy order-only methods remain compatible only while the order has no amendment release.
+    Every mutation locks ``LabOrder`` first, matching amendment release's lock order, so a version
+    cannot appear between the compatibility check and the review write.
+    """
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory
@@ -1511,20 +2178,62 @@ class DoctorReviewRepository:
             session,
         )
 
+    def mark_no_follow_up_required_for_release_version(
+        self,
+        lab_order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        *,
+        reviewed_by_practitioner_reference_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> DoctorReviewRecord:
+        return self._mark(
+            lab_order_id,
+            DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED,
+            reviewed_by_practitioner_reference_id,
+            session,
+            release_version_id=release_version_id,
+        )
+
+    def mark_follow_up_required_for_release_version(
+        self,
+        lab_order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        *,
+        reviewed_by_practitioner_reference_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> DoctorReviewRecord:
+        return self._mark(
+            lab_order_id,
+            DoctorReviewStatus.FOLLOW_UP_REQUIRED,
+            reviewed_by_practitioner_reference_id,
+            session,
+            release_version_id=release_version_id,
+        )
+
     def _mark(
         self,
         lab_order_id: uuid.UUID,
         status: DoctorReviewStatus,
         reviewed_by_practitioner_reference_id: uuid.UUID,
         session: Session | None,
+        *,
+        release_version_id: uuid.UUID | None = None,
     ) -> DoctorReviewRecord:
         if session is not None:
             return self._mark_in_session(
-                session, lab_order_id, status, reviewed_by_practitioner_reference_id
+                session,
+                lab_order_id,
+                status,
+                reviewed_by_practitioner_reference_id,
+                release_version_id=release_version_id,
             )
         with self._sessions.begin() as owned_session:
             return self._mark_in_session(
-                owned_session, lab_order_id, status, reviewed_by_practitioner_reference_id
+                owned_session,
+                lab_order_id,
+                status,
+                reviewed_by_practitioner_reference_id,
+                release_version_id=release_version_id,
             )
 
     def _mark_in_session(
@@ -1533,12 +2242,14 @@ class DoctorReviewRepository:
         lab_order_id: uuid.UUID,
         status: DoctorReviewStatus,
         reviewed_by_practitioner_reference_id: uuid.UUID,
+        *,
+        release_version_id: uuid.UUID | None,
     ) -> DoctorReviewRecord:
-        # LabOrder.status == COMPLETED is a terminal fact once true (no outgoing transition
-        # exists from COMPLETED in `orders.py`'s `_ALLOWED_TRANSITIONS`) -- a plain read, no
-        # FOR UPDATE needed here, matching `lab_workflow.py`'s own reasoning for why its
-        # post-lock reads need no lock of their own.
-        order = session.get(LabOrder, lab_order_id)
+        # Amendment release locks the same row first. This prevents a new release version from
+        # appearing between an order-only request's compatibility check and its review write.
+        order = session.scalar(
+            select(LabOrder).where(LabOrder.id == lab_order_id).with_for_update()
+        )
         if order is None:
             raise ReviewNotFound(str(lab_order_id))
         if LabOrderStatus(order.status) != LabOrderStatus.COMPLETED:
@@ -1547,13 +2258,28 @@ class DoctorReviewRepository:
                 f"review may only be recorded once every requested result is in"
             )
 
-        # Resolved by explicit version_number, then locked by primary key directly -- avoids
-        # combining `FOR UPDATE` with the outer join the resolution query itself needs (Postgres
-        # locking semantics over an outer-joined, possibly-NULL side are best avoided entirely
-        # rather than relied on).
-        review_id = session.scalar(self._current_review_id_query(lab_order_id))
+        if release_version_id is None:
+            latest_version_number = session.scalar(
+                select(LabResultReleaseVersion.version_number)
+                .where(LabResultReleaseVersion.lab_order_id == lab_order_id)
+                .order_by(LabResultReleaseVersion.version_number.desc())
+                .limit(1)
+            )
+            if latest_version_number is not None and latest_version_number > 1:
+                raise ExplicitReviewVersionRequired(
+                    f"LabOrder {lab_order_id} has amendment releases; review must name the exact "
+                    f"release_version_id whose content was reviewed"
+                )
+            review_id = session.scalar(self._current_review_id_query(lab_order_id))
+        else:
+            review_id = session.scalar(
+                select(DoctorReview.id).where(
+                    DoctorReview.lab_order_id == lab_order_id,
+                    DoctorReview.release_version_id == release_version_id,
+                )
+            )
         if review_id is None:
-            raise ReviewNotFound(str(lab_order_id))
+            raise ReviewNotFound(str(release_version_id or lab_order_id))
         review = session.scalar(
             select(DoctorReview).where(DoctorReview.id == review_id).with_for_update()
         )
@@ -1561,9 +2287,9 @@ class DoctorReviewRepository:
             raise ReviewNotFound(str(lab_order_id))
         if DoctorReviewStatus(review.status) != DoctorReviewStatus.PENDING:
             raise ReviewAlreadyFinalized(
-                f"DoctorReview for LabOrder {lab_order_id} is already {review.status!r} -- V1 "
-                f"has no review-revision model, refusing to silently overwrite the earlier "
-                f"disposition"
+                f"DoctorReview for LabOrder {lab_order_id}, release version "
+                f"{review.release_version_id}, is already {review.status!r}; refusing to "
+                f"overwrite the earlier disposition"
             )
 
         review.status = status.value
@@ -1586,10 +2312,11 @@ class DoctorReviewRepository:
             return _to_review_record(review)
 
     def get_for_release_version(self, release_version_id: uuid.UUID) -> DoctorReviewRecord | None:
-        """DH-EX-014A: the review obligation for one specific release version, by its own
-        immutable id -- the read a future version-scoped review endpoint (DH-EX-014B) uses.
+        """Return the review obligation for one immutable release version by id.
+
         Callers are responsible for their own tenant authorization check first, exactly mirroring
-        every other by-id read in this module."""
+        every other by-id read in this module.
+        """
         with self._sessions() as session:
             review = session.scalar(
                 select(DoctorReview).where(DoctorReview.release_version_id == release_version_id)
@@ -1597,10 +2324,10 @@ class DoctorReviewRepository:
             return None if review is None else _to_review_record(review)
 
     def get_history_for_order(self, lab_order_id: uuid.UUID) -> tuple[DoctorReviewRecord, ...]:
-        """DH-EX-014A: every review row that has ever existed for this order, ordered by the
+        """Every review row that has ever existed for this order, ordered by the
         release version it is bound to (the one unbound legacy row, if present, sorts first) --
-        never inferred from ``reviewed_at``. In this ticket, at most one row can exist; this exists
-        so DH-EX-014B's second review row needs no new read method."""
+        never inferred from ``reviewed_at``. One row exists per released version; a grandfathered
+        order may instead have the one honest unbound legacy row."""
         with self._sessions() as session:
             rows = session.scalars(
                 select(DoctorReview)
@@ -1651,6 +2378,75 @@ def _lock_order_and_item_for_entry(
     return item, order
 
 
+def _manifest_record_for_version(
+    session: Session, version: LabResultReleaseVersion
+) -> ReleaseVersionManifestRecord:
+    """Reconstruct one immutable release manifest, including superseded historical observations.
+
+    Shared by provider version reads and released-amendment inspection so neither can accidentally
+    fall back to the order's later current-effective state.
+    """
+    rows = session.execute(
+        select(LabOrderItem, LabResult, LabObservation)
+        .select_from(LabResultReleaseManifestEntry)
+        .join(
+            LabOrderItem,
+            LabResultReleaseManifestEntry.lab_order_item_id == LabOrderItem.id,
+        )
+        .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+        .join(
+            LabObservation,
+            LabResultReleaseManifestEntry.lab_observation_id == LabObservation.id,
+        )
+        .where(LabResultReleaseManifestEntry.release_version_id == version.id)
+        .order_by(LabOrderItem.id, LabObservation.recorded_at)
+    ).all()
+    observations_by_item: dict[uuid.UUID, list[LabObservation]] = {}
+    item_by_id: dict[uuid.UUID, LabOrderItem] = {}
+    entry_completed_at_by_item: dict[uuid.UUID, datetime] = {}
+    for item, container, observation in rows:
+        if container.entry_completed_at is None:
+            raise ResultsNotReadyForRelease(
+                f"release version {version.id} references an incomplete result container"
+            )
+        observations_by_item.setdefault(item.id, []).append(observation)
+        item_by_id[item.id] = item
+        entry_completed_at_by_item[item.id] = container.entry_completed_at
+    items = tuple(
+        ReleaseManifestItemRecord(
+            item_id=item_id,
+            catalog_code_snapshot=item_by_id[item_id].catalog_code_snapshot,
+            catalog_display_name_snapshot=item_by_id[item_id].catalog_display_name_snapshot,
+            entry_completed_at=entry_completed_at_by_item[item_id],
+            observations=tuple(_to_observation_record(o) for o in observations),
+        )
+        for item_id, observations in observations_by_item.items()
+    )
+    return ReleaseVersionManifestRecord(version=_to_release_version_record(version), items=items)
+
+
+def _effective_observation_rows(
+    session: Session, order_id: uuid.UUID
+) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """DH-EX-014A/DH-EX-014B: the exact ``(lab_order_item_id, lab_observation_id)`` effective set
+    for every item on this order right now -- shared by ``LabResultReleaseRepository``'s original
+    release and ``LabResultAmendmentRepository``'s amendment release, so both build a manifest from
+    the identical query, never two independently-maintained copies that could silently drift apart.
+    Callers are responsible for holding the ``LabOrder`` row's ``FOR UPDATE`` lock first, exactly
+    mirroring ``_count_missing_or_malformed_results``'s own convention."""
+    return session.execute(
+        select(LabOrderItem.id, LabObservation.id)
+        .select_from(LabOrderItem)
+        .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+        .join(
+            LabObservation,
+            (LabObservation.lab_result_id == LabResult.id)
+            & (LabObservation.superseded_at.is_(None)),
+        )
+        .where(LabOrderItem.lab_order_id == order_id)
+    ).all()
+
+
 def _count_missing_or_malformed_results(session: Session, order_id: uuid.UUID) -> int:
     """The single DB-grounded completeness query shared by result submission
     (``ready_for_release``) and release (``LabResultReleaseRepository``'s own re-check) -- both
@@ -1699,6 +2495,7 @@ def _to_observation_record(observation: LabObservation) -> LabObservationRecord:
         recorded_by_identity_id=observation.recorded_by_identity_id,
         supersedes_observation_id=observation.supersedes_observation_id,
         superseded_at=observation.superseded_at,
+        amendment_id=observation.amendment_id,
     )
 
 
@@ -1785,5 +2582,25 @@ def _to_release_version_record(version: LabResultReleaseVersion) -> LabResultRel
         lab_order_id=version.lab_order_id,
         version_number=version.version_number,
         lab_result_release_id=version.lab_result_release_id,
-        created_at=version.created_at,
+        amendment_id=version.amendment_id,
+        created_at=_as_utc(version.created_at),
     )
+
+
+def _to_amendment_record(amendment: LabResultAmendment) -> LabResultAmendmentRecord:
+    return LabResultAmendmentRecord(
+        id=amendment.id,
+        lab_order_id=amendment.lab_order_id,
+        amendment_number=amendment.amendment_number,
+        base_release_version_id=amendment.base_release_version_id,
+        status=amendment.status,
+        started_by_identity_id=amendment.started_by_identity_id,
+        started_at=_as_utc(amendment.started_at),
+        released_by_identity_id=amendment.released_by_identity_id,
+        released_at=None if amendment.released_at is None else _as_utc(amendment.released_at),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize SQLite's timezone-naive round trips to the stored UTC contract."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

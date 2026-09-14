@@ -1171,8 +1171,18 @@ entry, not restated here):
   on `IN_PROGRESS`, confirmed by an exhaustive grep of every `LabObservation` write site) — never a
   fabrication. Two downgrade guards, each demonstrated against real PostgreSQL including a
   guard-removal control that reproduced real, silent semantic loss (an amendment's entire existence
-  becomes untraceable). **Post-release amendment itself remains unimplemented — no amendment
-  endpoint exists, no `version_number > 1` is creatable anywhere — deferred to DH-EX-014B, which
-  Liban's own accepted decision makes a required real-patient-pilot blocker.**
+- **Post-release amendment is implemented (ADR-045 Questions 4–5, ADR-048 Model 3,
+  DH-EX-014B):** an amendment episode (`LabResultAmendment`, PREPARING/RELEASED states) allows
+  a LAB_TECH to prepare corrections while leaving existing releases immutable. When an authorized
+  LAB_RESULT_RELEASER releases the amendment, a new `LabResultReleaseVersion` is created with its
+  own immutable manifest and a fresh `PENDING` `DoctorReview` is created bound to that version.
 
-Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-014A entries.
+Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-014B entries.
+
+**DH-EX-014B update (2026-09-14):** The accepted amendment episode is now implemented on top of
+the immutable version foundation. A LAB_TECH starts and corrects one PREPARING episode; a separate
+LAB_RESULT_RELEASER releases a new manifest/version and fresh version-bound DoctorReview. Provider
+history and exact-version reads use immutable manifests, while released amendment inspection never
+shows a later proposal. SQLite tests (136 passed) and real-PostgreSQL qualification (33 passed
+across 6 test suites) pass; real Keycloak qualification, manual live/browser demonstration, and
+production deployment remain unrun, so no pilot-readiness claim follows.

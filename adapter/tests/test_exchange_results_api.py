@@ -2801,3 +2801,220 @@ def test_release_version_history_for_grandfathered_order_is_empty(
     response = client.get(_release_versions_url(lab.id, order_id), headers=_auth(lab_tech_token))
     assert response.status_code == 200, response.text
     assert response.json()["versions"] == []
+
+
+# -- DH-EX-014B/ADR-048: post-release amendment API ----------------------------------------------
+
+
+def _amendment_url(lab_id, order_id, amendment_id=None) -> str:
+    base = f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/amendments"
+    return base if amendment_id is None else f"{base}/{amendment_id}"
+
+
+def _amendment_releaser_token(client, private_key, lab_id, name: str) -> str:
+    identity_id = _bootstrap_identity(client, private_key, f"amend-releaser-{name}")
+    _grant_roles(
+        client,
+        private_key,
+        lab_id,
+        identity_id,
+        f"amend-releaser-{name}",
+        ["LAB_RESULT_RELEASER"],
+    )
+    return make_token(private_key, subject=f"amend-releaser-{name}")
+
+
+def test_amendment_golden_flow_provider_history_and_explicit_review(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="AmendGolden",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    original = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-OBS",
+            "display_label": "Synthetic observation",
+            "numeric_value": "1",
+        },
+    )
+    assert original.status_code == 201, original.text
+    assert (
+        client.post(
+            _completion_url(lab.id, order_id, item_id), headers=_auth(tech_token)
+        ).status_code
+        == 201
+    )
+    _release_results(client, private_key, lab.id, order_id, "AmendGolden-v1")
+    version_one = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    ).json()["release_version_id"]
+
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    assert started.status_code == 201, started.text
+    amendment_id = started.json()["amendment_id"]
+    corrected = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_id}/observations/"
+        f"{original.json()['observation_id']}/correct",
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-OBS",
+            "display_label": "Synthetic observation",
+            "numeric_value": "2",
+        },
+    )
+    assert corrected.status_code == 201, corrected.text
+    assert corrected.json()["supersedes_observation_id"] == original.json()["observation_id"]
+
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendGolden-v2")
+    released = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+        headers=_auth(releaser_token),
+    )
+    assert released.status_code == 201, released.text
+    version_two = released.json()["release_version_id"]
+    assert released.json()["version_number"] == 2
+    assert released.json()["is_amendment"] is True
+
+    replay = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+        headers=_auth(releaser_token),
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == released.json()
+    assert len(_audit_events(sessions, "lab_result_amendment_released")) == 1
+
+    latest = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert latest.status_code == 200, latest.text
+    assert latest.json()["release_version_id"] == version_two
+    assert latest.json()["release_version_number"] == 2
+    assert Decimal(latest.json()["results"][0]["observations"][0]["numeric_value"]) == Decimal("2")
+
+    history_url = f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/release-versions"
+    history = client.get(history_url, headers=_auth(clinician_token))
+    assert history.status_code == 200, history.text
+    assert [version["release_version_number"] for version in history.json()["versions"]] == [1, 2]
+    assert [version["review_status"] for version in history.json()["versions"]] == [
+        "PENDING",
+        "PENDING",
+    ]
+
+    version_one_content = client.get(f"{history_url}/{version_one}", headers=_auth(clinician_token))
+    assert version_one_content.status_code == 200, version_one_content.text
+    assert Decimal(
+        version_one_content.json()["results"][0]["observations"][0]["numeric_value"]
+    ) == Decimal("1")
+    version_two_content = client.get(f"{history_url}/{version_two}", headers=_auth(clinician_token))
+    assert Decimal(
+        version_two_content.json()["results"][0]["observations"][0]["numeric_value"]
+    ) == Decimal("2")
+
+    legacy_review = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
+        headers=_auth(clinician_token),
+    )
+    assert legacy_review.status_code == 409, legacy_review.text
+    version_one_review = client.post(
+        f"{history_url}/{version_one}/review/no-follow-up-required",
+        headers=_auth(clinician_token),
+    )
+    assert version_one_review.status_code == 200, version_one_review.text
+    assert version_one_review.json()["release_version_id"] == version_one
+    assert (
+        client.get(f"{history_url}/{version_two}", headers=_auth(clinician_token)).json()[
+            "review_status"
+        ]
+        == "PENDING"
+    )
+
+
+def test_amendment_and_version_routes_preserve_role_and_tenant_boundaries(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="AmendBoundary",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    result = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(tech_token),
+        json={"result_type": "TEXT", "text_value": "Synthetic result"},
+    )
+    assert result.status_code == 201, result.text
+    _release_results(client, private_key, lab.id, order_id, "AmendBoundary-v1")
+
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendBoundaryReleaser")
+    releaser_start = client.post(_amendment_url(lab.id, order_id), headers=_auth(releaser_token))
+    assert releaser_start.status_code == 403
+
+    clinician_start = client.post(_amendment_url(lab.id, order_id), headers=_auth(clinician_token))
+    assert clinician_start.status_code == 404
+    other_lab, other_tech_token, _identity = _setup_lab_tech(
+        client, private_key, organizations, "AmendBoundaryOther"
+    )
+    cross_lab = client.post(_amendment_url(other_lab.id, order_id), headers=_auth(other_tech_token))
+    assert cross_lab.status_code == 404
+
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    assert started.status_code == 201, started.text
+    amendment_id = started.json()["amendment_id"]
+    second_start = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    assert second_start.status_code == 409
+
+    # Releaser alone cannot correct observation (requires LAB_TECH)
+    releaser_correct = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_id}/observations/"
+        f"{result.json()['observation_id']}/correct",
+        headers=_auth(releaser_token),
+        json={
+            "result_type": "TEXT",
+            "source_code": "SYN-OBS",
+            "display_label": "Synthetic observation",
+            "text_value": "Attempted by releaser",
+        },
+    )
+    assert releaser_correct.status_code == 403
+
+    # Tech alone cannot release amendment (requires LAB_RESULT_RELEASER)
+    tech_release = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+        headers=_auth(tech_token),
+    )
+    assert tech_release.status_code == 403
+
+    other_provider, other_clinician = _setup_clinician(
+        client, private_key, organizations, "AmendBoundaryOtherProvider"
+    )
+    own_history = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/release-versions",
+        headers=_auth(clinician_token),
+    )
+    version_id = own_history.json()["versions"][0]["release_version_id"]
+    cross_provider = client.get(
+        f"/exchange/v1/organizations/{other_provider.id}/orders/{order_id}/release-versions/"
+        f"{version_id}",
+        headers=_auth(other_clinician),
+    )
+    assert cross_provider.status_code == 404

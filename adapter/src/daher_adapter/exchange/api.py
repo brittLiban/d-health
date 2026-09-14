@@ -106,19 +106,30 @@ from daher_adapter.exchange.patient_access import (
 )
 from daher_adapter.exchange.patient_access import OrderNotFound as GrantOrderNotFound
 from daher_adapter.exchange.results import (
+    AmendmentAlreadyInProgress,
+    AmendmentBaseVersionSuperseded,
+    AmendmentInspectionRecord,
+    AmendmentNotFound,
+    AmendmentNotPreparing,
+    AmendmentNotReadyForRelease,
     DoctorReviewRecord,
     DoctorReviewRepository,
     DuplicateResult,
     EntryAlreadyCompleted,
     EntryNotReadyForCompletion,
+    ExplicitReviewVersionRequired,
     InvalidResultSubmissionState,
+    LabResultAmendmentRecord,
+    LabResultAmendmentRepository,
     LabResultInspectionRecord,
     LabResultReleaseRepository,
     LabResultReleaseVersionRecord,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
+    ObservationNotEligibleForAmendment,
     ObservationNotFound,
     OrderItemNotFound,
+    OrderNotCompletedForAmendment,
     ResultsNotReadyForRelease,
     ResultSubmissionOutcome,
     ReviewAlreadyFinalized,
@@ -980,12 +991,12 @@ class ProviderOrderResultsResponse(BaseModel):
     with a 409 before this is ever built for an order still in progress, so this shape never has
     to represent a partial-results state.
 
-    **DH-EX-014A/ADR-048:** ``release_version_id``/``release_version_number``/``is_amendment`` are
-    all ``None`` together for exactly one reason -- a grandfathered ``COMPLETED``-without-
+    **ADR-048:** ``release_version_id``/``release_version_number``/``is_amendment`` are all ``None``
+    together for exactly one reason -- a grandfathered ``COMPLETED``-without-
     ``LabResultRelease`` order, which has no release version at all and is not amendment-eligible
-    (Decision 6). For every other order they are always populated; ``is_amendment`` is
-    ``version_number > 1`` -- always ``False`` in this ticket, since no amendment mechanism exists
-    yet to ever produce a version 2. No clinical interpretation is added by any of the three."""
+    (Decision 6). For every other order they are populated from the latest immutable manifest;
+    ``is_amendment`` is ``version_number > 1``. No clinical interpretation is added by any of the
+    three."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1070,15 +1081,14 @@ class LabResultReleaseResponse(BaseModel):
 
 
 class LabResultReleaseVersionResponse(BaseModel):
-    """DH-EX-014A/ADR-048: one released version, foundation-only in this ticket -- ``is_amendment``
-    is always ``False`` here since no mechanism exists yet to ever produce ``version_number > 1``.
-    No clinical content of any kind; purely workflow/version metadata."""
+    """ADR-048 release-version metadata; ``is_amendment`` is true after Version 1."""
 
     model_config = ConfigDict(extra="forbid")
 
     release_version_id: uuid.UUID
     version_number: int
     lab_result_release_id: uuid.UUID | None
+    amendment_id: uuid.UUID | None
     created_at: datetime
     is_amendment: bool
 
@@ -1088,6 +1098,102 @@ class LabResultReleaseVersionHistoryResponse(BaseModel):
 
     order_id: uuid.UUID
     versions: list[LabResultReleaseVersionResponse]
+
+
+class ProviderReleaseVersionContentResponse(BaseModel):
+    """DH-EX-014B: the exact, immutable content of one specific released version, by its own
+    immutable id -- never derived from live current-effective state, identical historical-
+    reconstruction semantic to ``get_manifest_for_version``. A provider retrieves this for any
+    version in its own order's history, not only the latest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    release_version_id: uuid.UUID
+    release_version_number: int
+    is_amendment: bool
+    review_status: str
+    reviewed_at: datetime | None
+    reviewed_by_practitioner_reference_id: uuid.UUID | None
+    results: list[ProviderResultItemResponse]
+
+
+class ProviderReleaseVersionSummaryResponse(BaseModel):
+    """Provider-visible workflow metadata for one immutable released version and its review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_version_id: uuid.UUID
+    release_version_number: int
+    is_amendment: bool
+    released_at: datetime
+    review_status: str
+    reviewed_at: datetime | None
+    reviewed_by_practitioner_reference_id: uuid.UUID | None
+
+
+class ProviderReleaseVersionHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    versions: list[ProviderReleaseVersionSummaryResponse]
+
+
+class AmendmentResponse(BaseModel):
+    """DH-EX-014B/ADR-048: one amendment episode. No clinical content of any kind -- purely
+    workflow/version metadata, matching ``LabResultReleaseVersionResponse``'s own convention."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amendment_id: uuid.UUID
+    lab_order_id: uuid.UUID
+    amendment_number: int
+    base_release_version_id: uuid.UUID
+    status: str
+    started_by_identity_id: uuid.UUID
+    started_at: datetime
+    released_by_identity_id: uuid.UUID | None
+    released_at: datetime | None
+
+
+class AmendmentInspectionObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    source_code: str
+    source_system: str
+    display_label_snapshot: str
+    result_type: str
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+    amendment_id: uuid.UUID | None
+
+
+class AmendmentInspectionItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    entry_completed_at: datetime
+    observations: list[AmendmentInspectionObservationResponse]
+    changed_in_this_amendment: bool
+
+
+class AmendmentInspectionResponse(BaseModel):
+    """DH-EX-014B: the lab-authorized-only pre-release-of-amendment read -- ``LAB_TECH``/
+    ``LAB_RESULT_RELEASER`` only; never reachable by a provider or patient-bearer credential (no
+    route exposes this shape to either)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amendment: AmendmentResponse
+    items: list[AmendmentInspectionItemResponse]
+    ready_to_release: bool
 
 
 class DoctorReviewResponse(BaseModel):
@@ -1127,6 +1233,7 @@ def build_exchange_router(
     results = LabResultRepository(session_factory)
     releases = LabResultReleaseRepository(session_factory)
     reviews = DoctorReviewRepository(session_factory)
+    amendments = LabResultAmendmentRepository(session_factory)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -3051,6 +3158,7 @@ def build_exchange_router(
             release_version_id=version.id,
             version_number=version.version_number,
             lab_result_release_id=version.lab_result_release_id,
+            amendment_id=version.amendment_id,
             created_at=version.created_at,
             is_amendment=version.version_number > 1,
         )
@@ -3064,9 +3172,8 @@ def build_exchange_router(
         order_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabResultReleaseVersionHistoryResponse:
-        # DH-EX-014A/ADR-048: the foundation read a future "Version 1 / Version 2 / Version 3" UI
-        # will use once DH-EX-014B can produce more than one version -- in this ticket, at most
-        # one. `LAB_TECH` or `LAB_RESULT_RELEASER`, exactly mirroring the pre-release inspection
+        # DH-EX-014B/ADR-048: lab-side Version 1 / Version 2 / Version 3 history metadata.
+        # `LAB_TECH` or `LAB_RESULT_RELEASER`, exactly mirroring the pre-release inspection
         # read's own authorization; `get_for_lab` is reused purely for its existing non-enumerating
         # tenant check (order doesn't exist vs. belongs to a different lab are never
         # distinguished), not for its own result content.
@@ -3078,6 +3185,370 @@ def build_exchange_router(
         return LabResultReleaseVersionHistoryResponse(
             order_id=order_id,
             versions=[_release_version_response(version) for version in history],
+        )
+
+    def _amendment_response(record: LabResultAmendmentRecord) -> AmendmentResponse:
+        return AmendmentResponse(
+            amendment_id=record.id,
+            lab_order_id=record.lab_order_id,
+            amendment_number=record.amendment_number,
+            base_release_version_id=record.base_release_version_id,
+            status=record.status,
+            started_by_identity_id=record.started_by_identity_id,
+            started_at=record.started_at,
+            released_by_identity_id=record.released_by_identity_id,
+            released_at=record.released_at,
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments",
+        response_model=AmendmentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def start_lab_order_amendment(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AmendmentResponse:
+        # DH-EX-014B/ADR-048 Model 3/§8: LAB_TECH only, matching entry/pre-release-correction
+        # authority exactly. No request body: actor from authentication, order/lab from the URL,
+        # amendment number/base version/time all server-assigned, never caller-supplied. Starting
+        # an amendment never changes provider-visible results, never creates a release version,
+        # and never creates a DoctorReview row -- all of that happens only at release.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record = amendments.start_amendment(
+                    order_id=order_id,
+                    lab_organization_id=lab_id,
+                    started_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_result_amendment_started",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except OrderNotCompletedForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LegacyCompletedOrderHasNoRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentAlreadyInProgress as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _amendment_response(record)
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}",
+        response_model=AmendmentInspectionResponse,
+    )
+    def get_lab_order_amendment(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        amendment_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AmendmentInspectionResponse:
+        # DH-EX-014B: either LAB_TECH or LAB_RESULT_RELEASER may inspect -- "a releaser must not
+        # be forced to release an amendment they cannot inspect," identical framing to the
+        # original pre-release inspection read. `get_for_lab` reused purely for its existing
+        # non-enumerating tenant check, matching `get_lab_order_release_version_history`'s own
+        # convention. Provider and patient-bearer credentials have no route to this shape at all.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        tenant_check = results.get_for_lab(order_id, lab_id)
+        if tenant_check is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        try:
+            inspection: AmendmentInspectionRecord | None = amendments.get_amendment_inspection(
+                amendment_id
+            )
+        except AmendmentNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        if inspection is None or inspection.amendment.lab_order_id != order_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="amendment not found")
+        return AmendmentInspectionResponse(
+            amendment=_amendment_response(inspection.amendment),
+            items=[
+                AmendmentInspectionItemResponse(
+                    item_id=item.item_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    entry_completed_at=item.entry_completed_at,
+                    observations=[
+                        AmendmentInspectionObservationResponse(
+                            observation_id=observation.id,
+                            source_code=observation.source_code,
+                            source_system=observation.source_system,
+                            display_label_snapshot=observation.display_label_snapshot,
+                            result_type=observation.result_type,
+                            numeric_value=observation.numeric_value,
+                            numeric_unit=observation.numeric_unit,
+                            reference_range_low=observation.reference_range_low,
+                            reference_range_high=observation.reference_range_high,
+                            text_value=observation.text_value,
+                            recorded_at=observation.recorded_at,
+                            amendment_id=observation.amendment_id,
+                        )
+                        for observation in item.observations
+                    ],
+                    changed_in_this_amendment=item.changed_in_this_amendment,
+                )
+                for item in inspection.items
+            ],
+            ready_to_release=inspection.ready_to_release,
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}"
+        "/items/{item_id}/observations/{observation_id}/correct",
+        response_model=LabObservationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def correct_lab_order_amendment_observation(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        amendment_id: uuid.UUID,
+        item_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        body: LabObservationRecordRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationResponse:
+        # DH-EX-014B/ADR-048 Decision 4: immediate/permanent revision -- LAB_TECH only, no reason
+        # field anywhere (Decision 5). Never mutates the predecessor's value; supersedes it with
+        # one new immutable observation carrying this exact amendment's id. This is explicitly NOT
+        # the DH-EX-013 pre-release correction endpoint -- that one's IN_PROGRESS gate is
+        # completely untouched and unaffected by this one's existence.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                successor = amendments.correct_observation(
+                    amendment_id=amendment_id,
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    observation_id=observation_id,
+                    result_type=LabResultType(body.result_type),
+                    source_code=body.source_code,
+                    display_label_snapshot=body.display_label,
+                    corrected_by_identity_id=principal.identity_id,
+                    numeric_value=body.numeric_value,
+                    numeric_unit=body.numeric_unit,
+                    reference_range_low=body.reference_range_low,
+                    reference_range_high=body.reference_range_high,
+                    text_value=body.text_value,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="lab_observation_amended",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except OrderNotCompletedForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="amendment not found"
+            ) from error
+        except AmendmentNotPreparing as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except ObservationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="observation not found"
+            ) from error
+        except StaleObservationVersion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotEligibleForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _observation_response(order_id, item_id, successor)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}/release",
+        response_model=LabResultReleaseVersionResponse,
+    )
+    def release_lab_order_amendment(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        amendment_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabResultReleaseVersionResponse:
+        # DH-EX-014B/ADR-048 §8: LAB_RESULT_RELEASER only -- an amendment changes content a
+        # provider and clinician may have already acted on, a materially higher-consequence event
+        # than a pre-release fix, exactly mirroring the original release's own separate release
+        # authority. Same human may hold both roles, unaffected by this ticket.
+        _require_lab_result_releaser(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                version_record, created = amendments.release_amendment(
+                    amendment_id=amendment_id,
+                    order_id=order_id,
+                    lab_organization_id=lab_id,
+                    released_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                # Only audited on a genuine new release -- a lost-response retry that returns the
+                # existing version (`created=False`) writes no second audit row, mirroring
+                # `release_lab_order_results`'s own identical `if created:` discipline.
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_result_amendment_released",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except AmendmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="amendment not found"
+            ) from error
+        except OrderNotCompletedForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentBaseVersionSuperseded as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ResultsNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _release_version_response(version_record)
+
+    def _provider_manifest_results(manifest) -> list[ProviderResultItemResponse]:
+        return [
+            ProviderResultItemResponse(
+                item_id=item.item_id,
+                catalog_code_snapshot=item.catalog_code_snapshot,
+                catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                entry_completed_at=item.entry_completed_at,
+                observations=[
+                    ProviderObservationResponse(
+                        observation_id=observation.id,
+                        source_code=observation.source_code,
+                        source_system=observation.source_system,
+                        display_label_snapshot=observation.display_label_snapshot,
+                        result_type=observation.result_type,
+                        numeric_value=observation.numeric_value,
+                        numeric_unit=observation.numeric_unit,
+                        reference_range_low=observation.reference_range_low,
+                        reference_range_high=observation.reference_range_high,
+                        text_value=observation.text_value,
+                        recorded_at=observation.recorded_at,
+                    )
+                    for observation in item.observations
+                ],
+            )
+            for item in manifest.items
+        ]
+
+    def _provider_review_for_version_or_conflict(
+        release_version_id: uuid.UUID,
+    ) -> DoctorReviewRecord:
+        review = reviews.get_for_release_version(release_version_id)
+        if review is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="release version has no clinician review obligation",
+            )
+        return review
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/release-versions",
+        response_model=ProviderReleaseVersionHistoryResponse,
+    )
+    def get_provider_release_version_history(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ProviderReleaseVersionHistoryResponse:
+        _require_clinician(principal, provider_id)
+        order = _existing_order_for_provider_or_404(order_id, provider_id)
+        if order.status != LabOrderStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="order results are not yet available",
+            )
+        history = releases.get_release_version_history(order_id)
+        return ProviderReleaseVersionHistoryResponse(
+            order_id=order_id,
+            versions=[
+                ProviderReleaseVersionSummaryResponse(
+                    release_version_id=version.id,
+                    release_version_number=version.version_number,
+                    is_amendment=version.version_number > 1,
+                    released_at=version.created_at,
+                    review_status=review.status,
+                    reviewed_at=review.reviewed_at,
+                    reviewed_by_practitioner_reference_id=(
+                        review.reviewed_by_practitioner_reference_id
+                    ),
+                )
+                for version in history
+                for review in [_provider_review_for_version_or_conflict(version.id)]
+            ],
+        )
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}",
+        response_model=ProviderReleaseVersionContentResponse,
+    )
+    def get_provider_release_version_content(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ProviderReleaseVersionContentResponse:
+        _require_clinician(principal, provider_id)
+        order = _existing_order_for_provider_or_404(order_id, provider_id)
+        if order.status != LabOrderStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="order results are not yet available",
+            )
+        version = releases.get_release_version(release_version_id)
+        if version is None or version.lab_order_id != order_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="release version not found",
+            )
+        manifest = releases.get_manifest_for_version(release_version_id)
+        if manifest is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="release version not found",
+            )
+        review = _provider_review_for_version_or_conflict(release_version_id)
+        return ProviderReleaseVersionContentResponse(
+            order_id=order_id,
+            release_version_id=version.id,
+            release_version_number=version.version_number,
+            is_amendment=version.version_number > 1,
+            review_status=review.status,
+            reviewed_at=review.reviewed_at,
+            reviewed_by_practitioner_reference_id=review.reviewed_by_practitioner_reference_id,
+            results=_provider_manifest_results(manifest),
         )
 
     @router.get(
@@ -3205,6 +3676,7 @@ def build_exchange_router(
         order_id: uuid.UUID,
         principal: AuthenticatedPrincipal,
         target_status: DoctorReviewStatus,
+        release_version_id: uuid.UUID | None = None,
     ) -> DoctorReviewResponse:
         _require_clinician(principal, provider_id)
         order = _existing_order_for_provider_or_404(order_id, provider_id)
@@ -3223,17 +3695,33 @@ def build_exchange_router(
                     session=session,
                 )
                 if target_status == DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED:
-                    record = reviews.mark_no_follow_up_required(
-                        order.id,
-                        reviewed_by_practitioner_reference_id=practitioner.id,
-                        session=session,
-                    )
+                    if release_version_id is None:
+                        record = reviews.mark_no_follow_up_required(
+                            order.id,
+                            reviewed_by_practitioner_reference_id=practitioner.id,
+                            session=session,
+                        )
+                    else:
+                        record = reviews.mark_no_follow_up_required_for_release_version(
+                            order.id,
+                            release_version_id,
+                            reviewed_by_practitioner_reference_id=practitioner.id,
+                            session=session,
+                        )
                 else:
-                    record = reviews.mark_follow_up_required(
-                        order.id,
-                        reviewed_by_practitioner_reference_id=practitioner.id,
-                        session=session,
-                    )
+                    if release_version_id is None:
+                        record = reviews.mark_follow_up_required(
+                            order.id,
+                            reviewed_by_practitioner_reference_id=practitioner.id,
+                            session=session,
+                        )
+                    else:
+                        record = reviews.mark_follow_up_required_for_release_version(
+                            order.id,
+                            release_version_id,
+                            reviewed_by_practitioner_reference_id=practitioner.id,
+                            session=session,
+                        )
                 security_audit.record(
                     session,
                     event_type="doctor_review_recorded",
@@ -3246,6 +3734,8 @@ def build_exchange_router(
         except ReviewNotAllowedYet as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ReviewAlreadyFinalized as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ExplicitReviewVersionRequired as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ReviewNotFound as error:
             raise HTTPException(
@@ -3278,6 +3768,44 @@ def build_exchange_router(
     ) -> DoctorReviewResponse:
         return _submit_doctor_review(
             provider_id, order_id, principal, DoctorReviewStatus.FOLLOW_UP_REQUIRED
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}"
+        "/review/no-follow-up-required",
+        response_model=DoctorReviewResponse,
+    )
+    def review_release_version_no_follow_up_required(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> DoctorReviewResponse:
+        return _submit_doctor_review(
+            provider_id,
+            order_id,
+            principal,
+            DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED,
+            release_version_id,
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}"
+        "/review/follow-up-required",
+        response_model=DoctorReviewResponse,
+    )
+    def review_release_version_follow_up_required(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> DoctorReviewResponse:
+        return _submit_doctor_review(
+            provider_id,
+            order_id,
+            principal,
+            DoctorReviewStatus.FOLLOW_UP_REQUIRED,
+            release_version_id,
         )
 
     return router

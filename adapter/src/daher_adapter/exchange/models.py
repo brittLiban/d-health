@@ -51,6 +51,8 @@ __all__ = [
     "LabOrderStatus",
     "LabPrice",
     "LabResult",
+    "LabResultAmendment",
+    "LabResultAmendmentStatus",
     "LabResultRelease",
     "LabResultReleaseManifestEntry",
     "LabResultReleaseVersion",
@@ -112,6 +114,18 @@ class DoctorReviewStatus(StrEnum):
     PENDING = "PENDING"
     NO_FOLLOW_UP_REQUIRED = "NO_FOLLOW_UP_REQUIRED"
     FOLLOW_UP_REQUIRED = "FOLLOW_UP_REQUIRED"
+
+
+class LabResultAmendmentStatus(StrEnum):
+    """DH-EX-014B/ADR-048 Decision 4: immediate/permanent revision semantics -- MVP has no
+    discardable-draft workflow, so this is deliberately a two-state machine, not three or four.
+    ``PREPARING``: at most one per order at a time (see ``LabResultAmendment``'s own partial-index
+    docstring); a ``LAB_TECH`` may add any number of observation revisions. ``RELEASED``: terminal
+    -- once released, an amendment episode is never reopened, discarded, cancelled, or rejected.
+    No ``CANCELLED``/``DISCARDED``/``REJECTED`` value exists; none is added "for future use"."""
+
+    PREPARING = "PREPARING"
+    RELEASED = "RELEASED"
 
 
 class LabResultType(StrEnum):
@@ -616,6 +630,21 @@ class LabObservation(Base):
     docstring. Every *new* observation created through the API from this ticket forward populates
     it, whether an original entry or a correction.
 
+    **DH-EX-014B/ADR-048: ``amendment_id`` is the post-release-amendment linkage ADR-048 §
+    "observation-to-amendment linkage" requires.** ``NULL`` means this observation is an original
+    entry or a *pre-release* (DH-EX-013) correction -- unchanged meaning from before this ticket,
+    and every historical row keeps this ``NULL`` forever (no retroactive fabrication). Non-``NULL``
+    means this exact revision was created by ``LabResultAmendmentRepository.correct_observation``
+    as part of that exact ``LabResultAmendment`` episode, permanently -- immediate/permanent
+    revision semantics (Decision 4), never a discardable draft. This column is the second half of
+    the amendment-correction eligibility predicate (see
+    ``LabResultAmendmentRepository.correct_observation``'s own docstring): a currently-effective
+    observation is a valid correction target for a given ``PREPARING`` amendment if and only if it
+    is named in that amendment's own ``base_release_version_id`` manifest, *or* its
+    ``amendment_id`` equals that exact amendment's id -- the latter is what allows a tech to
+    reconsider a not-yet-released amendment revision (B2 -> B3) without that reconsideration
+    reading as "starting from an old historical value".
+
     Value shape (``result_type``, `numeric_value`/`numeric_unit`/`reference_range_low`/
     `reference_range_high`, `text_value`) is the identical CHECK-constrained NUMERIC-xor-TEXT
     contract `LabResult` itself enforced before this ticket -- moved, not redesigned. No automated
@@ -637,6 +666,7 @@ class LabObservation(Base):
             name="ck_exchange_lab_observations_no_self_supersede",
         ),
         Index("ix_exchange_lab_observations_lab_result_id", "lab_result_id"),
+        Index("ix_exchange_lab_observations_amendment_id", "amendment_id"),
         UniqueConstraint(
             "supersedes_observation_id",
             name="uq_exchange_lab_observations_supersedes_observation_id",
@@ -666,6 +696,11 @@ class LabObservation(Base):
         ForeignKey("exchange_lab_observations.id", ondelete="RESTRICT"), nullable=True
     )
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # DH-EX-014B: NULL for an original entry or pre-release (DH-EX-013) correction -- see this
+    # class's own docstring for the full eligibility-predicate reasoning.
+    amendment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_amendments.id", ondelete="RESTRICT"), nullable=True
+    )
     result: Mapped[LabResult] = relationship(back_populates="observations")
 
 
@@ -718,12 +753,13 @@ class LabResultReleaseVersion(Base):
     ``LabResultReleaseManifestEntry``). ``LabResultRelease`` itself remains exactly as DH-EX-012/
     ADR-044 shipped it -- immutable, no revision, no un-release, no delete -- forever.
 
-    A future DH-EX-014B amendment release (version 2+) will bind to its own amendment-episode record
-    instead (a column that table does not exist yet and is deliberately not added here, matching
-    this ticket's own "do not implement amendment preparation" scope boundary) -- the ``CHECK``
-    constraint below enforces that a version-1 row is always release-bound and every later version
-    is not, so the schema itself, not merely application code, states which binding shape applies to
-    which version."""
+    **DH-EX-014B/ADR-048: a version 2+ row binds instead to the ``LabResultAmendment`` episode that
+    authorized it, via ``amendment_id`` -- ``UNIQUE``, so one amendment produces exactly one
+    released version, and the reverse-direction ``CHECK`` below (replacing DH-EX-014A's original,
+    narrower one) now states the full binding contract at the schema level: version 1 is always
+    release-bound and never amendment-bound; every later version is always amendment-bound and
+    never release-bound. Neither ``LabResultRelease`` nor Version 1 is ever mutated by an amendment
+    release -- this column only ever gets populated on a brand-new row for a brand-new version."""
 
     __tablename__ = "exchange_release_versions"
     __table_args__ = (
@@ -735,9 +771,14 @@ class LabResultReleaseVersion(Base):
         CheckConstraint(
             "version_number >= 1", name="ck_exchange_release_versions_version_positive"
         ),
+        # DH-EX-014B: replaces DH-EX-014A's original `ck_exchange_release_versions_v1_bound_to_
+        # release` (same name, widened definition) -- a version's binding is now fully determined
+        # by its own number: version 1 binds only to the original release, every later version
+        # binds only to the amendment that authorized it, and neither binding is ever optional.
         CheckConstraint(
-            "(version_number = 1 AND lab_result_release_id IS NOT NULL) OR "
-            "(version_number > 1 AND lab_result_release_id IS NULL)",
+            "(version_number = 1 AND lab_result_release_id IS NOT NULL "
+            "AND amendment_id IS NULL) OR (version_number > 1 AND lab_result_release_id IS NULL "
+            "AND amendment_id IS NOT NULL)",
             name="ck_exchange_release_versions_v1_bound_to_release",
         ),
         Index("ix_exchange_release_versions_lab_order_id", "lab_order_id"),
@@ -750,6 +791,13 @@ class LabResultReleaseVersion(Base):
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lab_result_release_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_lab_result_releases.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    # DH-EX-014B: nullable, UNIQUE -- populated only for version_number > 1, exactly one released
+    # version per amendment episode.
+    amendment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_amendments.id", ondelete="RESTRICT"),
         nullable=True,
         unique=True,
     )
@@ -801,6 +849,85 @@ class LabResultReleaseManifestEntry(Base):
     lab_observation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_lab_observations.id", ondelete="RESTRICT"), nullable=False
     )
+
+
+class LabResultAmendment(Base):
+    """DH-EX-014B/ADR-048 Model 3: the amendment-episode workflow container ADR-048 §5/§8
+    recommended -- ``PREPARING`` -> ``RELEASED``, no other states (see
+    ``LabResultAmendmentStatus``'s own docstring for why no discard/cancel state exists).
+
+    **At most one ``PREPARING`` amendment per order at a time** -- a genuine partial unique index
+    (see ``__table_args__``), the identical shape ``PatientAccessGrant``'s own "one live grant per
+    order" constraint already established (``uq_exchange_patient_access_grants_one_live_per_order``)
+    applied to a different status predicate. Sequential amendments are fully supported: once an
+    amendment reaches ``RELEASED`` (terminal, never reopened), a new ``PREPARING`` row for the same
+    order is unblocked by this same index.
+
+    ``amendment_number`` is explicit and ordered (``UNIQUE(lab_order_id, amendment_number)``,
+    ``CHECK(amendment_number >= 1)``) -- assigned once, at creation, as
+    ``COALESCE(MAX(amendment_number), 0) + 1`` under the same ``LabOrder FOR UPDATE`` lock every
+    other order-scoped mutation in this package already acquires first; never inferred from
+    ``started_at`` ordering.
+
+    ``base_release_version_id`` is **not** merely an audit convenience -- it is the left operand of
+    the amendment-correction eligibility predicate (see
+    ``LabResultAmendmentRepository.correct_observation``'s own docstring): an old ``PREPARING``
+    amendment must never be able to release against a release-version baseline other than the one
+    it actually started against. Non-nullable and immutable once set, so this fact can never
+    silently drift for as long as the amendment stays open.
+
+    ``released_by_identity_id``/``released_at`` are both ``NULL`` while ``PREPARING`` and both
+    non-``NULL`` exactly when ``RELEASED`` -- enforced by ``CHECK``, not merely application
+    discipline. **No reason field exists anywhere on this table** -- ADR-048 Decision 5 (no
+    mandatory amendment reason for MVP); nothing here is a placeholder for one."""
+
+    __tablename__ = "exchange_amendments"
+    __table_args__ = (
+        UniqueConstraint(
+            "lab_order_id", "amendment_number", name="uq_exchange_amendments_order_number"
+        ),
+        CheckConstraint("amendment_number >= 1", name="ck_exchange_amendments_number_positive"),
+        CheckConstraint(
+            "status IN ('PREPARING', 'RELEASED')", name="ck_exchange_amendments_status"
+        ),
+        CheckConstraint(
+            "(status = 'PREPARING' AND released_by_identity_id IS NULL AND released_at IS NULL) "
+            "OR (status = 'RELEASED' AND released_by_identity_id IS NOT NULL "
+            "AND released_at IS NOT NULL)",
+            name="ck_exchange_amendments_release_consistency",
+        ),
+        Index("ix_exchange_amendments_lab_order_id", "lab_order_id"),
+        Index("ix_exchange_amendments_base_release_version_id", "base_release_version_id"),
+        Index(
+            "uq_exchange_amendments_one_preparing_per_order",
+            "lab_order_id",
+            unique=True,
+            postgresql_where=text("status = 'PREPARING'"),
+            sqlite_where=text("status = 'PREPARING'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    amendment_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_release_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_release_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=LabResultAmendmentStatus.PREPARING.value
+    )
+    started_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    released_by_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ResultDelivery(Base):
@@ -1109,7 +1236,8 @@ class ExchangeSecurityAuditEvent(Base):
             "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
             "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded', "
             "'lab_results_released', 'lab_observation_recorded', 'lab_result_entry_completed', "
-            "'lab_observation_corrected'"
+            "'lab_observation_corrected', 'lab_result_amendment_started', "
+            "'lab_observation_amended', 'lab_result_amendment_released'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

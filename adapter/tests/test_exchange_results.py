@@ -27,17 +27,23 @@ from daher_adapter.exchange.models import (
     LabObservation,
     LabOrder,
     LabPrice,
+    LabResultAmendment,
+    LabResultAmendmentStatus,
     LabResultType,
     ResultDeliveryStatus,
 )
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.results import (
+    AmendmentAlreadyInProgress,
+    AmendmentNotPreparing,
     DoctorReviewRepository,
     DuplicateResult,
     EntryAlreadyCompleted,
     EntryNotReadyForCompletion,
+    ExplicitReviewVersionRequired,
     InvalidResultSubmissionState,
+    LabResultAmendmentRepository,
     LabResultReleaseRepository,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
@@ -65,6 +71,7 @@ class Repos:
     releases: LabResultReleaseRepository
     deliveries: ResultDeliveryRepository
     reviews: DoctorReviewRepository
+    amendments: LabResultAmendmentRepository
     directory: LabDirectoryProfileRepository
     identities: ExchangeIdentityRepository
 
@@ -84,6 +91,7 @@ def _build(sessions: sessionmaker[Session]) -> Repos:
         releases=LabResultReleaseRepository(sessions),
         deliveries=ResultDeliveryRepository(sessions),
         reviews=DoctorReviewRepository(sessions),
+        amendments=LabResultAmendmentRepository(sessions),
         directory=LabDirectoryProfileRepository(sessions, organizations),
         identities=ExchangeIdentityRepository(sessions),
     )
@@ -2188,3 +2196,247 @@ def test_duplicate_review_for_same_release_version_is_rejected_by_the_database(
         )
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+# -- DH-EX-014B/ADR-048: post-release amendments and version-targeted review --------------------
+
+
+def _released_order_for_amendment(
+    sessions: sessionmaker[Session], *, key: str, item_count: int = 1
+):
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations, name=f"Lab-{key}")
+    if item_count == 1:
+        order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key=key)
+    else:
+        order, practitioner = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key=key)
+    tech_id = _labtech_identity_id(repos, f"tech-{key}")
+    observations = []
+    for index, item in enumerate(order.items):
+        recorded = repos.results.record_observation(
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            result_type=LabResultType.NUMERIC,
+            source_code=f"OBS-{index}",
+            display_label_snapshot=f"Synthetic observation {index}",
+            numeric_value=Decimal(index + 1),
+            recorded_by_identity_id=tech_id,
+        )
+        observations.append(recorded)
+        repos.results.complete_entry(
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            completed_by_identity_id=tech_id,
+        )
+    _release(repos, order_id=order.id, lab_id=lab.id, key=key)
+    return repos, lab, order, practitioner, tech_id, observations
+
+
+def test_amendment_release_preserves_unchanged_items_and_creates_new_review(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos, lab, order, _practitioner, tech_id, originals = _released_order_for_amendment(
+        sessions, key="amend-golden", item_count=2
+    )
+    version_one = repos.releases.get_latest_release_version(order.id)
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        started_by_identity_id=tech_id,
+    )
+    corrected = repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("10"),
+        corrected_by_identity_id=tech_id,
+    )
+    releaser_id = _labtech_identity_id(repos, "amend-golden-releaser")
+    version_two, created = repos.amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=releaser_id,
+    )
+
+    assert created is True
+    assert version_two.version_number == 2
+    assert version_two.amendment_id == amendment.id
+    assert repos.orders.get(order.id).status == "COMPLETED"
+    assert [
+        version.version_number for version in repos.releases.get_release_version_history(order.id)
+    ] == [1, 2]
+    manifest_one = repos.releases.get_manifest_for_version(version_one.id)
+    manifest_two = repos.releases.get_manifest_for_version(version_two.id)
+    assert {observation.id for item in manifest_one.items for observation in item.observations} == {
+        original.id for original in originals
+    }
+    assert {observation.id for item in manifest_two.items for observation in item.observations} == {
+        corrected.id,
+        originals[1].id,
+    }
+    reviews = repos.reviews.get_history_for_order(order.id)
+    assert [review.release_version_id for review in reviews] == [version_one.id, version_two.id]
+    assert [review.status for review in reviews] == ["PENDING", "PENDING"]
+
+    replay, replay_created = repos.amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=_labtech_identity_id(repos, "amend-golden-other-releaser"),
+    )
+    assert replay_created is False
+    assert replay == version_two
+    assert len(repos.reviews.get_history_for_order(order.id)) == 2
+
+
+def test_released_amendment_inspection_never_shows_later_proposed_content(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos, lab, order, _practitioner, tech_id, originals = _released_order_for_amendment(
+        sessions, key="amend-history"
+    )
+    first = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    value_two = repos.amendments.correct_observation(
+        amendment_id=first.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("2"),
+        corrected_by_identity_id=tech_id,
+    )
+    repos.amendments.release_amendment(
+        amendment_id=first.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=tech_id,
+    )
+    second = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    repos.amendments.correct_observation(
+        amendment_id=second.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=value_two.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("3"),
+        corrected_by_identity_id=tech_id,
+    )
+
+    released_inspection = repos.amendments.get_amendment_inspection(first.id)
+    preparing_inspection = repos.amendments.get_amendment_inspection(second.id)
+    assert released_inspection.amendment.status == "RELEASED"
+    assert released_inspection.ready_to_release is False
+    assert released_inspection.items[0].observations[0].numeric_value == Decimal("2")
+    assert preparing_inspection.amendment.status == "PREPARING"
+    assert preparing_inspection.ready_to_release is True
+    assert preparing_inspection.items[0].observations[0].numeric_value == Decimal("3")
+
+
+def test_review_mutation_is_explicitly_bound_after_amendment(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos, lab, order, practitioner, tech_id, originals = _released_order_for_amendment(
+        sessions, key="review-version-target"
+    )
+    version_one = repos.releases.get_latest_release_version(order.id)
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("2"),
+        corrected_by_identity_id=tech_id,
+    )
+    version_two, _created = repos.amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=tech_id,
+    )
+
+    with pytest.raises(ExplicitReviewVersionRequired):
+        repos.reviews.mark_no_follow_up_required(
+            order.id, reviewed_by_practitioner_reference_id=practitioner.id
+        )
+    reviewed_one = repos.reviews.mark_no_follow_up_required_for_release_version(
+        order.id,
+        version_one.id,
+        reviewed_by_practitioner_reference_id=practitioner.id,
+    )
+    assert reviewed_one.release_version_id == version_one.id
+    assert repos.reviews.get_for_release_version(version_two.id).status == "PENDING"
+
+
+def test_only_one_preparing_amendment_and_released_episode_is_terminal(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos, lab, order, _practitioner, tech_id, originals = _released_order_for_amendment(
+        sessions, key="amend-state"
+    )
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    with pytest.raises(AmendmentAlreadyInProgress):
+        repos.amendments.start_amendment(
+            order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+        )
+    repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("2"),
+        corrected_by_identity_id=tech_id,
+    )
+    repos.amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=tech_id,
+    )
+    with pytest.raises(AmendmentNotPreparing):
+        repos.amendments.correct_observation(
+            amendment_id=amendment.id,
+            order_id=order.id,
+            lab_order_item_id=order.items[0].id,
+            lab_organization_id=lab.id,
+            observation_id=originals[0].id,
+            result_type=LabResultType.NUMERIC,
+            source_code="OBS-0",
+            display_label_snapshot="Synthetic observation 0",
+            numeric_value=Decimal("3"),
+            corrected_by_identity_id=tech_id,
+        )
+
+    with sessions() as session:
+        stored = session.get(LabResultAmendment, amendment.id)
+        assert stored.status == LabResultAmendmentStatus.RELEASED.value

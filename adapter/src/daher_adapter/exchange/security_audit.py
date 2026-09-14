@@ -86,6 +86,20 @@ SecurityEventType = Literal[
     # own audit atomicity requirement (correction + supersession + this event, one transaction) is
     # exactly `lab_result_entry_completed`'s own established discipline, not a new pattern.
     "lab_observation_corrected",
+    # DH-EX-014B/ADR-048: post-release amendment. All three reuse `resource_type="lab_order"`,
+    # identical convention to every event above -- audit stays order-centric, never per-amendment-
+    # episode as its own resource kind. `lab_result_amendment_started` fires once per amendment
+    # creation; `lab_observation_amended` fires once per amendment-scoped correction (the
+    # `lab_observation_corrected` sibling for post-release, not pre-release, revisions);
+    # `lab_result_amendment_released` fires once per successful (non-replay) amendment release,
+    # alongside the new `LabResultReleaseVersion`/manifest/`DoctorReview` creation it authorizes --
+    # no separate `doctor_review_recorded`-shaped event for the new PENDING row, mirroring how the
+    # very first PENDING row at order-creation time is never separately audited either (implicit in
+    # `lab_order_created`); creating a fresh unreviewed obligation is not itself a review being
+    # recorded.
+    "lab_result_amendment_started",
+    "lab_observation_amended",
+    "lab_result_amendment_released",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
