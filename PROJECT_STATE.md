@@ -13402,7 +13402,7 @@ code, migration, or API exists as a result of this ticket.
 
 ---
 
-### DH-EX-014A · Immutable release-version manifest + versioned DoctorReview foundation · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+### DH-EX-014A · Immutable release-version manifest + versioned DoctorReview foundation · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL + CI QUALIFIED, NEGATIVE-CONTROL VERIFIED
 
 **Ticket:** DH-EX-014A. Implements ADR-048's Model 3 architecture (accepted by Liban this ticket,
 appended to ADR-048) as an **immutable versioning foundation only** — a release-version manifest and
@@ -13639,10 +13639,10 @@ concurrent-reader-never-observes-a-partial-manifest, and a version-scoped review
 #### Validation
 
 `ruff check`/`ruff format --check` on `src tests migrations scripts`: clean. Full SQLite suite:
-**786 passed, 78 skipped** (up from DH-EX-013's baseline 766/74 — 20 net new tests after the
-negative-control-driven additions). Real-PostgreSQL, all five relevant qualification files run
-together in one final pass for stability: `test_dhex007_postgres_qualification.py` (6),
-`test_dhex012_postgres_qualification.py` (9), `test_dhex012c_postgres_qualification.py` (4),
+**787 passed, 78 skipped** (up from DH-EX-013's baseline 766/74 — 21 net new tests, including the
+query-count measurement control added after advisor review). Real-PostgreSQL, all five relevant
+qualification files run together in one final pass for stability: `test_dhex007_postgres_qualification.py`
+(6), `test_dhex012_postgres_qualification.py` (9), `test_dhex012c_postgres_qualification.py` (4),
 `test_dhex013_postgres_qualification.py` (4), `test_dhex014a_postgres_qualification.py` (4) —
 **27 passed, 0 failures**. The new concurrency file re-run 4 times total (1 initial + 3 repeats),
 0 flakes.
@@ -13662,5 +13662,14 @@ accepted; it does not itself raise a new question.
 **Next:** DH-EX-014B — post-release amendment preparation and release, built against this ticket's
 own versioning foundation — is the natural next ticket, and remains a real-patient-pilot blocker.
 Not started here, per this ticket's own explicit final instruction to stop after DH-EX-014A.
+
+**Commit/CI:** `0bb5ec97759665953d70eb03b0c3c4db7f7d88c0`, pushed to `origin/master`. CI run
+`34802002919` independently verified via GitHub's check-runs API: 9/9 jobs `success` (`static
+checks`, `OpenMRS narrow TestOrder module`, `adapter — ruff + pytest`, `oauth2login — patched
+identity tests`, `compose interpolates and parses`, `provisioning — ruff + pytest`, `openelis
+order-correlation patch — compiles`, `seed + form-safety suites`, `ui — lint, typecheck, test,
+build`).
+
+**DH-EX-014A CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
