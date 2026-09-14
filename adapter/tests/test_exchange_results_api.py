@@ -34,6 +34,8 @@ from daher_adapter.exchange.models import (
     LabOrderItem,
     LabResult,
     LabResultRelease,
+    LabResultReleaseManifestEntry,
+    LabResultReleaseVersion,
     ResultDelivery,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
@@ -382,6 +384,11 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
     assert results_response.status_code == 200, results_response.text
     results_body = results_response.json()
     assert results_body["order_status"] == "COMPLETED"
+    # DH-EX-014A/ADR-048: an explicit-release order reads its exact release-version manifest,
+    # not live current-effective state -- version 1, never an amendment (none exists yet).
+    assert results_body["release_version_id"] is not None
+    assert results_body["release_version_number"] == 1
+    assert results_body["is_amendment"] is False
     assert len(results_body["results"]) == 1
     result_line = results_body["results"][0]
     assert len(result_line["observations"]) == 1
@@ -397,6 +404,8 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
     review_body = review_response.json()
     assert review_body["status"] == "NO_FOLLOW_UP_REQUIRED"
     assert review_body["reviewed_by_practitioner_reference_id"] is not None
+    # DH-EX-014A/ADR-048: the review is bound to exactly the release version the provider read.
+    assert review_body["release_version_id"] == results_body["release_version_id"]
 
     with sessions() as session:
         delivery = session.scalar(
@@ -1345,6 +1354,12 @@ def test_release_and_completion_audit_atomicity(
         order = session.get(LabOrder, order_id)
         assert order.status == "IN_PROGRESS"  # never advanced to COMPLETED
         assert session.scalar(select(LabResultRelease)) is None  # release insert rolled back too
+        # DH-EX-014A/ADR-048: the version, manifest, and review-binding are all in the same
+        # transaction as the release insert -- none of them may survive either.
+        assert session.scalar(select(LabResultReleaseVersion)) is None
+        assert session.scalar(select(LabResultReleaseManifestEntry)) is None
+        review = session.scalar(select(DoctorReview).where(DoctorReview.lab_order_id == order_id))
+        assert review.release_version_id is None
 
     assert _audit_events(sessions, "lab_results_released") == []
     assert _audit_events(sessions, "lab_order_completed") == []
@@ -1816,6 +1831,13 @@ def test_release_on_legacy_completed_order_is_refused_not_fabricated(
         headers=_auth(clinician_token),
     )
     assert results_response.status_code == 200, results_response.text
+    # DH-EX-014A: a grandfathered order has no release version -- all three version-metadata
+    # fields stay None together, and reads the unchanged legacy live-effective-observation path.
+    results_body = results_response.json()
+    assert results_body["release_version_id"] is None
+    assert results_body["release_version_number"] is None
+    assert results_body["is_amendment"] is None
+    assert len(results_body["results"]) == 1
 
     review_response = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
@@ -2249,6 +2271,10 @@ def _history_url(lab_id, order_id, item_id) -> str:
     )
 
 
+def _release_versions_url(lab_id, order_id) -> str:
+    return f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/release-versions"
+
+
 def test_correction_golden_flow_history_and_release(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:
@@ -2669,3 +2695,109 @@ def test_patient_bearer_never_sees_correction_or_history(
     assert "141" not in body_text
     assert "numeric_value" not in patient_body
     assert "observations" not in patient_body
+    # DH-EX-014A/ADR-048: the release-version manifest must never become reachable through the
+    # patient bearer surface either -- this order has a real release version by this point.
+    assert "release_version" not in patient_body
+    assert "manifest" not in body_text
+
+
+# -- DH-EX-014A/ADR-048: release-version manifest + versioned DoctorReview API surface -----------
+
+
+def test_lab_tech_and_releaser_can_read_release_version_history(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="VersionHistory"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    _release_results(client, private_key, lab.id, order_id, "VersionHistory")
+
+    lab_tech_response = client.get(
+        _release_versions_url(lab.id, order_id), headers=_auth(lab_tech_token)
+    )
+    assert lab_tech_response.status_code == 200, lab_tech_response.text
+    body = lab_tech_response.json()
+    assert body["order_id"] == str(order_id)
+    assert len(body["versions"]) == 1
+    assert body["versions"][0]["version_number"] == 1
+    assert body["versions"][0]["is_amendment"] is False
+    assert body["versions"][0]["lab_result_release_id"] is not None
+
+    releaser_id = _bootstrap_identity(client, private_key, "releaser-versionhistory-reader")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        releaser_id,
+        "releaser-versionhistory-reader",
+        ["LAB_RESULT_RELEASER"],
+    )
+    releaser_token = make_token(private_key, subject="releaser-versionhistory-reader")
+    releaser_response = client.get(
+        _release_versions_url(lab.id, order_id), headers=_auth(releaser_token)
+    )
+    assert releaser_response.status_code == 200, releaser_response.text
+
+
+def test_clinician_cannot_read_lab_release_version_history(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="VersionHistoryAuth"
+    )
+    response = client.get(_release_versions_url(lab.id, order_id), headers=_auth(clinician_token))
+    assert response.status_code == 404, response.text  # clinician has zero relationship to lab.id
+
+
+def test_cross_lab_release_version_history_is_non_enumerating(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="VersionHistoryCross"
+    )
+    impostor_lab, impostor_token, _id = _setup_lab_tech(
+        client, private_key, organizations, "impostor-versionhistory"
+    )
+    real_response = client.get(
+        _release_versions_url(impostor_lab.id, order_id), headers=_auth(impostor_token)
+    )
+    fake_response = client.get(
+        _release_versions_url(impostor_lab.id, uuid.uuid4()), headers=_auth(impostor_token)
+    )
+    assert real_response.status_code == 404
+    assert fake_response.status_code == 404
+    assert real_response.json() == fake_response.json()
+
+
+def test_release_version_history_for_grandfathered_order_is_empty(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """A grandfathered COMPLETED-without-LabResultRelease order has no release version at all --
+    the history endpoint must return an empty list, never a fabricated one."""
+    private_key, _ = keypair
+    _provider, _clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="VersionHistoryGF"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        order.status = "COMPLETED"
+        session.commit()
+
+    response = client.get(_release_versions_url(lab.id, order_id), headers=_auth(lab_tech_token))
+    assert response.status_code == 200, response.text
+    assert response.json()["versions"] == []

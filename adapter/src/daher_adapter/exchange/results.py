@@ -104,6 +104,8 @@ from daher_adapter.exchange.models import (
     LabOrderStatus,
     LabResult,
     LabResultRelease,
+    LabResultReleaseManifestEntry,
+    LabResultReleaseVersion,
     LabResultType,
     LabSelection,
     ResultDelivery,
@@ -128,7 +130,10 @@ __all__ = [
     "LabResultRecord",
     "LabResultReleaseRecord",
     "LabResultReleaseRepository",
+    "LabResultReleaseVersionRecord",
     "LabResultRepository",
+    "ReleaseManifestItemRecord",
+    "ReleaseVersionManifestRecord",
     "LegacyCompletedOrderHasNoRelease",
     "MalformedZeroObservationEntry",
     "ObservationNotFound",
@@ -376,6 +381,44 @@ class LabResultReleaseRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LabResultReleaseVersionRecord:
+    """DH-EX-014A/ADR-048: one released version of an order's result set.
+    ``lab_result_release_id`` is non-``None`` for version 1 only -- see
+    ``LabResultReleaseVersion``'s own ``models.py`` docstring for why a later version
+    (DH-EX-014B, not built here) binds differently."""
+
+    id: uuid.UUID
+    lab_order_id: uuid.UUID
+    version_number: int
+    lab_result_release_id: uuid.UUID | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseManifestItemRecord:
+    """DH-EX-014A: one ordered item's exact observation set as it was released under one specific
+    version -- ``observations`` is read by manifest-entry id, never filtered by the observation's
+    own current ``superseded_at`` state (a manifest entry remains historically correct even after a
+    future amendment supersedes the observation it names)."""
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    entry_completed_at: datetime
+    observations: tuple[LabObservationRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseVersionManifestRecord:
+    """DH-EX-014A: one released version, plus its exact, immutable manifest -- the reconstruction
+    unit ADR-048 requires. ``version.version_number == 1`` and ``version.lab_result_release_id`` is
+    always the same order's ``LabResultRelease`` id, for every version this ticket can produce."""
+
+    version: LabResultReleaseVersionRecord
+    items: tuple[ReleaseManifestItemRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ResultDeliveryRecord:
     id: uuid.UUID
     lab_order_id: uuid.UUID
@@ -386,8 +429,14 @@ class ResultDeliveryRecord:
 
 @dataclass(frozen=True, slots=True)
 class DoctorReviewRecord:
+    """DH-EX-014A/ADR-048 (ADR-045 Question 4, Option C): ``release_version_id`` is ``None`` only
+    for the one legacy/pre-release row (created at order-creation time, never yet bound to a real
+    release) -- see ``DoctorReview``'s own ``models.py`` docstring. Never inferred, never rewritten
+    once bound."""
+
     id: uuid.UUID
     lab_order_id: uuid.UUID
+    release_version_id: uuid.UUID | None
     status: str
     reviewed_at: datetime | None
     reviewed_by_practitioner_reference_id: uuid.UUID | None
@@ -1082,10 +1131,23 @@ class LabResultRepository:
 
 
 class LabResultReleaseRepository:
-    """DH-EX-012/ADR-044, extended by DH-EX-012C: the sole supported production way to move a
-    ``LabOrder`` from ``IN_PROGRESS`` to ``COMPLETED`` -- see ``exchange/orders.py``'s
-    ``transition()`` for the identical, deliberately duplicated guard that keeps the generic
-    state-machine primitive from becoming an unguarded bypass of this same invariant."""
+    """DH-EX-012/ADR-044, extended by DH-EX-012C, extended by DH-EX-014A/ADR-048: the sole
+    supported production way to move a ``LabOrder`` from ``IN_PROGRESS`` to ``COMPLETED`` -- see
+    ``exchange/orders.py``'s ``transition()`` for the identical, deliberately duplicated guard that
+    keeps the generic state-machine primitive from becoming an unguarded bypass of this same
+    invariant.
+
+    **DH-EX-014A: a successful original release now atomically creates four things in the one
+    transaction this class already holds the ``LabOrder FOR UPDATE`` lock for** -- the existing
+    immutable ``LabResultRelease`` row (unchanged in shape/meaning); a new
+    ``LabResultReleaseVersion`` (``version_number=1``, bound to that same release row); one
+    ``LabResultReleaseManifestEntry`` per *effective* observation across every item, computed
+    inside this same lock so the manifest can never diverge from the actual released set; and the
+    order's existing ``PENDING`` ``DoctorReview`` row bound (``release_version_id`` set from
+    ``NULL``) to the new version -- so "Review #1" means exactly "the review obligation for
+    Release Version 1" from the instant release occurs. All four commit together or none do -- no
+    code path here creates a ``LabResultRelease`` without its version and manifest, or a version
+    without a bound review."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory
@@ -1168,14 +1230,64 @@ class LabResultReleaseRepository:
                 f"item(s) still lack a completed, observation-backed result entry"
             )
 
+        released_at = utc_now()
         release = LabResultRelease(
             lab_order_id=order_id,
             lab_organization_id=lab_organization_id,
             released_by_identity_id=released_by_identity_id,
-            released_at=utc_now(),
+            released_at=released_at,
         )
         session.add(release)
         session.flush()
+
+        # DH-EX-014A: the exact effective set this release authorizes, computed inside the same
+        # LabOrder-locked transaction that already re-checked completeness above -- this is what
+        # makes the manifest structurally unable to diverge from what was actually released.
+        # Identical query shape to `LabResultRepository.list_for_order`'s own effective-only read,
+        # deliberately not reused directly since that method opens its own session.
+        effective_rows = session.execute(
+            select(LabOrderItem.id, LabObservation.id)
+            .select_from(LabOrderItem)
+            .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+            .join(
+                LabObservation,
+                (LabObservation.lab_result_id == LabResult.id)
+                & (LabObservation.superseded_at.is_(None)),
+            )
+            .where(LabOrderItem.lab_order_id == order_id)
+        ).all()
+
+        version = LabResultReleaseVersion(
+            lab_order_id=order_id,
+            version_number=1,
+            lab_result_release_id=release.id,
+            created_at=released_at,
+        )
+        session.add(version)
+        session.flush()
+
+        for item_id, observation_id in effective_rows:
+            session.add(
+                LabResultReleaseManifestEntry(
+                    release_version_id=version.id,
+                    lab_order_item_id=item_id,
+                    lab_observation_id=observation_id,
+                )
+            )
+
+        # Bind the order's one existing, still-unbound review row to this new version -- never a
+        # new row here (that row was already created PENDING at order-creation time; DH-EX-014A
+        # does not change when a review obligation first comes to exist, only what it is bound to).
+        # No additional lock needed: the LabOrder FOR UPDATE lock held since this method's first
+        # statement already serializes every concurrent caller for this exact order.
+        unbound_review = session.scalar(
+            select(DoctorReview).where(
+                DoctorReview.lab_order_id == order_id, DoctorReview.release_version_id.is_(None)
+            )
+        )
+        if unbound_review is not None:
+            unbound_review.release_version_id = version.id
+
         order.status = LabOrderStatus.COMPLETED.value
         session.flush()
         return _to_release_record(release), True
@@ -1186,6 +1298,121 @@ class LabResultReleaseRepository:
                 select(LabResultRelease).where(LabResultRelease.lab_order_id == order_id)
             )
             return None if release is None else _to_release_record(release)
+
+    def get_latest_release_version(
+        self, order_id: uuid.UUID
+    ) -> LabResultReleaseVersionRecord | None:
+        """DH-EX-014A: the highest ``version_number`` release version for this order, or ``None``
+        for an order with no release version at all -- a grandfathered
+        ``COMPLETED``-without-``LabResultRelease`` order, or one not yet released. Ordered
+        explicitly by ``version_number``, never by ``created_at``."""
+        with self._sessions() as session:
+            version = session.scalar(
+                select(LabResultReleaseVersion)
+                .where(LabResultReleaseVersion.lab_order_id == order_id)
+                .order_by(LabResultReleaseVersion.version_number.desc())
+                .limit(1)
+            )
+            return None if version is None else _to_release_version_record(version)
+
+    def get_release_version_history(
+        self, order_id: uuid.UUID
+    ) -> tuple[LabResultReleaseVersionRecord, ...]:
+        """DH-EX-014A: every release version that has ever existed for this order, oldest first --
+        in this ticket, at most one (version 1). Never used by any provider-facing route directly;
+        a future DH-EX-014B UI reads this to render "Version 1 / Version 2 / ..." history."""
+        with self._sessions() as session:
+            versions = session.scalars(
+                select(LabResultReleaseVersion)
+                .where(LabResultReleaseVersion.lab_order_id == order_id)
+                .order_by(LabResultReleaseVersion.version_number)
+            ).all()
+            return tuple(_to_release_version_record(v) for v in versions)
+
+    def get_release_version(
+        self, release_version_id: uuid.UUID
+    ) -> LabResultReleaseVersionRecord | None:
+        """DH-EX-014A: fetch one release version by its own immutable id. Callers are responsible
+        for their own lab/provider-tenant authorization check before calling this, exactly
+        mirroring ``LabResultRepository.get_correction_history``'s identical convention."""
+        with self._sessions() as session:
+            version = session.get(LabResultReleaseVersion, release_version_id)
+            return None if version is None else _to_release_version_record(version)
+
+    def get_manifest_for_order(self, order_id: uuid.UUID) -> ReleaseVersionManifestRecord | None:
+        """DH-EX-014A: the *latest* released version's exact manifest for this order, or ``None``
+        if this order has no release version at all -- callers must fall back to
+        ``LabResultRepository.list_for_order``'s live-effective-observation read for that case
+        (a grandfathered order, which cannot have a release version by construction). **Historical
+        reconstruction, not a live read:** observations are fetched by the manifest's own recorded
+        ``lab_observation_id``, never filtered by that observation's current ``superseded_at`` --
+        this is the one deliberate difference from every other read in this module."""
+        with self._sessions() as session:
+            version = session.scalar(
+                select(LabResultReleaseVersion)
+                .where(LabResultReleaseVersion.lab_order_id == order_id)
+                .order_by(LabResultReleaseVersion.version_number.desc())
+                .limit(1)
+            )
+            if version is None:
+                return None
+            return self._manifest_record_for_version(session, version)
+
+    def get_manifest_for_version(
+        self, release_version_id: uuid.UUID
+    ) -> ReleaseVersionManifestRecord | None:
+        """DH-EX-014A: the exact manifest for one specific release version by id -- the read a
+        future "Version 1 / Version 2" history UI uses once more than one version exists. Same
+        historical-reconstruction semantic as ``get_manifest_for_order``."""
+        with self._sessions() as session:
+            version = session.get(LabResultReleaseVersion, release_version_id)
+            if version is None:
+                return None
+            return self._manifest_record_for_version(session, version)
+
+    def _manifest_record_for_version(
+        self, session: Session, version: LabResultReleaseVersion
+    ) -> ReleaseVersionManifestRecord:
+        # One joined query regardless of item/observation count -- no N+1, matching this module's
+        # own established query-count discipline (`get_for_lab`'s two/three-query pattern).
+        rows = session.execute(
+            select(LabOrderItem, LabResult, LabObservation)
+            .select_from(LabResultReleaseManifestEntry)
+            .join(
+                LabOrderItem,
+                LabResultReleaseManifestEntry.lab_order_item_id == LabOrderItem.id,
+            )
+            .join(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+            .join(
+                LabObservation,
+                LabResultReleaseManifestEntry.lab_observation_id == LabObservation.id,
+            )
+            .where(LabResultReleaseManifestEntry.release_version_id == version.id)
+            .order_by(LabOrderItem.id, LabObservation.recorded_at)
+        ).all()
+        observations_by_item: dict[uuid.UUID, list[LabObservation]] = {}
+        item_by_id: dict[uuid.UUID, LabOrderItem] = {}
+        entry_completed_at_by_item: dict[uuid.UUID, datetime] = {}
+        for item, container, observation in rows:
+            observations_by_item.setdefault(item.id, []).append(observation)
+            item_by_id[item.id] = item
+            # Never None here -- release() only ever creates a manifest entry from an item whose
+            # entry was already proven complete by the same completeness re-check that gates
+            # release itself.
+            entry_completed_at_by_item[item.id] = container.entry_completed_at  # type: ignore[assignment]
+        items = tuple(
+            ReleaseManifestItemRecord(
+                item_id=item_id,
+                catalog_code_snapshot=item_by_id[item_id].catalog_code_snapshot,
+                catalog_display_name_snapshot=item_by_id[item_id].catalog_display_name_snapshot,
+                entry_completed_at=entry_completed_at_by_item[item_id],
+                observations=tuple(_to_observation_record(o) for o in observations),
+            )
+            for item_id, observations in observations_by_item.items()
+        )
+        return ReleaseVersionManifestRecord(
+            version=_to_release_version_record(version), items=items
+        )
 
 
 class ResultDeliveryRepository:
@@ -1228,8 +1455,30 @@ class ResultDeliveryRepository:
 
 
 class DoctorReviewRepository:
+    """DH-EX-014A/ADR-048 (ADR-045 Question 4, Option C): every method that resolves "the" review
+    for an order now explicitly resolves the row bound to the *highest* ``version_number`` --
+    ``coalesce(version_number, 0)`` so the one legacy/unbound row (``release_version_id IS NULL``)
+    sorts lowest, never highest, once a real version exists for that order. **Never inferred from
+    ``reviewed_at`` or any other timestamp** -- the explicit `version_number` ordering is the one
+    ADR-048/this ticket's own instruction requires. In this ticket exactly one row can ever exist
+    per order, so this ordering is not yet load-bearing in practice -- it is written this way so
+    DH-EX-014B's second review row needs no change to this resolution logic at all."""
+
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory
+
+    @staticmethod
+    def _current_review_id_query(lab_order_id: uuid.UUID):
+        return (
+            select(DoctorReview.id)
+            .outerjoin(
+                LabResultReleaseVersion,
+                LabResultReleaseVersion.id == DoctorReview.release_version_id,
+            )
+            .where(DoctorReview.lab_order_id == lab_order_id)
+            .order_by(func.coalesce(LabResultReleaseVersion.version_number, 0).desc())
+            .limit(1)
+        )
 
     def mark_no_follow_up_required(
         self,
@@ -1295,8 +1544,15 @@ class DoctorReviewRepository:
                 f"review may only be recorded once every requested result is in"
             )
 
+        # Resolved by explicit version_number, then locked by primary key directly -- avoids
+        # combining `FOR UPDATE` with the outer join the resolution query itself needs (Postgres
+        # locking semantics over an outer-joined, possibly-NULL side are best avoided entirely
+        # rather than relied on).
+        review_id = session.scalar(self._current_review_id_query(lab_order_id))
+        if review_id is None:
+            raise ReviewNotFound(str(lab_order_id))
         review = session.scalar(
-            select(DoctorReview).where(DoctorReview.lab_order_id == lab_order_id).with_for_update()
+            select(DoctorReview).where(DoctorReview.id == review_id).with_for_update()
         )
         if review is None:
             raise ReviewNotFound(str(lab_order_id))
@@ -1314,13 +1570,45 @@ class DoctorReviewRepository:
         return _to_review_record(review)
 
     def get_for_order(self, lab_order_id: uuid.UUID) -> DoctorReviewRecord:
+        """DH-EX-014A: resolves to the review bound to the order's latest release version -- see
+        this class's own docstring. Order-oriented signature kept unchanged for backward
+        compatibility; internally version-aware."""
         with self._sessions() as session:
-            review = session.scalar(
-                select(DoctorReview).where(DoctorReview.lab_order_id == lab_order_id)
-            )
+            review_id = session.scalar(self._current_review_id_query(lab_order_id))
+            if review_id is None:
+                raise ReviewNotFound(str(lab_order_id))
+            review = session.get(DoctorReview, review_id)
             if review is None:
                 raise ReviewNotFound(str(lab_order_id))
             return _to_review_record(review)
+
+    def get_for_release_version(self, release_version_id: uuid.UUID) -> DoctorReviewRecord | None:
+        """DH-EX-014A: the review obligation for one specific release version, by its own
+        immutable id -- the read a future version-scoped review endpoint (DH-EX-014B) uses.
+        Callers are responsible for their own tenant authorization check first, exactly mirroring
+        every other by-id read in this module."""
+        with self._sessions() as session:
+            review = session.scalar(
+                select(DoctorReview).where(DoctorReview.release_version_id == release_version_id)
+            )
+            return None if review is None else _to_review_record(review)
+
+    def get_history_for_order(self, lab_order_id: uuid.UUID) -> tuple[DoctorReviewRecord, ...]:
+        """DH-EX-014A: every review row that has ever existed for this order, ordered by the
+        release version it is bound to (the one unbound legacy row, if present, sorts first) --
+        never inferred from ``reviewed_at``. In this ticket, at most one row can exist; this exists
+        so DH-EX-014B's second review row needs no new read method."""
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(DoctorReview)
+                .outerjoin(
+                    LabResultReleaseVersion,
+                    LabResultReleaseVersion.id == DoctorReview.release_version_id,
+                )
+                .where(DoctorReview.lab_order_id == lab_order_id)
+                .order_by(func.coalesce(LabResultReleaseVersion.version_number, 0))
+            ).all()
+            return tuple(_to_review_record(r) for r in rows)
 
 
 def _lock_order_and_item_for_entry(
@@ -1481,7 +1769,18 @@ def _to_review_record(review: DoctorReview) -> DoctorReviewRecord:
     return DoctorReviewRecord(
         id=review.id,
         lab_order_id=review.lab_order_id,
+        release_version_id=review.release_version_id,
         status=review.status,
         reviewed_at=review.reviewed_at,
         reviewed_by_practitioner_reference_id=review.reviewed_by_practitioner_reference_id,
+    )
+
+
+def _to_release_version_record(version: LabResultReleaseVersion) -> LabResultReleaseVersionRecord:
+    return LabResultReleaseVersionRecord(
+        id=version.id,
+        lab_order_id=version.lab_order_id,
+        version_number=version.version_number,
+        lab_result_release_id=version.lab_result_release_id,
+        created_at=version.created_at,
     )

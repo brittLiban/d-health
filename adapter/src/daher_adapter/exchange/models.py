@@ -52,6 +52,8 @@ __all__ = [
     "LabPrice",
     "LabResult",
     "LabResultRelease",
+    "LabResultReleaseManifestEntry",
+    "LabResultReleaseVersion",
     "LabResultType",
     "LabSampleCollection",
     "LabSelection",
@@ -706,6 +708,101 @@ class LabResultRelease(Base):
     )
 
 
+class LabResultReleaseVersion(Base):
+    """DH-EX-014A/ADR-048: the immutable versioning foundation Model 3 requires -- one row per
+    *released* version of an order's result set, explicitly ordered by ``version_number`` (never
+    inferred from ``created_at``). Version 1 always binds to the pre-existing, unmodified
+    ``LabResultRelease`` row via ``lab_result_release_id`` -- this table does not replace,
+    duplicate, or reinterpret that row's own authorization fact (who released, when); it is purely
+    an additional, additive layer naming *which exact observations* that release authorized (see
+    ``LabResultReleaseManifestEntry``). ``LabResultRelease`` itself remains exactly as DH-EX-012/
+    ADR-044 shipped it -- immutable, no revision, no un-release, no delete -- forever.
+
+    A future DH-EX-014B amendment release (version 2+) will bind to its own amendment-episode record
+    instead (a column that table does not exist yet and is deliberately not added here, matching
+    this ticket's own "do not implement amendment preparation" scope boundary) -- the ``CHECK``
+    constraint below enforces that a version-1 row is always release-bound and every later version
+    is not, so the schema itself, not merely application code, states which binding shape applies to
+    which version."""
+
+    __tablename__ = "exchange_release_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "lab_order_id",
+            "version_number",
+            name="uq_exchange_release_versions_order_version",
+        ),
+        CheckConstraint(
+            "version_number >= 1", name="ck_exchange_release_versions_version_positive"
+        ),
+        CheckConstraint(
+            "(version_number = 1 AND lab_result_release_id IS NOT NULL) OR "
+            "(version_number > 1 AND lab_result_release_id IS NULL)",
+            name="ck_exchange_release_versions_v1_bound_to_release",
+        ),
+        Index("ix_exchange_release_versions_lab_order_id", "lab_order_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lab_result_release_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_result_releases.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class LabResultReleaseManifestEntry(Base):
+    """DH-EX-014A/ADR-048: one row means exactly "this exact ``LabObservation`` id was part of this
+    exact released version, under this exact item" -- the immutable binding that makes a historical
+    release exactly reconstructable regardless of what happens to the observation's own
+    ``superseded_at`` afterward. **Deliberately binds by id only** -- no value, unit, range, source
+    code, or display label is copied here; the existing immutable ``LabObservation`` row is the
+    single source of truth for content, exactly as this ticket's own instruction requires. A single
+    item may have more than one manifest entry for the same version (a multi-observation panel),
+    which is why uniqueness is scoped to ``(release_version_id, lab_observation_id)``, not to the
+    item -- ADR-047's own "do not impose one observation per item" rule applies identically here.
+
+    **Cross-item/cross-order integrity is an application-layer check, not a database constraint** --
+    verifying "this observation's own container belongs to this exact item" and "this item belongs
+    to this exact order" requires a multi-hop join no `CHECK`/`UNIQUE` constraint alone can express
+    without a trigger; both are verified by ``LabResultReleaseRepository`` at the one place a
+    manifest is ever created (see its own docstring), inside the same ``LabOrder``-locked
+    transaction that already determines the effective set, so there is no window for either check to
+    be bypassed."""
+
+    __tablename__ = "exchange_release_manifest_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_version_id",
+            "lab_observation_id",
+            name="uq_exchange_release_manifest_entries_version_observation",
+        ),
+        Index(
+            "ix_exchange_release_manifest_entries_release_version_id",
+            "release_version_id",
+        ),
+        Index("ix_exchange_release_manifest_entries_lab_order_item_id", "lab_order_item_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    release_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_release_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    lab_order_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_order_items.id", ondelete="RESTRICT"), nullable=False
+    )
+    lab_observation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+
+
 class ResultDelivery(Base):
     """Delivery to the ordering provider organization is its own state, independent from
     ``LabResult`` existing -- DH-EX-001 forbids inferring delivery from result completion. Starts
@@ -738,7 +835,25 @@ class DoctorReview(Base):
     """The follow-up disposition flag. Created ``PENDING`` at order-creation time (see
     ``exchange/orders.py``) so "review remains pending until explicit provider action" is a real
     row from the start, not a state inferred by the absence of one. No clinical interpretation is
-    encoded beyond this workflow flag -- DH-EX-001's explicit boundary."""
+    encoded beyond this workflow flag -- DH-EX-001's explicit boundary.
+
+    **DH-EX-014A/ADR-048 (ADR-045 Question 4, Option C -- versioned review history):**
+    ``lab_order_id`` is no longer database-``unique`` -- an order may eventually carry more than one
+    review row, one per released version, once DH-EX-014B's amendment releases exist.
+    ``release_version_id`` is the explicit, never-inferred-from-timestamp binding: ``NULL`` means
+    this is the one legacy/pre-release row created at order-creation time before any release has
+    occurred yet (unchanged from before this ticket); non-``NULL`` means this review's obligation is
+    for *exactly* that ``LabResultReleaseVersion``, permanently -- a historical review is never
+    reset, rewritten, reassigned to a different release, or treated as covering content it never
+    saw. Two constraints, not one, enforce the intended shape at the database level (see
+    ``__table_args__``): at most one review per non-``NULL`` release version (a plain ``UNIQUE``
+    already gives this for free, since every SQL dialect this codebase targets treats ``NULL`` as
+    distinct from every other ``NULL`` under ``UNIQUE``); at most one *unbound* legacy row per order
+    (a genuine partial index, since the plain `UNIQUE` above does not by itself prevent two
+    ``NULL``-bound rows for the same order). A grandfathered ``COMPLETED``-without-
+    ``LabResultRelease`` order's review row keeps ``release_version_id = NULL`` forever -- it is
+    not amendment-eligible
+    (DH-EX-014A's Decision 6), so no version ever exists for it to bind to."""
 
     __tablename__ = "exchange_doctor_reviews"
     __table_args__ = (
@@ -746,11 +861,25 @@ class DoctorReview(Base):
             "status IN ('PENDING', 'NO_FOLLOW_UP_REQUIRED', 'FOLLOW_UP_REQUIRED')",
             name="ck_exchange_doctor_reviews_status",
         ),
+        UniqueConstraint(
+            "release_version_id",
+            name="uq_exchange_doctor_reviews_release_version_id",
+        ),
+        Index(
+            "uq_exchange_doctor_reviews_unbound_lab_order_id",
+            "lab_order_id",
+            unique=True,
+            postgresql_where=text("release_version_id IS NULL"),
+            sqlite_where=text("release_version_id IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     lab_order_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False, unique=True
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    release_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_release_versions.id", ondelete="RESTRICT"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=DoctorReviewStatus.PENDING.value

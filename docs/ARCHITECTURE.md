@@ -1067,9 +1067,10 @@ WhatsApp/SMS integration — none of this is equivalent to a completed Exchange 
 (DH-EX-001 through DH-EX-010): DH-PIVOT-001 (2026-09-08); build/review/closure detail:
 PROJECT_STATE.md's DH-EX-001 through DH-EX-007 entries.
 
-**DH-EX-008 (deployment wiring) through DH-EX-013 (pre-release observation correction) extend
-the Exchange well past DH-EX-007** — reconciled into this document 2026-09-13 (DH-FIELD-001; full
-per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not restated here):
+**DH-EX-008 (deployment wiring) through DH-EX-014A (release-version manifest + versioned review
+foundation) extend the Exchange well past DH-EX-007** — reconciled into this document 2026-09-13/14
+(DH-FIELD-001/DH-EX-014D; full per-ticket evidence remains in each ticket's own `PROJECT_STATE.md`
+entry, not restated here):
 
 - **DH-EX-008** wires the Exchange's existing OIDC auth code into the real Docker/Keycloak/Caddy
   deployment (env contract, realm import, `exchange.$BASE_DOMAIN` routing, a dedicated
@@ -1143,8 +1144,35 @@ per-ticket evidence remains in each ticket's own `PROJECT_STATE.md` entry, not r
   treats every `NULL` as distinct under `UNIQUE`, so the never-corrected majority of observations
   are unconstrained by it) — confirmed necessary, not redundant, by a
   negative control that reproduced real corruption (10 concurrent successors of one predecessor) only
-  once *both* defenses were removed together. **Post-release amendment (ADR-045 Questions 4–5)
-  remains OPEN, deferred to DH-EX-014** — nothing here moves `LabOrderStatus` out of `COMPLETED` or
-  touches an already-released result.
+  once *both* defenses were removed together. Post-release amendment (ADR-045 Questions 4–5) was
+  still OPEN at this point, resolved into ADR-048's architecture by the next two tickets below.
+- **DH-EX-014D (ADR-048, DECISION PACKET, 2026-09-14)** audits the naive-post-release-mutation risk
+  precisely (the provider-read route re-queries live effective observations gated only on
+  `LabOrder.status`, with no binding to which observations a specific release authorized) and
+  recommends Model 3 — an amendment episode plus an immutable release-version manifest — over two
+  other evaluated models, without implementing any of it. Liban accepted Model 3, ADR-045 Question 4
+  Option C (versioned `DoctorReview`), and Question 5 (amendment required before the first
+  real-patient pilot), appended to ADR-048.
+- **DH-EX-014A (ADR-048 Model 3, IMPLEMENTED, 2026-09-14)** builds the accepted architecture's
+  **versioning foundation only** — no amendment mutation exists yet. A new `LabResultReleaseVersion`
+  (`UNIQUE(lab_order_id, version_number)`, a `CHECK` binding version 1 to the unchanged, immutable
+  `LabResultRelease`) and `LabResultReleaseManifestEntry` (binds by `LabObservation.id` only, never
+  duplicating a scalar value) let a release name the exact effective observation set it authorized.
+  `LabResultReleaseRepository.release` now atomically creates the release, its Version 1, the full
+  manifest, and binds the order's existing `PENDING` `DoctorReview` to that version — all four
+  commit together or none do. `DoctorReview.lab_order_id` lost its database-`UNIQUE` constraint (a
+  real migration, `0018_exchange_release_versions`) in favor of a plain `UNIQUE` on the new
+  `release_version_id` plus a genuine partial unique index for the one legacy/unbound row per order
+  — resolved by explicit `version_number` ordering, never by `reviewed_at` or any other timestamp.
+  Provider reads of an explicit-release order now derive content from this manifest, never live
+  state, closing exactly the risk DH-EX-014D identified; a grandfathered order (no `LabResultRelease`)
+  is unaffected, using its unchanged legacy read. Original-release backfill for every pre-existing
+  release is reconstruction from a proven invariant (every observation-mutating code path is gated
+  on `IN_PROGRESS`, confirmed by an exhaustive grep of every `LabObservation` write site) — never a
+  fabrication. Two downgrade guards, each demonstrated against real PostgreSQL including a
+  guard-removal control that reproduced real, silent semantic loss (an amendment's entire existence
+  becomes untraceable). **Post-release amendment itself remains unimplemented — no amendment
+  endpoint exists, no `version_number > 1` is creatable anywhere — deferred to DH-EX-014B, which
+  Liban's own accepted decision makes a required real-patient-pilot blocker.**
 
-Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-013 entries.
+Full per-ticket evidence: `PROJECT_STATE.md`'s DH-EX-008 through DH-EX-014A entries.

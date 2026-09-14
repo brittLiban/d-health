@@ -13399,3 +13399,268 @@ ticket's own final instruction, implementation is **not started here** — no po
 code, migration, or API exists as a result of this ticket.
 
 **READY FOR LIBAN DECISION: YES**
+
+---
+
+### DH-EX-014A · Immutable release-version manifest + versioned DoctorReview foundation · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+
+**Ticket:** DH-EX-014A. Implements ADR-048's Model 3 architecture (accepted by Liban this ticket,
+appended to ADR-048) as an **immutable versioning foundation only** — a release-version manifest and
+a version-aware `DoctorReview`. It does **not** implement post-release amendment preparation or
+release; no amendment endpoint, no observation mutation past `COMPLETED`, and no `version_number > 1`
+row is creatable by anything in this ticket. DH-EX-014B (amendment preparation/release) remains
+required, and remains a real-patient-pilot blocker per Liban's own Decision 3.
+
+**Starting HEAD/CI:** `932455bbb812289268c032b0f9f8491ba6e8e9ce` (DH-EX-014D's own audit commit),
+fetched and audited fresh — working tree clean before this ticket began. CI run `34778951953`
+independently re-verified via GitHub's check-runs API: 9/9 jobs `success`. Both matched the
+ticket's own stated expectation exactly.
+
+#### The load-bearing invariant, proven from code before relying on it
+
+Every `LabObservation`-mutating code path in the package — `record_observation`,
+`correct_observation`, and the single-observation convenience path (`_submit_in_session`) — is
+gated, without exception, on `_lock_order_and_item_for_entry`'s `LabOrder`-locked `IN_PROGRESS`
+check (confirmed by grepping every `LabObservation(` construction site and the sole
+`.superseded_at =` assignment in the package: exactly three construction sites, one mutation site,
+all three behind the identical gate). Once `LabResultReleaseRepository.release` moves an order to
+`COMPLETED`, no code path anywhere can create, mutate, or supersede an observation belonging to it.
+**Therefore the currently-effective observation set for an already-released order is, today,
+exactly and provably the set that was effective at the moment of release** — proven, not assumed,
+and this is exactly why the migration's backfill (below) is reconstruction, never fabrication.
+
+#### Schema
+
+```text
+LabResultRelease (unchanged, immutable, exactly as ADR-044 shipped it)
+      ↓ (Version 1 only, lab_result_release_id UNIQUE)
+LabResultReleaseVersion (id, lab_order_id, version_number, lab_result_release_id, created_at)
+      ↓
+LabResultReleaseManifestEntry (release_version_id, lab_order_item_id, lab_observation_id)
+
+DoctorReview (lab_order_id no longer UNIQUE; new nullable release_version_id)
+```
+
+`exchange_release_versions`: `UNIQUE(lab_order_id, version_number)`; a `CHECK` enforces version 1
+is always release-bound (`lab_result_release_id IS NOT NULL`) and every later version is not (since
+DH-EX-014B's amendment episodes will bind differently — that table is deliberately not created
+here). `exchange_release_manifest_entries`: `UNIQUE(release_version_id, lab_observation_id)` — a
+single item may carry more than one manifest entry (a panel), matching ADR-047's own "do not impose
+one observation per item" rule; binds by immutable `LabObservation.id` only, no clinical scalar
+value ever duplicated. `exchange_doctor_reviews`: `uq_exchange_doctor_reviews_lab_order_id` dropped;
+new `release_version_id` column with a plain `UNIQUE` (sufficient alone for "one review per non-NULL
+version," since every SQL dialect this codebase targets treats `NULL` as distinct under `UNIQUE` —
+the identical insight `0017`'s `supersedes_observation_id` constraint already relies on) plus a
+genuine partial unique index on `lab_order_id` scoped to `release_version_id IS NULL` (the one
+legacy/unbound row per order).
+
+#### Migration
+
+`0018_exchange_release_versions`, revises `0017_observation_revisions`. **Table/constraint naming
+note:** the originally planned table names (`exchange_lab_result_release_versions`,
+`exchange_lab_result_release_manifest_entries`) produced constraint identifiers exceeding
+PostgreSQL's 63-character limit (`uq_exchange_lab_result_release_manifest_entries_version_
+observation` at 67 characters) — caught by actually running the migration against real PostgreSQL,
+not by inspection. Renamed to `exchange_release_versions`/`exchange_release_manifest_entries`
+throughout (model, migration, `.github/workflows/ci.yml`'s `EXPECTED_HEAD`), bringing every
+constraint name comfortably under the limit.
+
+**Original-release backfill**, seeded via the real repository layer at the pre-0018 schema in a
+temporary git worktree at the parent commit (the current ORM models already reflect the new schema,
+so seeding "pre-migration" data requires the pre-migration application code, not merely a pre-
+migration database) — four scenarios, verified against real PostgreSQL: (1) an explicit release
+with one DH-EX-013 pre-release correction — verified the manifest names the *corrected* observation
+id, never the superseded original; (2) an explicit release with a two-observation panel item —
+verified both manifest entries present; (3) a grandfathered `COMPLETED`-without-`LabResultRelease`
+order (raw SQL status write, matching DH-EX-012C's own precedent for simulating this otherwise-
+unreachable legacy shape) — verified zero version/manifest rows created; (4) an unreleased
+`IN_PROGRESS` order with its default `PENDING` review — verified untouched. `DoctorReview` status/
+`reviewed_at`/`reviewed_by_practitioner_reference_id` preserved verbatim for the terminal-review
+scenario, never reset or fabricated.
+
+**Second, independent backfill validation** (beyond the four seeded scenarios above): the 0018
+migration was also run against the still-existing `dhex012c_qual` and `dhex013_qual` real-PostgreSQL
+databases from DH-EX-012C's and DH-EX-013's own qualification runs — real released-order data
+produced by prior tickets' actual code paths, not seeded for this ticket. Both migrated cleanly and
+both tickets' own qualification suites still passed afterward, confirming the backfill logic holds
+against genuine historical data, not only against this ticket's purpose-built fixtures.
+
+**Downgrade guards, each independently demonstrated against real PostgreSQL:**
+`DowngradeBlockedByAmendmentReleaseVersionHistory` (any `version_number > 1` row) and
+`DowngradeBlockedByMultipleReviewsPerOrderHistory` (any `lab_order_id` with more than one review
+row) — neither can trigger against this ticket's own reachable states (no amendment mechanism
+exists to produce either condition), both exist to protect **future** DH-EX-014B history from an
+accidental downgrade run much later. A real downgrade with neither condition present was run and
+the pre-0018 shape was reconstructed exactly (both new tables dropped, `release_version_id` column
+and its two constraints dropped, `UNIQUE(lab_order_id)` restored) — verified byte-for-bit against
+the original `DoctorReview` status values, not assumed.
+
+**Guard-removal data-loss demonstration (required negative control 10):** on a disposable clone of
+the backfilled qualification database, a simulated `version_number = 2` row (with its own manifest
+entry) was inserted, both guards disabled, and the downgrade forced through. Result: both new
+tables were dropped entirely — **all evidence that a second (amendment) version had ever existed
+vanished with no trace**, and the surviving `DoctorReview` row (status `NO_FOLLOW_UP_REQUIRED`)
+reverted to the flat pre-0018 shape, now silently appearing to describe the order's only-ever
+version, with no way to tell it had actually been reviewed against different content than what a
+provider might see after a real future amendment. Guards restored immediately after (confirmed via
+`grep -rn "NEGATIVE CONTROL"` returning nothing); the disposable database dropped.
+
+#### Release transaction, now atomic across four things
+
+`LabResultReleaseRepository.release` (`results.py`), inside the same `LabOrder`-locked transaction
+that already re-checks completeness, now also: computes the exact effective observation set across
+every item (identical query shape to `list_for_order`'s own effective-only read); creates
+`LabResultReleaseVersion` (`version_number=1`, bound to the just-inserted `LabResultRelease`);
+inserts one manifest entry per effective observation; and binds the order's one existing, still-
+unbound `PENDING` review row to the new version (never creates a second review row). All four
+commit together or none do — the release insert, version, manifest, and review-binding are in the
+identical session/transaction, verified by extending the pre-existing
+`test_release_and_completion_audit_atomicity` test with explicit assertions that no version,
+manifest, or review-binding survives when the transaction is forced to fail.
+
+#### Reads
+
+- **Provider read** (`get_lab_order_results`, `api.py`): branches on whether the order has a release
+  version. If it does, reads the exact, immutable manifest — never live current-effective state —
+  and the response gains `release_version_id`/`release_version_number`/`is_amendment` (all three
+  `None` together only for a grandfathered order, `is_amendment` always `False` in this ticket).
+  If it does not (a grandfathered order), falls through to the **unchanged legacy path**
+  (`list_for_order`) — the two branches are deliberately kept separate, never merged into one
+  conditional expression, per the ticket's own explicit instruction.
+- **Historical manifest reads never filter by the observation's current `superseded_at`** — a
+  manifest entry names an exact id and resolves it regardless of whether a (not-yet-existing)
+  future amendment has since superseded it. Verified directly: since no code path in this ticket
+  can actually reach that future state, a dedicated test forces it (`superseded_at` set directly on
+  a manifested observation, bypassing every real code path) and confirms the manifest read still
+  resolves it unchanged.
+- **Lab pre-release inspection** (`get_for_lab`) is completely untouched — it continues reading live
+  current-effective observations, which is correct for a screen inspecting what is *about to be*
+  released, a different semantic from historical reconstruction. Not accidentally made to read a
+  manifest. **Precision on how this is verified**: no test distinguishes "reads live" from "reads
+  manifest" for this path, because in every state this ticket's own code can reach, the two reads
+  return identical content (a released order's effective observations are, by the load-bearing
+  invariant above, exactly what got manifested at release time) — so there is no reachable state in
+  which the two semantics would visibly diverge yet. Verified instead by non-modification
+  (`get_for_lab`'s source is byte-identical to before this ticket, confirmed via `git diff`) plus
+  the pre-existing inspection tests continuing to pass, not by a differentiating test. A genuinely
+  differentiating test becomes possible, and should be added, once DH-EX-014B can produce a state
+  where live-effective and last-manifested content actually differ.
+- New `DoctorReviewRepository` methods resolve "the current review for an order" by explicit
+  `version_number` ordering (`coalesce(version_number, 0) DESC`, the one legacy/unbound row sorting
+  lowest), never by `reviewed_at` or any other timestamp — `get_for_order`'s existing signature is
+  unchanged (order-oriented, internally version-aware), plus new `get_for_release_version` and
+  `get_history_for_order` for DH-EX-014B's future use.
+- New release-version repository reads: `get_latest_release_version`, `get_release_version_history`,
+  `get_release_version`, `get_manifest_for_order`, `get_manifest_for_version` — all O(1) queries
+  regardless of item/observation count (one version lookup, one batched joined manifest query),
+  matching this module's own established no-N+1 discipline. **Measured, not just reasoned about**
+  (ticket's own explicit requirement): a new test
+  (`test_get_manifest_for_order_query_count_does_not_scale_with_item_count`) hooks SQLAlchemy's
+  `before_cursor_execute` event and counts SQL statements for `get_manifest_for_order` against a
+  1-item/1-observation order versus a 5-item/10-observation order, asserting the counts are
+  **identical** (both 3 statements) rather than asserting a hardcoded magic number — so the test
+  goes red if a future change introduces a per-item or per-observation query, not merely if today's
+  exact count changes for an unrelated reason.
+
+#### API surface
+
+New `GET .../organizations/{lab_id}/lab-orders/{order_id}/release-versions` (`LAB_TECH`/
+`LAB_RESULT_RELEASER`, reusing `get_for_lab`'s existing non-enumerating tenant check purely for its
+own tenant-check side effect) — the foundation read a future "Version 1 / Version 2 / Version 3" UI
+will use once DH-EX-014B can produce more than one version; returns an empty list for a
+grandfathered order, never a fabricated one. No amendment-preparation or amendment-release endpoint
+exists anywhere. `security_audit.py` is **unchanged** — audited and concluded no new event type is
+warranted, since creating a release-version/manifest is part of the existing `lab_results_released`
+transaction and carries no independent semantic value the existing event doesn't already capture.
+
+#### Required negative controls — all 10 executed against real code, every mutation reverted and re-verified green
+
+1. Provider read forced back to live effective state (manifest branch disabled) → the golden-flow
+   test's `release_version_id is not None` assertion went red. Reverted, re-passed.
+2. Historical manifest read filtered by current `superseded_at` → the dedicated historical-read
+   test went red (the manifested item disappeared entirely once its observation was forced
+   superseded). Reverted, re-passed.
+3. Original release omitted the last item's observation from the manifest (`effective_rows[:-1]`)
+   → the multi-item manifest test went red (one item missing). Reverted, re-passed.
+4. Manifest entries paired with the wrong item (rotated by one across a two-item order) →
+   the cross-item integrity test went red (observation id mismatched its expected item).
+   Reverted, re-passed.
+5. Order-scoping filter removed from the release query (`LabOrderItem.lab_order_id == order_id`
+   deleted) → the cross-order integrity test went red (a different order's item leaked into the
+   manifest). Reverted, re-passed.
+6. **Genuine multi-layer defense-in-depth finding, not a fabricated failure:** removing the new
+   `uq_exchange_release_versions_order_version` constraint alone did not expose a race (the
+   `LabOrder FOR UPDATE` lock plus the idempotent-replay early-return already fully serialize
+   release attempts). Removing **both** that constraint and the lock together still did not produce
+   duplicate versions — instead, 9 of 10 concurrent attempts raised an unhandled `IntegrityError`
+   against DH-EX-012's own pre-existing `uq_exchange_lab_result_releases_lab_order_id` constraint
+   (unrelated to this ticket), which remained fully sufficient on its own to prevent duplication,
+   just without `release()`'s own graceful idempotent-replay translation. Reported exactly as
+   observed. Both defenses restored; re-verified stable across 3 repeated runs.
+7/8. **Atomicity, combined:** attempting a genuine mid-method premature `session.commit()` (to
+   simulate "release exists without its manifest") does not silently partially commit under this
+   codebase's `session_factory.begin()` context-manager convention — it raises `InvalidRequestError`
+   immediately, since the context manager refuses further operations on a session whose managed
+   transaction has already been closed. This is itself a real, disclosed finding: the convention
+   makes a silent partial-commit bug structurally impossible to introduce here, not merely unlikely.
+   The pre-existing `test_release_and_completion_audit_atomicity` (extended this ticket with
+   explicit version/manifest/review-binding assertions) already proves the required outcome — a
+   failure anywhere in the transaction rolls back everything, verified without needing to force an
+   artificial split.
+9. `uq_exchange_doctor_reviews_release_version_id` removed from the model → a dedicated test
+   inserting two `DoctorReview` rows bound to the same release version, expecting `IntegrityError`,
+   went red (`DID NOT RAISE`). Reverted, re-passed.
+10. Both downgrade guards disabled, forced downgrade on a disposable clone with simulated
+   `version_number = 2` history → real, observed silent semantic loss (see "Guard-removal
+   data-loss demonstration" above). Guards restored; the pre-existing DH-EX-013/012C guard-removal
+   precedent followed exactly.
+
+`grep -rn "NEGATIVE CONTROL" adapter/src adapter/tests adapter/migrations` returns nothing — every
+control fully reverted before proceeding.
+
+#### Test matrix coverage
+
+13 new repository-level tests (`test_exchange_results.py`) and 8 new/extended HTTP-level tests
+(`test_exchange_results_api.py`) cover: single-observation Version 1 manifest, panel-item manifest,
+multi-item manifest, pre-release-corrected-observation manifest uses the effective id, exact
+manifest reconstruction, grandfathered order has no version/manifest (and release on it still
+raises `LegacyCompletedOrderHasNoRelease`), unreleased order has no version, pending review binds
+to Version 1 on release, review marked after release is bound and readable by version, review
+history for the one-row case, release-version history ordering, release replay creates no second
+version/manifest, historical manifest read ignores current `superseded_at`, manifest integrity
+(cross-item, cross-order), duplicate-review-per-version database rejection, provider read version
+metadata (explicit-release and grandfathered), release-version-history endpoint auth (lab tech/
+releaser allowed, clinician denied, cross-lab non-enumerating, grandfathered returns empty),
+extended release/completion audit atomicity, and patient-bearer boundary (no release-version/
+manifest leakage). Plus 4 new real-PostgreSQL concurrency tests: original-release race (exactly one
+version/manifest/bound review), correction-vs-release race re-qualified against the manifest,
+concurrent-reader-never-observes-a-partial-manifest, and a version-scoped review race.
+
+#### Validation
+
+`ruff check`/`ruff format --check` on `src tests migrations scripts`: clean. Full SQLite suite:
+**786 passed, 78 skipped** (up from DH-EX-013's baseline 766/74 — 20 net new tests after the
+negative-control-driven additions). Real-PostgreSQL, all five relevant qualification files run
+together in one final pass for stability: `test_dhex007_postgres_qualification.py` (6),
+`test_dhex012_postgres_qualification.py` (9), `test_dhex012c_postgres_qualification.py` (4),
+`test_dhex013_postgres_qualification.py` (4), `test_dhex014a_postgres_qualification.py` (4) —
+**27 passed, 0 failures**. The new concurrency file re-run 4 times total (1 initial + 3 repeats),
+0 flakes.
+
+#### Known remaining gaps, stated plainly
+
+- **DH-EX-014B (amendment preparation and release) does not exist.** No amendment endpoint, no
+  `LabResultAmendment` table, no way to create `version_number > 1` anywhere in this codebase.
+- **Post-release amendment remains required before the first real-patient pilot** (Decision 3) —
+  this ticket's foundation alone does not satisfy that requirement.
+- Manual/live browser demonstration and real Keycloak qualification remain unperformed, unchanged
+  from every prior Exchange ticket's own disclosed boundary.
+
+**Human Decision Required: NO** — this ticket implements the six ADR-048 decisions Liban already
+accepted; it does not itself raise a new question.
+
+**Next:** DH-EX-014B — post-release amendment preparation and release, built against this ticket's
+own versioning foundation — is the natural next ticket, and remains a real-patient-pilot blocker.
+Not started here, per this ticket's own explicit final instruction to stop after DH-EX-014A.
+
+**READY FOR LIBAN REVIEW: YES**

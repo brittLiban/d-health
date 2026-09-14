@@ -114,6 +114,7 @@ from daher_adapter.exchange.results import (
     InvalidResultSubmissionState,
     LabResultInspectionRecord,
     LabResultReleaseRepository,
+    LabResultReleaseVersionRecord,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
     ObservationNotFound,
@@ -977,12 +978,22 @@ class ProviderResultItemResponse(BaseModel):
 class ProviderOrderResultsResponse(BaseModel):
     """Available only once ``LabOrder.status == COMPLETED`` -- ``get_lab_order_results`` refuses
     with a 409 before this is ever built for an order still in progress, so this shape never has
-    to represent a partial-results state."""
+    to represent a partial-results state.
+
+    **DH-EX-014A/ADR-048:** ``release_version_id``/``release_version_number``/``is_amendment`` are
+    all ``None`` together for exactly one reason -- a grandfathered ``COMPLETED``-without-
+    ``LabResultRelease`` order, which has no release version at all and is not amendment-eligible
+    (Decision 6). For every other order they are always populated; ``is_amendment`` is
+    ``version_number > 1`` -- always ``False`` in this ticket, since no amendment mechanism exists
+    yet to ever produce a version 2. No clinical interpretation is added by any of the three."""
 
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
     order_status: str
+    release_version_id: uuid.UUID | None
+    release_version_number: int | None
+    is_amendment: bool | None
     results: list[ProviderResultItemResponse]
 
 
@@ -1058,10 +1069,32 @@ class LabResultReleaseResponse(BaseModel):
     released_at: datetime
 
 
+class LabResultReleaseVersionResponse(BaseModel):
+    """DH-EX-014A/ADR-048: one released version, foundation-only in this ticket -- ``is_amendment``
+    is always ``False`` here since no mechanism exists yet to ever produce ``version_number > 1``.
+    No clinical content of any kind; purely workflow/version metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_version_id: uuid.UUID
+    version_number: int
+    lab_result_release_id: uuid.UUID | None
+    created_at: datetime
+    is_amendment: bool
+
+
+class LabResultReleaseVersionHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    versions: list[LabResultReleaseVersionResponse]
+
+
 class DoctorReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
+    release_version_id: uuid.UUID | None
     status: str
     reviewed_at: datetime | None
     reviewed_by_practitioner_reference_id: uuid.UUID | None
@@ -3011,6 +3044,42 @@ def build_exchange_router(
             released_at=record.released_at,
         )
 
+    def _release_version_response(
+        version: LabResultReleaseVersionRecord,
+    ) -> LabResultReleaseVersionResponse:
+        return LabResultReleaseVersionResponse(
+            release_version_id=version.id,
+            version_number=version.version_number,
+            lab_result_release_id=version.lab_result_release_id,
+            created_at=version.created_at,
+            is_amendment=version.version_number > 1,
+        )
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/release-versions",
+        response_model=LabResultReleaseVersionHistoryResponse,
+    )
+    def get_lab_order_release_version_history(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabResultReleaseVersionHistoryResponse:
+        # DH-EX-014A/ADR-048: the foundation read a future "Version 1 / Version 2 / Version 3" UI
+        # will use once DH-EX-014B can produce more than one version -- in this ticket, at most
+        # one. `LAB_TECH` or `LAB_RESULT_RELEASER`, exactly mirroring the pre-release inspection
+        # read's own authorization; `get_for_lab` is reused purely for its existing non-enumerating
+        # tenant check (order doesn't exist vs. belongs to a different lab are never
+        # distinguished), not for its own result content.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        inspection = results.get_for_lab(order_id, lab_id)
+        if inspection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        history = releases.get_release_version_history(order_id)
+        return LabResultReleaseVersionHistoryResponse(
+            order_id=order_id,
+            versions=[_release_version_response(version) for version in history],
+        )
+
     @router.get(
         "/organizations/{provider_id}/orders/{order_id}/results",
         response_model=ProviderOrderResultsResponse,
@@ -3032,9 +3101,59 @@ def build_exchange_router(
                 f"not 'COMPLETED'",
             )
         item_by_id = {item.id: item for item in order.items}
+
+        # DH-EX-014A/ADR-048: an order with a release version reads its exact, immutable manifest
+        # -- never live "current effective" state (that live-read behavior is exactly the naive
+        # post-release-mutation risk ADR-048 identified). A grandfathered COMPLETED-without-
+        # LabResultRelease order has no release version by construction (Decision 6, not
+        # amendment-eligible) and falls through to the unchanged legacy branch below -- the two
+        # branches are deliberately kept separate, not merged into one conditional expression.
+        manifest = releases.get_manifest_for_order(order_id)
+        if manifest is not None:
+            return ProviderOrderResultsResponse(
+                order_id=order.id,
+                order_status=order.status,
+                release_version_id=manifest.version.id,
+                release_version_number=manifest.version.version_number,
+                is_amendment=manifest.version.version_number > 1,
+                results=[
+                    ProviderResultItemResponse(
+                        item_id=item_record.item_id,
+                        catalog_code_snapshot=item_record.catalog_code_snapshot,
+                        catalog_display_name_snapshot=item_record.catalog_display_name_snapshot,
+                        entry_completed_at=item_record.entry_completed_at,
+                        observations=[
+                            ProviderObservationResponse(
+                                observation_id=observation.id,
+                                source_code=observation.source_code,
+                                source_system=observation.source_system,
+                                display_label_snapshot=observation.display_label_snapshot,
+                                result_type=observation.result_type,
+                                numeric_value=observation.numeric_value,
+                                numeric_unit=observation.numeric_unit,
+                                reference_range_low=observation.reference_range_low,
+                                reference_range_high=observation.reference_range_high,
+                                text_value=observation.text_value,
+                                recorded_at=observation.recorded_at,
+                            )
+                            for observation in item_record.observations
+                        ],
+                    )
+                    for item_record in manifest.items
+                    if item_record.item_id in item_by_id
+                ],
+            )
+
+        # Legacy/grandfathered branch, unchanged from before this ticket -- a COMPLETED order
+        # with no LabResultRelease predates DH-EX-012's explicit release step entirely. Reads
+        # live current-effective observations exactly as it always has; this is deliberately NOT
+        # a versioned read, since no version can exist for such an order (Decision 6).
         return ProviderOrderResultsResponse(
             order_id=order.id,
             order_status=order.status,
+            release_version_id=None,
+            release_version_number=None,
+            is_amendment=None,
             results=[
                 ProviderResultItemResponse(
                     item_id=record.lab_order_item_id,
@@ -3075,6 +3194,7 @@ def build_exchange_router(
     ) -> DoctorReviewResponse:
         return DoctorReviewResponse(
             order_id=order_id,
+            release_version_id=record.release_version_id,
             status=record.status,
             reviewed_at=record.reviewed_at,
             reviewed_by_practitioner_reference_id=record.reviewed_by_practitioner_reference_id,

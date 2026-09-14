@@ -39,8 +39,11 @@ order
 
 One thing this shape does **not** yet resolve, disclosed rather than glossed over: amending an
 already-*released* result has no supported path today (`DECISIONS.md`'s ADR-045 Questions 4–5,
-open) — covered in the DH-EX-012/DH-EX-012A/DH-EX-013 paragraphs below. Correcting an observation
-*before* release is implemented (DH-EX-013). The result data model itself (`LabOrderItem →
+open, required before a real-patient pilot per Liban's own accepted decision) — covered in the
+DH-EX-012/DH-EX-012A/DH-EX-013/DH-EX-014A/DH-EX-014D paragraphs below. Correcting an observation
+*before* release is implemented (DH-EX-013); the immutable release-version manifest and versioned
+review foundation post-release amendment will build on is also implemented (DH-EX-014A) — amendment
+itself is not. The result data model itself (`LabOrderItem →
 LabResult` container `→ LabObservation[]`, 0..N observations per ordered item) was confirmed by real
 field evidence not to be a single scalar per item, and is now implemented (ADR-046/ADR-047,
 DH-EX-012C) — see the paragraph below DH-EX-012A.
@@ -121,9 +124,22 @@ CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified —
   overwrite — LAB_TECH-only, no reason field, structurally refused once the order is released. A new
   `GET .../observations/history` returns the full correction chain to LAB_TECH/LAB_RESULT_RELEASER
   only; release, provider reads, and lab inspection all continue to see only the effective
-  observation. **Post-release amendment (ADR-045 Questions 4–5) remains open, deferred to
-  DH-EX-014.** Real-PostgreSQL qualified, including a full-unique-constraint-backed concurrency
+  observation. Real-PostgreSQL qualified, including a full-unique-constraint-backed concurrency
   race and downgrade-guard evidence — see `PROJECT_STATE.md`'s DH-EX-013 entry.
+- **DH-EX-014A (ADR-048 Model 3, IMPLEMENTED, 2026-09-14)** implements the immutable release-version
+  manifest + versioned `DoctorReview` foundation Liban accepted (`DECISIONS.md`'s ADR-048): a
+  successful release now atomically creates a `LabResultReleaseVersion` (Version 1, bound to the
+  unchanged, immutable `LabResultRelease`) plus a `LabResultReleaseManifestEntry` per effective
+  observation, and binds the order's review to that version. Provider reads of a released order now
+  derive content from that manifest, never live current-effective state. A new
+  `GET .../release-versions` is the foundation read for a future multi-version history UI. **This
+  ticket implements the versioning foundation only — no amendment-preparation or amendment-release
+  endpoint exists, and no `version_number > 1` is creatable anywhere.** Post-release amendment
+  itself (ADR-045 Questions 4–5) remains open and unimplemented, deferred to **DH-EX-014B, which
+  Liban has decided must exist before DHealth's first real-patient pilot.** Real-PostgreSQL
+  qualified, including an original-release race, a correction-vs-release race re-qualified against
+  the manifest, a partial-manifest-read proof, a version-scoped review race, and downgrade-guard
+  evidence — see `PROJECT_STATE.md`'s DH-EX-014A entry.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —

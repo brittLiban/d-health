@@ -5943,3 +5943,103 @@ a reason is wanted at all, not adopted).
 
 **ADR-045's Questions 4–5 remain OPEN**, unedited by this entry — this ADR is the linked decision
 packet answering them, not a revision of ADR-045 itself.
+
+---
+
+**Decisions accepted by Liban — 2026-09-14 (DH-EX-014A).** All six items in §19's numbered list
+above are resolved. This section is an append, not a revision — the RECOMMENDED packet above
+(architecture options, evidence, reasoning) stands unchanged as the record of what was evaluated
+and why; this is the record of what was chosen. DH-EX-014A implements only the immutable
+release-version/manifest foundation and versioned-review foundation §19 item 6 accepts below — it
+does **not** implement post-release amendment preparation or release, which remains DH-EX-014B.
+
+**Decision 1 (§19 item 6) — architecture: Model 3 accepted.** Amendment episode + immutable
+release manifest, exactly as recommended in §4/§5. Implemented in this ticket: only the manifest
+and version foundation (`LabResultReleaseVersion`, `LabResultReleaseManifestEntry`) — the amendment
+episode itself, and any preparation/release workflow built on top of it, is explicitly out of scope
+here and remains DH-EX-014B's job.
+
+**Decision 2 (§19 item 1) — ADR-045 Question 4: Option C accepted.** Versioned review history.
+Every released result version gets its own review obligation, bound by explicit
+`release_version_id`, never inferred from timestamp or "most recent row." A historical review is
+never reset, rewritten, reassigned to a different release, or treated as covering content it did
+not see. Implemented in this ticket for the only version that exists (Version 1); DH-EX-014B will
+create the second review row for Version 2 using the identical mechanism, unchanged.
+
+**Decision 3 (§19 item 2) — ADR-045 Question 5: post-release amendment required before the first
+real-patient pilot.** Of the three options §7 evaluated, this is Option 3 (implement amendment
+before pilot) — not Option 1 (block the pilot with no further work) or Option 2 (a manual
+out-of-system fallback, which this decision explicitly does not accept). **DH-EX-014A alone does
+not satisfy this requirement** — it is the versioning foundation only, not the amendment mutation
+workflow. DH-EX-014B remains a real-patient-pilot blocker until it exists and is qualified.
+
+**Decision 4 (§19 item 3) — amendment preparation semantics: immediate/permanent insert accepted
+for DH-EX-014B.** Option (a) from §3, not option (b) — no discardable-draft system for MVP. A
+future amendment's observation correction will be entered exactly like a pre-release correction:
+the moment it is entered, it is a real, permanent revision. This requires no relaxation of the
+existing `UNIQUE` constraint on `supersedes_observation_id`. **Not implemented in this ticket** —
+recorded here as the accepted design DH-EX-014B must build against, per this ticket's own explicit
+scope boundary ("do not implement amendment preparation in this ticket").
+
+**Decision 5 (§19 item 4) — amendment reason: no mandatory reason accepted for MVP.** No reason
+codes, no free-text clinical reason, and no amendment taxonomy were invented to reach this
+decision — matching ADR-045 Question 3's own precedent for pre-release correction. **Not
+implemented in this ticket** (no amendment-preparation endpoint exists yet to carry a reason field
+either way) — recorded as the accepted design for DH-EX-014B.
+
+**Decision 6 (§19 item 5) — grandfathered `COMPLETED`-without-`LabResultRelease` orders: excluded
+from amendment support in MVP, the recommended default from §11.** No fabricated release, version,
+manifest, or releaser is ever created for such an order — it retains exactly its existing
+grandfather-rule behavior (readable, reviewable, never amendment-eligible), unchanged by this
+ticket or by whatever DH-EX-014B eventually builds.
+
+**Implemented exactly as this ADR's own audit evidence recommended, now binding for the foundation,
+not merely recommended:**
+
+- `LabResultRelease` remains completely untouched, immutable, exactly as ADR-044 shipped it — no
+  mutation, no reinterpretation, no "amended" field added to it.
+- A new `LabResultReleaseVersion` row (`version_number`, `UNIQUE(lab_order_id, version_number)`)
+  binds Version 1 to the existing `LabResultRelease` row via `lab_result_release_id` (itself
+  database-`UNIQUE`) — enforced by a `CHECK` constraint, not merely application code.
+- A new `LabResultReleaseManifestEntry` row per effective observation names the release's exact
+  `(item, observation_id)` set, binding by immutable id only — no clinical scalar value duplicated.
+- A successful original release atomically creates the release, its Version 1, its full manifest,
+  and binds the order's existing `PENDING` review to that version — all four commit together or
+  none do, verified by a real negative control (see `PROJECT_STATE.md`'s DH-EX-014A entry).
+- Provider reads of an explicit-release order now derive content from the release-version manifest,
+  never from live current-effective state — closing exactly the naive-mutation risk this ADR's own
+  §2 identified. A grandfathered order's provider read is unaffected, using its unchanged legacy
+  path.
+- `DoctorReview.lab_order_id` is no longer database-unique; a new `release_version_id` column plus
+  two database constraints (a plain `UNIQUE` on the version id; a genuine partial unique index on
+  `lab_order_id` scoped to the one legacy/unbound row) enforce "at most one review per version, at
+  most one unbound legacy row per order" — a real migration (`0018_exchange_release_versions`), not
+  an application-code-only change, exactly as §6 anticipated.
+- Original-release backfill for every pre-existing `LabResultRelease` row is reconstruction from a
+  proven structural invariant (every observation-mutating code path is gated on `IN_PROGRESS`, so a
+  released order's effective observations cannot have changed since release), never a fabrication —
+  proven and cited in the migration's own docstring and `PROJECT_STATE.md`'s DH-EX-014A entry, not
+  merely asserted.
+- Real-PostgreSQL qualification (not merely SQLite) exercised: an original-release race (exactly
+  one version/manifest/bound review survives), the existing correction-vs-release race re-qualified
+  against the new manifest, a concurrent-reader-never-observes-a-partial-manifest proof, and a
+  review race preserving the existing one-terminal-disposition invariant.
+- Downgrade of migration `0018_exchange_release_versions` fails closed if any release version with
+  `version_number > 1` exists, or if any order carries more than one `DoctorReview` row — both real,
+  future DH-EX-014B history the pre-0018 schema cannot represent — verified against real PostgreSQL,
+  including a genuine guard-removal demonstration showing the exact silent semantic loss (an
+  amendment's entire existence becomes untraceable, and the surviving review status silently
+  appears to describe content it may never have reviewed).
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-EX-014A entry (migration
+`0018_exchange_release_versions`, `exchange/models.py`'s `LabResultReleaseVersion`/
+`LabResultReleaseManifestEntry`/updated `DoctorReview`, `exchange/results.py`'s extended
+`LabResultReleaseRepository.release`/new manifest and version-history reads/version-aware
+`DoctorReviewRepository`, the new release-version-history endpoint, real-PostgreSQL qualification,
+and full negative-control evidence).
+
+**Status: §19 items 1, 2, 3, 4, 5, and 6 are now RESOLVED** for the foundation scope described
+above. **DH-EX-014B (amendment preparation and release) remains required and remains a
+real-patient-pilot blocker per Decision 3** — recorded here rather than editing the header or the
+RECOMMENDED packet above, so the original evaluated architecture remains legible as written at the
+time it was proposed.

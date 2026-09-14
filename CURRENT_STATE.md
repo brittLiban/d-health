@@ -7,21 +7,26 @@
 > is an honest, unmodified implementation inventory for the **maternity/reference-connector
 > track** — real, current, and still binding wherever that track is touched, just no longer the
 > definition of DHealth's overall scope. **The DHealth Exchange backend's own current state**
-> (DH-EX-001 through **DH-EX-013** as of this note — organization onboarding, patient/order
+> (DH-EX-001 through **DH-EX-014A** as of this note — organization onboarding, patient/order
 > creation, provider- and patient-driven lab assignment, accept/reject/processing, an explicit
 > sample-collection milestone, a multi-observation result entry/completion workflow, an explicit
-> authorized release step distinct from entry, and an immutable pre-release observation-correction
-> workflow — what's WRITTEN/TESTED/CI-QUALIFIED/REAL-POSTGRESQL-QUALIFIED vs. NOT BUILT) is
-> inventoried in `docs/MVP-1.0.md` §8, not duplicated here; this file's own Exchange-era entries
-> (search "DH-EX-") remain as the detailed ticket-by-ticket record behind that summary. **The
-> result data model that field evidence (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, ADR-046) found
-> inadequate — one ordered diagnostic service may need to return multiple observations — is
-> implemented** (ADR-047, DH-EX-012C): `LabOrderItem → LabResult` (a container) `→
-> LabObservation[]` (0..N observations). **A pre-release, non-destructive correction workflow for an
-> entered observation is now also implemented** (ADR-045 Questions 1–3, DH-EX-013): an immutable
-> supersession chain (`supersedes_observation_id`/`superseded_at`), never a destructive overwrite.
-> Post-release amendment (ADR-045 Questions 4–5) remains its own, separately OPEN and unimplemented
-> question, deferred to DH-EX-014. **DHealth Clinic,
+> authorized release step distinct from entry, an immutable pre-release observation-correction
+> workflow, and an immutable release-version manifest + versioned review foundation — what's
+> WRITTEN/TESTED/CI-QUALIFIED/REAL-POSTGRESQL-QUALIFIED vs. NOT BUILT) is inventoried in
+> `docs/MVP-1.0.md` §8, not duplicated here; this file's own Exchange-era entries (search "DH-EX-")
+> remain as the detailed ticket-by-ticket record behind that summary. **The result data model that
+> field evidence (`docs/FIELD-DIAGNOSTIC-WORKFLOW.md`, ADR-046) found inadequate — one ordered
+> diagnostic service may need to return multiple observations — is implemented** (ADR-047,
+> DH-EX-012C): `LabOrderItem → LabResult` (a container) `→ LabObservation[]` (0..N observations).
+> **A pre-release, non-destructive correction workflow for an entered observation is implemented**
+> (ADR-045 Questions 1–3, DH-EX-013): an immutable supersession chain
+> (`supersedes_observation_id`/`superseded_at`), never a destructive overwrite. **An immutable
+> release-version manifest binding every explicit release to its exact observation set, plus a
+> version-capable `DoctorReview`, is now implemented** (ADR-048 Model 3, DH-EX-014A) — provider reads
+> of a released order now derive content from that manifest, never live state. **Post-release
+> amendment itself remains unimplemented** (ADR-045 Questions 4–5, ADR-048's amendment-episode
+> scope) — deferred to DH-EX-014B, which Liban has decided must exist before DHealth's first
+> real-patient pilot. **DHealth Clinic,
 > DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named applications anywhere
 > in this repository, on either track.
 

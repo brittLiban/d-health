@@ -9,7 +9,8 @@ from exchange_support import (
     make_priced_offering,
     make_provider,
 )
-from sqlalchemy import select
+from sqlalchemy import Engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
@@ -21,7 +22,10 @@ from daher_adapter.exchange.identity import (
 from daher_adapter.exchange.lab_workflow import LabOrderNotAssigned, LabWorkflowRepository
 from daher_adapter.exchange.membership import ExchangeIdentityRepository
 from daher_adapter.exchange.models import (
+    DoctorReview,
     DoctorReviewStatus,
+    LabObservation,
+    LabOrder,
     LabPrice,
     LabResultType,
     ResultDeliveryStatus,
@@ -214,6 +218,58 @@ def _create_and_select_two_items(
     )
     repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
     # DH-EX-011: start_processing now requires a recorded collection milestone.
+    repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
+    repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
+    return repos.orders.get(order.id), practitioner
+
+
+def _create_and_select_n_items(
+    repos: Repos, sessions: sessionmaker[Session], *, lab_id, key: str, count: int
+):
+    """Same shape as `_create_and_select_two_items`, generalized to an arbitrary item count --
+    needed by the DH-EX-014A query-count control, which must exercise an order wide enough that
+    an accidental per-item query would actually show up in the count."""
+    repos.directory.upsert(
+        lab_organization_id=lab_id,
+        public_address="Test Lab Address",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    entries_and_offerings = [
+        make_priced_offering(
+            repos.catalog,
+            lab_organization_id=lab_id,
+            amount=Decimal("100"),
+            code=f"DH-{key}-{i}",
+        )
+        for i in range(count)
+    ]
+    provider = make_provider(repos.organizations, name=f"Clinic-{key}")
+    patient = make_patient_reference(
+        repos.patients, provider_org_id=provider.id, source_identity_value=key
+    )
+    practitioner = make_practitioner_reference(
+        repos.practitioners, provider_org_id=provider.id, source_identity_value=f"doc-{key}"
+    )
+    order = repos.orders.create(
+        idempotency_key=key,
+        provider_organization_id=provider.id,
+        patient_reference_id=patient.id,
+        practitioner_reference_id=practitioner.id,
+        items=[
+            OrderItemInput(catalog_entry_id=entry.id) for entry, _offering in entries_and_offerings
+        ],
+    ).order
+    expected_price_ids = frozenset(
+        _current_price_id(sessions, offering.id) for _entry, offering in entries_and_offerings
+    )
+    repos.selections.select(
+        lab_order_id=order.id, lab_organization_id=lab_id, expected_price_ids=expected_price_ids
+    )
+    repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
     repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
     repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
@@ -1551,3 +1607,584 @@ def test_two_different_releasers_race_no_overwrite(tmp_path) -> None:
     for record, _created in results:
         assert record.released_by_identity_id == winning_identity
         assert record.id == results[0][0].id
+
+
+# -- DH-EX-014A/ADR-048: immutable release-version manifest + versioned DoctorReview foundation --
+
+
+def test_release_creates_version_one_and_manifest_for_single_observation(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="v1-single")
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("5.1"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="v1-single")
+
+    version = repos.releases.get_latest_release_version(order.id)
+    assert version is not None
+    assert version.version_number == 1
+    release = repos.releases.get_for_order(order.id)
+    assert version.lab_result_release_id == release.id
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    assert manifest.version.id == version.id
+    assert len(manifest.items) == 1
+    assert len(manifest.items[0].observations) == 1
+    assert manifest.items[0].observations[0].numeric_value == Decimal("5.1")
+
+
+def test_release_manifest_includes_every_observation_in_a_panel_item(
+    sessions: sessionmaker[Session],
+) -> None:
+    """One ordered item, several returned observations (ADR-046/ADR-047) -- the manifest must
+    name every one of them, never impose a one-observation-per-item limit."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="v1-panel")
+    item_id = order.items[0].id
+    tech = _labtech_identity_id(repos)
+    repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="WBC",
+        display_label_snapshot="White cell count",
+        numeric_value=Decimal("6.0"),
+        recorded_by_identity_id=tech,
+    )
+    repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="RBC",
+        display_label_snapshot="Red cell count",
+        numeric_value=Decimal("4.5"),
+        recorded_by_identity_id=tech,
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=tech,
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="v1-panel")
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    assert len(manifest.items) == 1
+    assert {o.source_code for o in manifest.items[0].observations} == {"WBC", "RBC"}
+
+
+def test_release_manifest_spans_multiple_items(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select_two_items(
+        repos, sessions, lab_id=lab.id, key="v1-multiitem"
+    )
+    tech = _labtech_identity_id(repos)
+    for item in order.items:
+        repos.results.record_numeric(
+            recorded_by_identity_id=tech,
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            value=Decimal("1.0"),
+        )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="v1-multiitem")
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    assert {item_record.item_id for item_record in manifest.items} == {
+        item.id for item in order.items
+    }
+
+
+def test_release_manifest_uses_effective_corrected_observation_not_original(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A pre-release correction (DH-EX-013) must be reflected in the manifest -- the *corrected*
+    observation id, never the original, superseded one."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="v1-corrected")
+    item_id = order.items[0].id
+    tech = _labtech_identity_id(repos)
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.1"),
+        recorded_by_identity_id=tech,
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=tech,
+    )
+    corrected = repos.results.correct_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        observation_id=original.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.9"),
+        corrected_by_identity_id=tech,
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="v1-corrected")
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    observation_ids = {o.id for o in manifest.items[0].observations}
+    assert observation_ids == {corrected.id}
+    assert original.id not in observation_ids
+
+
+def test_get_manifest_for_order_reconstructs_exact_observations(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="v1-reconstruct")
+    item_id = order.items[0].id
+    tech = _labtech_identity_id(repos)
+    original = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.TEXT,
+        source_code="CULT",
+        display_label_snapshot="Culture",
+        text_value="no growth",
+        recorded_by_identity_id=tech,
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=tech,
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="v1-reconstruct")
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    reconstructed = manifest.items[0].observations[0]
+    assert reconstructed.id == original.id
+    assert reconstructed.text_value == "no growth"
+    assert reconstructed.source_code == "CULT"
+
+
+def test_get_manifest_for_order_query_count_does_not_scale_with_item_count(
+    engine: Engine, sessions: sessionmaker[Session]
+) -> None:
+    """DH-EX-014A ticket requirement: measure, don't just reason about, `get_manifest_for_order`'s
+    query count. `_manifest_record_for_version` issues exactly one query to find the latest
+    version and one joined query for every manifest row -- two SQL statements regardless of how
+    many items/observations the order has. A one-item/one-observation order and a five-item/
+    ten-observation order must therefore both cost exactly the same number of statements; if a
+    future change introduces a per-item or per-observation query, this test goes red because the
+    five-item count grows past the one-item count, not because of a hardcoded magic number."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    tech = _labtech_identity_id(repos)
+
+    small_order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="qc-small")
+    repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=small_order.id,
+        lab_order_item_id=small_order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    repos.results.complete_entry(
+        order_id=small_order.id,
+        lab_order_item_id=small_order.items[0].id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=tech,
+    )
+    _release(repos, order_id=small_order.id, lab_id=lab.id, key="qc-small")
+
+    large_order, _practitioner = _create_and_select_n_items(
+        repos, sessions, lab_id=lab.id, key="qc-large", count=5
+    )
+    for item in large_order.items:
+        repos.results.record_observation(
+            order_id=large_order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="A",
+            display_label_snapshot="A",
+            numeric_value=Decimal("1.0"),
+            recorded_by_identity_id=tech,
+        )
+        repos.results.record_observation(
+            order_id=large_order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="B",
+            display_label_snapshot="B",
+            numeric_value=Decimal("2.0"),
+            recorded_by_identity_id=tech,
+        )
+        repos.results.complete_entry(
+            order_id=large_order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            completed_by_identity_id=tech,
+        )
+    _release(repos, order_id=large_order.id, lab_id=lab.id, key="qc-large")
+
+    def _count_statements(order_id) -> int:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            manifest = repos.releases.get_manifest_for_order(order_id)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert manifest is not None
+        return len(statements)
+
+    small_count = _count_statements(small_order.id)
+    large_count = _count_statements(large_order.id)
+
+    assert len(large_order.items) == 5
+    assert large_count == small_count
+
+
+def test_grandfathered_order_has_no_release_version(sessions: sessionmaker[Session]) -> None:
+    """A pre-DH-EX-012 COMPLETED order with no LabResultRelease must never get a fabricated
+    release version or manifest -- `get_manifest_for_order`/`get_latest_release_version` both
+    return None, exactly matching `LegacyCompletedOrderHasNoRelease`'s own no-fabrication rule."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="grandfathered")
+    tech = _labtech_identity_id(repos)
+    repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    with sessions() as session:
+        raw_order = session.get(LabOrder, order.id)
+        raw_order.status = "COMPLETED"
+        session.commit()
+
+    assert repos.releases.get_latest_release_version(order.id) is None
+    assert repos.releases.get_manifest_for_order(order.id) is None
+    assert repos.releases.get_release_version_history(order.id) == ()
+
+    with pytest.raises(LegacyCompletedOrderHasNoRelease):
+        _release(repos, order_id=order.id, lab_id=lab.id, key="grandfathered")
+
+
+def test_unreleased_order_has_no_release_version(sessions: sessionmaker[Session]) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="unreleased-v1")
+    assert repos.releases.get_latest_release_version(order.id) is None
+    assert repos.releases.get_manifest_for_order(order.id) is None
+
+
+def test_pending_review_binds_to_release_version_on_release(
+    sessions: sessionmaker[Session],
+) -> None:
+    """ADR-045 Question 4/Option C: the order's existing PENDING review (created at order-creation
+    time) must be bound to Release Version 1 the instant release occurs -- never a new row, never
+    left unbound."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-bind")
+    review_before = repos.reviews.get_for_order(order.id)
+    assert review_before.release_version_id is None
+    assert review_before.status == DoctorReviewStatus.PENDING.value
+
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="review-bind")
+
+    version = repos.releases.get_latest_release_version(order.id)
+    review_after = repos.reviews.get_for_order(order.id)
+    assert review_after.id == review_before.id, (
+        "release must bind the existing row, never a new one"
+    )
+    assert review_after.release_version_id == version.id
+    assert review_after.status == DoctorReviewStatus.PENDING.value
+
+
+def test_review_marked_after_release_is_bound_to_version_and_readable_by_version(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-mark-v1")
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="review-mark-v1")
+    version = repos.releases.get_latest_release_version(order.id)
+
+    repos.reviews.mark_no_follow_up_required(
+        order.id, reviewed_by_practitioner_reference_id=practitioner.id
+    )
+
+    review = repos.reviews.get_for_order(order.id)
+    assert review.status == DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED.value
+    assert review.release_version_id == version.id
+
+    by_version = repos.reviews.get_for_release_version(version.id)
+    assert by_version is not None
+    assert by_version.id == review.id
+
+    with pytest.raises(ReviewAlreadyFinalized):
+        repos.reviews.mark_follow_up_required(
+            order.id, reviewed_by_practitioner_reference_id=practitioner.id
+        )
+
+
+def test_review_history_for_order_returns_the_one_bound_row(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014A: in this ticket at most one review row can ever exist per order -- the
+    foundation read (`get_history_for_order`) must still work correctly for that single-row case,
+    since DH-EX-014B will add a second row without changing this method's own logic."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="review-history")
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="review-history")
+
+    history = repos.reviews.get_history_for_order(order.id)
+    assert len(history) == 1
+    version = repos.releases.get_latest_release_version(order.id)
+    assert history[0].release_version_id == version.id
+
+
+def test_get_release_version_history_orders_by_version_number(
+    sessions: sessionmaker[Session],
+) -> None:
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="version-history")
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="version-history")
+
+    history = repos.releases.get_release_version_history(order.id)
+    assert [v.version_number for v in history] == [1]
+    assert repos.releases.get_release_version(history[0].id) == history[0]
+
+
+def test_release_replay_does_not_create_a_second_version_or_manifest(
+    sessions: sessionmaker[Session],
+) -> None:
+    """An idempotent release replay (same or different releaser) must never create a second
+    `LabResultReleaseVersion` or a duplicated manifest -- exactly one of each, permanently."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="release-replay-v1"
+    )
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="release-replay-v1-a")
+    _release(repos, order_id=order.id, lab_id=lab.id, key="release-replay-v1-b")
+
+    history = repos.releases.get_release_version_history(order.id)
+    assert len(history) == 1
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert len(manifest.items) == 1
+    assert len(manifest.items[0].observations) == 1
+
+
+def test_manifest_read_does_not_filter_by_current_superseded_at(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014A's own critical snapshot semantic: a manifest entry names an exact observation
+    id and must resolve it regardless of that observation's *current* `superseded_at` state.
+    No code path in this ticket can ever actually supersede a manifested observation (correction
+    is refused after release, DH-EX-014B does not exist yet) -- this test forces that future
+    state directly to prove the *read path* itself is already correct, exactly mirroring this
+    codebase's own established pattern of testing a currently-unreachable defense directly."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="hist-read")
+    item_id = order.items[0].id
+    tech = _labtech_identity_id(repos)
+    observation = repos.results.record_observation(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        result_type=LabResultType.NUMERIC,
+        source_code="GLU",
+        display_label_snapshot="Glucose",
+        numeric_value=Decimal("5.1"),
+        recorded_by_identity_id=tech,
+    )
+    repos.results.complete_entry(
+        order_id=order.id,
+        lab_order_item_id=item_id,
+        lab_organization_id=lab.id,
+        completed_by_identity_id=tech,
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="hist-read")
+
+    # Force the future state directly -- no code path can do this today.
+    with sessions() as session:
+        raw_observation = session.get(LabObservation, observation.id)
+        raw_observation.superseded_at = raw_observation.recorded_at
+        session.commit()
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    assert len(manifest.items[0].observations) == 1
+    assert manifest.items[0].observations[0].id == observation.id
+
+
+def test_manifest_entries_do_not_mix_up_items_within_the_same_order(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Integrity: each manifest entry's observation must belong to exactly the item it is
+    recorded under -- never another item's container in the same order."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, _practitioner = _create_and_select_two_items(
+        repos, sessions, lab_id=lab.id, key="manifest-item-integrity"
+    )
+    tech = _labtech_identity_id(repos)
+    expected_by_item: dict = {}
+    for i, item in enumerate(order.items):
+        obs = repos.results.record_numeric(
+            recorded_by_identity_id=tech,
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            value=Decimal(f"{i}.0"),
+        )
+        expected_by_item[item.id] = obs.observation.id
+    _release(repos, order_id=order.id, lab_id=lab.id, key="manifest-item-integrity")
+
+    manifest = repos.releases.get_manifest_for_order(order.id)
+    assert manifest is not None
+    for item_record in manifest.items:
+        observation_ids = {o.id for o in item_record.observations}
+        assert observation_ids == {expected_by_item[item_record.item_id]}
+
+
+def test_manifest_never_includes_a_different_orders_item(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Integrity: releasing order A must never manifest an item/observation belonging to a
+    different order B, even one selected to the same lab."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    tech = _labtech_identity_id(repos)
+
+    order_a, _practitioner_a = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="manifest-order-integrity-a"
+    )
+    repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order_a.id,
+        lab_order_item_id=order_a.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+
+    order_b, _practitioner_b = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="manifest-order-integrity-b"
+    )
+    repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order_b.id,
+        lab_order_item_id=order_b.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("2.0"),
+    )
+
+    _release(repos, order_id=order_a.id, lab_id=lab.id, key="manifest-order-integrity-a")
+
+    manifest_a = repos.releases.get_manifest_for_order(order_a.id)
+    assert manifest_a is not None
+    manifest_a_item_ids = {item_record.item_id for item_record in manifest_a.items}
+    assert manifest_a_item_ids == {order_a.items[0].id}
+    assert order_b.items[0].id not in manifest_a_item_ids
+    assert repos.releases.get_manifest_for_order(order_b.id) is None
+
+
+def test_duplicate_review_for_same_release_version_is_rejected_by_the_database(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Database-enforced, not merely application-checked: `uq_exchange_doctor_reviews_release_
+    version_id` must refuse a second `DoctorReview` row ever binding to the same release version,
+    even via a direct insert bypassing every application-level check."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    order, practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="dup-review-v1")
+    repos.results.record_numeric(
+        recorded_by_identity_id=_labtech_identity_id(repos),
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("1.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="dup-review-v1")
+    version = repos.releases.get_latest_release_version(order.id)
+
+    with sessions() as session:
+        session.add(
+            DoctorReview(
+                lab_order_id=order.id,
+                release_version_id=version.id,
+                status=DoctorReviewStatus.PENDING.value,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
