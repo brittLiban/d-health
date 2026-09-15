@@ -11,6 +11,7 @@ RSA keypair, zero network).
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,14 @@ def _bind(client: TestClient, token: str, provider_id, **overrides):
         f"/exchange/v1/organizations/{provider_id}/patient-references",
         headers=_auth(token),
         json=body,
+    )
+
+
+def _search(client: TestClient, token: str, provider_id, query: str, *, limit: int = 50):
+    return client.post(
+        f"/exchange/v1/organizations/{provider_id}/patient-references/search",
+        headers=_auth(token),
+        json={"query": query, "limit": limit},
     )
 
 
@@ -515,3 +524,412 @@ def test_cross_org_bound_reference_cannot_be_used_for_another_providers_order(
     )
 
     assert order_response.status_code == 404, order_response.text
+
+
+# -- DH-CLINIC-002: provider-scoped patient lookup and search -------------------------------------
+
+
+def test_clinician_lists_patients_empty(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicEmpty")
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+def test_clinician_lists_patients_with_data_and_deterministic_order(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicList")
+
+    # Bind 3 patients, including one with display_name=None
+    res1 = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-001",
+        display_name="Patient One",
+        contact_channel_type="PHONE",
+        contact_value="+25377000001",
+    )
+    res2 = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-002",
+        display_name=None,
+        contact_channel_type=None,
+        contact_value=None,
+    )
+    res3 = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-003",
+        display_name="Patient Three",
+        contact_channel_type="SMS",
+        contact_value="+25377000003",
+    )
+    assert res1.status_code == 201
+    assert res2.status_code == 201
+    assert res3.status_code == 201
+
+    list_resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references",
+        headers=_auth(token),
+    )
+    assert list_resp.status_code == 200, list_resp.text
+    items = list_resp.json()
+    assert len(items) == 3
+
+    # Deterministic order: created_at.desc(), id.asc() -> 3, 2, 1
+    assert items[0]["local_reference"] == "DOS-003"
+    assert items[0]["display_name"] == "Patient Three"
+    assert items[0]["contact_channel_type"] == "SMS"
+    assert items[0]["contact_value"] == "+25377000003"
+    assert set(items[0]) == {
+        "patient_reference_id",
+        "display_name",
+        "contact_channel_type",
+        "contact_value",
+        "local_reference",
+    }
+
+    assert items[1]["local_reference"] == "DOS-002"
+    assert items[1]["display_name"] is None
+
+    assert items[2]["local_reference"] == "DOS-001"
+    assert items[2]["display_name"] == "Patient One"
+
+
+def test_patient_list_uses_uuid_tie_break_for_equal_created_at(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicTieBreak")
+    same_time = datetime(2026, 9, 15, 8, 0, tzinfo=UTC)
+    lower_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+    higher_id = uuid.UUID("00000000-0000-4000-8000-000000000002")
+    with sessions.begin() as session:
+        session.add_all(
+            [
+                PatientReference(
+                    id=higher_id,
+                    source_organization_id=provider.id,
+                    source_system="synthetic",
+                    source_identity_system="urn:synthetic:patient",
+                    source_identity_value="TIE-HIGH",
+                    created_at=same_time,
+                ),
+                PatientReference(
+                    id=lower_id,
+                    source_organization_id=provider.id,
+                    source_system="synthetic",
+                    source_identity_system="urn:synthetic:patient",
+                    source_identity_value="TIE-LOW",
+                    created_at=same_time,
+                ),
+            ]
+        )
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+    assert [item["patient_reference_id"] for item in response.json()] == [
+        str(lower_id),
+        str(higher_id),
+    ]
+
+
+def test_clinician_searches_by_name_phone_or_identity_value(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicSearch")
+
+    _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-101",
+        display_name="Amina Hassan",
+        contact_channel_type="PHONE",
+        contact_value="+25377112233",
+    )
+    _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-102",
+        display_name="Farhan Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377445566",
+    )
+
+    # Search by partial display name
+    resp_name = _search(client, token, provider.id, "amina")
+    assert resp_name.status_code == 200
+    assert len(resp_name.json()) == 1
+    assert resp_name.json()[0]["local_reference"] == "DOS-101"
+
+    # Search by partial contact value
+    resp_phone = _search(client, token, provider.id, "4455")
+    assert resp_phone.status_code == 200
+    assert len(resp_phone.json()) == 1
+    assert resp_phone.json()[0]["local_reference"] == "DOS-102"
+
+    # Search by exact local dossier number
+    resp_mrn = _search(client, token, provider.id, "DOS-101")
+    assert resp_mrn.status_code == 200
+    assert len(resp_mrn.json()) == 1
+    assert resp_mrn.json()[0]["display_name"] == "Amina Hassan"
+
+    # Search without matches
+    resp_none = _search(client, token, provider.id, "Inconnu")
+    assert resp_none.status_code == 200
+    assert resp_none.json() == []
+
+
+def test_search_query_escapes_sql_wildcards(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicWildcards")
+
+    _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS_001",
+        display_name="Test_Patient",
+    )
+    _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="DOS-001",
+        display_name="Test-Patient",
+    )
+    _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value=r"DOS\\001",
+        display_name=r"Test\\Patient",
+    )
+
+    # Search literal '_' should match only DOS_001, not DOS-001
+    resp = _search(client, token, provider.id, "DOS_001")
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 1
+    assert results[0]["local_reference"] == "DOS_001"
+
+    # Search literal '%' matches nothing if no record contains '%'
+    resp_pct = _search(client, token, provider.id, "%")
+    assert resp_pct.status_code == 200
+    assert resp_pct.json() == []
+
+    resp_backslash = _search(client, token, provider.id, "\\")
+    assert resp_backslash.status_code == 200
+    assert [item["local_reference"] for item in resp_backslash.json()] == [r"DOS\\001"]
+
+
+def test_search_whitespace_or_empty_is_rejected(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicWhitespace")
+
+    _bind(client, token, provider.id, source_identity_value="DOS-A", display_name=None)
+    _bind(client, token, provider.id, source_identity_value="DOS-B", display_name="Has Name")
+
+    assert _search(client, token, provider.id, "").status_code == 422
+    assert _search(client, token, provider.id, "  ").status_code == 422
+
+
+def test_search_is_strictly_provider_isolated(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider_a, token_a = _setup_clinician(client, private_key, organizations, "ClinicA")
+    provider_b, token_b = _setup_clinician(client, private_key, organizations, "ClinicB")
+
+    res_a = _bind(
+        client,
+        token_a,
+        provider_a.id,
+        source_identity_value="SHARED-MRN",
+        display_name="Shared Name",
+    )
+    res_b = _bind(
+        client,
+        token_b,
+        provider_b.id,
+        source_identity_value="SHARED-MRN",
+        display_name="Shared Name",
+    )
+    id_a = res_a.json()["id"]
+    id_b = res_b.json()["id"]
+    assert id_a != id_b
+
+    # Provider A search sees only A's record
+    list_a = _search(client, token_a, provider_a.id, "Shared").json()
+    assert len(list_a) == 1
+    assert list_a[0]["patient_reference_id"] == id_a
+
+    # Provider B search sees only B's record
+    list_b = _search(client, token_b, provider_b.id, "Shared").json()
+    assert len(list_b) == 1
+    assert list_b[0]["patient_reference_id"] == id_b
+
+    cross_search = _search(client, token_a, provider_b.id, "Shared")
+    assert cross_search.status_code == 404
+
+    # Cross-provider single get returns 404
+    cross_get = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/patient-references/{id_b}",
+        headers=_auth(token_a),
+    )
+    assert cross_get.status_code == 404, cross_get.text
+
+
+def test_search_unauthenticated_fails_closed(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, _ = _setup_clinician(client, private_key, organizations, "ClinicUnauth")
+
+    list_response = client.get(f"/exchange/v1/organizations/{provider.id}/patient-references")
+    search_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/search",
+        json={"query": "patient"},
+    )
+    assert list_response.status_code == 401
+    assert search_response.status_code == 401
+
+
+def test_search_non_clinician_role_refused_403(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    org = make_provider(organizations, name="ClinicNonClinician")
+    identity_id = _bootstrap_identity(client, private_key, "member-admin-only")
+    _grant_roles(client, private_key, org.id, identity_id, "member-admin-only", ["ORG_ADMIN"])
+    token = make_token(private_key, subject="member-admin-only")
+
+    list_response = client.get(
+        f"/exchange/v1/organizations/{org.id}/patient-references",
+        headers=_auth(token),
+    )
+    search_response = client.post(
+        f"/exchange/v1/organizations/{org.id}/patient-references/search",
+        headers=_auth(token),
+        json={"query": "patient"},
+    )
+    assert list_response.status_code == 403
+    assert search_response.status_code == 403
+
+
+def test_search_non_member_404_anti_enumeration(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider_a, _ = _setup_clinician(client, private_key, organizations, "ClinicOrgA")
+    _, token_b = _setup_clinician(client, private_key, organizations, "ClinicOrgB")
+
+    # Member of Org B tries to access Org A's patients -> anti-enumeration 404
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/patient-references",
+        headers=_auth(token_b),
+    )
+    assert resp.status_code == 404
+
+
+def test_query_bounds_validation_422(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicBounds")
+
+    # limit < 1
+    assert (
+        client.get(
+            f"/exchange/v1/organizations/{provider.id}/patient-references?limit=0",
+            headers=_auth(token),
+        ).status_code
+        == 422
+    )
+
+    # limit > 100
+    assert (
+        client.get(
+            f"/exchange/v1/organizations/{provider.id}/patient-references?limit=101",
+            headers=_auth(token),
+        ).status_code
+        == 422
+    )
+
+    assert _search(client, token, provider.id, "a" * 101).status_code == 422
+    assert _search(client, token, provider.id, "valid", limit=101).status_code == 422
+
+
+def test_get_single_patient_reference_by_id(client: TestClient, keypair, organizations) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "ClinicSingle")
+
+    bind_res = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="SINGLE-001",
+        display_name="Single Patient",
+        contact_channel_type="PHONE",
+        contact_value="+25377998877",
+    )
+    pat_id = bind_res.json()["id"]
+
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{pat_id}",
+        headers=_auth(token),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["patient_reference_id"] == pat_id
+    assert data["local_reference"] == "SINGLE-001"
+    assert data["display_name"] == "Single Patient"
+    assert data["contact_value"] == "+25377998877"
+    assert "source_identity_system" not in data
+    assert "source_system" not in data
+
+    # Nonexistent ID -> 404
+    nonexistent = uuid.uuid4()
+    assert (
+        client.get(
+            f"/exchange/v1/organizations/{provider.id}/patient-references/{nonexistent}",
+            headers=_auth(token),
+        ).status_code
+        == 404
+    )
+
+
+def test_patient_detail_requires_exact_provider_clinician_relationship(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token = _setup_clinician(client, private_key, organizations, "DetailAuth")
+    reference_id = _bind(client, clinician_token, provider.id).json()["id"]
+
+    unauthenticated = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{reference_id}"
+    )
+    assert unauthenticated.status_code == 401
+
+    _, unrelated_token = _setup_clinician(client, private_key, organizations, "DetailUnrelated")
+    unrelated = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{reference_id}",
+        headers=_auth(unrelated_token),
+    )
+    assert unrelated.status_code == 404
+
+    provider_admin, admin_token = _setup_member(
+        client, private_key, organizations, "DetailAdmin", roles=["ORG_ADMIN"]
+    )
+    admin = client.get(
+        f"/exchange/v1/organizations/{provider_admin.id}/patient-references/{uuid.uuid4()}",
+        headers=_auth(admin_token),
+    )
+    assert admin.status_code == 403

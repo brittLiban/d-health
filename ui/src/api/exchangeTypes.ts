@@ -137,6 +137,19 @@ export interface PatientReferenceBindRequest {
   contact_value?: string | null
 }
 
+export interface ClinicPatientSummary {
+  patient_reference_id: string
+  display_name: string | null
+  contact_channel_type: string | null
+  contact_value: string | null
+  local_reference: string
+}
+
+export interface BindPatientReferenceOutcome {
+  reference: PatientReference
+  created: boolean
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

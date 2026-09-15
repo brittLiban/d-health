@@ -515,6 +515,38 @@ class PatientReferenceResponse(BaseModel):
     source_identity_value: str
 
 
+class ProviderPatientReferenceSummary(BaseModel):
+    """Minimal provider-local selection view, not a patient demographic profile.
+
+    Source-system and identity-namespace internals are deliberately omitted. ``local_reference``
+    is the source's stable opaque value and is exposed only so a clinician can truthfully identify
+    a nameless reference and a native client can reconcile an ambiguous create response.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_reference_id: uuid.UUID
+    display_name: str | None
+    contact_channel_type: str | None
+    contact_value: str | None
+    local_reference: str
+
+
+class ProviderPatientReferenceSearchRequest(BaseModel):
+    """Search body kept out of the URL so patient lookup text is absent from access logs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=50, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _validate_query_not_blank(self) -> "ProviderPatientReferenceSearchRequest":
+        if not self.query.strip():
+            raise ValueError("query must not be blank")
+        return self
+
+
 # -- DH-EX-004: provider lab-order creation -------------------------------------------------------
 
 
@@ -2091,6 +2123,75 @@ def build_exchange_router(
             source_system=record.source_system,
             source_identity_system=record.source_identity_system,
             source_identity_value=record.source_identity_value,
+        )
+
+    # -- DH-CLINIC-002: provider-scoped patient lookup -------------------------------------------
+
+    @router.get(
+        "/organizations/{provider_id}/patient-references",
+        response_model=list[ProviderPatientReferenceSummary],
+    )
+    def list_patient_references(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[ProviderPatientReferenceSummary]:
+        _require_clinician(principal, provider_id)
+        records = patients.list_for_organization(provider_id, limit=limit)
+        return [
+            ProviderPatientReferenceSummary(
+                patient_reference_id=rec.id,
+                display_name=rec.display_name,
+                contact_channel_type=rec.contact_channel_type,
+                contact_value=rec.contact_value,
+                local_reference=rec.source_identity_value,
+            )
+            for rec in records
+        ]
+
+    @router.post(
+        "/organizations/{provider_id}/patient-references/search",
+        response_model=list[ProviderPatientReferenceSummary],
+    )
+    def search_patient_references(
+        provider_id: uuid.UUID,
+        body: ProviderPatientReferenceSearchRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[ProviderPatientReferenceSummary]:
+        _require_clinician(principal, provider_id)
+        records = patients.list_for_organization(provider_id, query=body.query, limit=body.limit)
+        return [
+            ProviderPatientReferenceSummary(
+                patient_reference_id=rec.id,
+                display_name=rec.display_name,
+                contact_channel_type=rec.contact_channel_type,
+                contact_value=rec.contact_value,
+                local_reference=rec.source_identity_value,
+            )
+            for rec in records
+        ]
+
+    @router.get(
+        "/organizations/{provider_id}/patient-references/{reference_id}",
+        response_model=ProviderPatientReferenceSummary,
+    )
+    def get_patient_reference(
+        provider_id: uuid.UUID,
+        reference_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ProviderPatientReferenceSummary:
+        _require_clinician(principal, provider_id)
+        record = patients.get_for_organization(reference_id, provider_id)
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient reference not found"
+            )
+        return ProviderPatientReferenceSummary(
+            patient_reference_id=record.id,
+            display_name=record.display_name,
+            contact_channel_type=record.contact_channel_type,
+            contact_value=record.contact_value,
+            local_reference=record.source_identity_value,
         )
 
     # -- DH-EX-004: provider lab-order creation --------------------------------------------------

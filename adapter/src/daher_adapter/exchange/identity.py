@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -39,6 +39,8 @@ class PatientReferenceRecord:
     source_identity_system: str
     source_identity_value: str
     display_name: str | None
+    contact_channel_type: str | None = None
+    contact_value: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +209,43 @@ class PatientReferenceRepository:
                 return None
             return _to_patient_record(reference)
 
+    def list_for_organization(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[PatientReferenceRecord]:
+        """DH-CLINIC-002: provider-scoped patient lookup.
+        Strictly filters by ``source_organization_id == organization_id`` -- never searches across
+        providers. If ``query`` is non-empty, performs deterministic substring search over
+        approved snapshot fields (``display_name``, ``contact_value``, ``source_identity_value``).
+        Orders deterministically by ``created_at.desc(), id.asc()`` with bounded limit."""
+        bounded_limit = max(1, min(limit, 100))
+        stmt = select(PatientReference).where(
+            PatientReference.source_organization_id == organization_id
+        )
+
+        clean_query = query.strip() if query is not None else None
+        if clean_query:
+            escaped = _escape_like(clean_query)
+            pattern = f"%{escaped}%"
+            stmt = stmt.where(
+                or_(
+                    PatientReference.display_name.ilike(pattern, escape="\\"),
+                    PatientReference.contact_value.ilike(pattern, escape="\\"),
+                    PatientReference.source_identity_value.ilike(pattern, escape="\\"),
+                )
+            )
+
+        stmt = stmt.order_by(PatientReference.created_at.desc(), PatientReference.id.asc()).limit(
+            bounded_limit
+        )
+
+        with self._sessions() as session:
+            rows = session.scalars(stmt).all()
+            return [_to_patient_record(row) for row in rows]
+
 
 class PractitionerReferenceRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
@@ -317,6 +356,10 @@ def _require_identity(
             raise ValueError(f"{name} is required -- exact source identity only, never inferred")
 
 
+def _escape_like(val: str) -> str:
+    return val.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _to_patient_record(reference: PatientReference) -> PatientReferenceRecord:
     return PatientReferenceRecord(
         id=reference.id,
@@ -325,6 +368,8 @@ def _to_patient_record(reference: PatientReference) -> PatientReferenceRecord:
         source_identity_system=reference.source_identity_system,
         source_identity_value=reference.source_identity_value,
         display_name=reference.display_name,
+        contact_channel_type=reference.contact_channel_type,
+        contact_value=reference.contact_value,
     )
 
 

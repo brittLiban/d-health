@@ -1,11 +1,16 @@
 import { useState } from 'react'
 import type { ExchangeClient } from '../../api/exchangeClient'
+import type { PatientReferenceBindRequest } from '../../api/exchangeTypes'
 import { ClinicProvider } from './ClinicContext'
 import { ClinicShell, type ClinicTabId } from './ClinicShell'
 import { ClinicHomePage } from './pages/ClinicHomePage'
 import { ClinicOrdersPage } from './pages/ClinicOrdersPage'
 import { ClinicPatientsPage } from './pages/ClinicPatientsPage'
 import { ClinicResultsPage } from './pages/ClinicResultsPage'
+
+export interface PendingPatientCreation {
+  body: PatientReferenceBindRequest
+}
 
 export interface ClinicAppProps {
   client?: ExchangeClient
@@ -25,6 +30,23 @@ function ClinicContent({
   onSwitchApp?: () => void
 }) {
   const [activeTab, setActiveTab] = useState<ClinicTabId>(initialTab)
+  const [pendingPatientCreations, setPendingPatientCreations] = useState<
+    Record<string, PendingPatientCreation>
+  >({})
+
+  const setPendingPatientCreation = (
+    scopeKey: string,
+    pending: PendingPatientCreation | null,
+  ) => {
+    setPendingPatientCreations((current) => {
+      if (pending) {
+        return { ...current, [scopeKey]: pending }
+      }
+      const next = { ...current }
+      delete next[scopeKey]
+      return next
+    })
+  }
 
   let pageContent
   switch (activeTab) {
@@ -32,7 +54,12 @@ function ClinicContent({
       pageContent = <ClinicHomePage onNavigate={setActiveTab} />
       break
     case 'patients':
-      pageContent = <ClinicPatientsPage />
+      pageContent = (
+        <ClinicPatientsPage
+          pendingCreations={pendingPatientCreations}
+          onPendingCreationChange={setPendingPatientCreation}
+        />
+      )
       break
     case 'orders':
       pageContent = <ClinicOrdersPage />

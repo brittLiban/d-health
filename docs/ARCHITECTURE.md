@@ -1081,6 +1081,17 @@ entry, not restated here):
   identity get-or-create bind — the first route letting a provider create a patient reference
   rather than requiring one to pre-exist. Narrower than full patient lookup/registration
   (§10 item 1 below is downgraded, not closed).
+- **DH-CLINIC-002** adds native, clinician-authorized provider-local patient selection without
+  changing that identity boundary: bounded `GET .../patient-references` listing,
+  `POST .../patient-references/search` deterministic literal substring retrieval (JSON body, so
+  names/contact fragments do not enter access-log URLs), and provider-scoped
+  `GET .../patient-references/{patient_reference_id}` reconciliation/detail. The lookup payload is
+  a separate minimal view (`patient_reference_id`, optional display/contact snapshots,
+  `local_reference`) and omits source namespace internals. Native creation reuses DH-EX-009's exact
+  bind with client-minted UUIDv4 values under `dhealth-clinic` /
+  `urn:dhealth:clinic:patient-reference-id`; unresolved attempts retain the same tuple within the
+  authenticated user + provider UI scope. No demographic matching, merge, cross-provider lookup,
+  or longitudinal patient profile is introduced.
 - **DH-EX-010/DH-EX-010A/DH-EX-010A1** add `POST .../orders/{order_id}/assign-lab`, a
   provider/facility-assigned routing path that shares the same `LabSelection` row as DH-EX-005's
   patient-selection path but never touches price consent — closing ADR-043's launch-option (a) gap

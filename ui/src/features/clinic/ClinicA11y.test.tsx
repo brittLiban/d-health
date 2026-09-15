@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { axe } from 'jest-axe'
 import { ClinicApp } from './ClinicApp'
@@ -58,6 +59,9 @@ describe('Clinic Accessibility', () => {
         versions: [],
       }),
       bindPatientReference: vi.fn(),
+      bindPatientReferenceWithOutcome: vi.fn(),
+      listPatientReferences: vi.fn().mockResolvedValue([]),
+      getPatientReference: vi.fn(),
     } as unknown as ExchangeClient
   })
 
@@ -75,7 +79,33 @@ describe('Clinic Accessibility', () => {
 
   it('Clinic patients view has no detectable axe violations', async () => {
     const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
-    await screen.findByRole('heading', { name: 'Dossiers Patients' })
+    await screen.findByRole('heading', { name: 'Patients' })
+    await screen.findByText('Aucun patient trouvé')
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('Clinic patient creation form has no detectable axe violations', async () => {
+    const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    await screen.findByRole('heading', { name: 'Nouveau patient' })
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('Clinic native patient workspace has no detectable axe violations', async () => {
+    mockClient.listPatientReferences = vi.fn().mockResolvedValue([
+      {
+        patient_reference_id: '11111111-1111-4111-8111-111111111111',
+        display_name: 'Patient Synthétique',
+        contact_channel_type: 'PHONE',
+        contact_value: '+25377000000',
+        local_reference: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      },
+    ])
+    const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
+    await screen.findByText('Patient Synthétique')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Ouvrir' }))
+    await screen.findByRole('heading', { name: 'Patient Synthétique' })
     expect(await axe(container)).toHaveNoViolations()
   })
 

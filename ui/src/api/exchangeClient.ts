@@ -15,6 +15,8 @@
 
 import type { ErrorCode } from './types'
 import type {
+  BindPatientReferenceOutcome,
+  ClinicPatientSummary,
   ExchangeErrorCode,
   ExchangeMeResponse,
   LabOrder,
@@ -128,11 +130,11 @@ export class ExchangeClient {
     return headers
   }
 
-  private async request<T>(
+  private async requestWithResponse<T>(
     path: string,
     options: RequestInit = {},
     customToken?: string,
-  ): Promise<T> {
+  ): Promise<{ data: T; status: number }> {
     const url = `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers = await this.buildHeaders(customToken)
 
@@ -152,7 +154,8 @@ export class ExchangeClient {
     }
 
     if (response.ok) {
-      return (await response.json()) as T
+      const data = (await response.json()) as T
+      return { data, status: response.status }
     }
 
     let errorDetail = response.statusText || 'Erreur du serveur DHealth Exchange.'
@@ -179,6 +182,15 @@ export class ExchangeClient {
     }
 
     throw new ExchangeApiError(response.status, code, errorDetail)
+  }
+
+  private async request<T>(
+    path: string,
+    options: RequestInit = {},
+    customToken?: string,
+  ): Promise<T> {
+    const { data } = await this.requestWithResponse<T>(path, options, customToken)
+    return data
   }
 
   /**
@@ -262,13 +274,60 @@ export class ExchangeClient {
     body: PatientReferenceBindRequest,
     token?: string,
   ): Promise<PatientReference> {
-    return this.request<PatientReference>(
+    const outcome = await this.bindPatientReferenceWithOutcome(providerId, body, token)
+    return outcome.reference
+  }
+
+  async bindPatientReferenceWithOutcome(
+    providerId: string,
+    body: PatientReferenceBindRequest,
+    token?: string,
+  ): Promise<BindPatientReferenceOutcome> {
+    const { data, status } = await this.requestWithResponse<PatientReference>(
       `/organizations/${encodeURIComponent(providerId)}/patient-references`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       },
+      token,
+    )
+    return { reference: data, created: status === 201 }
+  }
+
+  async listPatientReferences(
+    providerId: string,
+    options: { query?: string; limit?: number; token?: string } = {},
+  ): Promise<ClinicPatientSummary[]> {
+    const limit = options.limit ?? 50
+    if (options.query?.trim()) {
+      return this.request<ClinicPatientSummary[]>(
+        `/organizations/${encodeURIComponent(providerId)}/patient-references/search`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: options.query.trim(), limit }),
+        },
+        options.token,
+      )
+    }
+
+    const params = new URLSearchParams({ limit: String(limit) })
+    return this.request<ClinicPatientSummary[]>(
+      `/organizations/${encodeURIComponent(providerId)}/patient-references?${params.toString()}`,
+      { method: 'GET' },
+      options.token,
+    )
+  }
+
+  async getPatientReference(
+    providerId: string,
+    patientReferenceId: string,
+    token?: string,
+  ): Promise<ClinicPatientSummary> {
+    return this.request<ClinicPatientSummary>(
+      `/organizations/${encodeURIComponent(providerId)}/patient-references/${encodeURIComponent(patientReferenceId)}`,
+      { method: 'GET' },
       token,
     )
   }

@@ -1,0 +1,79 @@
+.page {
+  display: grid;
+  gap: var(--space-4);
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.header h1,
+.header p,
+.createForm h2,
+.workspace h2,
+.workspace p,
+.resultsHeader h2,
+.patientRow h3,
+.patientRow p {
+  margin: 0;
+}
+
+.header,
+.createForm,
+.workspace,
+.results,
+.createError {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.searchForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.actions,
+.resultsHeader,
+.patientRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.patientList {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.patientRow > div {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.patientRow code,
+.workspace code {
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .searchForm {
+    grid-template-columns: 1fr;
+  }
+
+  .resultsHeader,
+  .patientRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

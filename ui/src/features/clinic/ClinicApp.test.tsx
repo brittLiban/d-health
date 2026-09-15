@@ -99,6 +99,9 @@ describe('ClinicApp', () => {
         ],
       }),
       bindPatientReference: vi.fn(),
+      bindPatientReferenceWithOutcome: vi.fn(),
+      listPatientReferences: vi.fn().mockResolvedValue([]),
+      getPatientReference: vi.fn(),
     } as unknown as ExchangeClient
   })
 
@@ -124,14 +127,14 @@ describe('ClinicApp', () => {
     expect(screen.getByText("En cours d'analyse")).toBeInTheDocument()
   })
 
-  it('navigates to "Dossiers Patients" and displays truthful patient boundary notice', async () => {
+  it('navigates to the native Patients workflow', async () => {
     const user = userEvent.setup()
     render(<ClinicApp client={mockClient} />)
 
     await user.click(screen.getByRole('button', { name: 'Patients' }))
-    expect(await screen.findByRole('heading', { name: 'Dossiers Patients' })).toBeInTheDocument()
-    expect(screen.getByText(/Gestion native des patients \(Cadrage DH-CLINIC-002\)/)).toBeInTheDocument()
-    expect(screen.getByText(/Périmètre délimité par établissement/)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Patients' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
+    expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
   })
 
   it('navigates to "Résultats" and allows inspecting released observations for a completed order', async () => {

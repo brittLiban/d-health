@@ -216,6 +216,87 @@ describe('ExchangeClient', () => {
     })
   })
 
+  it('reports create versus exact-identity replay from the binding status', async () => {
+    const mockRef = {
+      id: 'pat-ref-1',
+      source_organization_id: 'prov-1',
+      source_system: 'dhealth-clinic',
+      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
+      source_identity_value: 'opaque-1',
+    }
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(mockRef), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(mockRef), { status: 200 }))
+    const client = new ExchangeClient()
+    const request = {
+      source_system: mockRef.source_system,
+      source_identity_system: mockRef.source_identity_system,
+      source_identity_value: mockRef.source_identity_value,
+    }
+
+    await expect(client.bindPatientReferenceWithOutcome('prov-1', request)).resolves.toEqual({
+      reference: mockRef,
+      created: true,
+    })
+    await expect(client.bindPatientReferenceWithOutcome('prov-1', request)).resolves.toEqual({
+      reference: mockRef,
+      created: false,
+    })
+  })
+
+  it('lists patients with GET and sends patient search text only in a POST body', async () => {
+    const patients = [
+      {
+        patient_reference_id: 'pat-ref-1',
+        display_name: 'Patient Synthétique',
+        contact_channel_type: null,
+        contact_value: null,
+        local_reference: 'opaque-1',
+      },
+    ]
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(patients), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(patients), { status: 200 }))
+    const client = new ExchangeClient()
+
+    await expect(client.listPatientReferences('prov-1')).resolves.toEqual(patients)
+    await expect(
+      client.listPatientReferences('prov-1', { query: 'Patient Synthétique', limit: 25 }),
+    ).resolves.toEqual(patients)
+
+    const [listUrl, listInit] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(listUrl).toBe('/exchange/v1/organizations/prov-1/patient-references?limit=50')
+    expect(listInit?.method).toBe('GET')
+
+    const [searchUrl, searchInit] = vi.mocked(globalThis.fetch).mock.calls[1]
+    expect(searchUrl).toBe('/exchange/v1/organizations/prov-1/patient-references/search')
+    expect(String(searchUrl)).not.toContain('Patient')
+    expect(searchInit?.method).toBe('POST')
+    expect(JSON.parse(searchInit?.body as string)).toEqual({
+      query: 'Patient Synthétique',
+      limit: 25,
+    })
+  })
+
+  it('gets one provider-scoped patient reference by id', async () => {
+    const patient = {
+      patient_reference_id: 'pat-ref-1',
+      display_name: null,
+      contact_channel_type: null,
+      contact_value: null,
+      local_reference: 'opaque-1',
+    }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(patient), { status: 200 }),
+    )
+    const client = new ExchangeClient()
+
+    await expect(client.getPatientReference('prov-1', 'pat-ref-1')).resolves.toEqual(patient)
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe(
+      '/exchange/v1/organizations/prov-1/patient-references/pat-ref-1',
+    )
+  })
+
   it('normalizes 401 Unauthorized with isAuthError = true', async () => {
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: 'invalid or missing credentials' }), {
@@ -334,6 +415,8 @@ describe('ExchangeClient', () => {
     await client.getMe()
     await client.listOrders('prov-1')
     await client.getOrder('prov-1', 'ord-1')
+    await client.listPatientReferences('prov-1', { query: 'synthetic' })
+    await client.getPatientReference('prov-1', 'pat-ref-1')
 
     for (const call of vi.mocked(globalThis.fetch).mock.calls) {
       const url = String(call[0])

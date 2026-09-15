@@ -13043,6 +13043,147 @@ instruction.
 
 ---
 
+## DH-CLINIC-002 — Native provider-scoped patient find and creation
+
+**Date:** 2026-09-15
+**Starting HEAD / `origin/master`:** `6795d86a27439218f402f6920db09201edd61ff4`
+**Status:** IMPLEMENTED + LOCALLY VERIFIED; commit/push/exact-SHA CI pending
+**Migration head:** `0019_exchange_amendments` (unchanged; no migration added)
+
+### Native patient lookup contract
+
+- `GET /exchange/v1/organizations/{provider_id}/patient-references?limit=50` lists at most 100
+  references for that exact provider, ordered deterministically by `created_at DESC, id ASC`.
+- `POST /exchange/v1/organizations/{provider_id}/patient-references/search` accepts JSON
+  `{ "query": <1..100 characters>, "limit": <1..100, default 50> }`. Search is a literal,
+  case-insensitive substring retrieval over only `display_name`, `contact_value`, and
+  `source_identity_value`; `%`, `_`, and `\\` are escaped as literal characters. The search text is
+  deliberately in a request body rather than a GET query string so native patient names/contact
+  fragments do not enter Uvicorn access-log URLs.
+- `GET /exchange/v1/organizations/{provider_id}/patient-references/{patient_reference_id}` supplies
+  the authoritative provider-scoped snapshot used after create/replay. Missing and wrong-provider
+  ids both return the existing non-enumerating 404.
+- List/search/detail use a separate response shape only:
+  `patient_reference_id`, nullable `display_name`, nullable `contact_channel_type`, nullable
+  `contact_value`, and `local_reference`. Internal `source_system` /
+  `source_identity_system` and `created_at` are not exposed. The older
+  `PatientReferenceResponse` contract remains byte-for-byte unchanged.
+
+Every route calls the existing no-platform-admin-bypass clinician authorization boundary. An
+authenticated identity with no relationship to the provider gets 404; a related membership without
+`CLINICIAN` gets 403; unauthenticated requests get 401. Repository lookup always starts with
+`source_organization_id == provider_id`; it issues one bounded single-table SELECT and introduces no
+related-row reads or N+1 pattern. The existing provider-organization index is the applicable first
+predicate, so no speculative index was added.
+
+### Native creation and ambiguous-write behavior
+
+DHealth Clinic calls the existing `POST .../patient-references` bind; it never calls `/openmrs/*`.
+The native source tuple is precisely:
+
+- `source_system = "dhealth-clinic"`
+- `source_identity_system = "urn:dhealth:clinic:patient-reference-id"`
+- `source_identity_value = <browser-generated UUIDv4>`
+
+The UUID is opaque, stable for the unresolved attempt, unrelated to name/contact, and remains inside
+the existing provider-scoped unique tuple. The UI retains the full pending request only in in-memory
+Clinic application state keyed by authenticated `identity_id + provider_id`; it is not written to
+browser storage. A lost/ambiguous response, detail-read failure, tab navigation, or provider switch
+therefore cannot make the pending tuple cross into another provider or mint a new tuple on retry.
+Both HTTP 201 create and HTTP 200 exact replay are followed by provider-scoped detail retrieval, so
+the workspace opens the authoritative stored snapshot rather than assuming replay updated optional
+fields. Provider A and Provider B may hold the same UUID value and still receive different
+`PatientReference` ids, exactly as the database uniqueness contract requires.
+
+The French-first UI now implements `Patients` → `Rechercher un patient` → `Ouvrir`, truthful
+`Aucun patient trouvé` + `Nouveau patient`, a minimal optional display-name/contact form, and a
+small native workspace. A null name falls back to the honest `local_reference`; the workspace shows
+only contact snapshot when present and the patient reference. `Nouvel ordre de laboratoire` is
+present but disabled; DH-CLINIC-003 is not started.
+
+`PatientReference` intentionally still does **not** model DOB, sex/gender, address, national id,
+household, diagnoses, allergies, medications, vitals, notes, medical history, reconciliation,
+deduplication, fuzzy matching, or cross-provider identity. No new demographic or clinical field was
+added.
+
+### Verification performed
+
+- Fresh remote check: local HEAD and fetched `origin/master` both
+  `6795d86a27439218f402f6920db09201edd61ff4` before editing.
+- First audit measurement, before the primary agent made further edits but with five pre-existing
+  partial DH-CLINIC-002 worktree changes already present: adapter
+  `813 passed / 88 skipped / 1 warning`; UI `23 files / 268 tests` passed. This is **not** claimed
+  as a clean-`origin/master` baseline; a clean-tree baseline was not run. Migration head
+  `0019_exchange_amendments`.
+- Focused backend: `tests/test_exchange_patient_references_api.py` — `37 passed`.
+- Full adapter: `815 passed / 88 skipped / 1 warning`.
+- Focused UI after final-review fixes: Exchange client + Clinic accessibility + native patient
+  workflow — `3 files / 35 tests` passed.
+- Full UI: `24 files / 284 tests` passed, including all existing connector-track UI tests.
+- Backend `ruff check`: passed. `ruff format --check` first named the two touched Python files;
+  both were formatted and the final `ruff format --check` passed across all 121 Python files.
+- UI `oxlint`: passed. UI `tsc -b --noEmit`: passed. UI production build: passed; post-build
+  secret scan found no secrets across 4 built files. `git diff --check`: passed before this entry.
+
+### Negative controls executed and restored
+
+1. Reversed `source_organization_id == organization_id` to `!=`: targeted
+   `test_search_is_strictly_provider_isolated` produced `1 failed`; Provider A received Provider
+   B's id.
+2. Removed `_require_clinician` from search: targeted
+   `test_search_is_strictly_provider_isolated` produced `1 failed`; the cross-provider probe
+   returned 200 instead of 404.
+3. Removed LIKE escaping: targeted `test_search_query_escapes_sql_wildcards` produced `1 failed`;
+   literal `_` returned 2 rows instead of 1 (the `%`/`\\` matrix remains permanent there).
+4. Ignored the retained pending creation: the targeted UI test `reuses the original opaque identity
+   and payload after an ambiguous response and tab navigation` produced `1 failed` because retry
+   generated a different UUID.
+5. Removed request-generation/provider guards and response-scope filtering: targeted UI test
+   `does not restore stale provider A results after switching to provider B` produced `1 failed`
+   because a deferred Provider A result appeared under Provider B. The first control exposed an
+   insufficient wait; after strengthening the wait, the restored mutation failed red as stated.
+6. Changed body-based patient search to a GET query string: targeted client test `lists patients
+   with GET and sends patient search text only in a POST body` produced `1 failed`; encoded patient
+   content appeared in the URL instead of the fixed `/search` path.
+7. Rendered synthetic raw database/trace detail in the error branch: targeted UI test `renders a
+   sanitized recoverable error without exposing raw backend details` produced `1 failed` on the
+   forbidden raw detail.
+8. Removed `mountedRef.current = true` from the effect setup, recreating the Strict Mode
+   development-lifecycle bug: targeted UI test `accepts completed patient requests under the application
+   Strict Mode lifecycle` produced `1 failed / 10 skipped`, stuck in the loading state.
+
+Every mutation was restored before the full-suite run.
+
+### Known gaps / not proven
+
+- Pending create state intentionally survives in-app tab/provider navigation, not a full browser
+  reload or application restart; the exact server tuple remains reconcilable, but cross-reload UX is
+  future work and no patient snapshot was placed in browser storage for this ticket.
+- Search is bounded retrieval, not matching or deduplication. It does not claim production-volume
+  performance measurement.
+- No native order creation, lab selection, order history in the patient workspace, Lab application,
+  notification, real Keycloak/browser runtime, deployment runtime, or real-patient workflow was
+  implemented or qualified.
+- Exact-SHA GitHub CI is pending the ticket commit/push and must be green before closure.
+
+### Independent advisor review
+
+Phase 3 found one blocker (GET search terms would enter Uvicorn access logs) and four should-fix
+groups (pending-identity lifetime, original-payload/authoritative-detail reconciliation, stale
+provider responses, and boundary/negative-control evidence). All were accepted and addressed.
+Final independent review found four should-fix groups: the React Strict Mode mount lifecycle;
+missing replay/detail/provider-switch/route/accessibility evidence; inaccurate evidence wording;
+and the form's overly-generic contact label despite PHONE semantics. All were accepted and fixed.
+Focused re-review confirmed the runtime/UI fixes and identified two test-only corrections (retain
+GET 401/403 coverage alongside POST and type the provider-roundtrip mock's body argument); both
+were fixed and the focused suites/typecheck rerun green. `HUMAN DECISION REQUIRED: NO`.
+
+### Next recommended ticket
+
+`DH-CLINIC-003 — Native diagnostic service ordering` (not started here).
+
+---
+
 ### DH-EX-013 · Immutable pre-release observation correction (ADR-045 Questions 1–3) · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
 
 **Ticket:** DH-EX-013. Implements ADR-045's Questions 1–3 exactly as accepted (see DECISIONS.md's
@@ -13975,4 +14116,3 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 **DH-CLINIC-001 CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
-
