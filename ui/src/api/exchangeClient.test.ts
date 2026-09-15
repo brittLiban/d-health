@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ExchangeClient } from './exchangeClient'
+import {
+  ExchangeApiError,
+  ExchangeClient,
+  isAmbiguousExchangeError,
+  isDefinitiveExchangeError,
+} from './exchangeClient'
 
 describe('ExchangeClient', () => {
   const originalFetch = globalThis.fetch
@@ -84,7 +89,7 @@ describe('ExchangeClient', () => {
         provider_organization_id: 'prov-1',
         patient_reference_id: 'pat-1',
         practitioner_reference_id: 'prac-1',
-        status: 'SUBMITTED',
+        status: 'AWAITING_LAB_SELECTION',
         created_at: '2026-09-15T06:00:00Z',
         item_count: 2,
       },
@@ -134,13 +139,33 @@ describe('ExchangeClient', () => {
   it('getOrderResults sends GET /organizations/{id}/orders/{order_id}/results', async () => {
     const mockResults = {
       order_id: 'ord-1',
+      order_status: 'COMPLETED',
       release_version_id: 'rel-v1',
       release_version_number: 1,
       is_amendment: false,
-      review_status: 'PENDING_REVIEW',
-      reviewed_at: null,
-      reviewed_by_practitioner_reference_id: null,
-      results: [],
+      results: [
+        {
+          item_id: 'item-1',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie',
+          entry_completed_at: '2026-09-15T09:00:00Z',
+          observations: [
+            {
+              observation_id: 'obs-1',
+              source_code: 'GLU',
+              source_system: 'LOINC',
+              display_label_snapshot: 'Glycémie',
+              result_type: 'NUMERIC',
+              numeric_value: 5.2,
+              numeric_unit: 'mmol/L',
+              reference_range_low: 3.9,
+              reference_range_high: 6.1,
+              text_value: null,
+              recorded_at: '2026-09-15T09:00:00Z',
+            },
+          ],
+        },
+      ],
     }
 
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(
@@ -160,13 +185,13 @@ describe('ExchangeClient', () => {
       order_id: 'ord-1',
       versions: [
         {
+          release_version_id: 'rel-v1',
           release_version_number: 1,
+          is_amendment: false,
           released_at: '2026-09-15T10:00:00Z',
-          lab_organization_id: 'lab-1',
-          released_by_user_id: 'user-1',
-          correction_reason: null,
-          observations: [],
-          doctor_reviews: [],
+          review_status: 'PENDING',
+          reviewed_at: null,
+          reviewed_by_practitioner_reference_id: null,
         },
       ],
     }
@@ -424,4 +449,50 @@ describe('ExchangeClient', () => {
       expect(url).toContain('/exchange/v1')
     }
   })
+
+  it('maps HTTP 400 to VALIDATION_ERROR', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Requête invalide' }), { status: 400 }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.getMe()).rejects.toMatchObject({
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      detail: 'Requête invalide',
+    })
+  })
+
+  it('correctly classifies definitive vs ambiguous exchange errors', () => {
+    const err400 = new ExchangeApiError(400, 'VALIDATION_ERROR', 'Bad Request')
+    const err401 = new ExchangeApiError(401, 'UNAUTHORIZED', 'Unauthorized')
+    const err403 = new ExchangeApiError(403, 'FORBIDDEN', 'Forbidden')
+    const err404 = new ExchangeApiError(404, 'NOT_FOUND', 'Not Found')
+    const err409 = new ExchangeApiError(409, 'CONFLICT', 'Conflict')
+    const err422 = new ExchangeApiError(422, 'VALIDATION_ERROR', 'Validation Error')
+
+    expect(isDefinitiveExchangeError(err400)).toBe(true)
+    expect(isDefinitiveExchangeError(err401)).toBe(true)
+    expect(isDefinitiveExchangeError(err403)).toBe(true)
+    expect(isDefinitiveExchangeError(err404)).toBe(true)
+    expect(isDefinitiveExchangeError(err409)).toBe(true)
+    expect(isDefinitiveExchangeError(err422)).toBe(true)
+
+    const errNetwork = new ExchangeApiError(0, 'NETWORK_ERROR', 'Network failure')
+    const err500 = new ExchangeApiError(500, 'SERVER_ERROR', 'Internal Server Error')
+    const err503 = new ExchangeApiError(503, 'SERVER_ERROR', 'Service Unavailable')
+    const errTypeError = new TypeError('Failed to fetch')
+
+    expect(isDefinitiveExchangeError(errNetwork)).toBe(false)
+    expect(isDefinitiveExchangeError(err500)).toBe(false)
+    expect(isDefinitiveExchangeError(errTypeError)).toBe(false)
+
+    expect(isAmbiguousExchangeError(errNetwork)).toBe(true)
+    expect(isAmbiguousExchangeError(err500)).toBe(true)
+    expect(isAmbiguousExchangeError(err503)).toBe(true)
+    expect(isAmbiguousExchangeError(errTypeError)).toBe(true)
+    expect(isAmbiguousExchangeError(err422)).toBe(false)
+    expect(isAmbiguousExchangeError(err401)).toBe(false)
+  })
 })
+

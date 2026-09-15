@@ -46,6 +46,39 @@ export function mapExchangeErrorToCode(code: ExchangeErrorCode): ErrorCode {
   }
 }
 
+export function isDefinitiveExchangeError(error: unknown): boolean {
+  if (error instanceof ExchangeApiError) {
+    return (
+      error.status === 400 ||
+      error.status === 401 ||
+      error.status === 403 ||
+      error.status === 404 ||
+      error.status === 409 ||
+      error.status === 422 ||
+      error.code === 'UNAUTHORIZED' ||
+      error.code === 'FORBIDDEN' ||
+      error.code === 'NOT_FOUND' ||
+      error.code === 'CONFLICT' ||
+      error.code === 'VALIDATION_ERROR'
+    )
+  }
+  return false
+}
+
+export function isAmbiguousExchangeError(error: unknown): boolean {
+  if (error instanceof ExchangeApiError) {
+    return (
+      error.status === 0 ||
+      error.status === 408 ||
+      error.status >= 500 ||
+      error.code === 'NETWORK_ERROR' ||
+      error.code === 'SERVER_ERROR'
+    )
+  }
+  return true
+}
+
+
 export class ExchangeApiError extends Error {
   readonly status: number
   readonly code: ExchangeErrorCode
@@ -167,7 +200,9 @@ export class ExchangeClient {
     }
 
     let code: ExchangeErrorCode = 'SERVER_ERROR'
-    if (response.status === 401) {
+    if (response.status === 400 || response.status === 422) {
+      code = 'VALIDATION_ERROR'
+    } else if (response.status === 401) {
       code = 'UNAUTHORIZED'
     } else if (response.status === 403) {
       code = 'FORBIDDEN'
@@ -175,8 +210,6 @@ export class ExchangeClient {
       code = 'NOT_FOUND'
     } else if (response.status === 409) {
       code = 'CONFLICT'
-    } else if (response.status === 422) {
-      code = 'VALIDATION_ERROR'
     } else if (response.status >= 500) {
       code = 'SERVER_ERROR'
     }

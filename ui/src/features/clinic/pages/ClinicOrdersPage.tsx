@@ -17,12 +17,12 @@ function mapOrderStatusTone(status: LabOrderStatus): StatusTone {
     case 'IN_PROGRESS':
     case 'ACCEPTED':
       return 'warning'
+    case 'SELECTED':
+    case 'AWAITING_LAB_SELECTION':
+      return 'neutral'
     case 'REJECTED':
     case 'CANCELLED':
       return 'danger'
-    case 'PENDING_SELECTION':
-    case 'LAB_ASSIGNED':
-    case 'SUBMITTED':
     default:
       return 'neutral'
   }
@@ -30,20 +30,18 @@ function mapOrderStatusTone(status: LabOrderStatus): StatusTone {
 
 function formatOrderStatusLabel(status: LabOrderStatus): string {
   switch (status) {
-    case 'PENDING_SELECTION':
+    case 'AWAITING_LAB_SELECTION':
       return 'En attente de choix labo'
-    case 'LAB_ASSIGNED':
-      return 'Laboratoire assigné'
-    case 'SUBMITTED':
-      return 'Transmis au labo'
+    case 'SELECTED':
+      return 'Laboratoire sélectionné'
     case 'ACCEPTED':
       return 'Accepté'
-    case 'REJECTED':
-      return 'Refusé'
     case 'IN_PROGRESS':
       return 'En cours d\'analyse'
     case 'COMPLETED':
       return 'Résultats libérés'
+    case 'REJECTED':
+      return 'Refusé'
     case 'CANCELLED':
       return 'Annulé'
     default:

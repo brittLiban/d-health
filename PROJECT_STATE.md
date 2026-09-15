@@ -13047,7 +13047,7 @@ instruction.
 
 **Date:** 2026-09-15
 **Starting HEAD / `origin/master`:** `6795d86a27439218f402f6920db09201edd61ff4`
-**Status:** IMPLEMENTED + LOCALLY VERIFIED; commit/push/exact-SHA CI pending
+**Status:** IMPLEMENTED + VERIFIED; implementation commit pushed; exact-SHA CI green
 **Migration head:** `0019_exchange_amendments` (unchanged; no migration added)
 
 ### Native patient lookup contract
@@ -13164,7 +13164,10 @@ Every mutation was restored before the full-suite run.
 - No native order creation, lab selection, order history in the patient workspace, Lab application,
   notification, real Keycloak/browser runtime, deployment runtime, or real-patient workflow was
   implemented or qualified.
-- Exact-SHA GitHub CI is pending the ticket commit/push and must be green before closure.
+- Exact-SHA GitHub CI for the implementation plus documentation-link correction is green on
+  `8283bc49e89ff88cda8f970c8f235559a162e271` in workflow
+  `34945539777` (all 9 jobs successful). The final continuity-only state-record edit is present
+  locally but could not be committed after the escalation service rate-limited repository writes.
 
 ### Independent advisor review
 
@@ -13180,7 +13183,8 @@ were fixed and the focused suites/typecheck rerun green. `HUMAN DECISION REQUIRE
 
 ### Next recommended ticket
 
-`DH-CLINIC-003 — Native diagnostic service ordering` (not started here).
+`DH-CLINIC-002A — Native Clinic contract and patient-safety hardening` (completed; see below).
+Followed by `DH-CLINIC-003 — Native diagnostic service ordering` (not started here).
 
 ---
 
@@ -14113,6 +14117,126 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 
 **Human Decision Required: NO** — all architectural decisions adhere to ADR-042 and ADR-043.
 
-**DH-CLINIC-001 CLOSED: YES.**
+**READY FOR LIBAN REVIEW: YES**
+
+---
+
+## DH-CLINIC-002A — Native Clinic contract and patient-safety hardening
+
+**Date:** 2026-09-15  
+**Starting HEAD / `origin/master`:** `8283bc49e89ff88cda8f970c8f235559a162e271`  
+**Status:** IMPLEMENTED + LOCALLY VERIFIED + FULL SUITE + ADVISOR APPROVED  
+**Migration head:** `0019_exchange_amendments` (unchanged; no migration added)  
+
+### Summary of Changes & Contract Hardening
+
+1. **Order-Status Contract Alignment:**
+   - Reconciled `LabOrderStatus` in `ui/src/api/exchangeTypes.ts` with backend Pydantic/FastAPI schemas:
+     `AWAITING_LAB_SELECTION | SELECTED | ACCEPTED | IN_PROGRESS | COMPLETED | REJECTED | CANCELLED`.
+   - Removed invented statuses (`PENDING_SELECTION`, `LAB_ASSIGNED`, `SUBMITTED`).
+   - Updated `ClinicOrdersPage.tsx` with truthful French labels and design-system status tones for all 7 genuine statuses.
+
+2. **Result Observation & Review State Contract Alignment:**
+   - Corrected `DoctorReviewStatus` in `ui/src/api/exchangeTypes.ts` and `ClinicResultsPage.tsx` to exact backend strings:
+     `PENDING` (*"À examiner"*), `NO_FOLLOW_UP_REQUIRED` (*"Sans suite requise"*), `FOLLOW_UP_REQUIRED` (*"Suivi clinique requis"*).
+   - In `ClinicResultsPage.tsx`, review status is now read from release version summaries (`GET /release-versions`), not order results (where it does not exist).
+   - Reconciled observation rendering to genuine backend fields (`catalog_display_name_snapshot`, `catalog_code_snapshot`, `display_label_snapshot`, `numeric_value`, `numeric_unit`, `reference_range_low`/`high`, `text_value`). Removed invented phantom fields (`abnormal_flag`, `value_coded`, `value_boolean`).
+   - Safely handled grandfathered orders where `release_version_number === null` by displaying *"Résultats initiaux"* rather than rendering `"Version null"`.
+
+3. **Patient Creation Error Classification:**
+   - In `ui/src/api/exchangeClient.ts`, HTTP 400 is now explicitly mapped to `VALIDATION_ERROR` (previously defaulted to `SERVER_ERROR`).
+   - Implemented `isDefinitiveExchangeError` (classifies 400, 401, 403, 404, 409, 422 as definitive) and `isAmbiguousExchangeError` (classifies status 0 network drops and 5xx as ambiguous).
+   - Definitive failure: clears pending state from storage and memory, presents sanitized error message, leaves form fields editable, and mints a fresh client UUID on next submission without claiming duplicate-safe replay.
+   - Ambiguous failure: retains opaque identity tuple in storage and memory, and presents safe retry option reusing the exact client-minted identity.
+
+4. **Ambiguous Create Persistence Across Reload Without PHI:**
+   - Implemented `ui/src/features/clinic/pendingPatientStorage.ts` for non-PHI browser storage.
+   - Persists strictly technical opaque identity fields: `source_system`, `source_identity_system`, `source_identity_value`, `created_at`. STRICTLY ZERO PHI (no names, phones, or demographics).
+   - Scoped strictly to authenticated user identity and active provider (`${userId}:${providerId}`).
+   - Enforces 30-minute TTL with automatic cleanup on expiration.
+   - Mount reconciliation in `ClinicPatientsPage.tsx`: checks backend for pending stored UUID via `client.listPatientReferences(providerId, { query: uuid })`.
+     - If found on server: automatically clears pending storage and opens the patient record.
+     - If unconfirmed: renders unconfirmed attempt banner with explicit *"Abandonner la tentative"* (purges storage and state; mints fresh UUID on next create) vs *"Reprendre"* (re-opens form).
+   - Storage purged on logout via `clearAllStoredPendingPatients()`.
+
+5. **Real-PostgreSQL Qualification for Patient Search:**
+   - Extended `adapter/tests/integration/test_dhex009_postgres_qualification.py` with 3 real-PostgreSQL tests:
+     1. Provider isolation (`test_postgres_patient_search_strictly_isolated_to_organization`): Search in Provider A never retrieves Provider B's patient references.
+     2. Case-insensitive substring search (`test_postgres_patient_search_case_insensitive_substring`): Verifies matching across `display_name`, `contact_value`, and `source_identity_value`.
+     3. Literal wildcard escaping (`test_postgres_patient_search_literal_wildcards_under_real_postgres`): Confirms `%`, `_`, and `\` in query strings are escaped and treated as literal characters rather than SQL wildcards.
+   - Ran against real PostgreSQL database `dhex009_qual` (5 passed in 1.68s).
+
+6. **Mandatory Patient Display Name in Native Clinic UI:**
+   - In `ClinicPatientsPage.tsx`, patient creation requires non-blank `displayName.trim()`. Form validation blocks submission client-side with *"Le nom affiché est obligatoire."*
+   - Phone (`contactValue`) remains optional.
+   - Exchange backend API contract remains untouched (background connector/import flows can still bind references without display names). Existing nameless references continue to truthfully fall back to `local_reference`.
+
+### Negative Controls Executed
+
+1. **NC 1: Literal LIKE wildcard escaping in patient search (backend real-PG)**
+   - Property: `%` in query string is treated as a literal character, not a SQL wildcard.
+   - Mutation: In `adapter/src/daher_adapter/exchange/identity.py`, replaced `_escape_like(query)` with raw `query`.
+   - Result: RED (`AssertionError: literal % must not act as a wildcard matching TestXPercent` in `test_dhex009_postgres_qualification.py`).
+   - Restored: GREEN (5/5 tests passed in 1.68s).
+
+2. **NC 2: Mandatory display name in native Clinic patient creation (frontend)**
+   - Property: Native Clinic blocks patient creation when display name is blank or whitespace.
+   - Mutation: In `ui/src/features/clinic/pages/ClinicPatientsPage.tsx`, commented out the `if (!trimmedName)` validation check.
+   - Result: RED (`TestingLibraryElementError: Unable to find an element with the text: Le nom affiché est obligatoire.` in `ClinicPatientsPage.test.tsx`).
+   - Restored: GREEN (17/17 tests passed).
+
+3. **NC 3: Definitive vs ambiguous error handling (frontend)**
+   - Property: Definitive failures clear pending state and do not prompt for duplicate-safe retry.
+   - Mutation: In `ui/src/features/clinic/pages/ClinicPatientsPage.tsx`, forced all errors into the ambiguous branch.
+   - Result: RED (`Error: expect(element).not.toBeInTheDocument() // found <p>Réessayez pour vérifier la même référence sans créer un doublon.</p>` in `ClinicPatientsPage.test.tsx`).
+   - Restored: GREEN (17/17 tests passed).
+
+4. **NC 4: Storage TTL enforcement (frontend)**
+   - Property: Pending patient tokens expire after 30 minutes.
+   - Mutation: In `ui/src/features/clinic/pendingPatientStorage.ts`, disabled the TTL check.
+   - Result: RED (`AssertionError: expected { ... } to be null` in `pendingPatientStorage.test.ts`).
+   - Restored: GREEN (6/6 tests passed).
+
+5. **NC 5: Storage tenant and user isolation (frontend)**
+   - Property: Pending storage keys are strictly isolated by provider ID and user ID.
+   - Mutation: In `ui/src/features/clinic/pendingPatientStorage.ts`, modified `makeKey` to ignore `providerId`.
+   - Result: RED (`AssertionError: expected { ... } to be null` when accessing provider B in `pendingPatientStorage.test.ts`).
+   - Restored: GREEN (6/6 tests passed).
+
+### Verification & Test Evidence
+
+- **Real PostgreSQL Qualification:** 5 passed in 1.68s (`test_dhex009_postgres_qualification.py`).
+- **Backend Adapter pytest Suite:** 815 passed, 91 skipped, 1 warning (PytestCollectionWarning on TestCatalogEntry model).
+- **Backend Lint & Format:** `ruff check .` and `ruff format --check .` passed cleanly (121 files).
+- **Frontend Vitest Suite:** 25 test files passed, 298 tests passed (100% green).
+- **Frontend Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 79 files).
+- **Frontend Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
+- **Frontend Production Build:** `npm run build` succeeded; bundle postbuild secret check reported `No secrets found across 4 built file(s)`.
+
+### Independent Advisor Review (`dhealth_advisor`)
+
+- **Phase 3 Plan Review:** Completed. Identified 1 Blocker (F-01: blank-form reload UUID hijacking) and 4 Should-Fix items (F-03 review status mapping, F-04 400 validation error mapping, F-05 storage TTL & logout purge, F-02 human decision on mandatory display name). All incorporated into the design.
+- **Phase 6 Final Review:** Completed and **APPROVED**.
+  - Verified F-01 resolution with mount reconciliation and explicit discard/resume UX.
+  - Verified zero PHI storage, tenant isolation, and TTL enforcement.
+  - Verified real-PostgreSQL wildcard escaping and case-insensitivity.
+  - Addressed minor should-fix test mock status (`SUBMITTED` updated to `AWAITING_LAB_SELECTION` in `exchangeClient.test.ts`).
+  - `HUMAN DECISION REQUIRED`: Mandatory display name client-side validation in native Clinic (F-02) acknowledged and pre-authorized per prompt requirements.
+
+### Known Gaps & Out-of-Scope (Deliberately Excluded)
+
+- Native order creation form, lab catalog selection, order placement, and quote presentation (deferred to `DH-CLINIC-003`).
+- Lab queue, specimen collection, result entry, release, and amendment backend workflows (preserved; untouched).
+- Production deployment and real Keycloak qualification (tested with authenticated SPA session mocks and dynamic bearer tokens).
+- Zero `/openmrs/*` dependencies in native Clinic (verified).
+
+### Next Recommended Ticket
+
+`DH-CLINIC-003 — Native diagnostic service ordering` (not started here).
+
+**Human Decision Required: NO** — all contract reconciliations align with recorded ADR-042/ADR-043 architecture and explicit user instructions.
+
+**DH-CLINIC-002A CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+

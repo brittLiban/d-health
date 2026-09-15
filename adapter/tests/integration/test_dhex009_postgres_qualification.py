@@ -144,3 +144,161 @@ def test_cross_organization_same_raw_identity_yields_distinct_references_under_r
         "two different provider organizations reusing the same raw identity string under real "
         "PostgreSQL must never be silently merged into one PatientReference"
     )
+
+
+def test_postgres_patient_search_strictly_isolated_to_organization(
+    sessions: sessionmaker,
+) -> None:
+    """DH-CLINIC-002A real-PostgreSQL qualification: patient search is strictly provider-scoped."""
+    key_prefix = f"pgiso-{uuid.uuid4().hex[:8]}"
+    organizations = OrganizationRepository(sessions)
+    patients = PatientReferenceRepository(sessions)
+    provider_a = organizations.create(org_type="PROVIDER", name=f"{key_prefix}-clinic-a")
+    provider_b = organizations.create(org_type="PROVIDER", name=f"{key_prefix}-clinic-b")
+
+    patient_a, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider_a.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="P-A1",
+        display_name="Hodan Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377000001",
+    )
+    patient_b, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider_b.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="P-B1",
+        display_name="Hodan Farah",
+        contact_channel_type="PHONE",
+        contact_value="+25377000002",
+    )
+
+    results_a = patients.list_for_organization(provider_a.id, query="Hodan")
+    assert len(results_a) == 1
+    assert results_a[0].id == patient_a.id
+    assert results_a[0].display_name == "Hodan Ali"
+
+    results_b = patients.list_for_organization(provider_b.id, query="Hodan")
+    assert len(results_b) == 1
+    assert results_b[0].id == patient_b.id
+    assert results_b[0].display_name == "Hodan Farah"
+
+    # Listing without query also respects tenant boundary under real PostgreSQL
+    list_all_a = patients.list_for_organization(provider_a.id)
+    assert any(p.id == patient_a.id for p in list_all_a)
+    assert not any(p.id == patient_b.id for p in list_all_a)
+
+
+def test_postgres_patient_search_case_insensitive_substring(
+    sessions: sessionmaker,
+) -> None:
+    """DH-CLINIC-002A real-PostgreSQL qualification: search matches substrings case-insensitively
+    across display_name, contact_value, and source_identity_value."""
+    key_prefix = f"pgci-{uuid.uuid4().hex[:8]}"
+    organizations = OrganizationRepository(sessions)
+    patients = PatientReferenceRepository(sessions)
+    provider = organizations.create(org_type="PROVIDER", name=f"{key_prefix}-clinic")
+
+    patient, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="PAT-X99",
+        display_name="Fatouma Mohamed",
+        contact_channel_type="PHONE",
+        contact_value="+25321350000",
+    )
+
+    # Lowercase substring in display_name
+    match_lower = patients.list_for_organization(provider.id, query="fatouma")
+    assert any(p.id == patient.id for p in match_lower)
+
+    # Uppercase substring in display_name
+    match_upper = patients.list_for_organization(provider.id, query="MOHAMED")
+    assert any(p.id == patient.id for p in match_upper)
+
+    # Substring in contact_value
+    match_contact = patients.list_for_organization(provider.id, query="2135")
+    assert any(p.id == patient.id for p in match_contact)
+
+    # Substring in source_identity_value
+    match_ident = patients.list_for_organization(provider.id, query="pat-x")
+    assert any(p.id == patient.id for p in match_ident)
+
+    # Non-matching string
+    no_match = patients.list_for_organization(provider.id, query="Amina")
+    assert not any(p.id == patient.id for p in no_match)
+
+
+def test_postgres_patient_search_literal_wildcards_under_real_postgres(
+    sessions: sessionmaker,
+) -> None:
+    """DH-CLINIC-002A real-PostgreSQL qualification: %, _, and \\ are treated as literal characters,
+    not SQL wildcards."""
+    key_prefix = f"pgwild-{uuid.uuid4().hex[:8]}"
+    organizations = OrganizationRepository(sessions)
+    patients = PatientReferenceRepository(sessions)
+    provider = organizations.create(org_type="PROVIDER", name=f"{key_prefix}-clinic")
+
+    p_pct, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-PCT",
+        display_name="Test%Percent",
+    )
+    p_xpct, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-XPCT",
+        display_name="TestXPercent",
+    )
+    p_und, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-UND",
+        display_name="Test_Underscore",
+    )
+    p_xund, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-XUND",
+        display_name="TestXUnderscore",
+    )
+    p_bs, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-BS",
+        display_name="Test\\Backslash",
+    )
+    p_xbs, _ = patients.get_or_create_with_outcome(
+        source_organization_id=provider.id,
+        source_system="pg-qualification",
+        source_identity_system=f"urn:{key_prefix}:patient",
+        source_identity_value="ID-XBS",
+        display_name="TestBackslash",
+    )
+
+    # % must match literally
+    pct_results = patients.list_for_organization(provider.id, query="%Percent")
+    pct_ids = {p.id for p in pct_results}
+    assert p_pct.id in pct_ids
+    assert p_xpct.id not in pct_ids, "literal % must not act as a wildcard matching TestXPercent"
+
+    # _ must match literally
+    und_results = patients.list_for_organization(provider.id, query="_Underscore")
+    und_ids = {p.id for p in und_results}
+    assert p_und.id in und_ids
+    assert p_xund.id not in und_ids, "literal _ must not act as a wildcard matching TestXUnderscore"
+
+    # \ must match literally
+    bs_results = patients.list_for_organization(provider.id, query="\\Backslash")
+    bs_ids = {p.id for p in bs_results}
+    assert p_bs.id in bs_ids
+    assert p_xbs.id not in bs_ids, "literal \\ must not match TestBackslash"

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ExchangeClient } from '../../api/exchangeClient'
 import type { PatientReferenceBindRequest } from '../../api/exchangeTypes'
 import { ClinicProvider } from './ClinicContext'
+import { clearAllStoredPendingPatients } from './pendingPatientStorage'
 import { ClinicShell, type ClinicTabId } from './ClinicShell'
 import { ClinicHomePage } from './pages/ClinicHomePage'
 import { ClinicOrdersPage } from './pages/ClinicOrdersPage'
@@ -33,6 +34,11 @@ function ClinicContent({
   const [pendingPatientCreations, setPendingPatientCreations] = useState<
     Record<string, PendingPatientCreation>
   >({})
+
+  const handleLogout = () => {
+    clearAllStoredPendingPatients()
+    onLogout?.()
+  }
 
   const setPendingPatientCreation = (
     scopeKey: string,
@@ -75,7 +81,7 @@ function ClinicContent({
     <ClinicShell
       activeTab={activeTab}
       onSelectTab={setActiveTab}
-      onLogout={onLogout}
+      onLogout={handleLogout}
       onSwitchApp={onSwitchApp}
     >
       {pageContent}

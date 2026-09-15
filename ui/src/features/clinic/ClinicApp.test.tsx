@@ -54,31 +54,29 @@ describe('ClinicApp', () => {
       getOrder: vi.fn(),
       getOrderResults: vi.fn().mockResolvedValue({
         order_id: 'ord-5555-6666',
+        order_status: 'COMPLETED',
         release_version_id: 'rel-v1',
         release_version_number: 1,
         is_amendment: false,
-        review_status: 'PENDING_REVIEW',
-        reviewed_at: null,
-        reviewed_by_practitioner_reference_id: null,
         results: [
           {
-            order_item_id: 'item-1',
-            catalog_code: 'GLU',
-            catalog_display_name: 'Glycémie à jeun',
+            item_id: 'item-1',
+            catalog_code_snapshot: 'GLU',
+            catalog_display_name_snapshot: 'Glycémie à jeun',
+            entry_completed_at: '2026-09-15T08:30:00Z',
             observations: [
               {
-                id: 'obs-1',
-                observation_code: 'GLU',
-                display_name: 'Glycémie',
-                value_numeric: 5.4,
-                value_text: null,
-                value_boolean: null,
-                value_coded: null,
-                unit: 'mmol/L',
+                observation_id: 'obs-1',
+                source_code: 'GLU',
+                source_system: 'LOINC',
+                display_label_snapshot: 'Glycémie',
+                result_type: 'NUMERIC',
+                numeric_value: 5.4,
+                numeric_unit: 'mmol/L',
                 reference_range_low: 3.9,
                 reference_range_high: 6.1,
-                abnormal_flag: null,
-                status: 'FINAL',
+                text_value: null,
+                recorded_at: '2026-09-15T08:30:00Z',
               },
             ],
           },
@@ -92,7 +90,7 @@ describe('ClinicApp', () => {
             release_version_number: 1,
             is_amendment: false,
             released_at: '2026-09-15T08:30:00Z',
-            review_status: 'PENDING_REVIEW',
+            review_status: 'PENDING',
             reviewed_at: null,
             reviewed_by_practitioner_reference_id: null,
           },
@@ -152,6 +150,7 @@ describe('ClinicApp', () => {
     expect(screen.getByText('mmol/L')).toBeInTheDocument()
     expect(screen.getByText('3.9 - 6.1')).toBeInTheDocument()
     expect(screen.getByText('Version 1')).toBeInTheDocument()
+    expect(screen.getByText('À examiner')).toBeInTheDocument()
   })
 
   it('renders truthful unauthenticated state on 401 without mock fallback', async () => {

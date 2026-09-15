@@ -46,12 +46,10 @@ describe('Clinic Accessibility', () => {
       getOrder: vi.fn(),
       getOrderResults: vi.fn().mockResolvedValue({
         order_id: 'ord-1111-2222',
+        order_status: 'COMPLETED',
         release_version_id: 'rel-v1',
         release_version_number: 1,
         is_amendment: false,
-        review_status: 'PENDING_REVIEW',
-        reviewed_at: null,
-        reviewed_by_practitioner_reference_id: null,
         results: [],
       }),
       getReleaseVersions: vi.fn().mockResolvedValue({

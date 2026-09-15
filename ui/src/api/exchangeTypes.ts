@@ -34,14 +34,18 @@ export interface ExchangeMeResponse {
 }
 
 export type LabOrderStatus =
-  | 'PENDING_SELECTION'
-  | 'LAB_ASSIGNED'
-  | 'SUBMITTED'
+  | 'AWAITING_LAB_SELECTION'
+  | 'SELECTED'
   | 'ACCEPTED'
-  | 'REJECTED'
   | 'IN_PROGRESS'
   | 'COMPLETED'
+  | 'REJECTED'
   | 'CANCELLED'
+
+export type DoctorReviewStatus =
+  | 'PENDING'
+  | 'NO_FOLLOW_UP_REQUIRED'
+  | 'FOLLOW_UP_REQUIRED'
 
 export interface LabOrderItem {
   catalog_entry_id: string
@@ -72,53 +76,70 @@ export interface LabOrder {
   items: LabOrderItem[]
 }
 
-export interface ProviderResultObservation {
-  id: string
-  observation_code: string
-  display_name: string
-  value_numeric: number | null
-  value_text: string | null
-  value_boolean: boolean | null
-  value_coded: string | null
-  unit: string | null
+export interface ProviderObservationResponse {
+  observation_id: string
+  source_code: string
+  source_system: string
+  display_label_snapshot: string
+  result_type: string
+  numeric_value: number | null
+  numeric_unit: string | null
   reference_range_low: number | null
   reference_range_high: number | null
-  abnormal_flag: string | null
-  status: string
+  text_value: string | null
+  recorded_at: string
 }
 
-export interface ProviderResultItem {
-  order_item_id: string
-  catalog_code: string
-  catalog_display_name: string
-  observations: ProviderResultObservation[]
+export interface ProviderResultItemResponse {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  entry_completed_at: string
+  observations: ProviderObservationResponse[]
 }
 
-export interface ProviderOrderResults {
+export interface ProviderOrderResultsResponse {
   order_id: string
-  release_version_id: string
-  release_version_number: number
-  is_amendment: boolean
-  review_status: 'PENDING_REVIEW' | 'NO_FOLLOW_UP_REQUIRED' | 'FOLLOW_UP_REQUIRED' | string
-  reviewed_at: string | null
-  reviewed_by_practitioner_reference_id: string | null
-  results: ProviderResultItem[]
+  order_status: string
+  release_version_id: string | null
+  release_version_number: number | null
+  is_amendment: boolean | null
+  results: ProviderResultItemResponse[]
 }
 
-export interface ProviderReleaseVersionSummary {
+export interface ProviderReleaseVersionSummaryResponse {
   release_version_id: string
   release_version_number: number
   is_amendment: boolean
   released_at: string
-  review_status: string
+  review_status: DoctorReviewStatus | string
   reviewed_at: string | null
   reviewed_by_practitioner_reference_id: string | null
 }
 
-export interface ProviderReleaseVersionHistory {
+export interface ProviderReleaseVersionHistoryResponse {
   order_id: string
-  versions: ProviderReleaseVersionSummary[]
+  versions: ProviderReleaseVersionSummaryResponse[]
 }
+
+export interface ProviderReleaseVersionContentResponse {
+  order_id: string
+  release_version_id: string
+  release_version_number: number
+  is_amendment: boolean
+  review_status: DoctorReviewStatus | string
+  reviewed_at: string | null
+  reviewed_by_practitioner_reference_id: string | null
+  results: ProviderResultItemResponse[]
+}
+
+// Compatibility aliases
+export type ProviderOrderResults = ProviderOrderResultsResponse
+export type ProviderResultItem = ProviderResultItemResponse
+export type ProviderResultObservation = ProviderObservationResponse
+export type ProviderReleaseVersionSummary = ProviderReleaseVersionSummaryResponse
+export type ProviderReleaseVersionHistory = ProviderReleaseVersionHistoryResponse
+export type ProviderReleaseVersionContent = ProviderReleaseVersionContentResponse
 
 export interface PatientReference {
   id: string

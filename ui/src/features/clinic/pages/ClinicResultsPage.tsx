@@ -13,6 +13,18 @@ import {
   StatusBadge,
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
+function formatReviewStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case 'PENDING':
+      return 'À examiner'
+    case 'NO_FOLLOW_UP_REQUIRED':
+      return 'Sans suite requise'
+    case 'FOLLOW_UP_REQUIRED':
+      return 'Suivi clinique requis'
+    default:
+      return status || 'Non renseigné'
+  }
+}
 
 export function ClinicResultsPage() {
   const { status: authStatus, activeProvider, client, authToken, reload } = useClinic()
@@ -164,16 +176,32 @@ export function ClinicResultsPage() {
                 </h2>
                 <StatusBadge
                   tone="success"
-                  label={`Version ${orderDetails.release_version_number}${orderDetails.is_amendment ? ' (Amendée)' : ''}`}
+                  label={
+                    orderDetails.release_version_number !== null
+                      ? `Version ${orderDetails.release_version_number}${orderDetails.is_amendment ? ' (Amendée)' : ''}`
+                      : 'Résultats initiaux'
+                  }
                 />
               </div>
 
-              <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)', margin: '0 0 var(--space-4)' }}>
-                Statut de revue clinique : <strong>{orderDetails.review_status}</strong>
-                {releaseHistory && releaseHistory.versions.length > 1 ? (
-                  <span> ({releaseHistory.versions.length} versions disponibles)</span>
-                ) : null}
-              </p>
+              {(() => {
+                const currentVersion =
+                  orderDetails.release_version_id
+                    ? releaseHistory?.versions.find(
+                        (v) => v.release_version_id === orderDetails.release_version_id,
+                      ) ?? null
+                    : releaseHistory?.versions[0] ?? null
+                const reviewStatus = currentVersion?.review_status
+
+                return (
+                  <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)', margin: '0 0 var(--space-4)' }}>
+                    Statut de revue clinique : <strong>{formatReviewStatusLabel(reviewStatus)}</strong>
+                    {releaseHistory && releaseHistory.versions.length > 1 ? (
+                      <span> ({releaseHistory.versions.length} versions disponibles)</span>
+                    ) : null}
+                  </p>
+                )
+              })()}
 
               {orderDetails.results.length === 0 ? (
                 <p style={{ color: 'var(--color-neutral-500)', fontStyle: 'italic' }}>
@@ -182,7 +210,7 @@ export function ClinicResultsPage() {
               ) : (
                 orderDetails.results.map((item) => (
                   <div
-                    key={item.order_item_id}
+                    key={item.item_id}
                     style={{
                       borderTop: '1px solid var(--color-neutral-200)',
                       paddingTop: 'var(--space-3)',
@@ -190,7 +218,7 @@ export function ClinicResultsPage() {
                     }}
                   >
                     <h3 style={{ fontSize: 'var(--font-size-base)', margin: '0 0 var(--space-2)', color: 'var(--color-neutral-800)' }}>
-                      {item.catalog_display_name} ({item.catalog_code})
+                      {item.catalog_display_name_snapshot} ({item.catalog_code_snapshot})
                     </h3>
 
                     <table
@@ -210,15 +238,15 @@ export function ClinicResultsPage() {
                       </thead>
                       <tbody>
                         {item.observations.map((obs) => (
-                          <tr key={obs.id} style={{ borderBottom: '1px solid var(--color-neutral-100)' }}>
-                            <td style={{ padding: 'var(--space-2) var(--space-3)' }}>{obs.display_name}</td>
+                          <tr key={obs.observation_id} style={{ borderBottom: '1px solid var(--color-neutral-100)' }}>
+                            <td style={{ padding: 'var(--space-2) var(--space-3)' }}>{obs.display_label_snapshot}</td>
                             <td style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>
-                              {obs.value_numeric !== null
-                                ? obs.value_numeric
-                                : obs.value_text ?? obs.value_coded ?? '-'}
+                              {obs.numeric_value !== null
+                                ? obs.numeric_value
+                                : obs.text_value ?? '-'}
                             </td>
                             <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
-                              {obs.unit ?? '-'}
+                              {obs.numeric_unit ?? '-'}
                             </td>
                             <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
                               {obs.reference_range_low !== null && obs.reference_range_high !== null
