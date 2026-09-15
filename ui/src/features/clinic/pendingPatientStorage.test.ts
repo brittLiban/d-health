@@ -45,7 +45,7 @@ describe('pendingPatientStorage', () => {
     expect(getStoredPendingPatient('user-1', 'provider-a')?.source_identity_value).toBe('uuid-user1-prova')
   })
 
-  it('expires pending identity after TTL (30 minutes)', () => {
+  it('retains an unresolved identity beyond the former 30-minute TTL', () => {
     const now = 1000000000000
     vi.spyOn(Date, 'now').mockReturnValue(now)
 
@@ -61,9 +61,8 @@ describe('pendingPatientStorage', () => {
     // Advance 31 minutes
     vi.spyOn(Date, 'now').mockReturnValue(now + 31 * 60 * 1000)
 
-    // Should return null and clean up expired entry
-    expect(getStoredPendingPatient('user-1', 'provider-a')).toBeNull()
-    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:user-1:provider-a')).toBeNull()
+    expect(getStoredPendingPatient('user-1', 'provider-a')?.source_identity_value).toBe('uuid-ttl-test')
+    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:user-1:provider-a')).not.toBeNull()
   })
 
   it('clears individual scoped entries', () => {

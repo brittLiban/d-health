@@ -19,6 +19,8 @@ import { useClinic } from '../ClinicContext'
 import type { PendingPatientCreation } from '../ClinicApp'
 import {
   clearStoredPendingPatient,
+  canReadPendingPatientStorage,
+  PendingPatientStorageReadError,
   getStoredPendingPatient,
   setStoredPendingPatient,
   type OpaquePendingPatientIdentity,
@@ -66,6 +68,9 @@ export function ClinicPatientsPage({
   const [createErrorCode, setCreateErrorCode] = useState<ErrorCode>('SERVER_ERROR')
   const [definitiveError, setDefinitiveError] = useState<string | null>(null)
   const [unresolvedStoredAttempt, setUnresolvedStoredAttempt] = useState<OpaquePendingPatientIdentity | null>(null)
+  const [confirmedReadAttempt, setConfirmedReadAttempt] = useState<OpaquePendingPatientIdentity | null>(null)
+  const [reconcilingStoredAttempt, setReconcilingStoredAttempt] = useState(false)
+  const [storageUnreadable, setStorageUnreadable] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -113,34 +118,62 @@ export function ClinicPatientsPage({
     setDisplayNameError(null)
     setDefinitiveError(null)
     setUnresolvedStoredAttempt(null)
+    setConfirmedReadAttempt(null)
+    setReconcilingStoredAttempt(false)
+    setStorageUnreadable(false)
 
     // 1. In-memory pending attempt from tab switching within the same React session
     const inMemoryPending = scopeKey ? pendingCreations[scopeKey] : undefined
     setDisplayName(String(inMemoryPending?.body.display_name ?? ''))
     setContactValue(String(inMemoryPending?.body.contact_value ?? ''))
-    setShowCreate(Boolean(inMemoryPending))
-    setCreateState(inMemoryPending ? 'uncertain' : 'idle')
+    setShowCreate(Boolean(inMemoryPending && !inMemoryPending.confirmedPatientReferenceId))
+    setCreateState(inMemoryPending && !inMemoryPending.confirmedPatientReferenceId ? 'uncertain' : 'idle')
+    if (inMemoryPending?.confirmedPatientReferenceId) {
+      setConfirmedReadAttempt({
+        source_system: inMemoryPending.body.source_system,
+        source_identity_system: inMemoryPending.body.source_identity_system,
+        source_identity_value: inMemoryPending.body.source_identity_value,
+        confirmed_patient_reference_id: inMemoryPending.confirmedPatientReferenceId,
+        created_at: Date.now(),
+      })
+    }
 
     // 2. Cross-reload recovery: check browser storage for unresolved opaque identity
     if (user && providerId) {
-      const stored = getStoredPendingPatient(user.identity_id, providerId)
+      if (!canReadPendingPatientStorage()) {
+        setStorageUnreadable(true)
+        setDefinitiveError("Impossible de verifier la recuperation sure d'une creation precedente.")
+      }
+      let stored: OpaquePendingPatientIdentity | null = null
+      try {
+        stored = getStoredPendingPatient(user.identity_id, providerId)
+      } catch (error) {
+        if (error instanceof PendingPatientStorageReadError) {
+          setStorageUnreadable(true)
+          setDefinitiveError("Impossible de verifier la recuperation sure d'une creation precedente.")
+        } else throw error
+      }
       if (stored) {
-        // Attempt server reconciliation in case the server committed before response drop
+        // Block new creation immediately. A stored UUID may identify a POST which the server
+        // committed before its response was lost, so it must be reconciled exactly, never replaced.
+        setReconcilingStoredAttempt(true)
+        if (!stored.confirmed_patient_reference_id) setUnresolvedStoredAttempt(stored)
         void (async () => {
+          let found: ClinicPatientSummary | null = null
           try {
-            const matches = await client.listPatientReferences(providerId, {
-              query: stored.source_identity_value,
-              limit: 10,
-              token: authToken ?? undefined,
-            })
-            const found = matches.find(
-              (p) => p.local_reference === stored.source_identity_value,
-            )
-            if (
-              mountedRef.current &&
-              currentProviderRef.current === providerId &&
-              found
-            ) {
+            if (stored.confirmed_patient_reference_id) {
+              found = await client.getPatientReference(
+                providerId,
+                stored.confirmed_patient_reference_id,
+                authToken ?? undefined,
+              )
+            }
+          } catch {
+            // A read failure cannot undo a confirmed bind POST.
+          }
+
+          if (mountedRef.current && currentProviderRef.current === providerId) {
+            if (found) {
               clearStoredPendingPatient(user.identity_id, providerId)
               if (scopeKey) onPendingCreationChange(scopeKey, null)
               setSelected({ providerId, value: found })
@@ -152,14 +185,9 @@ export function ClinicPatientsPage({
                     : [found],
               }))
               setLoadState('success')
-              return
-            }
-          } catch {
-            // Ignore reconciliation failure and treat as unresolved attempt
-          }
-
-          if (mountedRef.current && currentProviderRef.current === providerId) {
-            setUnresolvedStoredAttempt(stored)
+            } else if (stored.confirmed_patient_reference_id) setConfirmedReadAttempt(stored)
+            else setUnresolvedStoredAttempt(stored)
+            setReconcilingStoredAttempt(false)
           }
         })()
       }
@@ -181,22 +209,6 @@ export function ClinicPatientsPage({
     if (providerId) void loadPatients(providerId, searchInput.trim())
   }
 
-  const handleDiscardStoredAttempt = () => {
-    if (user && providerId) {
-      clearStoredPendingPatient(user.identity_id, providerId)
-    }
-    if (scopeKey) {
-      onPendingCreationChange(scopeKey, null)
-    }
-    setUnresolvedStoredAttempt(null)
-    setCreateState('idle')
-    setShowCreate(false)
-    setDisplayName('')
-    setContactValue('')
-    setDisplayNameError(null)
-    setDefinitiveError(null)
-  }
-
   const handleResumeStoredAttempt = () => {
     setShowCreate(true)
     setCreateState('idle')
@@ -205,17 +217,20 @@ export function ClinicPatientsPage({
 
   const handleCancelCreate = () => {
     setShowCreate(false)
-    setDisplayName('')
-    setContactValue('')
-    setDisplayNameError(null)
-    setDefinitiveError(null)
-    setCreateState('idle')
-    handleDiscardStoredAttempt()
+    // Cancellation is presentation-only if a create is unresolved. The durable
+    // source identity remains available for exact reconciliation.
+    if (!unresolvedStoredAttempt && !pendingCreations[scopeKey ?? '']) {
+      setDisplayName('')
+      setContactValue('')
+      setDisplayNameError(null)
+      setDefinitiveError(null)
+      setCreateState('idle')
+    }
   }
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault()
-    if (!providerId || !scopeKey || !user) return
+    if (!providerId || !scopeKey || !user || storageUnreadable) return
 
     const trimmedName = displayName.trim()
     if (!trimmedName) {
@@ -241,47 +256,31 @@ export function ClinicPatientsPage({
     }
 
     const targetProviderId = providerId
+    const hadEarlierAmbiguousAttempt = Boolean(existingPending || unresolvedStoredAttempt)
+    // Durability is a precondition of issuing a mutation whose response may be lost.
+    if (!setStoredPendingPatient(user.identity_id, targetProviderId, {
+      source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
+      source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
+      source_identity_value: identityValue,
+    })) {
+      setCreateErrorCode('SERVER_ERROR')
+      setDefinitiveError("Impossible de preparer la recuperation sure de cette creation. Aucun envoi n'a ete effectue.")
+      return
+    }
+    onPendingCreationChange(scopeKey, { body })
     setCreateState('submitting')
+    let outcome
     try {
-      const outcome = await client.bindPatientReferenceWithOutcome(
+      outcome = await client.bindPatientReferenceWithOutcome(
         targetProviderId,
         body,
         authToken ?? undefined,
       )
-      const authoritative = await client.getPatientReference(
-        targetProviderId,
-        outcome.reference.id,
-        authToken ?? undefined,
-      )
-      if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
-
-      // Clear pending state on success
-      clearStoredPendingPatient(user.identity_id, targetProviderId)
-      onPendingCreationChange(scopeKey, null)
-      setUnresolvedStoredAttempt(null)
-
-      setResults((current) => {
-        const values = current?.providerId === targetProviderId ? current.values : []
-        return {
-          providerId: targetProviderId,
-          values: [
-            authoritative,
-            ...values.filter(
-              (patient) => patient.patient_reference_id !== authoritative.patient_reference_id,
-            ),
-          ],
-        }
-      })
-      setSelected({ providerId: targetProviderId, value: authoritative })
-      setLoadState('success')
-      setCreateState('idle')
-      setShowCreate(false)
     } catch (error) {
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
 
-      if (isDefinitiveExchangeError(error)) {
-        // Definitive failure (400, 401, 403, 404, 409, 422):
-        // Server definitively refused request. Clear pending token and do NOT prompt for duplicate-safe reconciliation.
+      if (isDefinitiveExchangeError(error) && !hadEarlierAmbiguousAttempt) {
+        // This specific first POST was authoritatively refused before any ambiguity existed.
         clearStoredPendingPatient(user.identity_id, targetProviderId)
         onPendingCreationChange(scopeKey, null)
         setUnresolvedStoredAttempt(null)
@@ -289,16 +288,86 @@ export function ClinicPatientsPage({
         setDefinitiveError("Impossible d'enregistrer le patient. Veuillez vérifier les informations et vos autorisations.")
         setCreateState('idle')
       } else {
-        // Ambiguous failure (network drop, 5xx):
-        // Retain opaque identity tuple across reload and in memory for safe retry.
-        setStoredPendingPatient(user.identity_id, targetProviderId, {
-          source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
-          source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
-          source_identity_value: identityValue,
-        })
+        // A later retry refusal cannot prove that an earlier ambiguous POST did not commit.
         onPendingCreationChange(scopeKey, { body })
         setCreateErrorCode(safeErrorCode(error))
         setCreateState('uncertain')
+      }
+      return
+    }
+
+    // Phase A is now authoritatively confirmed. Persist the returned reference before
+    // Phase B so a failed read, reload, or navigation cannot turn it into a fresh create.
+    const confirmed = {
+      source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
+      source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
+      source_identity_value: identityValue,
+      confirmed_patient_reference_id: outcome.reference.id,
+    }
+    if (!setStoredPendingPatient(user.identity_id, targetProviderId, confirmed)) {
+      // The mutation is confirmed; retain it in memory and avoid any second create.
+      onPendingCreationChange(scopeKey, { body, confirmedPatientReferenceId: outcome.reference.id })
+      if (mountedRef.current && currentProviderRef.current === targetProviderId) {
+        setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
+        setCreateErrorCode('SERVER_ERROR')
+        setCreateState('idle')
+        setShowCreate(false)
+      }
+      return
+    }
+    onPendingCreationChange(scopeKey, null)
+    // The authoritative record is durable for targetProviderId. Never attach it to
+    // whatever provider the clinician may have selected while the POST was in flight.
+    if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
+    // Phase B is a read only. Gate creation before awaiting it so cancel/navigation
+    // cannot mint another source identity while this confirmed reference is loading.
+    setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
+    setShowCreate(false)
+    try {
+      const authoritative = await client.getPatientReference(
+        targetProviderId,
+        outcome.reference.id,
+        authToken ?? undefined,
+      )
+      if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
+      clearStoredPendingPatient(user.identity_id, targetProviderId)
+      setUnresolvedStoredAttempt(null)
+      setConfirmedReadAttempt(null)
+      setResults((current) => ({
+        providerId: targetProviderId,
+        values: [authoritative, ...(current?.providerId === targetProviderId
+          ? current.values.filter((patient) => patient.patient_reference_id !== authoritative.patient_reference_id)
+          : [])],
+      }))
+      setSelected({ providerId: targetProviderId, value: authoritative })
+      setLoadState('success')
+      setCreateState('idle')
+      setShowCreate(false)
+    } catch (error) {
+      if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
+      setCreateErrorCode(safeErrorCode(error))
+      setCreateState('idle')
+      setShowCreate(false)
+    }
+  }
+
+  const handleRetryConfirmedRead = async () => {
+    if (!providerId || !user || !confirmedReadAttempt?.confirmed_patient_reference_id) return
+    try {
+      const authoritative = await client.getPatientReference(
+        providerId,
+        confirmedReadAttempt.confirmed_patient_reference_id,
+        authToken ?? undefined,
+      )
+      if (!mountedRef.current || currentProviderRef.current !== providerId) return
+      clearStoredPendingPatient(user.identity_id, providerId)
+      setConfirmedReadAttempt(null)
+      setUnresolvedStoredAttempt(null)
+      if (scopeKey) onPendingCreationChange(scopeKey, null)
+      setSelected({ providerId, value: authoritative })
+    } catch (error) {
+      if (mountedRef.current && currentProviderRef.current === providerId) {
+        setCreateErrorCode(safeErrorCode(error))
       }
     }
   }
@@ -344,16 +413,24 @@ export function ClinicPatientsPage({
         <p>Établissement prescripteur : <strong>{activeProvider?.organization_name}</strong></p>
       </header>
 
-      {unresolvedStoredAttempt && !showCreate ? (
+      {storageUnreadable ? (
+        <Card><div className={styles.createError}><ErrorState code="SERVER_ERROR" /><p className={styles.errorText}>Impossible de verifier la recuperation sure d'une creation precedente.</p></div></Card>
+      ) : null}
+
+      {confirmedReadAttempt ? (
+        <Card>
+          <div className={styles.alertBanner} role="alert">
+            <p><strong>Patient créé :</strong> La création est confirmée, mais la fiche patient ne peut pas être ouverte pour le moment.</p>
+            <Button type="button" onClick={() => void handleRetryConfirmedRead()}>Réessayer l’ouverture</Button>
+          </div>
+        </Card>
+      ) : unresolvedStoredAttempt && !showCreate ? (
         <Card>
           <div className={styles.alertBanner} role="alert">
             <p>
-              <strong>Tentative non confirmée :</strong> Une tentative précédente de création n'a pas pu être confirmée sur le serveur. Aucun patient n'a été créé.
+              <strong>Tentative non confirmée :</strong> La création du patient n’a pas pu être confirmée. Vérifiez la tentative existante avant de créer un nouveau patient.
             </p>
             <div className={styles.actions}>
-              <Button type="button" variant="secondary" onClick={handleDiscardStoredAttempt}>
-                Abandonner la tentative
-              </Button>
               <Button type="button" onClick={handleResumeStoredAttempt}>
                 Reprendre
               </Button>
@@ -434,13 +511,13 @@ export function ClinicPatientsPage({
       ) : visibleResults.length === 0 ? (
         <EmptyState
           title="Aucun patient trouvé"
-          action={<Button type="button" onClick={() => setShowCreate(true)}>Nouveau patient</Button>}
+          action={<Button type="button" disabled={Boolean(unresolvedStoredAttempt || confirmedReadAttempt || reconcilingStoredAttempt || storageUnreadable)} onClick={() => setShowCreate(true)}>Nouveau patient</Button>}
         />
       ) : (
         <section aria-label="Résultats de recherche" className={styles.results}>
           <div className={styles.resultsHeader}>
             <h2>Patients trouvés</h2>
-            <Button type="button" variant="secondary" onClick={() => setShowCreate(true)}>
+            <Button type="button" variant="secondary" disabled={Boolean(unresolvedStoredAttempt || confirmedReadAttempt || reconcilingStoredAttempt || storageUnreadable)} onClick={() => setShowCreate(true)}>
               Nouveau patient
             </Button>
           </div>

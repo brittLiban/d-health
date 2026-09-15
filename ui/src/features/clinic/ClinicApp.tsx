@@ -2,7 +2,6 @@ import { useState } from 'react'
 import type { ExchangeClient } from '../../api/exchangeClient'
 import type { PatientReferenceBindRequest } from '../../api/exchangeTypes'
 import { ClinicProvider } from './ClinicContext'
-import { clearAllStoredPendingPatients } from './pendingPatientStorage'
 import { ClinicShell, type ClinicTabId } from './ClinicShell'
 import { ClinicHomePage } from './pages/ClinicHomePage'
 import { ClinicOrdersPage } from './pages/ClinicOrdersPage'
@@ -11,6 +10,7 @@ import { ClinicResultsPage } from './pages/ClinicResultsPage'
 
 export interface PendingPatientCreation {
   body: PatientReferenceBindRequest
+  confirmedPatientReferenceId?: string
 }
 
 export interface ClinicAppProps {
@@ -36,7 +36,10 @@ function ClinicContent({
   >({})
 
   const handleLogout = () => {
-    clearAllStoredPendingPatients()
+    // Do not erase durable, non-PHI reconciliation identities. A logout cannot
+    // establish whether an earlier create POST committed; the next authenticated
+    // session in this exact user/provider scope must be able to reconcile it.
+    setPendingPatientCreations({})
     onLogout?.()
   }
 

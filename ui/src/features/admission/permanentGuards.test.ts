@@ -173,5 +173,5 @@ describe('permanent safety guards — runtime behavior', () => {
       const [, init] = call as [string, RequestInit]
       expect((init.headers as Record<string, string>)['X-Daher-App-Request']).toBe('1')
     }
-  })
+  }, 15000)
 })

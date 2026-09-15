@@ -7,8 +7,9 @@
  * - Bound strictly to authenticated user identity + active provider scope.
  * - Provider A cannot access Provider B's pending token.
  * - User A cannot access User B's pending token.
- * - 30-minute TTL to prevent stale orphaned tokens from lingering indefinitely.
- * - Cleared on successful reconciliation, explicit abandonment, or logout.
+ * - Never expires an unresolved identity: expiry would make a potentially committed
+ *   create unrecoverable and permit a duplicate.
+ * - Cleared only once the server has authoritatively resolved the attempt.
  */
 
 export interface OpaquePendingPatientIdentity {
@@ -16,10 +17,13 @@ export interface OpaquePendingPatientIdentity {
   source_identity_system: string
   source_identity_value: string
   created_at: number
+  /** Set only after the exact bind POST has returned successfully; still non-PHI. */
+  confirmed_patient_reference_id?: string
 }
 
+export class PendingPatientStorageReadError extends Error {}
+
 const STORAGE_PREFIX = 'dhealth_clinic_pending_patient_v1:'
-const DEFAULT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
 function makeKey(userId: string, providerId: string): string {
   return `${STORAGE_PREFIX}${userId}:${providerId}`
@@ -36,6 +40,18 @@ function getStorage(): Storage | null {
   return null
 }
 
+/** A read failure means we cannot prove that this scoped browser has no pending UUID. */
+export function canReadPendingPatientStorage(): boolean {
+  const storage = getStorage()
+  if (!storage) return false
+  try {
+    storage.getItem(STORAGE_PREFIX)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function getStoredPendingPatient(
   userId: string,
   providerId: string,
@@ -43,8 +59,13 @@ export function getStoredPendingPatient(
   const storage = getStorage()
   if (!storage || !userId || !providerId) return null
 
+  let raw: string | null
   try {
-    const raw = storage.getItem(makeKey(userId, providerId))
+    raw = storage.getItem(makeKey(userId, providerId))
+  } catch {
+    throw new PendingPatientStorageReadError()
+  }
+  try {
     if (!raw) return null
 
     const parsed = JSON.parse(raw) as Partial<OpaquePendingPatientIdentity>
@@ -54,22 +75,21 @@ export function getStoredPendingPatient(
       typeof parsed.source_identity_value === 'string' &&
       typeof parsed.created_at === 'number'
     ) {
-      // Check TTL
-      if (Date.now() - parsed.created_at > DEFAULT_TTL_MS) {
-        clearStoredPendingPatient(userId, providerId)
-        return null
-      }
       return {
         source_system: parsed.source_system,
         source_identity_system: parsed.source_identity_system,
         source_identity_value: parsed.source_identity_value,
         created_at: parsed.created_at,
+        ...(typeof parsed.confirmed_patient_reference_id === 'string'
+          ? { confirmed_patient_reference_id: parsed.confirmed_patient_reference_id }
+          : {}),
       }
     }
     // Malformed entry
     clearStoredPendingPatient(userId, providerId)
     return null
-  } catch {
+  } catch (error) {
+    if (error instanceof PendingPatientStorageReadError) throw error
     return null
   }
 }
@@ -78,21 +98,25 @@ export function setStoredPendingPatient(
   userId: string,
   providerId: string,
   pending: Omit<OpaquePendingPatientIdentity, 'created_at'> & { created_at?: number },
-): void {
+): boolean {
   const storage = getStorage()
-  if (!storage || !userId || !providerId) return
+  if (!storage || !userId || !providerId) return false
 
   const record: OpaquePendingPatientIdentity = {
     source_system: pending.source_system,
     source_identity_system: pending.source_identity_system,
     source_identity_value: pending.source_identity_value,
     created_at: pending.created_at ?? Date.now(),
+    ...(typeof pending.confirmed_patient_reference_id === 'string'
+      ? { confirmed_patient_reference_id: pending.confirmed_patient_reference_id }
+      : {}),
   }
 
   try {
     storage.setItem(makeKey(userId, providerId), JSON.stringify(record))
+    return storage.getItem(makeKey(userId, providerId)) === JSON.stringify(record)
   } catch {
-    // Ignore storage quota / access errors
+    return false
   }
 }
 

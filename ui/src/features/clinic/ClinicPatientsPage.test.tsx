@@ -231,7 +231,7 @@ describe('Clinic native patient workflow', () => {
       created: false,
     })
     const get = vi.fn()
-      .mockRejectedValueOnce(new ExchangeApiError(503, 'SERVER_ERROR', 'raw detail failure'))
+      .mockRejectedValueOnce(new ExchangeApiError(403, 'FORBIDDEN', 'raw detail failure'))
       .mockResolvedValueOnce(authoritativeReplayPatient)
     const client = makeClient({
       bindPatientReferenceWithOutcome: bind,
@@ -244,13 +244,157 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Nom saisi')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
-    expect(await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Réessayer l’ouverture' })).toBeInTheDocument()
     expect(screen.queryByText('raw detail failure')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+    await user.click(screen.getByRole('button', { name: 'Réessayer l’ouverture' }))
     expect(await screen.findByRole('heading', { name: 'Nom stocké autoritatif' })).toBeInTheDocument()
-    expect(bind).toHaveBeenCalledTimes(2)
-    expect(bind.mock.calls[1][1]).toEqual(bind.mock.calls[0][1])
+    expect(bind).toHaveBeenCalledTimes(1)
+    expect(get).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    {
+      created: true,
+      label: 'newly-created (created=true)',
+      failureType: 'definitive (403)',
+      error: new ExchangeApiError(403, 'FORBIDDEN', 'detail forbidden'),
+    },
+    {
+      created: true,
+      label: 'newly-created (created=true)',
+      failureType: 'transient (503)',
+      error: new ExchangeApiError(503, 'SERVER_ERROR', 'service unavailable'),
+    },
+    {
+      created: false,
+      label: 'idempotent-replay (created=false)',
+      failureType: 'definitive (403)',
+      error: new ExchangeApiError(403, 'FORBIDDEN', 'detail forbidden'),
+    },
+    {
+      created: false,
+      label: 'idempotent-replay (created=false)',
+      failureType: 'transient (503)',
+      error: new ExchangeApiError(503, 'SERVER_ERROR', 'service unavailable'),
+    },
+  ])(
+    'matrix: $label with $failureType detail GET failure keeps mutation confirmed, retries GET only, and opens on success',
+    async ({ created, error }) => {
+      const bind = vi.fn().mockResolvedValue({
+        reference: {
+          id: patientWithName.patient_reference_id,
+          source_organization_id: 'provider-a',
+          source_system: 'dhealth-clinic',
+          source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
+          source_identity_value: patientWithName.local_reference,
+        },
+        created,
+      })
+      const get = vi
+        .fn()
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce(patientWithName)
+      const client = makeClient({ bindPatientReferenceWithOutcome: bind, getPatientReference: get })
+      const user = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+      await screen.findByText('Aucun patient trouvé')
+      await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+      await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+      await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+
+      // Confirmed recovery state
+      expect(await screen.findByRole('button', { name: 'Réessayer l’ouverture' })).toBeInTheDocument()
+      expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
+      expect(screen.getByText(/Patient créé/)).toBeInTheDocument()
+      expect(bind).toHaveBeenCalledTimes(1)
+      const identity = bind.mock.calls[0][1].source_identity_value
+      expect(typeof identity).toBe('string')
+      expect(getStoredPendingPatient('identity-1', 'provider-a')).toMatchObject({
+        source_identity_value: identity,
+        confirmed_patient_reference_id: patientWithName.patient_reference_id,
+      })
+
+      // Retry performs GET only; no second POST create mutation
+      await user.click(screen.getByRole('button', { name: 'Réessayer l’ouverture' }))
+      expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
+      expect(bind).toHaveBeenCalledTimes(1)
+      expect(get).toHaveBeenCalledTimes(2)
+      expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
+    },
+  )
+
+  it('fails closed without POST when durable pending storage cannot be written', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+    await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(bind).not.toHaveBeenCalled()
+    expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
+  })
+
+  it('fails closed without POST when storage read-back throws during pre-POST verification', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const originalGetItem = Storage.prototype.getItem
+    // Allow initial mount check to succeed, but throw when verifying write before POST
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
+      if (key.startsWith('dhealth_clinic_pending_patient_v1:identity-1:provider-a')) {
+        // Return null for the initial query, but throw if setStoredPendingPatient calls getItem
+        if (this.length > 0) {
+          throw new Error('read-after-write failed')
+        }
+      }
+      return originalGetItem.call(this, key)
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+    await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(bind).not.toHaveBeenCalled()
+  })
+
+  it('fails closed without POST when storage read-back is mismatched during pre-POST verification', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const originalGetItem = Storage.prototype.getItem
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
+      if (key.startsWith('dhealth_clinic_pending_patient_v1:identity-1:provider-a')) {
+        // If an entry was written, simulate corrupted read-back
+        if (this.length > 0) {
+          return '{"corrupted":true}'
+        }
+      }
+      return originalGetItem.call(this, key)
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+    await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(bind).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the scoped pending-store cannot be read', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
+    expect(bind).not.toHaveBeenCalled()
   })
 
   it('renders a sanitized recoverable error without exposing raw backend details', async () => {
@@ -419,10 +563,17 @@ describe('Clinic native patient workflow', () => {
       expect(screen.queryByRole('heading', { name: 'Patient Synthétique' })).not.toBeInTheDocument()
       expect(screen.getByText('Aucun patient trouvé')).toBeInTheDocument()
     })
+    expect(client.getPatientReference).not.toHaveBeenCalled()
+    expect(getStoredPendingPatient('identity-1', 'provider-b')).toBeNull()
+    expect(screen.queryByText(/Patient créé/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
+    expect(getStoredPendingPatient('identity-1', 'provider-a')).toMatchObject({
+      confirmed_patient_reference_id: patientWithName.patient_reference_id,
+    })
+    await user.selectOptions(providerSelect, 'provider-a')
+    expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(client.getPatientReference).toHaveBeenCalledWith(
-      'provider-a',
-      patientWithName.patient_reference_id,
-      undefined,
+      'provider-a', patientWithName.patient_reference_id, undefined,
     )
   })
 
@@ -530,7 +681,7 @@ describe('Clinic native patient workflow', () => {
     expect(rawStorage).not.toContain('+25377999888')
   })
 
-  it('recovers from reload with unresolved attempt and allows discarding to mint a fresh identity', async () => {
+  it('recovers from reload without allowing discard or a fresh identity', async () => {
     // Pre-populate storage with an unresolved UUID
     const staleUuid = '99999999-9999-4999-8999-999999999999'
     setStoredPendingPatient('identity-1', 'provider-a', {
@@ -562,27 +713,26 @@ describe('Clinic native patient workflow', () => {
 
     // Banner indicates unresolved attempt
     expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
+    expect(screen.getByText(/La création du patient n’a pas pu être confirmée/)).toBeInTheDocument()
+    expect(screen.queryByText("Aucun patient n'a été créé")).not.toBeInTheDocument()
 
-    // Discard the stale attempt
-    await user.click(screen.getByRole('button', { name: 'Abandonner la tentative' }))
-    expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
-    expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
-
-    // Open create form and submit; now uses a fresh UUID (not the discarded one)
-    await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    expect(screen.queryByRole('button', { name: 'Abandonner la tentative' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Reprendre' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Nouveau Patient Après Abandon')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(1)
-    expect(bind.mock.calls[0][1].source_identity_value).not.toBe(staleUuid)
+    expect(bind.mock.calls[0][1].source_identity_value).toBe(staleUuid)
   })
 
-  it('recovers from reload by automatically opening patient if already committed on backend', async () => {
+  it('recovers a confirmed reference by its stored authoritative id', async () => {
     const committedUuid = '88888888-8888-4888-8888-888888888888'
     setStoredPendingPatient('identity-1', 'provider-a', {
       source_system: 'dhealth-clinic',
       source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
       source_identity_value: committedUuid,
+      confirmed_patient_reference_id: '33333333-3333-4333-8333-333333333333',
       created_at: Date.now(),
     })
 
@@ -595,12 +745,6 @@ describe('Clinic native patient workflow', () => {
     }
 
     const client = makeClient({
-      listPatientReferences: vi.fn((_providerId: string, params?: { query?: string }) => {
-        if (params?.query === committedUuid) {
-          return Promise.resolve([matchingPatient])
-        }
-        return Promise.resolve([])
-      }),
       getPatientReference: vi.fn().mockResolvedValue(matchingPatient),
     })
 
@@ -612,7 +756,7 @@ describe('Clinic native patient workflow', () => {
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
   })
 
-  it('purges stored pending patients on logout', async () => {
+  it('retains non-PHI pending identities on logout for safe later reconciliation', async () => {
     setStoredPendingPatient('identity-1', 'provider-a', {
       source_system: 'dhealth-clinic',
       source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
@@ -630,7 +774,91 @@ describe('Clinic native patient workflow', () => {
 
     await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
     expect(onLogout).toHaveBeenCalledTimes(1)
+    expect(getStoredPendingPatient('identity-1', 'provider-a')?.source_identity_value).toBe('test-uuid')
+  })
+
+  it('maintains strict user and provider isolation of unconfirmed state across logout and login', async () => {
+    const unconfirmedUuid = '11111111-2222-4333-8444-555555555555'
+    setStoredPendingPatient('identity-1', 'provider-a', {
+      source_system: 'dhealth-clinic',
+      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
+      source_identity_value: unconfirmedUuid,
+      created_at: Date.now(),
+    })
+
+    const bind = vi.fn().mockResolvedValue({
+      reference: {
+        id: patientWithName.patient_reference_id,
+        source_organization_id: 'provider-a',
+        source_system: 'dhealth-clinic',
+        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
+        source_identity_value: unconfirmedUuid,
+      },
+      created: true,
+    })
+    // 1. User 1 logs in with Provider A: sees unconfirmed banner
+    const clientUser1 = makeClient({
+      getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-1' }),
+      bindPatientReferenceWithOutcome: bind,
+      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+    })
+    const { unmount: unmount1 } = render(
+      <ClinicApp client={clientUser1} initialTab="patients" />,
+    )
+    expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
+    unmount1()
+
+    // 2. Different user (identity-2) logs in with Provider A: CANNOT consume or see identity-1 attempt
+    const clientUser2 = makeClient({
+      getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-2' }),
+      bindPatientReferenceWithOutcome: bind,
+      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+    })
+    const { unmount: unmount2 } = render(
+      <ClinicApp client={clientUser2} initialTab="patients" />,
+    )
+    await screen.findByText('Aucun patient trouvé')
+    expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).not.toBeDisabled()
+    unmount2()
+
+    // 3. User 1 logs in with different provider (provider-b): CANNOT consume or see provider-a attempt
+    const clientWithBothProviders = makeClient({
+      getMe: vi.fn().mockResolvedValue({
+        ...me,
+        identity_id: 'identity-1',
+        memberships: [
+          me.memberships[0],
+          { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
+        ],
+      }),
+      bindPatientReferenceWithOutcome: bind,
+      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+    })
+    const { unmount: unmount3 } = render(
+      <ClinicApp client={clientWithBothProviders} initialTab="patients" />,
+    )
+    const userEventObj = userEvent.setup()
+    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    await userEventObj.selectOptions(providerSelect, 'provider-b')
+    await screen.findByText('Aucun patient trouvé')
+    expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).not.toBeDisabled()
+    unmount3()
+
+    // 4. User 1 logs back in with Provider A: can resume and complete creation with exact same UUID
+    render(
+      <ClinicApp client={clientUser1} initialTab="patients" />,
+    )
+    expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
+    await userEventObj.click(screen.getByRole('button', { name: 'Reprendre' }))
+    await userEventObj.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Repris')
+    await userEventObj.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+
+    expect(bind).toHaveBeenCalledTimes(1)
+    expect(bind.mock.calls[0][1].source_identity_value).toBe(unconfirmedUuid)
+    expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
   })
 })
-

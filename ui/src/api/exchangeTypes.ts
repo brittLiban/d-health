@@ -82,10 +82,11 @@ export interface ProviderObservationResponse {
   source_system: string
   display_label_snapshot: string
   result_type: string
-  numeric_value: number | null
+  // FastAPI/Pydantic serializes Decimal response values as JSON strings.
+  numeric_value: string | null
   numeric_unit: string | null
-  reference_range_low: number | null
-  reference_range_high: number | null
+  reference_range_low: string | null
+  reference_range_high: string | null
   text_value: string | null
   recorded_at: string
 }

@@ -5,6 +5,7 @@ import {
   isAmbiguousExchangeError,
   isDefinitiveExchangeError,
 } from './exchangeClient'
+import type { ProviderOrderResultsResponse } from './exchangeTypes'
 
 describe('ExchangeClient', () => {
   const originalFetch = globalThis.fetch
@@ -137,7 +138,7 @@ describe('ExchangeClient', () => {
   })
 
   it('getOrderResults sends GET /organizations/{id}/orders/{order_id}/results', async () => {
-    const mockResults = {
+    const mockResults: ProviderOrderResultsResponse = {
       order_id: 'ord-1',
       order_status: 'COMPLETED',
       release_version_id: 'rel-v1',
@@ -156,10 +157,10 @@ describe('ExchangeClient', () => {
               source_system: 'LOINC',
               display_label_snapshot: 'Glycémie',
               result_type: 'NUMERIC',
-              numeric_value: 5.2,
+              numeric_value: '5.2',
               numeric_unit: 'mmol/L',
-              reference_range_low: 3.9,
-              reference_range_high: 6.1,
+              reference_range_low: '3.9',
+              reference_range_high: '6.1',
               text_value: null,
               recorded_at: '2026-09-15T09:00:00Z',
             },
@@ -176,6 +177,11 @@ describe('ExchangeClient', () => {
     const result = await client.getOrderResults('prov-1', 'ord-1')
 
     expect(result).toEqual(mockResults)
+    const obs = result.results[0].observations[0]
+    expect(typeof obs.numeric_value).toBe('string')
+    expect(obs.numeric_value).toBe('5.2')
+    expect(typeof obs.reference_range_low).toBe('string')
+    expect(typeof obs.reference_range_high).toBe('string')
     const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
     expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1/results')
   })
@@ -495,4 +501,3 @@ describe('ExchangeClient', () => {
     expect(isAmbiguousExchangeError(err401)).toBe(false)
   })
 })
-
