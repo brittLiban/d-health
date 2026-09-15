@@ -14125,8 +14125,10 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 
 **Date:** 2026-09-15
 **Starting HEAD / `origin/master`:** `e0eaef9a1b54577918cd5a9c5c342e151d746657`
-**Status:** IMPLEMENTED + LOCALLY VERIFIED + FULL UI SUITE (307 passed) + ADVISOR APPROVED
+**Status:** IMPLEMENTED + LOCALLY VERIFIED + FULL UI SUITE (307 passed) + ADVISOR APPROVED + CI-QUALIFIED (exact-SHA run 35016425683: 9/9 jobs passed)
 **Migration head:** `0019_exchange_amendments` (unchanged; no migration added)  
+**Exact CI Commit SHA:** `b8879122268f36c60e67185d81ec7c3374b3adf3`
+**GitHub Actions Run ID:** `35016425683` (https://github.com/brittLiban/d-health/actions/runs/35016425683)
 
 ### Summary of Changes & Contract Hardening
 
@@ -14172,7 +14174,7 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 
 7. **Decimal Wire Contract Alignment:**
    - FastAPI/Pydantic returns Decimal fields (`numeric_value`, `reference_range_low`, `reference_range_high`) as JSON strings.
-   - Asserted in backend API test (`test_exchange_results_api.py`) that Decimal fields are JSON strings preserving exact precision.
+   - Asserted in backend API test (`test_exchange_results_api.py`) that Decimal fields are JSON strings preserving exact precision (allowing PostgreSQL `NUMERIC` scale formatting e.g. `"13.5000"`).
    - Frontend types (`exchangeTypes.ts`) model them as `string | null` and test fixtures match.
 
 8. **Mandatory Patient Display Name in Native Clinic UI:**
@@ -14232,6 +14234,16 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 
 ### Verification & Test Evidence
 
+- **Exact-SHA GitHub Actions CI Run (35016425683):** 9/9 jobs passed (100% green).
+  - `adapter - ruff + pytest`: 815 passed, 91 skipped, 1 warning in 106.32s (104540896411: success).
+  - `provisioning - ruff + pytest`: success.
+  - `seed + form-safety suites`: success (10 role tests ok).
+  - `compose interpolates and parses`: success.
+  - `openelis order-correlation patch - compiles`: success.
+  - `ui - lint, typecheck, test, build`: 25 test files passed, 307 tests passed in 45.61s (104540896719: success).
+  - `static checks`: success.
+  - `OpenMRS narrow TestOrder module`: success.
+  - `oauth2login - patched identity tests`: success.
 - **Frontend Vitest Suite:** 25 test files passed, 307 tests passed (100% green).
 - **Frontend Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 79 files).
 - **Frontend Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
