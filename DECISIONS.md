@@ -6043,3 +6043,20 @@ above. **DH-EX-014B (amendment preparation and release) remains required and rem
 real-patient-pilot blocker per Decision 3** — recorded here rather than editing the header or the
 RECOMMENDED packet above, so the original evaluated architecture remains legible as written at the
 time it was proposed.
+
+### Accepted decisions (2026-09-15 DH-EX-014B) — post-release amendment preparation/release under Model 3
+
+**Date:** 2026-09-15 · **Status:** ACCEPTED AND IMPLEMENTED — Model 3 post-release amendment preparation and release workflow is closed · **Ticket:** DH-EX-014B.
+
+Implements the post-release amendment preparation and release workflow designed and accepted in ADR-048 Model 3 (§19 items 1–6), satisfying the real-patient pilot prerequisite established in Decision 3.
+
+**Accepted implementation specifics:**
+- **Table and schema naming:** table `exchange_amendments` with columns `id`, `lab_order_id`, `lab_organization_id`, `base_release_version_id`, `started_by_identity_id`, `started_at`, `released_by_identity_id`, `released_at`, `status` (`PREPARING`, `RELEASED`).
+- **Zero reason requirement:** zero amendment reason column in schema, zero reason field in API request payload, adhering to Decision 5 (no reason taxonomy or required justification invented for MVP).
+- **One active preparation episode per order:** enforced at database level via partial unique index `uq_exchange_amendments_one_preparing_per_order` on `(lab_order_id)` WHERE `status = 'PREPARING'`.
+- **Strict role separation:** `LAB_TECH` starts amendments (`POST .../amendments`) and corrects observations (`POST .../amendments/{id}/items/{item_id}/observations/{obs_id}/correct`). `LAB_RESULT_RELEASER` releases amendments (`POST .../amendments/{id}/release`). Same human may hold both roles, but role boundaries are enforced fail-closed (403 Forbidden).
+- **Lineage integrity defense:** `AmendmentReleaseIntegrityError` (HTTP 409 Conflict) prevents releasing an amendment if an effective observation at release time differs from the base release manifest but is not attributable to the amendment being released.
+- **Provider release-version history query scaling:** single joined query with `DoctorReview` on `release_version_id == version.id` (`get_release_version_history_with_reviews`) and batch fetch (`get_for_release_versions`), eliminating N+1 query scaling (1 SELECT query for history with reviews; 7 SELECTs / 15 total statements for provider API endpoint, constant across 1 vs 4+ versions).
+- **Exact-version provider reads and reviews:** `GET .../release-versions/{v}` returns the exact immutable manifest and review status for that version. Unversioned review mutations reject with `ExplicitReviewVersionRequired` once multiple release versions exist.
+- **Migration `0019_exchange_amendments` downgrade safety:** downgrade fails closed if any `exchange_amendments` row exists (`DowngradeBlockedByAmendmentHistory`) or if any amendment audit event exists (`DowngradeBlockedByAmendmentAuditVocabulary`). Clean round-trip downgrade/re-upgrade verified against real PostgreSQL.
+- **All 12 negative controls verified:** NC 1 to NC 12 individually tested with red failure and restored green.

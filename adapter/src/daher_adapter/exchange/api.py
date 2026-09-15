@@ -112,6 +112,7 @@ from daher_adapter.exchange.results import (
     AmendmentNotFound,
     AmendmentNotPreparing,
     AmendmentNotReadyForRelease,
+    AmendmentReleaseIntegrityError,
     DoctorReviewRecord,
     DoctorReviewRepository,
     DuplicateResult,
@@ -3429,6 +3430,8 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except AmendmentNotReadyForRelease as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentReleaseIntegrityError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except AmendmentBaseVersionSuperseded as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ResultsNotReadyForRelease as error:
@@ -3490,10 +3493,15 @@ def build_exchange_router(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="order results are not yet available",
             )
-        history = releases.get_release_version_history(order_id)
-        return ProviderReleaseVersionHistoryResponse(
-            order_id=order_id,
-            versions=[
+        history_with_reviews = releases.get_release_version_history_with_reviews(order_id)
+        versions: list[ProviderReleaseVersionSummaryResponse] = []
+        for version, review in history_with_reviews:
+            if review is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="release version has no clinician review obligation",
+                )
+            versions.append(
                 ProviderReleaseVersionSummaryResponse(
                     release_version_id=version.id,
                     release_version_number=version.version_number,
@@ -3505,9 +3513,10 @@ def build_exchange_router(
                         review.reviewed_by_practitioner_reference_id
                     ),
                 )
-                for version in history
-                for review in [_provider_review_for_version_or_conflict(version.id)]
-            ],
+            )
+        return ProviderReleaseVersionHistoryResponse(
+            order_id=order_id,
+            versions=versions,
         )
 
     @router.get(

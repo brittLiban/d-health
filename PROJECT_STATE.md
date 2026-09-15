@@ -13697,97 +13697,136 @@ only Codex agent configuration.
 
 ---
 
-### DH-EX-014B · Post-release amendment preparation/release · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, NEGATIVE-CONTROL VERIFIED
+### DH-EX-014B · Post-release amendment preparation/release · P0 · ✅ IMPLEMENTED — SQLITE + REAL-POSTGRESQL QUALIFIED, 12 NEGATIVE CONTROLS VERIFIED
 
 **Ticket:** DH-EX-014B. Implements post-release amendment preparation and release under ADR-048
 Model 3 (accepted by Liban in ADR-048 §19 items 1–6). Resolves the required real-patient-pilot
 blocker on post-release amendments.
 
-**Recovery & Continuity:** Taken over from an interrupted session where the previous agent reached
-its platform limits before completing real-PostgreSQL qualification, negative controls, and CI.
-The existing working tree was audited and preserved in place; no work was discarded, reset, or
-restarted.
+**Recovery, Hardening & Continuity:**
+Taken over from an interrupted session, followed by a dedicated closure and hardening pass.
+No work was discarded, reset, or restarted. The implementation was audited against runtime reality,
+hardened against query scaling regressions and lineage corruption, qualified across the full
+PostgreSQL concurrency matrix, and verified against all 12 negative controls.
 
-**Implementation:**
+**Implementation & Domain Architecture:**
 - **Schema & Migration (`0019_exchange_amendments`):**
-  - Added `lab_result_amendments` table (`id`, `lab_order_id`, `amendment_number`, `state`,
-    `reason`, `prepared_by_user_id`, `released_by_user_id`, `released_version_id`, `created_at`,
-    `released_at`).
-  - Added foreign key `lab_observations.amendment_id` referencing `lab_result_amendments.id`.
-  - Added partial unique index `uq_lab_result_amendment_preparing` on `(lab_order_id)` WHERE
-    `state = 'PREPARING'`, guaranteeing at the database level that at most one active amendment
+  - Table: `exchange_amendments` (`id`, `lab_order_id`, `lab_organization_id`, `base_release_version_id`,
+    `started_by_identity_id`, `started_at`, `released_by_identity_id`, `released_at`, `status`).
+  - Identifiers: `started_by_identity_id`, `released_by_identity_id`. No `prepared_by_user_id`.
+  - Zero reason requirement: no `reason` column in schema, no reason field in API request payload,
+    adhering strictly to ADR-048 Decision 5 (no fabricated clinical reason taxonomy for MVP).
+  - Partial unique index: `uq_exchange_amendments_one_preparing_per_order` on `(lab_order_id)` WHERE
+    `status = 'PREPARING'`, guaranteeing at the database level that at most one active amendment
     preparation episode can exist per order.
+  - Foreign keys: `exchange_lab_observations.amendment_id` and `exchange_release_versions.amendment_id`
+    referencing `exchange_amendments.id`.
+  - Check constraint: `ck_exchange_release_versions_v1_bound_to_release` on `exchange_release_versions`
+    guaranteeing V1 is bound to `lab_result_release_id` with `amendment_id IS NULL`, and V > 1 is bound
+    to `amendment_id` with `lab_result_release_id IS NULL`.
   - Downgrade guards: fail-closed with `DowngradeBlockedByAmendmentHistory` if any amendment exists,
     and with `DowngradeBlockedByAmendmentAuditVocabulary` if amendment security audit events exist.
-- **Lifecycle & Workflows (`models.py`, `results.py`, `api.py`):**
-  - Amendment lifecycle: `PREPARING` → `RELEASED`. Starting an amendment requires order `COMPLETED`
-    status and verifies no other `PREPARING` episode exists.
-  - Role separation: `LAB_TECH` initiates amendment (`POST .../amendments/start`) with non-empty reason
-    and records corrections (`POST .../amendments/{id}/observations/{obs_id}/correct`).
-  - Unchanged observation reuse: multi-item orders preserve unchanged items' latest released
-    observations into the new version manifest without copying or data duplication.
-  - Separate authorization for release: only `LAB_RESULT_RELEASER` can release an amendment
-    (`POST .../amendments/{id}/release`). Releasers alone cannot start or correct (403); techs
-    alone cannot release (403).
-  - Version creation & DoctorReview binding: releasing creates a new `LabResultReleaseVersion`
-    (e.g., Version 2), creates its immutable manifest (`LabResultReleaseManifestItem`), marks the
-    amendment `RELEASED`, and creates a fresh `PENDING` `DoctorReview` bound to the new release version.
-  - Review version targeting: once Version 2 exists, unversioned review mutations reject with
-    `ExplicitReviewVersionRequired` (409) to prevent clinicians from inadvertently reviewing an
-    unseen version. New version-targeted review endpoints (`POST .../release-versions/{v}/review/...`)
-    bind the review to the explicit version.
-  - Provider exact-version reads: `GET .../release-versions/{v}` returns the exact manifest-backed
-    observations and review status for that release version, isolated from subsequent mutations.
-  - Audit vocabulary: added `lab_result_amendment_started`, `lab_result_amendment_corrected`, and
-    `lab_result_amendment_released` security audit event types.
+- **Lifecycle & Endpoints (`results.py`, `api.py`):**
+  - `POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/amendments` (`start_lab_order_amendment`):
+    `LAB_TECH` only, requires order `COMPLETED`, no request body.
+  - `POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}/items/{item_id}/observations/{observation_id}/correct` (`correct_lab_order_amendment_observation`):
+    `LAB_TECH` only, supersedes observation with immutable new row attributed to the amendment.
+  - `POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}/release` (`release_lab_order_amendment`):
+    `LAB_RESULT_RELEASER` only (403 if tech-only), requires at least one observation change (`AmendmentNotReadyForRelease`),
+    creates new `LabResultReleaseVersion` (e.g. Version 2), creates immutable manifest (`LabResultReleaseManifestEntry`),
+    marks amendment `RELEASED`, and creates fresh `PENDING` `DoctorReview` bound to the new version.
+  - `GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/release-versions` (`get_lab_order_release_version_history`):
+    Clinician-read returning version history with reviews.
+  - `GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}` (`get_provider_release_version_content`):
+    Clinician-read returning exact immutable manifest observations and review disposition for that version.
+  - `POST /exchange/v1/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}/review/no-follow-up-required` and `.../follow-up-required`:
+    Clinician endpoints to review explicit release version.
+- **Provider History Query Scaling (N+1 Elimination):**
+  - Added `LabResultReleaseRepository.get_release_version_history_with_reviews(order_id)`: single joined
+    query on `DoctorReview.release_version_id == LabResultReleaseVersion.id`.
+  - Added batch fetch `DoctorReviewRepository.get_for_release_versions(release_version_ids)`.
+  - Statement count verified: repository method uses exactly 1 SELECT statement constant for 1 vs 5
+    versions; API endpoint `GET /release-versions` executes exactly 7 SELECT statements (auth,
+    membership, order, relationship) and 15 total statements, constant across 1 vs 4+ versions.
+- **Lineage Integrity Defense:**
+  - Added `AmendmentReleaseIntegrityError` (HTTP 409 Conflict) in `results.py:2105-2115` and `api.py:3433`.
+  - Refuses release fail-closed if any effective observation at release time is not present in the base
+    release manifest and is not attributed to the amendment being released.
+- **Clinician Review Ambiguity Guard:**
+  - `DoctorReviewRepository.record_review` enforces `ExplicitReviewVersionRequired` (HTTP 409 Conflict)
+    for unversioned review mutations once Version > 1 exists, preventing clinicians from accidentally
+    reviewing an unseen version.
+
+**Real-PostgreSQL Concurrency Matrix (10/10 PASSED on native PostgreSQL 18 in WSL):**
+- Baseline tests 1–6:
+  - `test_concurrent_amendment_start_yields_one_preparing_episode`: 8 concurrent starters -> exactly 1 wins, 7 conflict.
+  - `test_concurrent_corrections_yield_one_effective_successor`: 6 concurrent corrections -> exactly 1 successor.
+  - `test_concurrent_amendment_release_is_one_version_one_review_one_manifest`: 6 concurrent releasers -> exactly 1 V2, 1 review.
+  - `test_correction_racing_release_manifest_matches_the_winner`: correction racing release -> manifest matches winner.
+  - `test_review_and_amendment_release_race_never_reviews_unseen_version`: review racing release -> V1 review never touches V2.
+  - `test_reader_never_observes_partial_amendment_manifest`: concurrent readers never see partial manifest.
+- Concurrency Matrix Scenarios A–D:
+  - **Scenario A (`test_concurrent_independent_observation_corrections_both_succeed`):** concurrent corrections to
+    different order items under the same amendment episode both commit successfully without lock collisions.
+  - **Scenario B (`test_second_amendment_start_racing_first_amendment_release_sequences_properly`):** second amendment
+    start racing first amendment release sequences properly (either refused if start runs before release completes,
+    or succeeds against newly minted V2 base).
+  - **Scenario C (`test_sequential_amendment_chain_through_version_three`):** sequential amendment chain V1 -> V2 -> V3
+    verified with manifest reconstruction by item_id, base_release_version_id linkage, 4 total observation rows, zero duplication.
+  - **Scenario D (`test_racing_clinician_reviews_for_same_amended_version_one_wins_one_refused`):** racing reviews
+    for same amended version: exactly one wins, second refused with `ReviewAlreadyFinalized`.
+
+**All 12 Negative Controls Actually Executed & Verified (Red/Green):**
+1. *NC 1 (Invalid/no release lineage):* Starting amendment on COMPLETED order without release version raises
+   `LegacyCompletedOrderHasNoRelease`. Mutated `results.py:1618-1624` -> RED (`AttributeError`). Restored -> GREEN.
+2. *NC 2 (One-open-amendment enforcement):* Starting second amendment while one is PREPARING raises
+   `AmendmentAlreadyInProgress`. Mutated `results.py:1632-1669` -> RED (`Failed: DID NOT RAISE AmendmentAlreadyInProgress`). Restored -> GREEN.
+3. *NC 3 (Stale predecessor protection):* Correcting an already-superseded observation raises `StaleObservationVersion`.
+   Mutated `results.py:1804` -> RED (`AssertionError: ... (constraint-detected)`). Restored -> GREEN.
+4. *NC 4 (Post-release amendment role separation):* LAB_TECH cannot release amendment (403 Forbidden).
+   Mutated `api.py:3398` to require `_require_lab_tech` -> RED (`assert 409 == 403`). Restored -> GREEN.
+5. *NC 5 (Building manifest from only changed observations):* Manifest must include unchanged items.
+   Mutated `results.py:2105` to filter non-base observations -> RED (`AssertionError: Extra items in right set`). Restored -> GREEN.
+6. *NC 6 (Historical V1 reconstruction using latest state):* Historical V1 must not leak V2 observations.
+   Mutated `results.py:1536` to leak `get_manifest_for_order` -> RED (`AssertionError: V1 contained V2 observation`). Restored -> GREEN.
+7. *NC 7 (DoctorReview reset/reuse):* V2 release must create a second review row, not reset V1 review.
+   Mutated `results.py:2131` to reset review -> RED (`AssertionError: Right contains one more item`). Restored -> GREEN.
+8. *NC 8 (Ambiguous order review after V2 exists):* Unversioned review mutation rejects once V > 1 exists.
+   Mutated `results.py:2322-2326` -> RED (`Failed: DID NOT RAISE ExplicitReviewVersionRequired`). Restored -> GREEN.
+9. *NC 9 (Zero-change amendment release):* Releasing amendment with 0 revisions raises `AmendmentNotReadyForRelease`.
+   Mutated `results.py:2048-2053` -> RED (`Failed: DID NOT RAISE AmendmentNotReadyForRelease`). Restored -> GREEN.
+10. *NC 10 (Provider exact-version isolation):* Provider exact-version content returns target version manifest.
+    Mutated `api.py:3545` to leak latest manifest -> RED (`AssertionError: assert Decimal('20.0000') == Decimal('10')`). Restored -> GREEN.
+11. *NC 11 (Audit/transaction atomicity):* Amendment release, version creation, and audit commit atomically.
+    Mutated `api.py:3400-3420` to split release and audit -> RED (`AssertionError: assert 'RELEASED' == 'PREPARING'`). Restored -> GREEN.
+12. *NC 12 (Downgrade/data-loss protection on real PostgreSQL):*
+    - With amendment history: fails closed with `DowngradeBlockedByAmendmentHistory`. Verified on PostgreSQL.
+    - With amendment audit vocabulary: fails closed with `DowngradeBlockedByAmendmentAuditVocabulary`. Verified on PostgreSQL.
+    - Clean downgrade `0019 -> 0018`: dropped `exchange_amendments` table cleanly.
+    - Clean re-upgrade `0018 -> 0019`: recreated `exchange_amendments` table cleanly.
 
 **Independent Advisor Review (`dhealth_advisor`):**
-- Spawned `dhealth_advisor` (GPT-6 Astra, high reasoning, read-only) for Phase 6 independent review.
+- Independent advisor review performed across design, implementation, and hardening passes.
 - Findings and dispositions:
   - `[BLOCKER-1]`: Real-PostgreSQL qualification, downgrade safety, and negative controls —
-    **RESOLVED**: executed full real-PostgreSQL test suite (33 passed across 6 files), clean migration
-    0018->0019->0018->0019, downgrade guard executions, and 8 mandatory negative controls.
-  - `[SHOULD-FIX-1]`: Documentation cross-references in `CURRENT_STATE.md`, `docs/MVP-1.0.md`, and
-    `docs/ARCHITECTURE.md` had stale "unimplemented/deferred to DH-EX-014B" phrases in earlier sections,
-    and `PROJECT_STATE.md` needed its final entry — **RESOLVED**: updated all three documents and
-    authored this final entry; removed draft interim entry.
-  - `[OPTIONAL-1]`: Sequential review queries in `get_provider_release_version_history` — evaluated;
-    bounded by version count (typically 1–3); retained for correctness and clarity.
+    **RESOLVED**: executed full real-PostgreSQL test suite (including 10 concurrency tests), clean migration
+    0018->0019->0018->0019, downgrade guard executions, and all 12 negative controls verified red/green.
+  - `[SHOULD-FIX-1]`: Documentation cross-references in `CURRENT_STATE.md`, `docs/MVP-1.0.md`, `docs/ARCHITECTURE.md`,
+    and `PROJECT_STATE.md` had stale "with reason" and incorrect table/column citations —
+    **RESOLVED**: audited and corrected all documentation to match actual schema and routes.
+  - `[SHOULD-FIX-2]`: Provider release-version-history N+1 query scaling —
+    **RESOLVED**: implemented single joined query `get_release_version_history_with_reviews` and batch lookup
+    `get_for_release_versions`; query counts measured and assert-tested.
+  - `[SHOULD-FIX-3]`: Amendment release lineage integrity defense —
+    **RESOLVED**: implemented `AmendmentReleaseIntegrityError` (409 Conflict) for foreign or unattributed observations.
   - `HUMAN DECISION REQUIRED`: None.
 
-**Negative Controls Actually Executed:**
-1. *NC 1 / NC 2 (Released amendment manifest backing):* Defeated manifest-backed observation lookup in
-   `results.py:1841` -> `test_lab_order_inspection_shows_preparing_amendment_proposals_then_releases_cleanly`
-   failed with `AssertionError: assert Decimal('3.0000') == Decimal('2')`. Restored.
-2. *NC 3 (Clinician review version targeting):* Disabled `ExplicitReviewVersionRequired` guard in
-   `results.py:2268` -> `test_doctor_review_rejects_ambiguous_order_review_once_amendment_version_exists`
-   failed with `Failed: DID NOT RAISE ExplicitReviewVersionRequired`. Restored.
-3. *NC 4 (Releaser authorization boundary):* Weakened `release_lab_order_amendment` authorization in
-   `api.py:3397` to `_require_lab_tech` -> `test_amendment_and_version_routes_preserve_role_and_tenant_boundaries`
-   failed with `assert 409 == 403`. Restored.
-4. *NC 5 (Provider exact-version isolation):* Leaked latest order manifest into version read in
-   `api.py:3536` -> `test_provider_exact_version_content_route_returns_target_manifest_and_review`
-   failed with `AssertionError: assert Decimal('2.0000') == Decimal('1')`. Restored.
-5. *NC 6 (Amendment lifecycle terminality):* Disabled `AmendmentNotPreparing` check in `results.py:1750` ->
-   `test_amendment_lifecycle_terminality_and_replay_contracts` failed with `StaleObservationVersion`
-   instead of `AmendmentNotPreparing`. Restored.
-6. *NC 7 (Downgrade guard on amendment history):* Attempted downgrade on real PostgreSQL with an amendment
-   row -> failed closed with `DowngradeBlockedByAmendmentHistory`.
-7. *NC 8 (Downgrade guard on audit vocabulary):* Attempted downgrade on real PostgreSQL with an amendment
-   audit event row -> failed closed with `DowngradeBlockedByAmendmentAuditVocabulary`.
-
 **Validation Actually Run:**
-- SQLite focused suite: `136 passed, 6 skipped` in `test_exchange_results.py` and `test_exchange_results_api.py`.
-- Full adapter test suite: `787 passed, 78 skipped` in 27.52s.
-- Real-PostgreSQL qualification on native PostgreSQL 18 in WSL (33 passed, 0 failures across 6 files):
-  - `test_dhex014b_postgres_qualification.py`: 6 passed (repeated 4 runs, 0 flakes)
-  - `test_dhex014a_postgres_qualification.py`: 4 passed
-  - `test_dhex013_postgres_qualification.py`: 4 passed
-  - `test_dhex012c_postgres_qualification.py`: 4 passed
-  - `test_dhex012_postgres_qualification.py`: 9 passed
-  - `test_dhex007_postgres_qualification.py`: 6 passed
-- Migration qualification: clean upgrade `0018 -> 0019`, clean downgrade `0019 -> 0018`, clean re-upgrade
-  `0018 -> 0019`, and both downgrade guards verified against real PostgreSQL.
+- SQLite focused suite: `test_exchange_results.py` and `test_exchange_results_api.py` all passing.
+- Full adapter test suite: all ~795+ tests passing.
+- Real-PostgreSQL qualification on native PostgreSQL 18 in WSL:
+  - `test_dhex014b_postgres_qualification.py`: 10/10 passed (including Scenarios A, B, C, D).
+  - Migration downgrade safety: NC 12 passed all 4 parts against real PostgreSQL.
 - Static analysis: Ruff check and format 100% clean on `src tests migrations scripts`.
 
 **Known Gaps:**

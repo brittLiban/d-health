@@ -18,7 +18,7 @@ from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate
 from exchange_support import make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
@@ -33,13 +33,17 @@ from daher_adapter.exchange.models import (
     LabOrder,
     LabOrderItem,
     LabResult,
+    LabResultAmendment,
+    LabResultAmendmentStatus,
     LabResultRelease,
     LabResultReleaseManifestEntry,
     LabResultReleaseVersion,
+    LabResultType,
     ResultDelivery,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
+from daher_adapter.models import utc_now
 
 TTL_HOURS = 168
 
@@ -3018,3 +3022,444 @@ def test_amendment_and_version_routes_preserve_role_and_tenant_boundaries(
         headers=_auth(other_clinician),
     )
     assert cross_provider.status_code == 404
+
+
+def test_provider_release_version_history_query_count_does_not_scale_with_version_count(
+    client: TestClient,
+    keypair,
+    organizations,
+    catalog,
+    directory,
+    patients,
+    sessions: sessionmaker[Session],
+    engine: Engine,
+) -> None:
+    """DH-EX-014B: GET .../release-versions query count must be constant (O(1) in release versions).
+
+    A single joined query retrieves release versions and doctor reviews together, replacing
+    the per-version DoctorReview lookup loop.
+    """
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="AmendHistQC",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    orig_res = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-OBS",
+            "display_label": "Synthetic observation",
+            "numeric_value": "10",
+        },
+    )
+    assert orig_res.status_code == 201
+    assert (
+        client.post(
+            _completion_url(lab.id, order_id, item_id), headers=_auth(tech_token)
+        ).status_code
+        == 201
+    )
+    _release_results(client, private_key, lab.id, order_id, "AmendHistQC-v1")
+
+    history_url = f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/release-versions"
+
+    def _measure_history_statements() -> tuple[int, int]:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get(history_url, headers=_auth(clinician_token))
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert resp.status_code == 200, resp.text
+        selects = [s for s in statements if s.strip().startswith("SELECT")]
+        version_selects = [s for s in statements if "exchange_release_versions" in s]
+        return len(selects), len(version_selects), len(statements)
+
+    selects_1, ver_selects_1, total_1 = _measure_history_statements()
+
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendHistQCReleaser")
+    current_obs_id = orig_res.json()["observation_id"]
+
+    # Create 3 amendments (so total versions = 4)
+    for v in range(2, 5):
+        started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+        assert started.status_code == 201, started.text
+        amend_id = started.json()["amendment_id"]
+        corrected = client.post(
+            f"{_amendment_url(lab.id, order_id, amend_id)}/items/{item_id}/observations/"
+            f"{current_obs_id}/correct",
+            headers=_auth(tech_token),
+            json={
+                "result_type": "NUMERIC",
+                "source_code": "SYN-OBS",
+                "display_label": f"Correction v{v}",
+                "numeric_value": str(v * 10),
+            },
+        )
+        assert corrected.status_code == 201, corrected.text
+        current_obs_id = corrected.json()["observation_id"]
+        rel = client.post(
+            f"{_amendment_url(lab.id, order_id, amend_id)}/release",
+            headers=_auth(releaser_token),
+        )
+        assert rel.status_code == 201, rel.text
+
+    selects_4, ver_selects_4, total_4 = _measure_history_statements()
+
+    # The single joined query means release-version history query count is constant:
+    assert ver_selects_1 == 1
+    assert ver_selects_4 == 1
+    # Total endpoint queries do not scale with version count:
+    assert selects_1 == 7
+    assert selects_4 == 7
+    assert selects_4 == selects_1
+    assert total_4 == total_1 == 15
+
+
+def test_amendment_release_route_fails_closed_on_integrity_violation(
+    client: TestClient,
+    keypair,
+    organizations,
+    catalog,
+    directory,
+    patients,
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B: amendment release endpoint returns 409 Conflict if an effective observation
+    has no attribution or foreign attribution not belonging to the amendment.
+    """
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="AmendLineageAPI",
+        test_count=2,
+    )
+    item_ids = _order_item_ids(sessions, order_id)
+    assert len(item_ids) == 2
+
+    # Record results for both items
+    res0 = client.post(
+        _observation_url(lab.id, order_id, item_ids[0]),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-0",
+            "display_label": "Synthetic 0",
+            "numeric_value": "10",
+        },
+    )
+    assert res0.status_code == 201
+    res1 = client.post(
+        _observation_url(lab.id, order_id, item_ids[1]),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-1",
+            "display_label": "Synthetic 1",
+            "numeric_value": "20",
+        },
+    )
+    assert res1.status_code == 201
+    for i_id in item_ids:
+        assert (
+            client.post(
+                _completion_url(lab.id, order_id, i_id), headers=_auth(tech_token)
+            ).status_code
+            == 201
+        )
+    obs_id_0 = res0.json()["observation_id"]
+    obs_id_1 = res1.json()["observation_id"]
+
+    _release_results(client, private_key, lab.id, order_id, "AmendLineageAPI-v1")
+
+    # Start amendment
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    assert started.status_code == 201
+    amendment_id = started.json()["amendment_id"]
+
+    # Tech corrects item 0 observation (so has_changes is True)
+    corrected = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_ids[0]}/observations/"
+        f"{obs_id_0}/correct",
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-0",
+            "display_label": "Corrected 0",
+            "numeric_value": "15",
+        },
+    )
+    assert corrected.status_code == 201
+
+    # Simulate direct DB mutation on item 1: observation superseded unattributed (amendment_id=None)
+    with sessions() as session:
+        result_id = session.scalar(
+            select(LabObservation.lab_result_id).where(LabObservation.id == uuid.UUID(obs_id_1))
+        )
+        unattributed_obs = LabObservation(
+            id=uuid.uuid4(),
+            lab_result_id=result_id,
+            source_code="SYN-1",
+            source_system="dhealth-exchange",
+            display_label_snapshot="Unattributed Obs",
+            result_type=LabResultType.NUMERIC.value,
+            numeric_value=Decimal("99.9"),
+            supersedes_observation_id=uuid.UUID(obs_id_1),
+            amendment_id=None,
+        )
+        orig = session.get(LabObservation, uuid.UUID(obs_id_1))
+        orig.superseded_at = utc_now()
+        session.add(unattributed_obs)
+        session.commit()
+
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendLineageReleaser")
+
+    # Attempt to release amendment -> must fail closed with 409 Conflict
+    release_resp = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+        headers=_auth(releaser_token),
+    )
+    assert release_resp.status_code == 409, release_resp.text
+    detail = release_resp.json()["detail"]
+    assert "differs from base release manifest" in detail or "is not attributed" in detail
+
+    # Verify amendment remains PREPARING and no release version 2 was created
+    with sessions() as session:
+        stored_amend = session.get(LabResultAmendment, uuid.UUID(amendment_id))
+        assert stored_amend.status == LabResultAmendmentStatus.PREPARING.value
+        versions = session.scalars(
+            select(LabResultReleaseVersion).where(LabResultReleaseVersion.lab_order_id == order_id)
+        ).all()
+        assert len(versions) == 1
+
+
+def test_provider_exact_version_content_route_returns_target_manifest_and_review(
+    client: TestClient,
+    keypair,
+    organizations,
+    catalog,
+    directory,
+    patients,
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B NC 10: provider exact-version content route returns the target version's
+    immutable manifest and exact review status, never leaking latest order state or another version.
+    """
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="ExactVerNC10",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    # Record and release V1
+    orig = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-10",
+            "display_label": "Synthetic 10",
+            "numeric_value": "10",
+        },
+    )
+    assert orig.status_code == 201
+    assert (
+        client.post(
+            _completion_url(lab.id, order_id, item_id), headers=_auth(tech_token)
+        ).status_code
+        == 201
+    )
+    _release_results(client, private_key, lab.id, order_id, "ExactVerNC10-v1")
+    v1_id = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    ).json()["release_version_id"]
+
+    # Amend and release V2 with value "20"
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    amendment_id = started.json()["amendment_id"]
+    corrected = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_id}/observations/"
+        f"{orig.json()['observation_id']}/correct",
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-10",
+            "display_label": "Synthetic 10 Corrected",
+            "numeric_value": "20",
+        },
+    )
+    assert corrected.status_code == 201
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "ExactVerNC10Releaser")
+    v2_rel = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+        headers=_auth(releaser_token),
+    )
+    assert v2_rel.status_code == 201
+    v2_id = v2_rel.json()["release_version_id"]
+
+    # Clinician reviews V1 with NO_FOLLOW_UP_REQUIRED
+    history_url = f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/release-versions"
+    rev_resp = client.post(
+        f"{history_url}/{v1_id}/review/no-follow-up-required",
+        headers=_auth(clinician_token),
+    )
+    assert rev_resp.status_code == 200, rev_resp.text
+    assert rev_resp.json()["release_version_id"] == v1_id
+
+    # Read exact version V1 -> must return value "10" and review status "NO_FOLLOW_UP_REQUIRED"
+    v1_content = client.get(
+        f"{history_url}/{v1_id}",
+        headers=_auth(clinician_token),
+    )
+    assert v1_content.status_code == 200, v1_content.text
+    v1_body = v1_content.json()
+    assert v1_body["release_version_id"] == v1_id
+    assert v1_body["release_version_number"] == 1
+    assert v1_body["is_amendment"] is False
+    assert v1_body["review_status"] == "NO_FOLLOW_UP_REQUIRED"
+    assert Decimal(v1_body["results"][0]["observations"][0]["numeric_value"]) == Decimal("10")
+
+    # Read exact version V2 -> must return value "20" and review status "PENDING"
+    v2_content = client.get(
+        f"{history_url}/{v2_id}",
+        headers=_auth(clinician_token),
+    )
+    assert v2_content.status_code == 200, v2_content.text
+    v2_body = v2_content.json()
+    assert v2_body["release_version_id"] == v2_id
+    assert v2_body["release_version_number"] == 2
+    assert v2_body["is_amendment"] is True
+    assert v2_body["review_status"] == "PENDING"
+    assert Decimal(v2_body["results"][0]["observations"][0]["numeric_value"]) == Decimal("20")
+
+
+def test_amendment_release_audit_atomicity(
+    client: TestClient,
+    keypair,
+    organizations,
+    catalog,
+    directory,
+    patients,
+    sessions: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    """DH-EX-014B NC 11: amendment release, version row creation, manifest entries, new review
+    row, and the lab_result_amendment_released audit event must all commit or roll back
+    together atomically. An audit recording failure rolls back the entire transaction --
+    no split brain.
+    """
+    private_key, _ = keypair
+    provider, clinician_token, lab, tech_token, order_id = _create_in_progress_order(
+        client,
+        private_key,
+        organizations,
+        catalog,
+        directory,
+        patients,
+        name="AmendAuditFail",
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+
+    # Create and release V1
+    orig = client.post(
+        _observation_url(lab.id, order_id, item_id),
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-AUD",
+            "display_label": "Synthetic Audit",
+            "numeric_value": "10",
+        },
+    )
+    assert orig.status_code == 201
+    assert (
+        client.post(
+            _completion_url(lab.id, order_id, item_id), headers=_auth(tech_token)
+        ).status_code
+        == 201
+    )
+    _release_results(client, private_key, lab.id, order_id, "AmendAuditFail-v1")
+
+    # Start amendment and correct observation
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    amendment_id = started.json()["amendment_id"]
+    corrected = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_id}/observations/"
+        f"{orig.json()['observation_id']}/correct",
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-AUD",
+            "display_label": "Synthetic Audit Corrected",
+            "numeric_value": "15",
+        },
+    )
+    assert corrected.status_code == 201
+
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendAuditReleaser")
+
+    # Simulate audit write failure
+    original_record = ExchangeSecurityAuditRepository.record
+
+    def _failing_record(self, session, *args, **kwargs):
+        if kwargs.get("event_type") == "lab_result_amendment_released":
+            raise RuntimeError("simulated amendment audit failure")
+        return original_record(self, session, *args, **kwargs)
+
+    monkeypatch.setattr(ExchangeSecurityAuditRepository, "record", _failing_record)
+
+    # Attempt to release -> must fail with simulated audit failure
+    with pytest.raises(RuntimeError, match="simulated amendment audit failure"):
+        client.post(
+            f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
+            headers=_auth(releaser_token),
+        )
+
+    # Verify complete atomicity rollback:
+    with sessions() as session:
+        # Amendment remains PREPARING, not RELEASED
+        stored_amend = session.get(LabResultAmendment, uuid.UUID(amendment_id))
+        assert stored_amend.status == LabResultAmendmentStatus.PREPARING.value
+        assert stored_amend.released_at is None
+        assert stored_amend.released_by_identity_id is None
+
+        # No version 2 created
+        versions = session.scalars(
+            select(LabResultReleaseVersion).where(LabResultReleaseVersion.lab_order_id == order_id)
+        ).all()
+        assert len(versions) == 1
+        assert versions[0].version_number == 1
+
+        # No review for version 2 created
+        reviews = session.scalars(
+            select(DoctorReview).where(DoctorReview.lab_order_id == order_id)
+        ).all()
+        assert len(reviews) == 1
+        assert reviews[0].release_version_id == versions[0].id
+
+    # No amendment release audit event was committed
+    assert _audit_events(sessions, "lab_result_amendment_released") == []

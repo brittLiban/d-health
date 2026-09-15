@@ -28,6 +28,7 @@ from daher_adapter.exchange.models import (
     DoctorReview,
     LabObservation,
     LabPrice,
+    LabResult,
     LabResultAmendment,
     LabResultReleaseManifestEntry,
     LabResultReleaseVersion,
@@ -43,6 +44,7 @@ from daher_adapter.exchange.results import (
     LabResultAmendmentRepository,
     LabResultReleaseRepository,
     LabResultRepository,
+    ReviewAlreadyFinalized,
     StaleObservationVersion,
 )
 from daher_adapter.exchange.selection import LabSelectionRepository
@@ -549,3 +551,386 @@ def test_reader_never_observes_partial_amendment_manifest(sessions: sessionmaker
     assert seen_counts
     assert all(item_count == 2 for _version, item_count in seen_counts)
     assert {version for version, _count in seen_counts} <= {1, 2}
+
+
+def test_concurrent_independent_observation_corrections_both_succeed(
+    sessions: sessionmaker,
+) -> None:
+    """DH-EX-014B Concurrency Matrix Scenario A:
+
+    Concurrent independent observation corrections in the same amendment episode both succeed
+    and are both reflected in the resulting released version manifest.
+    """
+    key = f"pg14b-indep-{uuid.uuid4().hex[:8]}"
+    lab_id, order_id, _practitioner_id, item_ids, originals, _v1 = _release_version_one(
+        sessions, key_prefix=key, item_count=2
+    )
+    amendments = LabResultAmendmentRepository(sessions)
+    tech_id = _identity_id(sessions, f"{key}-tech")
+    amendment = amendments.start_amendment(
+        order_id=order_id, lab_organization_id=lab_id, started_by_identity_id=tech_id
+    )
+
+    barrier = threading.Barrier(2)
+    outcomes: dict[int, str] = {}
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def correct(index: int, item_id: uuid.UUID, orig_obs_id: uuid.UUID, val: Decimal) -> None:
+        try:
+            barrier.wait(timeout=15)
+            amendments.correct_observation(
+                amendment_id=amendment.id,
+                order_id=order_id,
+                lab_order_item_id=item_id,
+                lab_organization_id=lab_id,
+                observation_id=orig_obs_id,
+                result_type=LabResultType.NUMERIC,
+                source_code=f"OBS-{index}",
+                display_label_snapshot=f"Synthetic observation {index}",
+                numeric_value=val,
+                corrected_by_identity_id=tech_id,
+            )
+            with lock:
+                outcomes[index] = "created"
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    threads = [
+        threading.Thread(target=correct, args=(0, item_ids[0], originals[0].id, Decimal("100"))),
+        threading.Thread(target=correct, args=(1, item_ids[1], originals[1].id, Decimal("200"))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert outcomes == {0: "created", 1: "created"}
+
+    # Release amendment
+    version, created = amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order_id,
+        lab_organization_id=lab_id,
+        released_by_identity_id=_identity_id(sessions, f"{key}-releaser"),
+    )
+    assert created is True
+    assert version.version_number == 2
+
+    manifest = LabResultReleaseRepository(sessions).get_manifest_for_version(version.id)
+    assert len(manifest.items) == 2
+    item0_obs = manifest.items[0].observations[0]
+    item1_obs = manifest.items[1].observations[0]
+    assert item0_obs.numeric_value == Decimal("100")
+    assert item1_obs.numeric_value == Decimal("200")
+    assert item0_obs.amendment_id == amendment.id
+    assert item1_obs.amendment_id == amendment.id
+
+
+def test_second_amendment_start_racing_first_amendment_release_sequences_properly(
+    sessions: sessionmaker,
+) -> None:
+    """DH-EX-014B Concurrency Matrix Scenario B:
+
+    A second amendment start racing the release of an existing preparing amendment either gets
+    cleanly rejected with AmendmentAlreadyInProgress (if it runs before release commits) or
+    cleanly succeeds in starting the next episode based on Version 2 (if it runs after release
+    commits). At no point do two preparing episodes coexist.
+    """
+    key = f"pg14b-seq-race-{uuid.uuid4().hex[:8]}"
+    amendments, lab_id, order_id, _practitioner_id, _item_id, _v1, amendment, _value_two = (
+        _prepared_amendment(sessions, key_prefix=key)
+    )
+    starter_tech_id = _identity_id(sessions, f"{key}-starter-tech")
+    releaser_id = _identity_id(sessions, f"{key}-releaser")
+
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, str] = {}
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def do_release() -> None:
+        try:
+            barrier.wait(timeout=15)
+            amendments.release_amendment(
+                amendment_id=amendment.id,
+                order_id=order_id,
+                lab_organization_id=lab_id,
+                released_by_identity_id=releaser_id,
+            )
+            with lock:
+                outcomes["release"] = "released"
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    def do_start() -> None:
+        try:
+            barrier.wait(timeout=15)
+            second_amend = amendments.start_amendment(
+                order_id=order_id,
+                lab_organization_id=lab_id,
+                started_by_identity_id=starter_tech_id,
+            )
+            with lock:
+                outcomes["start"] = f"created:{second_amend.id}"
+        except AmendmentAlreadyInProgress:
+            with lock:
+                outcomes["start"] = "conflict"
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    threads = [threading.Thread(target=do_release), threading.Thread(target=do_start)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert outcomes["release"] == "released"
+    assert outcomes["start"] == "conflict" or outcomes["start"].startswith("created:")
+
+    with sessions() as session:
+        # Exactly one amendment is RELEASED (amendment 1)
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(LabResultAmendment)
+                .where(
+                    LabResultAmendment.lab_order_id == order_id,
+                    LabResultAmendment.status == "RELEASED",
+                )
+            )
+            == 1
+        )
+        # PREPARING count is either 0 (if conflict) or 1 (if created after release)
+        prep_count = session.scalar(
+            select(func.count())
+            .select_from(LabResultAmendment)
+            .where(
+                LabResultAmendment.lab_order_id == order_id,
+                LabResultAmendment.status == "PREPARING",
+            )
+        )
+        if outcomes["start"] == "conflict":
+            assert prep_count == 0
+        else:
+            assert prep_count == 1
+            # If created, its base_release_version_id must be Version 2
+            v2 = session.scalar(
+                select(LabResultReleaseVersion).where(
+                    LabResultReleaseVersion.lab_order_id == order_id,
+                    LabResultReleaseVersion.version_number == 2,
+                )
+            )
+            assert v2 is not None
+            created_amend_id = uuid.UUID(outcomes["start"].split(":")[1])
+            created_amend = session.get(LabResultAmendment, created_amend_id)
+            assert created_amend.base_release_version_id == v2.id
+
+
+def test_sequential_amendment_chain_through_version_three(
+    sessions: sessionmaker,
+) -> None:
+    """DH-EX-014B Concurrency Matrix Scenario C:
+
+    Sequential amendment chain through Version 3 (V1 -> V2 -> V3) demonstrates:
+    1. Base version linkage integrity (V2.base == V1, V3.base == V2).
+    2. Exact manifest reconstruction for all 3 versions.
+    3. Unchanged observations reused across versions without row duplication.
+    4. Exact DoctorReview binding to each version in the chain.
+    """
+    key = f"pg14b-chain-{uuid.uuid4().hex[:8]}"
+    lab_id, order_id, _practitioner_id, item_ids, originals, v1 = _release_version_one(
+        sessions, key_prefix=key, item_count=2
+    )
+    amendments = LabResultAmendmentRepository(sessions)
+    releases = LabResultReleaseRepository(sessions)
+    tech_id = _identity_id(sessions, f"{key}-tech")
+    releaser_id = _identity_id(sessions, f"{key}-releaser")
+
+    obs1_0 = originals[0].id
+    obs1_1 = originals[1].id
+
+    # Amendment 1: correct item 0 only -> releases Version 2
+    amend_1 = amendments.start_amendment(
+        order_id=order_id, lab_organization_id=lab_id, started_by_identity_id=tech_id
+    )
+    assert amend_1.base_release_version_id == v1.id
+    corr_item0 = amendments.correct_observation(
+        amendment_id=amend_1.id,
+        order_id=order_id,
+        lab_order_item_id=item_ids[0],
+        lab_organization_id=lab_id,
+        observation_id=obs1_0,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("50"),
+        corrected_by_identity_id=tech_id,
+    )
+    obs2_0 = corr_item0.id
+    v2, _ = amendments.release_amendment(
+        amendment_id=amend_1.id,
+        order_id=order_id,
+        lab_organization_id=lab_id,
+        released_by_identity_id=releaser_id,
+    )
+    assert v2.version_number == 2
+
+    # Amendment 2: correct item 1 only -> releases Version 3
+    amend_2 = amendments.start_amendment(
+        order_id=order_id, lab_organization_id=lab_id, started_by_identity_id=tech_id
+    )
+    assert amend_2.base_release_version_id == v2.id
+    corr_item1 = amendments.correct_observation(
+        amendment_id=amend_2.id,
+        order_id=order_id,
+        lab_order_item_id=item_ids[1],
+        lab_organization_id=lab_id,
+        observation_id=obs1_1,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-1",
+        display_label_snapshot="Synthetic observation 1",
+        numeric_value=Decimal("75"),
+        corrected_by_identity_id=tech_id,
+    )
+    obs3_1 = corr_item1.id
+    v3, _ = amendments.release_amendment(
+        amendment_id=amend_2.id,
+        order_id=order_id,
+        lab_organization_id=lab_id,
+        released_by_identity_id=releaser_id,
+    )
+    assert v3.version_number == 3
+
+    # Verify manifest reconstructions
+    m1 = releases.get_manifest_for_version(v1.id)
+    m2 = releases.get_manifest_for_version(v2.id)
+    m3 = releases.get_manifest_for_version(v3.id)
+
+    # Verify manifest reconstructions by item_id
+    m1_by_item = {item.item_id: [o.id for o in item.observations] for item in m1.items}
+    m2_by_item = {item.item_id: [o.id for o in item.observations] for item in m2.items}
+    m3_by_item = {item.item_id: [o.id for o in item.observations] for item in m3.items}
+
+    # V1: [obs1_0, obs1_1]
+    assert m1_by_item[item_ids[0]] == [obs1_0]
+    assert m1_by_item[item_ids[1]] == [obs1_1]
+
+    # V2: [obs2_0 (new), obs1_1 (reused from V1)]
+    assert m2_by_item[item_ids[0]] == [obs2_0]
+    assert m2_by_item[item_ids[1]] == [obs1_1]
+
+    # V3: [obs2_0 (reused from V2), obs3_1 (new)]
+    assert m3_by_item[item_ids[0]] == [obs2_0]
+    assert m3_by_item[item_ids[1]] == [obs3_1]
+
+    # Check total observation rows in database: exactly 4 (2 original + 2 corrections),
+    # ZERO duplication
+    with sessions() as session:
+        all_obs = session.scalars(
+            select(LabObservation.id)
+            .join(LabResult, LabObservation.lab_result_id == LabResult.id)
+            .where(LabResult.lab_order_item_id.in_(item_ids))
+        ).all()
+        assert len(all_obs) == 4
+        assert set(all_obs) == {obs1_0, obs1_1, obs2_0, obs3_1}
+
+    # Verify history with reviews returns 3 versions and each has its review
+    history_with_reviews = releases.get_release_version_history_with_reviews(order_id)
+    assert len(history_with_reviews) == 3
+    for ver, rev in history_with_reviews:
+        assert rev is not None
+        assert rev.release_version_id == ver.id
+
+
+def test_racing_clinician_reviews_for_same_amended_version_one_wins_one_refused(
+    sessions: sessionmaker,
+) -> None:
+    """DH-EX-014B Concurrency Matrix Scenario D:
+
+    Two clinician review attempts racing for the same amended release version (Version 2):
+    exactly one wins and finalizes the review, the second is refused with ReviewAlreadyFinalized.
+    """
+    key = f"pg14b-review-race-{uuid.uuid4().hex[:8]}"
+    amendments, lab_id, order_id, practitioner_id, _item_id, _v1, amendment, _value_two = (
+        _prepared_amendment(sessions, key_prefix=key)
+    )
+    v2, _ = amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order_id,
+        lab_organization_id=lab_id,
+        released_by_identity_id=_identity_id(sessions, f"{key}-releaser"),
+    )
+    reviews = DoctorReviewRepository(sessions)
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def review_no_follow_up() -> None:
+        try:
+            barrier.wait(timeout=15)
+            reviews.mark_no_follow_up_required_for_release_version(
+                order_id,
+                v2.id,
+                reviewed_by_practitioner_reference_id=practitioner_id,
+            )
+            with lock:
+                outcomes.append("reviewed_no_follow_up")
+        except ReviewAlreadyFinalized:
+            with lock:
+                outcomes.append("conflict_already_finalized")
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    def review_follow_up_required() -> None:
+        try:
+            barrier.wait(timeout=15)
+            reviews.mark_follow_up_required_for_release_version(
+                order_id,
+                v2.id,
+                reviewed_by_practitioner_reference_id=practitioner_id,
+            )
+            with lock:
+                outcomes.append("reviewed_follow_up_required")
+        except ReviewAlreadyFinalized:
+            with lock:
+                outcomes.append("conflict_already_finalized")
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                errors.append(error)
+
+    threads = [
+        threading.Thread(target=review_no_follow_up),
+        threading.Thread(target=review_follow_up_required),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert len(outcomes) == 2
+    # Exactly one winner, exactly one conflict
+    winners = [o for o in outcomes if o.startswith("reviewed_")]
+    conflicts = [o for o in outcomes if o == "conflict_already_finalized"]
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+
+    # Check database: exactly one review row for V2, and its status matches the winning action
+    with sessions() as session:
+        v2_review = session.scalar(
+            select(DoctorReview).where(DoctorReview.release_version_id == v2.id)
+        )
+        assert v2_review is not None
+        if winners[0] == "reviewed_no_follow_up":
+            assert v2_review.status == "NO_FOLLOW_UP_REQUIRED"
+        else:
+            assert v2_review.status == "FOLLOW_UP_REQUIRED"

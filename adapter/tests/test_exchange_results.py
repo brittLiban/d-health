@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -29,6 +30,7 @@ from daher_adapter.exchange.models import (
     LabPrice,
     LabResultAmendment,
     LabResultAmendmentStatus,
+    LabResultReleaseVersion,
     LabResultType,
     ResultDeliveryStatus,
 )
@@ -37,6 +39,8 @@ from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.results import (
     AmendmentAlreadyInProgress,
     AmendmentNotPreparing,
+    AmendmentNotReadyForRelease,
+    AmendmentReleaseIntegrityError,
     DoctorReviewRepository,
     DuplicateResult,
     EntryAlreadyCompleted,
@@ -56,6 +60,7 @@ from daher_adapter.exchange.results import (
     StaleObservationVersion,
 )
 from daher_adapter.exchange.selection import LabSelectionRepository
+from daher_adapter.models import utc_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -2440,3 +2445,320 @@ def test_only_one_preparing_amendment_and_released_episode_is_terminal(
     with sessions() as session:
         stored = session.get(LabResultAmendment, amendment.id)
         assert stored.status == LabResultAmendmentStatus.RELEASED.value
+
+
+def test_get_release_version_history_with_reviews_constant_query_count(
+    engine: Engine, sessions: sessionmaker[Session]
+) -> None:
+    """DH-EX-014B: measure statement counts for release version history with reviews.
+
+    Single joined query on ``DoctorReview.release_version_id == LabResultReleaseVersion.id``
+    means 1 release version and 5 release versions both cost exactly 1 SQL statement.
+    """
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    tech = _labtech_identity_id(repos)
+
+    # 1 version order
+    order_1, _ = _create_and_select(repos, sessions, lab_id=lab.id, key="vhist-1")
+    repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order_1.id,
+        lab_order_item_id=order_1.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("10.0"),
+    )
+    _release(repos, order_id=order_1.id, lab_id=lab.id, key="vhist-1")
+
+    # 5 version order (V1 + 4 amendments)
+    order_5, _ = _create_and_select(repos, sessions, lab_id=lab.id, key="vhist-5")
+    outcome_5 = repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order_5.id,
+        lab_order_item_id=order_5.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("10.0"),
+    )
+    _release(repos, order_id=order_5.id, lab_id=lab.id, key="vhist-5")
+
+    current_obs_id = outcome_5.observation.id
+    for v in range(2, 6):
+        amend = repos.amendments.start_amendment(
+            order_id=order_5.id,
+            lab_organization_id=lab.id,
+            started_by_identity_id=tech,
+        )
+        new_obs = repos.amendments.correct_observation(
+            amendment_id=amend.id,
+            order_id=order_5.id,
+            lab_order_item_id=order_5.items[0].id,
+            lab_organization_id=lab.id,
+            observation_id=current_obs_id,
+            result_type=LabResultType.NUMERIC,
+            source_code="TEST-0",
+            display_label_snapshot="Test Obs",
+            numeric_value=Decimal(str(v * 10)),
+            corrected_by_identity_id=tech,
+        )
+        current_obs_id = new_obs.id
+        repos.amendments.release_amendment(
+            amendment_id=amend.id,
+            order_id=order_5.id,
+            lab_organization_id=lab.id,
+            released_by_identity_id=tech,
+        )
+
+    def _count_statements(order_id) -> tuple[int, int, tuple]:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            result = repos.releases.get_release_version_history_with_reviews(order_id)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        selects = [s for s in statements if s.strip().startswith("SELECT")]
+        return len(selects), len(statements), result
+
+    selects_1, total_1, result_1 = _count_statements(order_1.id)
+    selects_5, total_5, result_5 = _count_statements(order_5.id)
+
+    assert len(result_1) == 1
+    assert len(result_5) == 5
+    assert selects_1 == 1
+    assert selects_5 == 1
+    assert selects_5 == selects_1
+    assert total_5 == total_1 == 2
+
+    # Verify all reviews in result_5 are bound to the exact release_version_id
+    for version_rec, review_rec in result_5:
+        assert review_rec is not None
+        assert review_rec.release_version_id == version_rec.id
+
+    # Also test DoctorReviewRepository.get_for_release_versions batch query count
+    version_ids_5 = [v.id for v, _ in result_5]
+    statements_reviews: list[str] = []
+
+    def _record_reviews(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+        statements_reviews.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record_reviews)
+    try:
+        reviews_map = repos.reviews.get_for_release_versions(version_ids_5)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record_reviews)
+
+    select_reviews = [s for s in statements_reviews if s.strip().startswith("SELECT")]
+    assert len(select_reviews) == 1
+    assert len(reviews_map) == 5
+    for vid in version_ids_5:
+        assert reviews_map[vid].release_version_id == vid
+
+
+def test_amendment_release_fails_closed_on_foreign_or_unattributed_observation(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B: amendment release must fail closed if an effective observation is not in the
+    base release version manifest and is not attributed to the amendment being released.
+    """
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    tech = _labtech_identity_id(repos)
+
+    order, _ = _create_and_select_two_items(repos, sessions, lab_id=lab.id, key="lineage-fail")
+    outcome_0 = repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        value=Decimal("10.0"),
+    )
+    outcome_1 = repos.results.record_numeric(
+        recorded_by_identity_id=tech,
+        order_id=order.id,
+        lab_order_item_id=order.items[1].id,
+        lab_organization_id=lab.id,
+        value=Decimal("20.0"),
+    )
+    _release(repos, order_id=order.id, lab_id=lab.id, key="lineage-fail")
+    obs_id_0 = outcome_0.observation.id
+    obs_id_1 = outcome_1.observation.id
+
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        started_by_identity_id=tech,
+    )
+
+    # Legitimate correction on item 0 so has_changes is True
+    repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=obs_id_0,
+        result_type=LabResultType.NUMERIC,
+        source_code="TEST-0",
+        display_label_snapshot="Item 0 Corrected",
+        numeric_value=Decimal("15.0"),
+        corrected_by_identity_id=tech,
+    )
+
+    # Simulate unattributed direct DB mutation on item 1: an observation is inserted with
+    # amendment_id=None superseding item 1's original observation
+    with sessions() as session:
+        result_id = session.scalar(
+            select(LabObservation.lab_result_id).where(LabObservation.id == obs_id_1)
+        )
+        unattributed_obs = LabObservation(
+            id=uuid.uuid4(),
+            lab_result_id=result_id,
+            source_code="TEST-1",
+            source_system="dhealth-exchange",
+            display_label_snapshot="Unattributed",
+            result_type=LabResultType.NUMERIC.value,
+            numeric_value=Decimal("99.9"),
+            supersedes_observation_id=obs_id_1,
+            amendment_id=None,
+        )
+        orig = session.get(LabObservation, obs_id_1)
+        orig.superseded_at = utc_now()
+        session.add(unattributed_obs)
+        session.commit()
+
+    # Attempting to release this amendment must fail closed!
+    with pytest.raises(AmendmentReleaseIntegrityError) as exc_info:
+        repos.amendments.release_amendment(
+            amendment_id=amendment.id,
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            released_by_identity_id=tech,
+        )
+    assert "differs from base release manifest" in str(
+        exc_info.value
+    ) or "is not attributed" in str(exc_info.value)
+
+    # Verify amendment remains PREPARING, no new version was created
+    with sessions() as session:
+        stored_amend = session.get(LabResultAmendment, amendment.id)
+        assert stored_amend.status == LabResultAmendmentStatus.PREPARING.value
+        versions = session.scalars(
+            select(LabResultReleaseVersion).where(LabResultReleaseVersion.lab_order_id == order.id)
+        ).all()
+        assert len(versions) == 1
+
+    # Next test foreign amendment_id (belonging to a different amendment)
+    foreign_amendment_id = uuid.uuid4()
+    with sessions() as session:
+        uobs = session.get(LabObservation, unattributed_obs.id)
+        uobs.amendment_id = foreign_amendment_id
+        session.commit()
+
+    with pytest.raises(AmendmentReleaseIntegrityError):
+        repos.amendments.release_amendment(
+            amendment_id=amendment.id,
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            released_by_identity_id=tech,
+        )
+
+
+def test_start_amendment_refused_on_legacy_completed_order_without_release(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B NC 1: starting an amendment on a COMPLETED order without a release version
+    must raise LegacyCompletedOrderHasNoRelease.
+    """
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations)
+    tech = _labtech_identity_id(repos)
+
+    order, _ = _create_and_select(repos, sessions, lab_id=lab.id, key="legacy-no-rel")
+    with sessions() as session:
+        stored_order = session.get(LabOrder, order.id)
+        stored_order.status = "COMPLETED"
+        session.commit()
+
+    with pytest.raises(LegacyCompletedOrderHasNoRelease):
+        repos.amendments.start_amendment(
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            started_by_identity_id=tech,
+        )
+
+
+def test_amendment_correct_observation_rejects_stale_predecessor(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B NC 3: attempting to correct an observation that has already been superseded
+    must raise StaleObservationVersion.
+    """
+    repos, lab, order, _practitioner, tech_id, originals = _released_order_for_amendment(
+        sessions, key="amend-stale-pred"
+    )
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    # First correction succeeds
+    repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("2"),
+        corrected_by_identity_id=tech_id,
+    )
+    # Second correction attempting to branch off the already-superseded original must
+    # raise StaleObservationVersion
+    with pytest.raises(StaleObservationVersion) as exc_info:
+        repos.amendments.correct_observation(
+            amendment_id=amendment.id,
+            order_id=order.id,
+            lab_order_item_id=order.items[0].id,
+            lab_organization_id=lab.id,
+            observation_id=originals[0].id,
+            result_type=LabResultType.NUMERIC,
+            source_code="OBS-0",
+            display_label_snapshot="Synthetic observation 0",
+            numeric_value=Decimal("3"),
+            corrected_by_identity_id=tech_id,
+        )
+    assert "must start from the currently effective observation" in str(exc_info.value)
+
+
+def test_amendment_release_with_no_changes_refused(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-EX-014B NC 9: releasing an amendment that has zero observation revisions
+    must raise AmendmentNotReadyForRelease.
+    """
+    repos, lab, order, _practitioner, tech_id, _originals = _released_order_for_amendment(
+        sessions, key="amend-no-changes"
+    )
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+
+    with pytest.raises(AmendmentNotReadyForRelease) as exc_info:
+        repos.amendments.release_amendment(
+            amendment_id=amendment.id,
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            released_by_identity_id=tech_id,
+        )
+    assert "zero observation revisions" in str(exc_info.value)
+
+    # Verify amendment remains PREPARING and no release version 2 was created
+    with sessions() as session:
+        stored_amend = session.get(LabResultAmendment, amendment.id)
+        assert stored_amend.status == LabResultAmendmentStatus.PREPARING.value
+        versions = session.scalars(
+            select(LabResultReleaseVersion).where(LabResultReleaseVersion.lab_order_id == order.id)
+        ).all()
+        assert len(versions) == 1

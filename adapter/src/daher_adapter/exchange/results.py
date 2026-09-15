@@ -84,6 +84,7 @@ never a fabricated one (see that migration's own docstring)."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -121,6 +122,7 @@ __all__ = [
     "AmendmentNotFound",
     "AmendmentNotReadyForRelease",
     "AmendmentNotPreparing",
+    "AmendmentReleaseIntegrityError",
     "DeliveryNotFound",
     "DoctorReviewRecord",
     "DoctorReviewRepository",
@@ -339,6 +341,13 @@ class AmendmentNotReadyForRelease(RuntimeError):
     the episode itself (``LabObservation.amendment_id == this amendment's id``), never against
     "has anything changed since the original release," which would be true for reasons unrelated to
     this episode once a second amendment exists."""
+
+
+class AmendmentReleaseIntegrityError(RuntimeError):
+    """DH-EX-014B: an effective observation at amendment release time differs from the base release
+    version manifest but is not attributable to the amendment being released. Refuses release
+    fail-closed if an effective observation was introduced from another amendment, an
+    unattributed/direct database mutation, or an unsupported lineage."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,6 +1467,33 @@ class LabResultReleaseRepository:
             ).all()
             return tuple(_to_release_version_record(v) for v in versions)
 
+    def get_release_version_history_with_reviews(
+        self, order_id: uuid.UUID
+    ) -> tuple[tuple[LabResultReleaseVersionRecord, DoctorReviewRecord | None], ...]:
+        """DH-EX-014B: every release version and its associated DoctorReview for this order,
+        oldest first.
+
+        Single joined query on ``DoctorReview.release_version_id == LabResultReleaseVersion.id``,
+        eliminating N+1 query scaling while preserving exact explicit release_version_id binding
+        and ordering by version_number (never inferring associations from timestamps).
+        """
+        with self._sessions() as session:
+            rows = session.execute(
+                select(LabResultReleaseVersion, DoctorReview)
+                .outerjoin(
+                    DoctorReview, DoctorReview.release_version_id == LabResultReleaseVersion.id
+                )
+                .where(LabResultReleaseVersion.lab_order_id == order_id)
+                .order_by(LabResultReleaseVersion.version_number)
+            ).all()
+            return tuple(
+                (
+                    _to_release_version_record(version),
+                    None if review is None else _to_review_record(review),
+                )
+                for version, review in rows
+            )
+
     def get_release_version(
         self, release_version_id: uuid.UUID
     ) -> LabResultReleaseVersionRecord | None:
@@ -2057,7 +2093,25 @@ class LabResultAmendmentRepository:
         # manifest construction (`_effective_observation_rows`) -- structurally cannot omit an
         # unaffected item merely because another item changed.
         effective_rows = _effective_observation_rows(session, order_id)
+
+        base_manifest_items = session.scalars(
+            select(LabResultReleaseManifestEntry.lab_observation_id).where(
+                LabResultReleaseManifestEntry.release_version_id
+                == amendment.base_release_version_id
+            )
+        ).all()
+        base_observation_ids = set(base_manifest_items)
+
         for item_id, observation_id in effective_rows:
+            if observation_id not in base_observation_ids:
+                obs = session.get(LabObservation, observation_id)
+                if obs is None or obs.amendment_id != amendment.id:
+                    raise AmendmentReleaseIntegrityError(
+                        f"cannot release amendment {amendment_id} for LabOrder {order_id} -- "
+                        f"effective observation {observation_id} is not present in base release "
+                        f"manifest {amendment.base_release_version_id} and is not attributed to "
+                        f"this amendment (amendment_id={getattr(obs, 'amendment_id', None)})"
+                    )
             session.add(
                 LabResultReleaseManifestEntry(
                     release_version_id=version.id,
@@ -2322,6 +2376,27 @@ class DoctorReviewRepository:
                 select(DoctorReview).where(DoctorReview.release_version_id == release_version_id)
             )
             return None if review is None else _to_review_record(review)
+
+    def get_for_release_versions(
+        self, release_version_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, DoctorReviewRecord]:
+        """DH-EX-014B: batch-fetch DoctorReview records for multiple release versions,
+        keyed by release_version_id.
+
+        Batch-fetches in a single query via IN clause on release_version_id, preserving
+        exact explicit release_version_id binding without N+1 query scaling.
+        """
+        if not release_version_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(DoctorReview).where(DoctorReview.release_version_id.in_(release_version_ids))
+            ).all()
+            return {
+                r.release_version_id: _to_review_record(r)
+                for r in rows
+                if r.release_version_id is not None
+            }
 
     def get_history_for_order(self, lab_order_id: uuid.UUID) -> tuple[DoctorReviewRecord, ...]:
         """Every review row that has ever existed for this order, ordered by the
