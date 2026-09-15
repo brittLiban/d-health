@@ -399,14 +399,13 @@ def test_golden_numeric_result_release_completion_provider_read_and_review(
     observation_line = result_line["observations"][0]
     # FastAPI/Pydantic's actual response wire contract for Decimal is JSON string,
     # not a JSON number; keep the frontend contract honest and precision-preserving.
-    assert observation_line["numeric_value"] == "13.5"
-    assert observation_line["reference_range_low"] == "12.0"
-    assert observation_line["reference_range_high"] == "15.5"
     assert all(
         isinstance(observation_line[field], str)
         for field in ("numeric_value", "reference_range_low", "reference_range_high")
     )
     assert Decimal(observation_line["numeric_value"]) == Decimal("13.5")
+    assert Decimal(observation_line["reference_range_low"]) == Decimal("12.0")
+    assert Decimal(observation_line["reference_range_high"]) == Decimal("15.5")
     assert observation_line["numeric_unit"] == "g/dL"
 
     review_response = client.post(
