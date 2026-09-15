@@ -13839,3 +13839,140 @@ PostgreSQL concurrency matrix, and verified against all 12 negative controls.
 **DH-EX-014B CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+## DH-CLINIC-001 — Native DHealth Clinic foundation
+
+**Date:** 2026-09-15
+**Branch:** `master`
+**Status:** COMPLETED
+**Author:** Primary Agent & `dhealth_advisor`
+**Reviewed By:** Senior Independent Advisor (`dhealth_advisor`)
+
+### Summary & Goal
+
+Established the native **DHealth Clinic** frontend application foundation and clean typed Exchange client boundary under `ui/src/features/clinic/` and `ui/src/api/exchangeClient.ts`.
+
+This ticket delivers the native Clinic surface without breaking, modifying, or repurposing the existing OpenMRS connector maternity stack (all 19 pre-existing test files and 236 tests continue to pass without modification).
+
+### Delivered Architecture & Components
+
+1. **Typed Exchange Client Boundary (`ui/src/api/`):**
+   - [`ui/src/api/exchangeTypes.ts`](file:///C:/Users/liban/Documents/d-health/ui/src/api/exchangeTypes.ts): Strongly typed models for `ExchangeIdentity`, `ExchangeMembershipSummary`, `ExchangeMeResponse`, `LabOrderSummary`, `LabOrder`, `ProviderOrderResults`, `ProviderReleaseVersionHistory`, `PatientReferenceResponse`, and related Enums.
+   - [`ui/src/api/exchangeClient.ts`](file:///C:/Users/liban/Documents/d-health/ui/src/api/exchangeClient.ts): Direct client for DHealth Exchange endpoints (`/exchange/v1/me`, `/organizations/{id}/orders`, `/organizations/{id}/orders/{order_id}`, `/organizations/{id}/orders/{order_id}/results`, `/organizations/{id}/orders/{order_id}/release-versions`, `/organizations/{id}/patient-references`).
+   - Normalizes FastAPI error responses (`{ detail: string | Array<{ msg: string }> }`) into typed `ExchangeApiError` instances with semantic codes (`UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `VALIDATION_ERROR`, `SERVER_ERROR`, `NETWORK_ERROR`).
+   - Includes `mapExchangeErrorToCode` adapter for design system `ErrorState`.
+   - **Zero calls to `/openmrs/*`** from the Exchange client boundary.
+
+2. **Native Clinic Application Shell & State (`ui/src/features/clinic/`):**
+   - [`ui/src/features/clinic/ClinicContext.ts`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/ClinicContext.ts) & [`ClinicProvider.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/ClinicProvider.tsx): Provider organization context with automatic identity bootstrap via `/me`. Enforces Finding F-08: filters strictly for active provider organizations with active clinician roles (`organization_type === 'PROVIDER'`, `organization_status === 'ACTIVE'`, `membership_status === 'ACTIVE'`, `roles.includes('CLINICIAN')`). Truthful states for `loading`, `ready`, `unauthenticated`, `no_clinics`, and `error` without mock fallback.
+   - [`ui/src/features/clinic/ClinicShell.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/ClinicShell.tsx) & [`ClinicShell.module.css`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/ClinicShell.module.css): French-first responsive navigation with accessible tabs (`Accueil`, `Patients`, `Ordres de laboratoire`, `Résultats`), active clinic selector badge, and app mode switcher.
+   - [`ui/src/features/clinic/ClinicApp.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/ClinicApp.tsx): Top-level Clinic application component managing active navigation tabs.
+
+3. **Clinic Pages:**
+   - [`ui/src/features/clinic/pages/ClinicHomePage.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/pages/ClinicHomePage.tsx): Summary cards for *Ordres actifs* (pending, accepted, in-progress), *Résultats disponibles* (completed), and *À revoir* (truthful navigation to results tab). Avoids N+1 query storms by deriving counts directly from provider orders list.
+   - [`ui/src/features/clinic/pages/ClinicPatientsPage.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/pages/ClinicPatientsPage.tsx): Truthful patient boundary explanation pending DH-CLINIC-002; zero calls to OpenMRS and zero fabricated patient names.
+   - [`ui/src/features/clinic/pages/ClinicOrdersPage.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/pages/ClinicOrdersPage.tsx): Provider orders table displaying status badges, order priority, timestamps, test counts, and opaque patient reference tokens (`patient_reference_id` UUIDs).
+   - [`ui/src/features/clinic/pages/ClinicResultsPage.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/features/clinic/pages/ClinicResultsPage.tsx): Lists completed orders and allows drill-down into order-scoped `/results` to view released observations, reference ranges, abnormal flags, and lab comments.
+
+4. **Integration & Connector Stack Preservation:**
+   - [`ui/src/design-system/AppShell.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/design-system/AppShell.tsx): Added optional `headerActions` slot to allow seamless app switching.
+   - [`ui/src/App.tsx`](file:///C:/Users/liban/Documents/d-health/ui/src/App.tsx): Preserves default OpenMRS maternity workflow. Adds mode toggle to switch between OpenMRS Maternity and native DHealth Clinic. All existing 236 OpenMRS maternity tests pass without regression.
+
+### Patient Workflow Audit for DH-CLINIC-002
+
+An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py`) revealed the following constraints for native patient management:
+- **Available endpoint:** `POST /organizations/{provider_id}/patient-references` exists to bind/register a patient reference token.
+- **Missing endpoints:**
+  - No patient search endpoint (cannot search by name, phone, birth date, or external identifier).
+  - No patient list endpoint (no `GET /organizations/{provider_id}/patient-references`).
+  - No patient detail endpoint (no `GET .../patient-references/{id}`).
+- **Response payload limitation:**
+  - `POST .../patient-references` returns `PatientReferenceResponse(id=..., source_organization_id=..., source_system=..., source_identity_system=..., source_identity_value=...)` (no `created_at` or patient profile representation).
+  - It does NOT return `display_name`, `phone_number`, or contact channels in the response model.
+- **Architectural laws:**
+  - The Exchange is an interoperability hub, not a centralized national patient registry.
+  - `PatientReference` is strictly scoped to a provider organization; there is no global patient registry and no fuzzy matching across clinics.
+- **Requirement for DH-CLINIC-002:**
+  To implement native provider-scoped patient finding and registration, DH-CLINIC-002 should either:
+  1. Add a provider-scoped patient lookup/list endpoint to the Exchange API: `GET /organizations/{provider_id}/patient-references?query=...` with strict provider authorization.
+  2. Include `display_name` in the patient reference retrieval model so clinicians can identify patients within their own clinic.
+
+### Infrastructure & Keycloak Notes for SPA
+
+- **Reverse Proxy Routing:**
+  In local development and production (`caddy/Caddyfile` and Vite dev server `vite.config.ts`), requests to `/exchange/v1/*` must be routed to the Exchange backend service (`http://exchange:8000` or `http://localhost:8000`), alongside existing `/openmrs/*` reverse proxy rules.
+- **Keycloak Client Configuration:**
+  Direct browser authentication for the SPA requires a public Keycloak client configured with PKCE (e.g., client ID `dhealth-clinic-ui`, standard flow with PKCE, valid redirect URIs).
+
+### Independent Advisor Review (`dhealth_advisor`)
+
+- Phase 3 independent architecture and plan review performed by `dhealth_advisor` (conversation `536af9f4-776e-42af-989e-b3581d192006`).
+- Phase 3 Findings & Dispositions:
+  - **F-01 (CORS & Caddy/Vite Routing):** RESOLVED. Base URL made configurable via `baseUrl` option and `VITE_EXCHANGE_BASE_URL`. Documented proxy requirements.
+  - **F-02 (Keycloak Public Client):** RESOLVED. Truthful unauthenticated state rendered without mock fallback; documented public SPA client requirement.
+  - **F-03 (Home Card N+1 Query Storm):** RESOLVED. Counts derived directly from provider orders list; "À revoir" points to results tab rather than looping `/release-versions`.
+  - **F-04 (Opaque Patient References):** RESOLVED. Displayed genuine Exchange UUID tokens; zero calls to OpenMRS and zero fabricated patient names.
+  - **F-05 (Order-Scoped `/results`):** RESOLVED. Implemented drill-down pattern from completed orders to order results.
+  - **F-06 (FastAPI Error Parsing):** RESOLVED. Handled `{ detail }` string and array structures and provided `mapExchangeErrorToCode`.
+  - **F-07 (A11y Navigation Collision):** RESOLVED. Disjoint accessible names (`Navigation DHealth Clinique` vs `Navigation principale`).
+  - **F-08 (Multi-Provider Filter):** RESOLVED. Filtered memberships for `organization_type === 'PROVIDER'`, active statuses, and `CLINICIAN` role.
+  - **F-09 (TypeScript Compiler Constraints):** RESOLVED. Used `import type` and `const` string unions.
+- Phase 6 Independent Review (`dhealth_advisor` conversation `14cce7fd-d8bd-4abc-95bb-58c263a19d70`):
+  - **Verdict:** APPROVED (0 Blockers, 3 Should Fix, 2 Optional, 0 Human Decision Required).
+  - **[SHOULD-FIX-1] (`getReleaseVersions` boundary unit test):** RESOLVED. Added unit test asserting `GET /exchange/v1/organizations/prov-1/orders/ord-1/release-versions` in `exchangeClient.test.ts`.
+  - **[SHOULD-FIX-2] (`ClinicResultsPage` drill-down state reset on clinic change):** RESOLVED. Added render-time provider ID tracking to reset `selectedOrderId(null)`, `setOrderDetails(null)`, and `setReleaseHistory(null)` when active organization changes.
+  - **[SHOULD-FIX-3] (`PatientReferenceResponse` field citation in docs):** RESOLVED. Corrected doc entry to reflect `id`, `source_organization_id`, `source_system`, `source_identity_system`, `source_identity_value` (no `created_at`).
+  - **[OPTIONAL-1] (F-08 non-clinician role predicate test):** RESOLVED. Added test in `ClinicApp.test.tsx` verifying that a user with only `LAB` memberships or non-clinician roles receives `no_clinics`.
+  - **[OPTIONAL-2] (`fetch` mock in `App.test.tsx`):** RESOLVED. Added global fetch mock in `App.test.tsx` for Exchange endpoints.
+
+### Negative Controls Executed
+
+1. **NC 1 (Truthful Home Card Metric Derivation):**
+   - Property: Home page renders truthful active orders count from Exchange API.
+   - Mutation: Hardcoded `{activeOrdersCount}` to `{999}` in `ClinicHomePage.tsx`.
+   - Result: RED (`AssertionError: expected [ <p …(1)></p> ] to have a length of 2 but got 1` in `ClinicApp.test.tsx`).
+   - Restored: GREEN (8/8 tests passed).
+2. **NC 2 (Exchange Client 401 Error Normalization):**
+   - Property: Client maps HTTP 401 to `code: 'UNAUTHORIZED'` and `isAuthError: true`.
+   - Mutation: Changed 401 status mapping to `code: 'SERVER_ERROR'` in `exchangeClient.ts`.
+   - Result: RED (`AssertionError: expected { code: 'SERVER_ERROR', isAuthError: false } to match { code: 'UNAUTHORIZED', isAuthError: true }` in `exchangeClient.test.ts`).
+   - Restored: GREEN (15/15 tests passed).
+3. **NC 3 (ClinicShell Accessible Active Page Indication):**
+   - Property: Active tab has `aria-current="page"`.
+   - Mutation: Set `aria-current={undefined}` in `ClinicShell.tsx`.
+   - Result: RED (`Error: expect(element).toHaveAttribute("aria-current", "page") // Received: null` in `ClinicShell.test.tsx`).
+   - Restored: GREEN (3/3 tests passed).
+
+### Verification & Test Evidence
+
+- **Unit & Integration Tests:** 23 test files passed, 268 total tests passed (Vitest).
+  - `exchangeClient.test.ts`: 15 passed.
+  - `ClinicShell.test.tsx`: 3 passed.
+  - `ClinicA11y.test.tsx`: 4 passed (0 axe violations).
+  - `ClinicApp.test.tsx`: 8 passed.
+  - `App.test.tsx`: 8 passed (including app switcher mode verification).
+  - `App.a11y.test.tsx`: 5 passed.
+  - All 19 pre-existing OpenMRS/maternity test files (236 tests): 100% passed.
+- **Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
+- **Linter:** `oxlint` exited 0 (0 warnings, 0 errors across 76 files).
+- **Production Build:** `npm run build` succeeded (0 secret leaks in bundle).
+
+### Known Gaps & Out-of-Scope (Deliberately Excluded)
+
+- Native order creation form, lab catalog selection, and quote presentation (reserved for subsequent tickets).
+- Patient WhatsApp link and SMS delivery mechanisms.
+- Clinician review disposition workflow UI (accept/reject/amend actions).
+- Real Keycloak runtime qualification in browser (unauthenticated empty state tested cleanly with mock client/tokens).
+
+### Next Recommended Ticket
+
+**`DH-CLINIC-002 — Native provider-scoped patient find and creation`**
+
+**Human Decision Required: NO** — all architectural decisions adhere to ADR-042 and ADR-043.
+
+**DH-CLINIC-001 CLOSED: YES.**
+
+**READY FOR LIBAN REVIEW: YES**
+

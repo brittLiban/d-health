@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { OpenMrsPatient } from './api/types'
 import { AppShell, EmptyState, Navigation, type NavItem } from './design-system'
 import { logoutLocalSessions, navigateToKeycloakEndSession } from './features/auth/logout'
+import { ClinicApp } from './features/clinic/ClinicApp'
 import { MaternityBoardPage } from './features/maternity/MaternityBoardPage'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
 import { PatientWorkspace } from './features/patients/PatientWorkspace'
@@ -21,7 +22,18 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'results', label: 'Résultats', available: false },
 ]
 
-function App() {
+export interface AppProps {
+  initialApp?: 'maternity' | 'clinic'
+}
+
+function App({ initialApp = 'maternity' }: AppProps = {}) {
+  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic'>(() => {
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('app') === 'clinic') return 'clinic'
+    }
+    return initialApp
+  })
   const [activeNavId, setActiveNavId] = useState('patients')
   const [selectedPatient, setSelectedPatient] = useState<OpenMrsPatient | null>(null)
 
@@ -39,6 +51,17 @@ function App() {
     })
   }
 
+  // Native DHealth Clinic surface (DH-CLINIC-001)
+  if (activeApp === 'clinic') {
+    return (
+      <ClinicApp
+        onLogout={handleLogout}
+        onSwitchApp={() => setActiveApp('maternity')}
+      />
+    )
+  }
+
+  // Reference Connector track: OpenMRS/Maternity UI (ADR-042/043 preserved)
   let content
   if (activeNavId === 'patients') {
     content = selectedPatient ? (
@@ -74,6 +97,24 @@ function App() {
     <AppShell
       navigation={<Navigation items={NAV_ITEMS} activeId={activeNavId} onSelect={handleSelectNav} />}
       onLogout={handleLogout}
+      headerActions={
+        <button
+          type="button"
+          onClick={() => setActiveApp('clinic')}
+          aria-label="Basculer vers DHealth Clinique"
+          style={{
+            background: 'transparent',
+            border: '1px solid var(--color-primary-contrast)',
+            color: 'var(--color-primary-contrast)',
+            borderRadius: '4px',
+            padding: 'var(--space-1) var(--space-3)',
+            cursor: 'pointer',
+            fontSize: '0.9rem',
+          }}
+        >
+          DHealth Clinique (Natif)
+        </button>
+      }
     >
       {content}
     </AppShell>

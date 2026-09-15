@@ -18,6 +18,40 @@ describe('App', () => {
     mockedSearch.mockReset()
     mockedBoard.mockReset()
     mockedBoard.mockResolvedValue({ visits: [], truncated: false })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (typeof url === 'string' && url.includes('/exchange/v1/me')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                identity_id: 'id-1',
+                issuer: 'issuer',
+                subject: 'sub',
+                display_name: 'Dr. Test',
+                email: 'dr@clinic.dj',
+                platform_admin: false,
+                memberships: [
+                  {
+                    organization_id: 'org-1',
+                    organization_name: 'Clinique Espoir',
+                    organization_type: 'PROVIDER',
+                    organization_status: 'ACTIVE',
+                    membership_status: 'ACTIVE',
+                    roles: ['CLINICIAN'],
+                  },
+                ],
+              }),
+              { status: 200 },
+            ),
+          )
+        }
+        if (typeof url === 'string' && url.includes('/orders')) {
+          return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+        }
+        return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+      }),
+    )
   })
 
   it('selecting a patient from search opens that patient\'s workspace', async () => {
@@ -110,4 +144,28 @@ describe('App', () => {
     expect(await screen.findByText('Patientes actuellement admises')).toBeInTheDocument()
     await waitFor(() => expect(mockedBoard).toHaveBeenCalledTimes(2))
   })
+
+  it('can switch to native DHealth Clinic and back to Maternity connector', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Initial view is OpenMRS patient search
+    expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
+
+    // Switch to native Clinic
+    await user.click(screen.getByRole('button', { name: 'Basculer vers DHealth Clinique' }))
+    expect(await screen.findByText('DHEALTH CLINIQUE')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
+
+    // Switch back to Maternity connector
+    await user.click(screen.getByRole('button', { name: 'Passer au connecteur Maternité' }))
+    expect(await screen.findByLabelText('Rechercher un patient')).toBeInTheDocument()
+  })
+
+  it('mounts native Clinic directly when initialApp="clinic"', async () => {
+    render(<App initialApp="clinic" />)
+    expect(await screen.findByText('DHEALTH CLINIQUE')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
+  })
 })
+

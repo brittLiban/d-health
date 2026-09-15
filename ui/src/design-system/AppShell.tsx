@@ -5,18 +5,22 @@ interface AppShellProps {
   navigation: ReactNode
   children: ReactNode
   onLogout?: () => void
+  headerActions?: ReactNode
 }
 
-export function AppShell({ navigation, children, onLogout }: AppShellProps) {
+export function AppShell({ navigation, children, onLogout, headerActions }: AppShellProps) {
   return (
     <div className={styles.shell}>
       <header className={styles.topBar}>
         <p className={styles.brand}>DAHER HEALTH</p>
-        {onLogout ? (
-          <button type="button" className={styles.logoutButton} onClick={onLogout}>
-            Se déconnecter
-          </button>
-        ) : null}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+          {headerActions}
+          {onLogout ? (
+            <button type="button" className={styles.logoutButton} onClick={onLogout}>
+              Se déconnecter
+            </button>
+          ) : null}
+        </div>
       </header>
       <div className={styles.body}>
         {navigation}

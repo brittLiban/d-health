@@ -1,0 +1,344 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ExchangeClient } from './exchangeClient'
+
+describe('ExchangeClient', () => {
+  const originalFetch = globalThis.fetch
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn()
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    vi.restoreAllMocks()
+  })
+
+  it('configures default base path to /exchange/v1 and normalizes trailing slashes', () => {
+    const clientDefault = new ExchangeClient()
+    expect(clientDefault.getBaseUrl()).toBe('/exchange/v1')
+
+    const clientCustom = new ExchangeClient({ baseUrl: 'https://api.dhealth.org/exchange/v1/' })
+    expect(clientCustom.getBaseUrl()).toBe('https://api.dhealth.org/exchange/v1')
+  })
+
+  it('getMe performs GET /exchange/v1/me with Authorization Bearer header', async () => {
+    const mockMe = {
+      identity_id: '11111111-1111-1111-1111-111111111111',
+      issuer: 'https://id.dhealth.org/realms/dhealth-exchange',
+      subject: 'sub-123',
+      display_name: 'Dr. Farah',
+      email: 'farah@clinic.dj',
+      platform_admin: false,
+      memberships: [
+        {
+          organization_id: 'org-1',
+          organization_name: 'Clinique de la Paix',
+          organization_type: 'PROVIDER',
+          organization_status: 'ACTIVE',
+          membership_status: 'ACTIVE',
+          roles: ['CLINICIAN'],
+        },
+      ],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockMe), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    const client = new ExchangeClient({ baseUrl: '/exchange/v1' })
+    const result = await client.getMe('test-token-jwt')
+
+    expect(result).toEqual(mockMe)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/me')
+    expect(init?.headers).toMatchObject({
+      Accept: 'application/json',
+      Authorization: 'Bearer test-token-jwt',
+    })
+  })
+
+  it('supports an injected getAuthToken callback', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ identity_id: 'id-1', memberships: [] }), { status: 200 }),
+    )
+
+    const client = new ExchangeClient({
+      getAuthToken: () => 'dynamic-token-456',
+    })
+    await client.getMe()
+
+    const [, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer dynamic-token-456',
+    })
+  })
+
+  it('listOrders sends GET /organizations/{id}/orders with query limit', async () => {
+    const mockOrders = [
+      {
+        id: 'ord-1',
+        provider_organization_id: 'prov-1',
+        patient_reference_id: 'pat-1',
+        practitioner_reference_id: 'prac-1',
+        status: 'SUBMITTED',
+        created_at: '2026-09-15T06:00:00Z',
+        item_count: 2,
+      },
+    ]
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrders), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.listOrders('prov-1', { limit: 25 })
+
+    expect(result).toEqual(mockOrders)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders?limit=25')
+  })
+
+  it('getOrder sends GET /organizations/{id}/orders/{order_id}', async () => {
+    const mockOrder = {
+      id: 'ord-1',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-1',
+      practitioner_reference_id: 'prac-1',
+      status: 'IN_PROGRESS',
+      created_at: '2026-09-15T06:00:00Z',
+      items: [
+        {
+          catalog_entry_id: 'cat-1',
+          catalog_code_snapshot: 'CBC',
+          catalog_display_name_snapshot: 'Numération Formule Sanguine',
+        },
+      ],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrder), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrder('prov-1', 'ord-1')
+
+    expect(result).toEqual(mockOrder)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1')
+  })
+
+  it('getOrderResults sends GET /organizations/{id}/orders/{order_id}/results', async () => {
+    const mockResults = {
+      order_id: 'ord-1',
+      release_version_id: 'rel-v1',
+      release_version_number: 1,
+      is_amendment: false,
+      review_status: 'PENDING_REVIEW',
+      reviewed_at: null,
+      reviewed_by_practitioner_reference_id: null,
+      results: [],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockResults), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrderResults('prov-1', 'ord-1')
+
+    expect(result).toEqual(mockResults)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1/results')
+  })
+
+  it('getReleaseVersions sends GET /organizations/{id}/orders/{order_id}/release-versions', async () => {
+    const mockVersions = {
+      order_id: 'ord-1',
+      versions: [
+        {
+          release_version_number: 1,
+          released_at: '2026-09-15T10:00:00Z',
+          lab_organization_id: 'lab-1',
+          released_by_user_id: 'user-1',
+          correction_reason: null,
+          observations: [],
+          doctor_reviews: [],
+        },
+      ],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockVersions), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getReleaseVersions('prov-1', 'ord-1')
+
+    expect(result).toEqual(mockVersions)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1/release-versions')
+  })
+
+  it('bindPatientReference sends POST /organizations/{id}/patient-references', async () => {
+    const mockRef = {
+      id: 'pat-ref-1',
+      source_organization_id: 'prov-1',
+      source_system: 'CLINIC_LOCAL',
+      source_identity_system: 'LOCAL_MRN',
+      source_identity_value: 'MRN-9021',
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockRef), { status: 201 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.bindPatientReference('prov-1', {
+      source_system: 'CLINIC_LOCAL',
+      source_identity_system: 'LOCAL_MRN',
+      source_identity_value: 'MRN-9021',
+      display_name: 'Patient A',
+    })
+
+    expect(result).toEqual(mockRef)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/patient-references')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(init?.body as string)).toEqual({
+      source_system: 'CLINIC_LOCAL',
+      source_identity_system: 'LOCAL_MRN',
+      source_identity_value: 'MRN-9021',
+      display_name: 'Patient A',
+    })
+  })
+
+  it('normalizes 401 Unauthorized with isAuthError = true', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'invalid or missing credentials' }), {
+        status: 401,
+        statusText: 'Unauthorized',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.getMe()).rejects.toMatchObject({
+      status: 401,
+      code: 'UNAUTHORIZED',
+      detail: 'invalid or missing credentials',
+      isAuthError: true,
+      isNetworkError: false,
+    })
+  })
+
+  it('normalizes 403 Forbidden with isAuthError = true', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'clinician role required' }), {
+        status: 403,
+        statusText: 'Forbidden',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.listOrders('prov-1')).rejects.toMatchObject({
+      status: 403,
+      code: 'FORBIDDEN',
+      detail: 'clinician role required',
+      isAuthError: true,
+      isNetworkError: false,
+    })
+  })
+
+  it('normalizes 404 Not Found', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'order not found' }), {
+        status: 404,
+        statusText: 'Not Found',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.getOrder('prov-1', 'nonexistent')).rejects.toMatchObject({
+      status: 404,
+      code: 'NOT_FOUND',
+      detail: 'order not found',
+      isAuthError: false,
+    })
+  })
+
+  it('normalizes 409 Conflict', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'order results are not yet available' }), {
+        status: 409,
+        statusText: 'Conflict',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.getOrderResults('prov-1', 'ord-in-progress')).rejects.toMatchObject({
+      status: 409,
+      code: 'CONFLICT',
+      detail: 'order results are not yet available',
+    })
+  })
+
+  it('normalizes 422 Validation Error with Pydantic array detail', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          detail: [
+            { loc: ['body', 'source_system'], msg: 'Field required', type: 'missing' },
+            { loc: ['body', 'source_identity_value'], msg: 'Field required', type: 'missing' },
+          ],
+        }),
+        { status: 422, statusText: 'Unprocessable Entity' },
+      ),
+    )
+
+    const client = new ExchangeClient()
+    await expect(
+      client.bindPatientReference('prov-1', {
+        source_system: '',
+        source_identity_system: '',
+        source_identity_value: '',
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      code: 'VALIDATION_ERROR',
+      detail: 'Field required; Field required',
+    })
+  })
+
+  it('normalizes network failures with isNetworkError = true', async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    const client = new ExchangeClient()
+    await expect(client.getMe()).rejects.toMatchObject({
+      status: 0,
+      code: 'NETWORK_ERROR',
+      detail: 'Failed to fetch',
+      isNetworkError: true,
+      isAuthError: false,
+    })
+  })
+
+  it('never calls /openmrs/*', async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({}), { status: 200 })),
+    )
+
+    const client = new ExchangeClient()
+    await client.getMe()
+    await client.listOrders('prov-1')
+    await client.getOrder('prov-1', 'ord-1')
+
+    for (const call of vi.mocked(globalThis.fetch).mock.calls) {
+      const url = String(call[0])
+      expect(url).not.toContain('/openmrs')
+      expect(url).toContain('/exchange/v1')
+    }
+  })
+})
