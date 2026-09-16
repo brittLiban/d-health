@@ -397,6 +397,40 @@ describe('Clinic native patient workflow', () => {
     expect(bind).not.toHaveBeenCalled()
   })
 
+  it('fails closed when scoped pending-store record contains corrupted fields and leaves raw entry intact', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const rawCorrupted = JSON.stringify({
+      source_system: 12345, // invalid type
+      corrupted_payload: true,
+    })
+    localStorage.setItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a', rawCorrupted)
+
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+
+    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(screen.queryByText(/corrupted_payload/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
+    expect(bind).not.toHaveBeenCalled()
+    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a')).toBe(rawCorrupted)
+  })
+
+  it('fails closed when scoped pending-store record contains invalid JSON and leaves raw entry intact', async () => {
+    const bind = vi.fn()
+    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const rawInvalidJson = '{not valid json'
+    localStorage.setItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a', rawInvalidJson)
+
+    render(<ClinicApp client={client} initialTab="patients" />)
+    await screen.findByText('Aucun patient trouvé')
+
+    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
+    expect(bind).not.toHaveBeenCalled()
+    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a')).toBe(rawInvalidJson)
+  })
+
   it('renders a sanitized recoverable error without exposing raw backend details', async () => {
     const client = makeClient({
       listPatientReferences: vi.fn().mockRejectedValue(

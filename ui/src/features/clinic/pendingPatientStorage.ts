@@ -21,7 +21,12 @@ export interface OpaquePendingPatientIdentity {
   confirmed_patient_reference_id?: string
 }
 
-export class PendingPatientStorageReadError extends Error {}
+export class PendingPatientStorageReadError extends Error {
+  constructor(message = "Impossible de lire le stockage de réconciliation patient.") {
+    super(message)
+    this.name = 'PendingPatientStorageReadError'
+  }
+}
 
 const STORAGE_PREFIX = 'dhealth_clinic_pending_patient_v1:'
 
@@ -59,38 +64,75 @@ export function getStoredPendingPatient(
   const storage = getStorage()
   if (!storage || !userId || !providerId) return null
 
+  const key = makeKey(userId, providerId)
   let raw: string | null
   try {
-    raw = storage.getItem(makeKey(userId, providerId))
+    raw = storage.getItem(key)
   } catch {
-    throw new PendingPatientStorageReadError()
+    throw new PendingPatientStorageReadError('Storage access error')
   }
-  try {
-    if (!raw) return null
 
-    const parsed = JSON.parse(raw) as Partial<OpaquePendingPatientIdentity>
+  // 1. Truly absent: key does not exist in storage
+  if (raw === null) {
+    return null
+  }
+
+  // 2. Value exists: must parse as valid JSON
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new PendingPatientStorageReadError('Corrupted pending patient storage: malformed JSON')
+  }
+
+  // 3. Schema validation: must be a plain object
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new PendingPatientStorageReadError('Corrupted pending patient storage: expected JSON object')
+  }
+
+  const obj = parsed as Record<string, unknown>
+
+  // 4. Validate required technical fields
+  const hasValidSourceSystem =
+    typeof obj.source_system === 'string' && obj.source_system.trim().length > 0
+  const hasValidSourceIdentitySystem =
+    typeof obj.source_identity_system === 'string' && obj.source_identity_system.trim().length > 0
+  const hasValidSourceIdentityValue =
+    typeof obj.source_identity_value === 'string' && obj.source_identity_value.trim().length > 0
+  const hasValidCreatedAt =
+    typeof obj.created_at === 'number' && Number.isFinite(obj.created_at)
+
+  if (
+    !hasValidSourceSystem ||
+    !hasValidSourceIdentitySystem ||
+    !hasValidSourceIdentityValue ||
+    !hasValidCreatedAt
+  ) {
+    throw new PendingPatientStorageReadError(
+      'Corrupted pending patient storage: missing or invalid required technical fields',
+    )
+  }
+
+  // 5. Optional confirmed_patient_reference_id must be valid string if present
+  if ('confirmed_patient_reference_id' in obj && obj.confirmed_patient_reference_id !== undefined) {
     if (
-      typeof parsed.source_system === 'string' &&
-      typeof parsed.source_identity_system === 'string' &&
-      typeof parsed.source_identity_value === 'string' &&
-      typeof parsed.created_at === 'number'
+      typeof obj.confirmed_patient_reference_id !== 'string' ||
+      obj.confirmed_patient_reference_id.trim().length === 0
     ) {
-      return {
-        source_system: parsed.source_system,
-        source_identity_system: parsed.source_identity_system,
-        source_identity_value: parsed.source_identity_value,
-        created_at: parsed.created_at,
-        ...(typeof parsed.confirmed_patient_reference_id === 'string'
-          ? { confirmed_patient_reference_id: parsed.confirmed_patient_reference_id }
-          : {}),
-      }
+      throw new PendingPatientStorageReadError(
+        'Corrupted pending patient storage: invalid confirmed_patient_reference_id',
+      )
     }
-    // Malformed entry
-    clearStoredPendingPatient(userId, providerId)
-    return null
-  } catch (error) {
-    if (error instanceof PendingPatientStorageReadError) throw error
-    return null
+  }
+
+  return {
+    source_system: obj.source_system as string,
+    source_identity_system: obj.source_identity_system as string,
+    source_identity_value: obj.source_identity_value as string,
+    created_at: obj.created_at as number,
+    ...(typeof obj.confirmed_patient_reference_id === 'string'
+      ? { confirmed_patient_reference_id: obj.confirmed_patient_reference_id }
+      : {}),
   }
 }
 

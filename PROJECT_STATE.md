@@ -14182,6 +14182,12 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
    - Phone (`contactValue`) remains optional.
    - Exchange backend API contract remains untouched (background connector/import flows can still bind references without display names).
 
+9. **Fail-Closed Corrupted Pending Patient Storage (Zero Silent Deletion):**
+   - In `pendingPatientStorage.ts`, when a scoped pending patient key exists in `localStorage` but cannot be safely parsed (malformed JSON, invalid field types, missing required source identity value, or untrusted schema), the storage layer throws `PendingPatientStorageReadError`.
+   - Absolutely never deletes, clears, or resets corrupted storage entries; the raw record remains intact for safe/manual recovery.
+   - `ClinicPatientsPage` treats this condition as unreadable storage (`storageUnreadable`): renders safe server error banner without leaking raw technical contents or PHI, disables *"Nouveau patient"* button, closes creation form, disables submit, and ensures `bindPatientReferenceWithOutcome` is never called (0 mutation POSTs) and no fresh UUID is minted.
+   - Distinguishes strictly between truly absent keys (`localStorage.getItem(key) === null` -> returns `null` normally) and corrupted keys (throws fail-closed error).
+
 ### Negative Controls Executed
 
 1. **NC 1: Bypass storage verification before POST (frontend)**
@@ -14232,19 +14238,16 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
    - Result: RED (`AssertionError: expected 'string' to be 'number'`).
    - Restored: GREEN.
 
+9. **NC 9: Corrupted pending patient record treated as absent/cleared (frontend)**
+   - Property: Corrupted or malformed storage must fail closed, must not return null or delete record, and must keep patient creation disabled.
+   - Mutation: In `pendingPatientStorage.ts`, returned `null` instead of throwing `PendingPatientStorageReadError` on JSON parse failure and malformed fields.
+   - Result: RED (`TestingLibraryElementError: Unable to find an element with the text: /Impossible de verifier la recuperation sure/` and `"Nouveau patient"` button was enabled in `ClinicPatientsPage.test.tsx`).
+   - Restored: GREEN.
+
 ### Verification & Test Evidence
 
-- **Exact-SHA GitHub Actions CI Run (35016425683):** 9/9 jobs passed (100% green).
-  - `adapter - ruff + pytest`: 815 passed, 91 skipped, 1 warning in 106.32s (104540896411: success).
-  - `provisioning - ruff + pytest`: success.
-  - `seed + form-safety suites`: success (10 role tests ok).
-  - `compose interpolates and parses`: success.
-  - `openelis order-correlation patch - compiles`: success.
-  - `ui - lint, typecheck, test, build`: 25 test files passed, 307 tests passed in 45.61s (104540896719: success).
-  - `static checks`: success.
-  - `OpenMRS narrow TestOrder module`: success.
-  - `oauth2login - patched identity tests`: success.
-- **Frontend Vitest Suite:** 25 test files passed, 307 tests passed (100% green).
+- **Prior Certified Base SHA:** `b44f7802511336d8de6cb164dbf026a620466f16`
+- **Frontend Vitest Suite:** 25 test files passed, 313 tests passed (100% green).
 - **Frontend Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 79 files).
 - **Frontend Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
 - **Frontend Production Build:** `npm run build` succeeded (`tsc -b && vite build`); bundle postbuild secret check reported `No secrets found across 4 built file(s)`.

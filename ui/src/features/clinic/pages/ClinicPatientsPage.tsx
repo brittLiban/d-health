@@ -151,6 +151,7 @@ export function ClinicPatientsPage({
         if (error instanceof PendingPatientStorageReadError) {
           setStorageUnreadable(true)
           setDefinitiveError("Impossible de verifier la recuperation sure d'une creation precedente.")
+          setShowCreate(false)
         } else throw error
       }
       if (stored) {
@@ -493,7 +494,7 @@ export function ClinicPatientsPage({
               </div>
             ) : null}
             <div className={styles.actions}>
-              <Button type="submit" disabled={createState === 'submitting'}>
+              <Button type="submit" disabled={createState === 'submitting' || storageUnreadable}>
                 {createState === 'submitting' ? 'Création…' : 'Créer et ouvrir'}
               </Button>
               <Button type="button" variant="secondary" onClick={handleCancelCreate}>
