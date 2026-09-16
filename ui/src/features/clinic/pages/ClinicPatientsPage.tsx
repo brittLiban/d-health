@@ -9,6 +9,8 @@ import type {
   ClinicPatientSummary,
   LabOrder,
   LabOrderCreateOutcome,
+  LabOrderIntent,
+  LabOrderIntentItem,
   PatientReferenceBindRequest,
 } from '../../../api/exchangeTypes'
 import type { ErrorCode } from '../../../api/types'
@@ -149,6 +151,7 @@ export function ClinicPatientsPage({
   const [reconcilingStoredOrder, setReconcilingStoredOrder] = useState(false)
   const [orderStorageUnreadable, setOrderStorageUnreadable] = useState(false)
   const [hadPriorAmbiguousAttempt, setHadPriorAmbiguousAttempt] = useState(false)
+  const [intentItemSnapshots, setIntentItemSnapshots] = useState<LabOrderIntentItem[] | null>(null)
 
 
   useEffect(() => {
@@ -338,6 +341,7 @@ export function ClinicPatientsPage({
       } else {
         setOrderDraftIdempotencyKey(null)
         setSelectedCatalogEntryIds([])
+        setIntentItemSnapshots(null)
         setOrderSubmitState('idle')
         setOrderSubmitError(null)
         setHadPriorAmbiguousAttempt(false)
@@ -367,6 +371,8 @@ export function ClinicPatientsPage({
         if (storedOrder) {
           setUnresolvedStoredOrder(storedOrder)
           setOrderDraftIdempotencyKey(storedOrder.idempotency_key)
+          // DH-CLINIC-003B fix: Any unresolved stored order represents a prior ambiguous attempt
+          setHadPriorAmbiguousAttempt(true)
           setReconcilingStoredOrder(true)
           void (async () => {
             let foundOrder: LabOrder | null = null
@@ -385,8 +391,8 @@ export function ClinicPatientsPage({
               currentProviderRef.current === providerId &&
               currentPatientRef.current === selectedPatient.patient_reference_id
             ) {
-              setReconcilingStoredOrder(false)
               if (foundOrder) {
+                setReconcilingStoredOrder(false)
                 clearStoredPendingOrder(
                   user.identity_id,
                   providerId,
@@ -402,13 +408,116 @@ export function ClinicPatientsPage({
                   if (curr.some((o) => o.id === foundOrder.id)) return curr
                   return [foundOrder, ...curr]
                 })
+              } else {
+                // Order not found. Check if backend-owned intent exists (DH-CLINIC-003C Option A)
+                let foundIntent: LabOrderIntent | null = null
+                try {
+                  if (storedOrder.intent_id) {
+                    foundIntent = await client.getOrderIntent(
+                      providerId,
+                      storedOrder.intent_id,
+                      { token: authToken ?? undefined },
+                    )
+                  } else {
+                    foundIntent = await client.getOrderIntentByIdempotencyKey(
+                      providerId,
+                      storedOrder.idempotency_key,
+                      { token: authToken ?? undefined },
+                    )
+                  }
+                } catch {
+                  // Intent read failure
+                }
+
+                if (
+                  mountedRef.current &&
+                  currentProviderRef.current === providerId &&
+                  currentPatientRef.current === selectedPatient.patient_reference_id
+                ) {
+                  setReconcilingStoredOrder(false)
+                  if (
+                    foundIntent &&
+                    (foundIntent.provider_organization_id !== providerId ||
+                      foundIntent.patient_reference_id !== selectedPatient.patient_reference_id ||
+                      foundIntent.idempotency_key !== storedOrder.idempotency_key)
+                  ) {
+                    // A syntactically valid technical pointer that resolves to another
+                    // canonical tuple is unsafe.  Retain the stored record fail-closed.
+                    setOrderStorageUnreadable(true)
+                    setOrderSubmitState('uncertain')
+                    return
+                  }
+                  if (foundIntent) {
+                    if (foundIntent.committed_lab_order_id) {
+                      let committedOrder: LabOrder | null = null
+                      try {
+                        committedOrder = await client.getOrder(
+                          providerId,
+                          foundIntent.committed_lab_order_id,
+                          authToken ?? undefined,
+                        )
+                      } catch {
+                        // ignore
+                      }
+                      if (
+                        mountedRef.current &&
+                        currentProviderRef.current === providerId &&
+                        currentPatientRef.current === selectedPatient.patient_reference_id &&
+                        committedOrder
+                      ) {
+                        clearStoredPendingOrder(
+                          user.identity_id,
+                          providerId,
+                          selectedPatient.patient_reference_id,
+                        )
+                        if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
+                        setUnresolvedStoredOrder(null)
+                        setOrderOutcome({ order: committedOrder, created: false })
+                        setOrderStep('confirmation')
+                        setShowOrderWizard(true)
+                        setPatientOrders((curr) => {
+                          if (!curr) return [committedOrder]
+                          if (curr.some((o) => o.id === committedOrder.id)) return curr
+                          return [committedOrder, ...curr]
+                        })
+                        return
+                      }
+                    }
+
+                    // Intent exists and is not yet committed.
+                    // If intent_id was not yet in storedOrder, update persistent storage
+                    if (!storedOrder.intent_id) {
+                      setStoredPendingOrder(
+                        user.identity_id,
+                        providerId,
+                        selectedPatient.patient_reference_id,
+                        {
+                          idempotency_key: storedOrder.idempotency_key,
+                          intent_id: foundIntent.id,
+                          created_at: storedOrder.created_at,
+                        },
+                      )
+                      setUnresolvedStoredOrder({
+                        ...storedOrder,
+                        intent_id: foundIntent.id,
+                      })
+                    }
+
+                    // Faithfully restore catalog selections strictly from backend intent!
+                    // Zero catalog IDs in browser local storage.
+                    setIntentItemSnapshots(foundIntent.items)
+                    setSelectedCatalogEntryIds(foundIntent.items.map((item) => item.catalog_entry_id))
+                    setOrderStep('review')
+                    setOrderSubmitState('uncertain')
+                    setHadPriorAmbiguousAttempt(true)
+                  }
+                }
               }
-              // If foundOrder is null (404) or failed, unresolvedStoredOrder remains set!
-              // Do NOT clear it or allow abandoning.
             }
           })()
         } else {
           setUnresolvedStoredOrder(null)
+          setIntentItemSnapshots(null)
         }
       }
     } else {
@@ -418,6 +527,7 @@ export function ClinicPatientsPage({
       setOrderOutcome(null)
       setOrderDraftIdempotencyKey(null)
       setSelectedCatalogEntryIds([])
+      setIntentItemSnapshots(null)
       setOrderSubmitState('idle')
       setUnresolvedStoredOrder(null)
       setHadPriorAmbiguousAttempt(false)
@@ -445,7 +555,7 @@ export function ClinicPatientsPage({
     if (!orderDraftIdempotencyKey) {
       setOrderDraftIdempotencyKey(crypto.randomUUID())
     }
-    if (orderSubmitState !== 'uncertain') {
+    if (orderSubmitState !== 'uncertain' && !unresolvedStoredOrder?.intent_id) {
       setSelectedCatalogEntryIds([])
       setCatalogSearch('')
       setOrderSubmitState('idle')
@@ -464,8 +574,10 @@ export function ClinicPatientsPage({
     if (selectedCatalogEntryIds.length > 0) {
       setOrderStep('review')
     } else {
-      setOrderStep('catalog')
-      setOrderSubmitState('idle')
+      // A durable intent is immutable.  Never revive the old Option-C path in
+      // which a clinician reconstructs unknown service selections after reload.
+      // The reconciliation effect must first retrieve the canonical intent.
+      setOrderSubmitState('uncertain')
     }
     if (catalogEntries === null || catalogLoadState !== 'success') {
       void loadCatalog()
@@ -474,7 +586,7 @@ export function ClinicPatientsPage({
 
   const handleToggleService = (entryId: string) => {
     if (orderSubmitState === 'submitting') return
-    if (orderSubmitState === 'uncertain' && selectedCatalogEntryIds.length > 0) return
+    if (unresolvedStoredOrder?.intent_id || orderSubmitState === 'uncertain') return
     setSelectedCatalogEntryIds((prev) =>
       prev.includes(entryId) ? prev.filter((id) => id !== entryId) : [...prev, entryId],
     )
@@ -494,14 +606,15 @@ export function ClinicPatientsPage({
 
     // Persist-before-POST durability gate:
     // We MUST record the technical non-PHI identity tuple in persistent storage
-    // and verify read-back BEFORE firing the network mutation.
+    // and verify read-back BEFORE firing any network mutation.
     // If storage write or read-back fails, we fail closed and NEVER call POST.
     let writeOk = false
     let readBackOk = false
     if (targetUserId) {
       writeOk = setStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId, {
         idempotency_key: key,
-        created_at: Date.now(),
+        created_at: unresolvedStoredOrder?.created_at ?? Date.now(),
+        ...(unresolvedStoredOrder?.intent_id ? { intent_id: unresolvedStoredOrder.intent_id } : {}),
       })
       try {
         const readBack = getStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)
@@ -532,16 +645,70 @@ export function ClinicPatientsPage({
     setOrderSubmitState('submitting')
     setOrderSubmitError(null)
 
+    let durableIntentRegistered = Boolean(unresolvedStoredOrder?.intent_id)
     try {
-      const outcome = await client.createOrderWithOutcome(
-        targetProviderId,
-        key,
-        {
-          patient_reference_id: targetPatientRefId,
-          catalog_entry_ids: selectedCatalogEntryIds,
-        },
-        { token: authToken ?? undefined },
-      )
+      // Step 1: Ensure backend intent exists (DH-CLINIC-003C Option A)
+      let intentId = unresolvedStoredOrder?.intent_id
+      if (!intentId) {
+        const intentOutcome = await client.createOrderIntentWithOutcome(
+          targetProviderId,
+          key,
+          {
+            patient_reference_id: targetPatientRefId,
+            catalog_entry_ids: selectedCatalogEntryIds,
+          },
+          { token: authToken ?? undefined },
+        )
+        intentId = intentOutcome.intent.id
+
+        if (
+          !mountedRef.current ||
+          currentProviderRef.current !== targetProviderId ||
+          currentPatientRef.current !== targetPatientRefId
+        ) {
+          return
+        }
+
+        // Persist intent_id to storage and verify read-back
+        if (targetUserId) {
+          const updatedWriteOk = setStoredPendingOrder(
+            targetUserId,
+            targetProviderId,
+            targetPatientRefId,
+            {
+              idempotency_key: key,
+              intent_id: intentId,
+              created_at: unresolvedStoredOrder?.created_at ?? Date.now(),
+            },
+          )
+          const readBack = getStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)
+          if (!updatedWriteOk || !readBack || readBack.intent_id !== intentId) {
+            setOrderStorageUnreadable(true)
+            setOrderSubmitState('uncertain')
+            setHadPriorAmbiguousAttempt(true)
+            return
+          }
+        }
+        setUnresolvedStoredOrder((prev) =>
+          prev
+            ? { ...prev, intent_id: intentId }
+            : {
+                user_id: targetUserId,
+                provider_id: targetProviderId,
+                patient_reference_id: targetPatientRefId,
+                idempotency_key: key,
+                intent_id: intentId,
+                created_at: Date.now(),
+              },
+        )
+        durableIntentRegistered = true
+      }
+
+      // Step 2: Commit the backend intent
+      const outcome = await client.commitOrderIntentWithOutcome(targetProviderId, intentId, {
+        token: authToken ?? undefined,
+      })
+
       if (
         !mountedRef.current ||
         currentProviderRef.current !== targetProviderId ||
@@ -555,6 +722,7 @@ export function ClinicPatientsPage({
       setOrderSubmitState('idle')
       setHadPriorAmbiguousAttempt(false)
       setUnresolvedStoredOrder(null)
+      setIntentItemSnapshots(null)
 
       // Immediately prepend outcome.order to local patientOrders state
       setPatientOrders((curr) => {
@@ -588,24 +756,29 @@ export function ClinicPatientsPage({
             error.detail ||
               'Conflit d’idempotence : Cette clé a déjà été utilisée avec un contenu différent.',
           )
-        } else if (!hadPriorAmbiguousAttempt) {
+        } else if (!hadPriorAmbiguousAttempt && !durableIntentRegistered) {
           // If first attempt was definitively refused before any ambiguity, clear stored pending order
           if (targetUserId) {
             clearStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)
           }
           if (currentScopeKey) onPendingOrderChange?.(currentScopeKey, null)
           setUnresolvedStoredOrder(null)
+          setIntentItemSnapshots(null)
           setOrderSubmitState('error')
           setOrderSubmitErrorCode(safeErrorCode(error))
           setOrderSubmitError(
-            error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la création de l’ordre',
+            error instanceof ExchangeApiError
+              ? error.detail
+              : 'Erreur lors de la création de l’ordre',
           )
         } else {
           // Definitive error on retry after earlier ambiguous attempt: keep uncertain
           setOrderSubmitState('uncertain')
           setOrderSubmitErrorCode(safeErrorCode(error))
           setOrderSubmitError(
-            error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la vérification de l’ordre',
+            error instanceof ExchangeApiError
+              ? error.detail
+              : 'Erreur lors de la vérification de l’ordre',
           )
         }
       } else {
@@ -623,11 +796,12 @@ export function ClinicPatientsPage({
     if (
       orderSubmitState !== 'uncertain' &&
       !hadPriorAmbiguousAttempt &&
-      !unresolvedStoredOrder
+      !unresolvedStoredOrder?.intent_id
     ) {
       setOrderOutcome(null)
       setOrderDraftIdempotencyKey(null)
       setSelectedCatalogEntryIds([])
+      setIntentItemSnapshots(null)
       setOrderSubmitState('idle')
       setOrderSubmitError(null)
       setOrderStep('catalog')
@@ -1024,11 +1198,16 @@ export function ClinicPatientsPage({
                     <h3>Services sélectionnés ({selectedCatalogEntryIds.length})</h3>
                     <ul className={styles.reviewServicesList}>
                       {selectedCatalogEntryIds.map((id) => {
+                        const snapshot = intentItemSnapshots?.find((s) => s.catalog_entry_id === id)
                         const entry = (catalogEntries ?? []).find((e) => e.id === id)
+                        const code = snapshot?.catalog_code_snapshot || entry?.code || id
+                        const displayName =
+                          snapshot?.catalog_display_name_snapshot ||
+                          entry?.display_name ||
+                          'Service diagnostique'
                         return (
                           <li key={id}>
-                            <strong>{entry?.code || id}</strong> —{' '}
-                            {entry?.display_name || 'Service diagnostique'}
+                            <strong>{code}</strong> — {displayName}
                           </li>
                         )
                       })}

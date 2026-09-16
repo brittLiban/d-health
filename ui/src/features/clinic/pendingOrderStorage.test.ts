@@ -29,6 +29,16 @@ describe('pendingOrderStorage', () => {
     expect(stored?.confirmed_order_id).toBeUndefined()
   })
 
+  it('stores optional intent_id', () => {
+    setStoredPendingOrder('user-1', 'prov-1', 'pat-1', {
+      idempotency_key: 'idemp-uuid-1',
+      intent_id: 'intent-uuid-1',
+    })
+
+    const stored = getStoredPendingOrder('user-1', 'prov-1', 'pat-1')
+    expect(stored?.intent_id).toBe('intent-uuid-1')
+  })
+
   it('stores optional confirmed_order_id', () => {
     setStoredPendingOrder('user-1', 'prov-1', 'pat-1', {
       idempotency_key: 'idemp-uuid-1',

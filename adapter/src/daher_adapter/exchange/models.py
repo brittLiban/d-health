@@ -47,6 +47,8 @@ __all__ = [
     "LabOffering",
     "LabObservation",
     "LabOrder",
+    "LabOrderIntent",
+    "LabOrderIntentItem",
     "LabOrderItem",
     "LabOrderStatus",
     "LabPrice",
@@ -363,6 +365,7 @@ class LabOrder(Base):
             "idempotency_key",
             name="uq_exchange_lab_orders_provider_idempotency_key",
         ),
+        UniqueConstraint("intent_id", name="uq_exchange_lab_orders_intent_id"),
         Index("ix_exchange_lab_orders_provider_organization_id", "provider_organization_id"),
         Index("ix_exchange_lab_orders_status", "status"),
     )
@@ -377,6 +380,11 @@ class LabOrder(Base):
     )
     practitioner_reference_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_practitioner_references.id", ondelete="RESTRICT"), nullable=False
+    )
+    # NULL is retained solely for LabOrders created before DH-CLINIC-003C.
+    # Every new provider order is committed from one immutable intent.
+    intent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_order_intents.id", ondelete="RESTRICT"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default=LabOrderStatus.AWAITING_LAB_SELECTION.value
@@ -421,6 +429,87 @@ class LabOrderItem(Base):
     selected_price_currency: Mapped[str | None] = mapped_column(String(3))
     order: Mapped[LabOrder] = relationship(back_populates="items")
     result: Mapped[LabResult | None] = relationship(back_populates="order_item")
+
+
+class LabOrderIntent(Base):
+    """DH-CLINIC-003C: Backend-owned durable canonical diagnostic order intent.
+
+    An immutable record of one intended clinical submission created prior to committing
+    a LabOrder. Allows exact mutation recovery across browser crashes or page reloads
+    without persisting diagnostic service IDs or test names in browser local storage.
+
+    Uniqueness is scoped to ``(provider_organization_id, idempotency_key)``, preserving
+    exact provider isolation and duplicate-safe replay semantics.
+    """
+
+    __tablename__ = "exchange_lab_order_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_organization_id",
+            "idempotency_key",
+            name="uq_exchange_lab_order_intents_provider_idempotency_key",
+        ),
+        UniqueConstraint(
+            "committed_lab_order_id",
+            name="uq_exchange_lab_order_intents_committed_order",
+        ),
+        Index("ix_exchange_lab_order_intents_provider_org_id", "provider_organization_id"),
+        Index(
+            "ix_exchange_lab_order_intents_patient_ref_id",
+            "provider_organization_id",
+            "patient_reference_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    patient_reference_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_patient_references.id", ondelete="RESTRICT"), nullable=False
+    )
+    practitioner_reference_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_practitioner_references.id", ondelete="RESTRICT"), nullable=False
+    )
+    committed_lab_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    items: Mapped[list[LabOrderIntentItem]] = relationship(
+        back_populates="intent", cascade="all, delete-orphan"
+    )
+    committed_order: Mapped[LabOrder | None] = relationship(foreign_keys=[committed_lab_order_id])
+
+
+class LabOrderIntentItem(Base):
+    """One requested test on an order intent. Freezes canonical catalog_entry_id as well
+    as catalog code and display name snapshots at intent creation time."""
+
+    __tablename__ = "exchange_lab_order_intent_items"
+    __table_args__ = (
+        Index("ix_exchange_lab_order_intent_items_intent_id", "intent_id"),
+        UniqueConstraint(
+            "intent_id",
+            "catalog_entry_id",
+            name="uq_exchange_lab_order_intent_items_intent_entry",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    intent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_order_intents.id", ondelete="CASCADE"), nullable=False
+    )
+    catalog_entry_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_test_catalog_entries.id", ondelete="RESTRICT"), nullable=False
+    )
+    catalog_code_snapshot: Mapped[str] = mapped_column(String(64), nullable=False)
+    catalog_display_name_snapshot: Mapped[str] = mapped_column(String(256), nullable=False)
+
+    intent: Mapped[LabOrderIntent] = relationship(back_populates="items")
 
 
 class LabSelection(Base):

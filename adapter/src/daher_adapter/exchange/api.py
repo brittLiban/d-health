@@ -89,6 +89,11 @@ from daher_adapter.exchange.models import (
     OrganizationType,
     PatientAccessMode,
 )
+from daher_adapter.exchange.order_intents import (
+    LabOrderIntentRecord,
+    LabOrderIntentRepository,
+    OrderIntentNotFound,
+)
 from daher_adapter.exchange.orders import (
     EmptyOrder,
     IdempotencyKeyConflict,
@@ -608,6 +613,63 @@ class LabOrderSummaryResponse(BaseModel):
     status: str
     created_at: datetime
     item_count: int
+
+
+# -- DH-CLINIC-003C: backend-owned durable canonical order intent ---------------------------------
+
+
+class LabOrderIntentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    patient_reference_id: uuid.UUID
+    catalog_entry_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def _no_duplicate_entries(self) -> "LabOrderIntentCreateRequest":
+        if len(set(self.catalog_entry_ids)) != len(self.catalog_entry_ids):
+            raise ValueError("catalog_entry_ids must not contain duplicates")
+        return self
+
+
+class LabOrderIntentItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_entry_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+
+
+class LabOrderIntentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    idempotency_key: str
+    provider_organization_id: uuid.UUID
+    patient_reference_id: uuid.UUID
+    practitioner_reference_id: uuid.UUID
+    committed_lab_order_id: uuid.UUID | None
+    created_at: datetime
+    items: list[LabOrderIntentItemResponse]
+
+
+def _to_intent_response(intent: LabOrderIntentRecord) -> LabOrderIntentResponse:
+    return LabOrderIntentResponse(
+        id=intent.id,
+        idempotency_key=intent.idempotency_key,
+        provider_organization_id=intent.provider_organization_id,
+        patient_reference_id=intent.patient_reference_id,
+        practitioner_reference_id=intent.practitioner_reference_id,
+        committed_lab_order_id=intent.committed_lab_order_id,
+        created_at=intent.created_at,
+        items=[
+            LabOrderIntentItemResponse(
+                catalog_entry_id=item.catalog_entry_id,
+                catalog_code_snapshot=item.catalog_code_snapshot,
+                catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+            )
+            for item in intent.items
+        ],
+    )
 
 
 # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) ---------------
@@ -1258,6 +1320,7 @@ def build_exchange_router(
     patients = PatientReferenceRepository(session_factory)
     practitioners = PractitionerReferenceRepository(session_factory)
     orders = LabOrderRepository(session_factory, organizations, catalog)
+    order_intents = LabOrderIntentRepository(session_factory, organizations, catalog)
     selections = LabSelectionRepository(session_factory, organizations)
     patient_access = PatientAccessGrantRepository(
         session_factory, ttl_hours=patient_access_ttl_hours
@@ -2262,17 +2325,43 @@ def build_exchange_router(
                     display_name=identity.display_name,
                     session=session,
                 )
-                result = orders.create(
-                    idempotency_key=idempotency_key,
-                    provider_organization_id=provider_id,
-                    patient_reference_id=body.patient_reference_id,
-                    practitioner_reference_id=practitioner.id,
-                    items=[
-                        OrderItemInput(catalog_entry_id=entry_id)
-                        for entry_id in body.catalog_entry_ids
-                    ],
-                    session=session,
+                # DH-CLINIC-003C: a prepared durable intent reserves this
+                # provider/key.  The retained legacy endpoint may only consume
+                # that exact canonical intent; it must never create different
+                # clinical content under the same idempotency identity.
+                reserved_intent = order_intents.get_by_idempotency_key(
+                    provider_id, idempotency_key, session=session
                 )
+                if reserved_intent is not None:
+                    if (
+                        reserved_intent.patient_reference_id != body.patient_reference_id
+                        or reserved_intent.practitioner_reference_id != practitioner.id
+                        or {item.catalog_entry_id for item in reserved_intent.items}
+                        != set(body.catalog_entry_ids)
+                    ):
+                        raise IdempotencyKeyConflict(
+                            "idempotency key is reserved by an immutable order intent with "
+                            "different canonical content"
+                        )
+                    result = order_intents.commit(
+                        provider_id, reserved_intent.id, orders, session=session
+                    )
+                else:
+                    # All new creation, including this legacy-compatible route,
+                    # first acquires the single durable provider/key reservation.
+                    # The intent table's unique constraint is therefore the one
+                    # owner under concurrent legacy and native-Clinic requests.
+                    reservation = order_intents.create(
+                        idempotency_key=idempotency_key,
+                        provider_organization_id=provider_id,
+                        patient_reference_id=body.patient_reference_id,
+                        practitioner_reference_id=practitioner.id,
+                        catalog_entry_ids=body.catalog_entry_ids,
+                        session=session,
+                    )
+                    result = order_intents.commit(
+                        provider_id, reservation.intent.id, orders, session=session
+                    )
                 # Exact idempotent replay must never emit a second `lab_order_created` row -- the
                 # original mutation was already audited.
                 if result.created:
@@ -2352,6 +2441,208 @@ def build_exchange_router(
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return _to_order_response(order)
+
+    @router.post(
+        "/organizations/{provider_id}/order-intents",
+        response_model=LabOrderIntentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_order_intent(
+        provider_id: uuid.UUID,
+        body: LabOrderIntentCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> LabOrderIntentResponse:
+        """DH-CLINIC-003C: Prepare and persist an immutable diagnostic order intent.
+
+        Validates provider scope, patient reference existence within provider, active synthetic
+        catalog entries, and derives practitioner from authenticated clinician.
+        Enforces provider-scoped idempotency: exact match returns existing intent (200 OK),
+        mismatched payload for same key returns 409 Conflict.
+        """
+        _require_clinician(principal, provider_id)
+
+        if patients.get_for_organization(body.patient_reference_id, provider_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient reference not found"
+            )
+
+        for entry_id in body.catalog_entry_ids:
+            try:
+                entry = catalog.get_entry(entry_id)
+            except CatalogEntryNotFound as error:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"catalog entry {entry_id} not found",
+                ) from error
+            if not entry.active:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not active",
+                )
+            if not entry.is_synthetic:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"catalog entry {entry_id} is not a synthetic pilot-phase entry",
+                )
+
+        identity = identities.get(principal.identity_id)
+
+        try:
+            with session_factory.begin() as session:
+                practitioner = practitioners.get_or_create(
+                    source_organization_id=provider_id,
+                    source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+                    source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+                    source_identity_value=str(principal.identity_id),
+                    display_name=identity.display_name,
+                    session=session,
+                )
+                result = order_intents.create(
+                    idempotency_key=idempotency_key,
+                    provider_organization_id=provider_id,
+                    patient_reference_id=body.patient_reference_id,
+                    practitioner_reference_id=practitioner.id,
+                    catalog_entry_ids=body.catalog_entry_ids,
+                    session=session,
+                )
+        except (InvalidOrganizationType, ValueError, EmptyOrder) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except IdempotencyKeyConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_intent_response(result.intent)
+
+    @router.get(
+        "/organizations/{provider_id}/order-intents/by-idempotency-key/{idempotency_key}",
+        response_model=LabOrderIntentResponse,
+    )
+    def get_order_intent_by_idempotency_key(
+        provider_id: uuid.UUID,
+        idempotency_key: Annotated[str, Path(min_length=1, max_length=256)],
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOrderIntentResponse:
+        """DH-CLINIC-003C: Lookup an existing LabOrderIntent by its idempotency key.
+
+        Enforces clinician authorization, provider isolation, and anti-enumeration (404 on miss).
+        """
+        _require_clinician(principal, provider_id)
+        intent = order_intents.get_by_idempotency_key(provider_id, idempotency_key)
+        if intent is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+            )
+        caller = practitioners.get_or_create(
+            source_organization_id=provider_id,
+            source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+            source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+            source_identity_value=str(principal.identity_id),
+            display_name=identities.get(principal.identity_id).display_name,
+        )
+        if caller.id != intent.practitioner_reference_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found")
+        return _to_intent_response(intent)
+
+    @router.get(
+        "/organizations/{provider_id}/order-intents/{intent_id}",
+        response_model=LabOrderIntentResponse,
+    )
+    def get_order_intent(
+        provider_id: uuid.UUID,
+        intent_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOrderIntentResponse:
+        """DH-CLINIC-003C: Lookup an existing LabOrderIntent by intent_id.
+
+        Enforces clinician authorization, provider isolation, and anti-enumeration (404 on miss).
+        """
+        _require_clinician(principal, provider_id)
+        intent = order_intents.get_for_organization(provider_id, intent_id)
+        if intent is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+            )
+        caller = practitioners.get_or_create(
+            source_organization_id=provider_id,
+            source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+            source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+            source_identity_value=str(principal.identity_id),
+            display_name=identities.get(principal.identity_id).display_name,
+        )
+        if caller.id != intent.practitioner_reference_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found")
+        return _to_intent_response(intent)
+
+    @router.post(
+        "/organizations/{provider_id}/order-intents/{intent_id}/commit",
+        response_model=LabOrderResponse,
+    )
+    def commit_order_intent(
+        provider_id: uuid.UUID,
+        intent_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOrderResponse:
+        """DH-CLINIC-003C: Commit an immutable backend LabOrderIntent into an actual LabOrder.
+
+        Enforces:
+        - Clinician authorization for provider
+        - Intent must exist under provider
+        - Caller must be the author clinician (practitioner reference matches)
+        - Row-level locking ensures concurrent commits converge cleanly to exactly one LabOrder
+        - Audits lab_order_created on creation
+        """
+        _require_clinician(principal, provider_id)
+        identity = identities.get(principal.identity_id)
+
+        try:
+            with session_factory.begin() as session:
+                intent_record = order_intents.get_for_organization(
+                    provider_id, intent_id, session=session
+                )
+                if intent_record is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+                    )
+
+                caller_practitioner = practitioners.get_or_create(
+                    source_organization_id=provider_id,
+                    source_system=_CLINICIAN_PRACTITIONER_SOURCE_SYSTEM,
+                    source_identity_system=_CLINICIAN_PRACTITIONER_SOURCE_IDENTITY_SYSTEM,
+                    source_identity_value=str(principal.identity_id),
+                    display_name=identity.display_name,
+                    session=session,
+                )
+                if caller_practitioner.id != intent_record.practitioner_reference_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="only the ordering clinician who authored this intent may commit it",
+                    )
+
+                result = order_intents.commit(provider_id, intent_id, orders, session=session)
+                if result.created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_created",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=result.order.id,
+                    )
+        except OrderIntentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+            ) from error
+        except IdempotencyKeyConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_order_response(result.order)
 
     @router.get(
         "/organizations/{provider_id}/patient-references/{patient_reference_id}/orders",

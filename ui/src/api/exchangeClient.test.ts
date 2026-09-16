@@ -682,4 +682,133 @@ describe('ExchangeClient', () => {
     const client = new ExchangeClient()
     await expect(client.getOrderByIdempotencyKey('prov-1', 'err-key')).rejects.toThrow()
   })
+
+  it('createOrderIntentWithOutcome sends POST /exchange/v1/organizations/{provider_id}/order-intents with Idempotency-Key', async () => {
+    const mockIntent = {
+      id: 'intent-123',
+      idempotency_key: 'key-abc',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-1',
+      practitioner_reference_id: 'prac-1',
+      committed_lab_order_id: null,
+      created_at: '2026-09-16T08:00:00Z',
+      items: [
+        {
+          id: 'item-1',
+          catalog_entry_id: 'cat-1',
+          catalog_code_snapshot: 'SYNTH-CBC',
+          catalog_display_name_snapshot: 'Numération Formule Sanguine',
+        },
+      ],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockIntent), { status: 201 }),
+    )
+
+    const client = new ExchangeClient()
+    const outcome = await client.createOrderIntentWithOutcome(
+      'prov-1',
+      'key-abc',
+      {
+        patient_reference_id: 'pat-1',
+        catalog_entry_ids: ['cat-1'],
+      },
+      { token: 'tok-intent' },
+    )
+
+    expect(outcome.created).toBe(true)
+    expect(outcome.intent).toEqual(mockIntent)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/order-intents')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer tok-intent',
+      'Idempotency-Key': 'key-abc',
+      'Content-Type': 'application/json',
+    })
+  })
+
+  it('getOrderIntentByIdempotencyKey retrieves intent by key and returns null on 404', async () => {
+    const mockIntent = {
+      id: 'intent-456',
+      idempotency_key: 'key-xyz',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-1',
+      practitioner_reference_id: 'prac-1',
+      committed_lab_order_id: null,
+      created_at: '2026-09-16T08:00:00Z',
+      items: [],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockIntent), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrderIntentByIdempotencyKey('prov-1', 'key-xyz')
+    expect(result).toEqual(mockIntent)
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    )
+    const notFound = await client.getOrderIntentByIdempotencyKey('prov-1', 'missing-key')
+    expect(notFound).toBeNull()
+  })
+
+  it('getOrderIntent retrieves intent by ID and returns null on 404', async () => {
+    const mockIntent = {
+      id: 'intent-789',
+      idempotency_key: 'key-789',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-1',
+      practitioner_reference_id: 'prac-1',
+      committed_lab_order_id: null,
+      created_at: '2026-09-16T08:00:00Z',
+      items: [],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockIntent), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrderIntent('prov-1', 'intent-789')
+    expect(result).toEqual(mockIntent)
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    )
+    const notFound = await client.getOrderIntent('prov-1', 'missing-id')
+    expect(notFound).toBeNull()
+  })
+
+  it('commitOrderIntentWithOutcome sends POST /exchange/v1/organizations/{provider_id}/order-intents/{intent_id}/commit', async () => {
+    const mockOrder = {
+      id: 'order-commit-1',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-1',
+      practitioner_reference_id: 'prac-1',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:00:00Z',
+      items: [],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrder), { status: 201 }),
+    )
+
+    const client = new ExchangeClient()
+    const outcome = await client.commitOrderIntentWithOutcome('prov-1', 'intent-123', {
+      token: 'tok-commit',
+    })
+
+    expect(outcome.created).toBe(true)
+    expect(outcome.order).toEqual(mockOrder)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/order-intents/intent-123/commit')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer tok-commit',
+      'Content-Type': 'application/json',
+    })
+  })
 })

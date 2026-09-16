@@ -21,6 +21,8 @@ export interface OpaquePendingOrderIdentity {
   patient_reference_id: string
   idempotency_key: string
   created_at: number
+  /** Set after the intent is created on backend; still non-PHI and non-clinical. */
+  intent_id?: string
   /** Set only after the order create POST has returned successfully; still non-PHI. */
   confirmed_order_id?: string
 }
@@ -119,7 +121,19 @@ export function getStoredPendingOrder(
     )
   }
 
-  // 5. Optional confirmed_order_id must be valid string if present
+  // 5. Optional intent_id must be valid string if present
+  if ('intent_id' in obj && obj.intent_id !== undefined) {
+    if (
+      typeof obj.intent_id !== 'string' ||
+      obj.intent_id.trim().length === 0
+    ) {
+      throw new PendingOrderStorageReadError(
+        'Corrupted pending order storage: invalid intent_id',
+      )
+    }
+  }
+
+  // 6. Optional confirmed_order_id must be valid string if present
   if ('confirmed_order_id' in obj && obj.confirmed_order_id !== undefined) {
     if (
       typeof obj.confirmed_order_id !== 'string' ||
@@ -137,6 +151,7 @@ export function getStoredPendingOrder(
     patient_reference_id: obj.patient_reference_id as string,
     idempotency_key: obj.idempotency_key as string,
     created_at: obj.created_at as number,
+    ...(typeof obj.intent_id === 'string' ? { intent_id: obj.intent_id } : {}),
     ...(typeof obj.confirmed_order_id === 'string'
       ? { confirmed_order_id: obj.confirmed_order_id }
       : {}),
@@ -160,6 +175,9 @@ export function setStoredPendingOrder(
     patient_reference_id: patientReferenceId,
     idempotency_key: pending.idempotency_key,
     created_at: pending.created_at ?? Date.now(),
+    ...(typeof pending.intent_id === 'string'
+      ? { intent_id: pending.intent_id }
+      : {}),
     ...(typeof pending.confirmed_order_id === 'string'
       ? { confirmed_order_id: pending.confirmed_order_id }
       : {}),

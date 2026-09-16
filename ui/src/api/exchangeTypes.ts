@@ -100,6 +100,37 @@ export interface LabOrderCreateOutcome {
   created: boolean
 }
 
+export interface LabOrderIntentItem {
+  id: string
+  catalog_entry_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+}
+
+export interface LabOrderIntent {
+  id: string
+  idempotency_key: string
+  provider_organization_id: string
+  patient_reference_id: string
+  practitioner_reference_id: string
+  committed_lab_order_id: string | null
+  created_at: string
+  items: LabOrderIntentItem[]
+}
+
+export type LabOrderIntentResponse = LabOrderIntent
+export type LabOrderIntentItemResponse = LabOrderIntentItem
+
+export interface LabOrderIntentCreateRequest {
+  patient_reference_id: string
+  catalog_entry_ids: string[]
+}
+
+export interface LabOrderIntentCreateOutcome {
+  intent: LabOrderIntent
+  created: boolean
+}
+
 
 export interface ProviderObservationResponse {
   observation_id: string

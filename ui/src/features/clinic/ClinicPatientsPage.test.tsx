@@ -8,6 +8,8 @@ import type {
   ClinicPatientSummary,
   ExchangeMeResponse,
   LabOrder,
+  LabOrderIntent,
+  LabOrderIntentItem,
   PatientReferenceBindRequest,
 } from '../../api/exchangeTypes'
 import {
@@ -21,6 +23,33 @@ import {
   setStoredPendingOrder,
 } from './pendingOrderStorage'
 import { ClinicApp } from './ClinicApp'
+
+const mockCatalogTests: CatalogEntry[] = [
+  {
+    id: '11111111-2222-4333-8444-555555555555',
+    code: 'SYNTH-CBC',
+    display_name: 'Numération Formule Sanguine (NFS)',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+  {
+    id: '22222222-3333-4444-8555-666666666666',
+    code: 'SYNTH-GLU',
+    display_name: 'Glycémie à jeun',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+  {
+    id: '33333333-4444-4555-8666-777777777777',
+    code: 'SYNTH-LIP',
+    display_name: 'Bilan lipidique complet',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+]
 
 const patientWithName: ClinicPatientSummary = {
   patient_reference_id: '11111111-1111-4111-8111-111111111111',
@@ -64,6 +93,55 @@ const me: ExchangeMeResponse = {
 }
 
 function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
+  const defaultCreateIntent = vi
+    .fn()
+    .mockImplementation((providerId: string, idempotencyKey: string, body: any) =>
+      Promise.resolve({
+        intent: {
+          id: `intent-${idempotencyKey}`,
+          idempotency_key: idempotencyKey,
+          provider_organization_id: providerId,
+          patient_reference_id: body.patient_reference_id,
+          practitioner_reference_id: 'prac-clinician',
+          committed_lab_order_id: null,
+          created_at: new Date().toISOString(),
+          items: body.catalog_entry_ids.map((id: string) => {
+            const entry = mockCatalogTests.find((c) => c.id === id)
+            return {
+              id: `item-${id}`,
+              catalog_entry_id: id,
+              catalog_code_snapshot: entry?.code ?? 'CODE',
+              catalog_display_name_snapshot: entry?.display_name ?? 'Display',
+            }
+          }),
+        },
+        created: true,
+      }),
+    )
+
+  const defaultCommitIntent = vi
+    .fn()
+    .mockImplementation((providerId: string, intentId: string) =>
+      Promise.resolve({
+        order: {
+          id: `order-${intentId}`,
+          provider_organization_id: providerId,
+          patient_reference_id: patientWithName.patient_reference_id,
+          practitioner_reference_id: 'prac-clinician',
+          status: 'AWAITING_LAB_SELECTION',
+          created_at: new Date().toISOString(),
+          items: [
+            {
+              catalog_entry_id: mockCatalogTests[0].id,
+              catalog_code_snapshot: mockCatalogTests[0].code,
+              catalog_display_name_snapshot: mockCatalogTests[0].display_name,
+            },
+          ],
+        },
+        created: true,
+      }),
+    )
+
   return {
     getMe: vi.fn().mockResolvedValue(me),
     listOrders: vi.fn().mockResolvedValue([]),
@@ -76,6 +154,10 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getPatientReference: vi.fn(),
     listCatalogTests: vi.fn().mockResolvedValue([]),
     createOrderWithOutcome: vi.fn(),
+    createOrderIntentWithOutcome: defaultCreateIntent,
+    getOrderIntentByIdempotencyKey: vi.fn().mockResolvedValue(null),
+    getOrderIntent: vi.fn().mockResolvedValue(null),
+    commitOrderIntentWithOutcome: defaultCommitIntent,
     listPatientOrders: vi.fn().mockResolvedValue([]),
     getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
     ...overrides,

@@ -23,6 +23,9 @@ import type {
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderCreateRequest,
+  LabOrderIntent,
+  LabOrderIntentCreateOutcome,
+  LabOrderIntentCreateRequest,
   LabOrderSummary,
   PatientReference,
   PatientReferenceBindRequest,
@@ -451,6 +454,103 @@ export class ExchangeClient {
       }
       throw error
     }
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/order-intents
+   * Backend-owned durable order intent creation (DH-CLINIC-003C).
+   */
+  async createOrderIntentWithOutcome(
+    providerId: string,
+    idempotencyKey: string,
+    body: LabOrderIntentCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderIntentCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<LabOrderIntent>(
+      `/organizations/${encodeURIComponent(providerId)}/order-intents`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { intent: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/order-intents/by-idempotency-key/{idempotency_key}
+   * Retrieves an order intent by its idempotency key (DH-CLINIC-003C).
+   * Returns null on 404, throws on other errors.
+   */
+  async getOrderIntentByIdempotencyKey(
+    providerId: string,
+    idempotencyKey: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderIntent | null> {
+    try {
+      return await this.request<LabOrderIntent>(
+        `/organizations/${encodeURIComponent(providerId)}/order-intents/by-idempotency-key/${encodeURIComponent(idempotencyKey)}`,
+        { method: 'GET', signal: options.signal },
+        options.token,
+      )
+    } catch (error) {
+      if (error instanceof ExchangeApiError && error.status === 404) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/order-intents/{intent_id}
+   * Retrieves an order intent by intent_id (DH-CLINIC-003C).
+   * Returns null on 404, throws on other errors.
+   */
+  async getOrderIntent(
+    providerId: string,
+    intentId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderIntent | null> {
+    try {
+      return await this.request<LabOrderIntent>(
+        `/organizations/${encodeURIComponent(providerId)}/order-intents/${encodeURIComponent(intentId)}`,
+        { method: 'GET', signal: options.signal },
+        options.token,
+      )
+    } catch (error) {
+      if (error instanceof ExchangeApiError && error.status === 404) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/order-intents/{intent_id}/commit
+   * Commits an immutable backend order intent into a LabOrder (DH-CLINIC-003C).
+   */
+  async commitOrderIntentWithOutcome(
+    providerId: string,
+    intentId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<LabOrder>(
+      `/organizations/${encodeURIComponent(providerId)}/order-intents/${encodeURIComponent(intentId)}/commit`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { order: data, created: status === 201 }
   }
 }
 
