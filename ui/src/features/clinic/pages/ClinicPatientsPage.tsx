@@ -108,6 +108,7 @@ export function ClinicPatientsPage({
   const mountedRef = useRef(true)
   const requestGenerationRef = useRef(0)
   const ordersGenerationRef = useRef(0)
+  const orderRecoveryGenerationRef = useRef(0)
   currentProviderRef.current = providerId
 
   const [searchInput, setSearchInput] = useState('')
@@ -326,6 +327,7 @@ export function ClinicPatientsPage({
   )
 
   useEffect(() => {
+    const recoveryGeneration = ++orderRecoveryGenerationRef.current
     if (providerId && selectedPatient) {
       void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
 
@@ -389,9 +391,14 @@ export function ClinicPatientsPage({
             if (
               mountedRef.current &&
               currentProviderRef.current === providerId &&
-              currentPatientRef.current === selectedPatient.patient_reference_id
+              currentPatientRef.current === selectedPatient.patient_reference_id &&
+              orderRecoveryGenerationRef.current === recoveryGeneration
             ) {
-              if (foundOrder) {
+              if (
+                foundOrder &&
+                foundOrder.provider_organization_id === providerId &&
+                foundOrder.patient_reference_id === storedOrder.patient_reference_id
+              ) {
                 setReconcilingStoredOrder(false)
                 clearStoredPendingOrder(
                   user.identity_id,
@@ -432,14 +439,16 @@ export function ClinicPatientsPage({
                 if (
                   mountedRef.current &&
                   currentProviderRef.current === providerId &&
-                  currentPatientRef.current === selectedPatient.patient_reference_id
+                  currentPatientRef.current === selectedPatient.patient_reference_id &&
+                  orderRecoveryGenerationRef.current === recoveryGeneration
                 ) {
                   setReconcilingStoredOrder(false)
                   if (
                     foundIntent &&
                     (foundIntent.provider_organization_id !== providerId ||
                       foundIntent.patient_reference_id !== selectedPatient.patient_reference_id ||
-                      foundIntent.idempotency_key !== storedOrder.idempotency_key)
+                      foundIntent.idempotency_key !== storedOrder.idempotency_key ||
+                      (storedOrder.intent_id !== undefined && foundIntent.id !== storedOrder.intent_id))
                   ) {
                     // A syntactically valid technical pointer that resolves to another
                     // canonical tuple is unsafe.  Retain the stored record fail-closed.
@@ -463,6 +472,7 @@ export function ClinicPatientsPage({
                         mountedRef.current &&
                         currentProviderRef.current === providerId &&
                         currentPatientRef.current === selectedPatient.patient_reference_id &&
+                        orderRecoveryGenerationRef.current === recoveryGeneration &&
                         committedOrder
                       ) {
                         clearStoredPendingOrder(
@@ -555,7 +565,7 @@ export function ClinicPatientsPage({
     if (!orderDraftIdempotencyKey) {
       setOrderDraftIdempotencyKey(crypto.randomUUID())
     }
-    if (orderSubmitState !== 'uncertain' && !unresolvedStoredOrder?.intent_id) {
+    if (orderSubmitState !== 'uncertain' && !unresolvedStoredOrder) {
       setSelectedCatalogEntryIds([])
       setCatalogSearch('')
       setOrderSubmitState('idle')
@@ -564,7 +574,7 @@ export function ClinicPatientsPage({
       setOrderStep('catalog')
     }
     setShowOrderWizard(true)
-    if (catalogEntries === null || catalogLoadState !== 'success') {
+    if (!unresolvedStoredOrder && (catalogEntries === null || catalogLoadState !== 'success')) {
       void loadCatalog()
     }
   }
@@ -578,9 +588,6 @@ export function ClinicPatientsPage({
       // which a clinician reconstructs unknown service selections after reload.
       // The reconciliation effect must first retrieve the canonical intent.
       setOrderSubmitState('uncertain')
-    }
-    if (catalogEntries === null || catalogLoadState !== 'success') {
-      void loadCatalog()
     }
   }
 
@@ -750,7 +757,7 @@ export function ClinicPatientsPage({
 
       if (isDefinitiveExchangeError(error)) {
         if (error instanceof ExchangeApiError && error.status === 409) {
-          setOrderSubmitState('error')
+          setOrderSubmitState('uncertain')
           setOrderSubmitErrorCode(safeErrorCode(error))
           setOrderSubmitError(
             error.detail ||
@@ -1244,7 +1251,7 @@ export function ClinicPatientsPage({
                           ? 'Vérifier / réessayer'
                           : 'Confirmer et prescrire'}
                     </Button>
-                    {orderSubmitState !== 'uncertain' ? (
+                    {orderSubmitState !== 'uncertain' && !unresolvedStoredOrder ? (
                       <Button
                         type="button"
                         variant="secondary"
@@ -1277,7 +1284,7 @@ export function ClinicPatientsPage({
                   </p>
                   <p>
                     <strong>Statut :</strong>{' '}
-                    <StatusBadge label="En attente de choix labo" tone="neutral" />
+                    <StatusBadge {...formatOrderStatus(orderOutcome.order.status)} />
                   </p>
                   <p>
                     <strong>Laboratoire :</strong> {formatOrderLabText(orderOutcome.order.status)}

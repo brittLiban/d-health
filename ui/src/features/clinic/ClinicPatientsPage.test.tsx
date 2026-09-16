@@ -8,8 +8,7 @@ import type {
   ClinicPatientSummary,
   ExchangeMeResponse,
   LabOrder,
-  LabOrderIntent,
-  LabOrderIntentItem,
+  LabOrderCreateOutcome,
   PatientReferenceBindRequest,
 } from '../../api/exchangeTypes'
 import {
@@ -142,7 +141,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       }),
     )
 
-  return {
+  const client = {
     getMe: vi.fn().mockResolvedValue(me),
     listOrders: vi.fn().mockResolvedValue([]),
     getOrder: vi.fn(),
@@ -162,6 +161,44 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
     ...overrides,
   } as unknown as ExchangeClient
+
+  // Older 003/003A scenarios use this local test shorthand. Keep their behavioural
+  // assertions (selection and outcome) while executing the production Option-A call
+  // sequence: registration returns a durable intent, then only commit returns the order.
+  const legacyCreate = overrides.createOrderWithOutcome as unknown as
+    | ((providerId: string, key: string, body: unknown) => Promise<LabOrderCreateOutcome>)
+    | undefined
+  if (legacyCreate) {
+    let legacyOutcome: LabOrderCreateOutcome | undefined
+    client.createOrderIntentWithOutcome = vi.fn(async (providerId, key, body) => {
+      legacyOutcome = await legacyCreate(providerId, key, body)
+      return {
+        created: legacyOutcome.created,
+        intent: {
+          id: `intent-${key}`,
+          idempotency_key: key,
+          provider_organization_id: providerId,
+          patient_reference_id: body.patient_reference_id,
+          practitioner_reference_id: 'prac-clinician',
+          committed_lab_order_id: null,
+          created_at: new Date().toISOString(),
+          items: body.catalog_entry_ids.map((catalog_entry_id: string) => {
+            const entry = mockCatalogTests.find((value) => value.id === catalog_entry_id)
+            return {
+              catalog_entry_id,
+              catalog_code_snapshot: entry?.code ?? catalog_entry_id,
+              catalog_display_name_snapshot: entry?.display_name ?? 'Service diagnostique',
+            }
+          }),
+        },
+      }
+    })
+    client.commitOrderIntentWithOutcome = vi.fn(async () => {
+      if (!legacyOutcome) throw new Error('intent must be registered before commit')
+      return legacyOutcome
+    })
+  }
+  return client
 }
 
 describe('Clinic native patient workflow', () => {
@@ -1948,27 +1985,16 @@ describe('Clinic native patient workflow', () => {
     expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
   })
 
-  it('resolves deadlock: allows re-selecting catalog items and submitting with the frozen key after reload on 404', async () => {
+  it('fails closed without Option-C reconstruction when the durable intent is unavailable', async () => {
     const frozenKey = 'frozen-key-after-reload-404'
     setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
       idempotency_key: frozenKey,
     })
 
-    const createdOrder: LabOrder = {
-      id: 'ord-resolved-after-reload',
-      provider_organization_id: 'provider-a',
-      patient_reference_id: patientWithName.patient_reference_id,
-      practitioner_reference_id: 'prac-1',
-      status: 'AWAITING_LAB_SELECTION',
-      created_at: '2026-09-16T08:00:00Z',
-      items: [{ catalog_entry_id: mockCatalogTests[0].id, catalog_code_snapshot: 'SYNTH-CBC', catalog_display_name_snapshot: 'NFS' }],
-    }
-
-    const createOrder = vi.fn().mockResolvedValue({ order: createdOrder, created: true })
+    const createOrder = vi.fn()
 
     const client = makeClient({
       listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
-      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null), // 404
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1985,7 +2011,12 @@ describe('Clinic native patient workflow', () => {
     // Click "Vérifier / réessayer"
     await userEventObj.click(screen.getByRole('button', { name: 'Vérifier / réessayer' }))
 
-    // Wizard opens at catalog step because items were not in storage
+    // A missing canonical intent is a reconciliation failure, never permission
+    // to reconstruct services from the catalog or issue another mutation.
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(createOrder).not.toHaveBeenCalled()
+    expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).not.toBeNull()
+    if (createOrder.mock.calls.length > 0) {
     expect(await screen.findByText('Prescrire un ordre de laboratoire')).toBeInTheDocument()
 
     // Checkboxes are NOT deadlocked: clinician can select items
@@ -2007,6 +2038,7 @@ describe('Clinic native patient workflow', () => {
     // Succeeded and storage cleaned up
     expect(await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' })).toBeInTheDocument()
     expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).toBeNull()
+    }
   })
 
   it('guarantees zero calls to OpenMRS across native diagnostic ordering', async () => {

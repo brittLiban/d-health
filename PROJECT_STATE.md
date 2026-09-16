@@ -14616,3 +14616,16 @@ There are three long-term architectural choices for cross-reload payload recover
 **DH-CLINIC-003B STATUS: BLOCKED ON HUMAN DECISION.**
 
 **STOPPED AT HUMAN DECISION GATE: YES.**
+
+---
+
+**DH-CLINIC-003C continuation (2026-09-16, UNFINISHED — append-only):** checkpoint
+`91e752d82d5f398bba2ede964dc3822b2468fd1e` was audited as an intermediate commit, not closure.
+The required pre-implementation independent review found a migration/model mismatch: `LabOrder`
+already declares its nullable intent ownership field but migration `0020` does not add it. A local,
+uncommitted corrective pass has started a successor `0021_exchange_order_intent_ownership`, a
+same-session intent-replay lookup, and preliminary Clinic recovery hardening. This work has not
+passed the required focused/full suites, disposable real-PostgreSQL qualification, NC1–NC23,
+final independent review, commit/push, or exact-SHA CI. Do not report DH-CLINIC-003C complete and
+do not start DH-CLINIC-004. Human Decision Required: No; blocker is incomplete verification and
+implementation, not a clinical/product decision.

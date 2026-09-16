@@ -22,7 +22,10 @@ from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.models import (
     LabOrderIntent,
     LabOrderIntentItem,
+    LabOrder,
     OrganizationType,
+    PatientReference,
+    PractitionerReference,
 )
 from daher_adapter.exchange.orders import (
     CreateOrderResult,
@@ -119,19 +122,11 @@ class LabOrderIntentRepository:
                 "an order intent must not request the same catalog_entry_id more than once"
             )
 
-        self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
-
-        # Snapshot catalog display and code before insertion attempt
-        snapshots: list[tuple[uuid.UUID, object]] = []
-        for entry_id in catalog_entry_ids:
-            entry = self._catalog.get_entry(entry_id)
-            if not entry.active:
-                raise ValueError(f"catalog entry {entry_id} is not active")
-            if not entry.is_synthetic:
-                raise ValueError(f"catalog entry {entry_id} is not a synthetic pilot-phase entry")
-            snapshots.append((entry_id, entry))
-
         if session is not None:
+            snapshots = self._validate_canonical_request(
+                session, provider_organization_id, patient_reference_id,
+                practitioner_reference_id, catalog_entry_ids
+            )
             return self._create_in_session(
                 session,
                 idempotency_key=idempotency_key,
@@ -142,6 +137,10 @@ class LabOrderIntentRepository:
                 snapshots=snapshots,
             )
         with self._sessions() as owned_session:
+            snapshots = self._validate_canonical_request(
+                owned_session, provider_organization_id, patient_reference_id,
+                practitioner_reference_id, catalog_entry_ids
+            )
             result = self._create_in_session(
                 owned_session,
                 idempotency_key=idempotency_key,
@@ -153,6 +152,36 @@ class LabOrderIntentRepository:
             )
             owned_session.commit()
             return result
+
+    def _validate_canonical_request(
+        self,
+        session: Session,
+        provider_organization_id: uuid.UUID,
+        patient_reference_id: uuid.UUID,
+        practitioner_reference_id: uuid.UUID,
+        catalog_entry_ids: list[uuid.UUID],
+    ) -> list[tuple[uuid.UUID, object]]:
+        """Single canonical request guard used before an immutable reservation exists.
+
+        It deliberately validates identifiers only; item snapshots are then frozen on the
+        intent, so commit never revalidates or accepts browser replacement content.
+        """
+        self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
+        patient = session.get(PatientReference, patient_reference_id)
+        practitioner = session.get(PractitionerReference, practitioner_reference_id)
+        if patient is None or patient.source_organization_id != provider_organization_id:
+            raise ValueError("patient reference does not belong to provider organization")
+        if practitioner is None or practitioner.source_organization_id != provider_organization_id:
+            raise ValueError("practitioner reference does not belong to provider organization")
+        snapshots: list[tuple[uuid.UUID, object]] = []
+        for entry_id in sorted(catalog_entry_ids, key=str):
+            entry = self._catalog.get_entry(entry_id)
+            if not entry.active:
+                raise ValueError(f"catalog entry {entry_id} is not active")
+            if not entry.is_synthetic:
+                raise ValueError(f"catalog entry {entry_id} is not a synthetic pilot-phase entry")
+            snapshots.append((entry_id, entry))
+        return snapshots
 
     def _create_in_session(
         self,
@@ -297,7 +326,7 @@ class LabOrderIntentRepository:
             raise OrderIntentNotFound(f"Order intent {intent_id} not found")
 
         if intent.committed_lab_order_id is not None:
-            existing_order = orders_repo.get(intent.committed_lab_order_id)
+            existing_order = orders_repo.get(intent.committed_lab_order_id, session=session)
             return CreateOrderResult(order=existing_order, created=False)
 
         # Create LabOrder using exact canonical intent data
@@ -310,8 +339,18 @@ class LabOrderIntentRepository:
             patient_reference_id=intent.patient_reference_id,
             practitioner_reference_id=intent.practitioner_reference_id,
             items=order_items,
+            intent_id=intent.id,
             session=session,
         )
+
+        # The two durable pointers are written and checked in this one transaction.
+        # A pre-003C direct order with the same key must not be retroactively claimed:
+        # it remains historical/unowned instead of becoming one-sided provenance.
+        created_order = session.get(LabOrder, result.order.id)
+        if created_order is None or created_order.intent_id != intent.id:
+            raise IdempotencyKeyConflict(
+                "idempotency key is already associated with an order outside this durable intent"
+            )
 
         intent.committed_lab_order_id = result.order.id
         session.flush()

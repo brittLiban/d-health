@@ -100,7 +100,6 @@ from daher_adapter.exchange.orders import (
     InvalidOrderTransition,
     LabOrderRecord,
     LabOrderRepository,
-    OrderItemInput,
 )
 from daher_adapter.exchange.orders import OrderNotFound as LabOrderNotFound
 from daher_adapter.exchange.organizations import InvalidOrganizationType, OrganizationRepository
@@ -2544,7 +2543,9 @@ def build_exchange_router(
             display_name=identities.get(principal.identity_id).display_name,
         )
         if caller.id != intent.practitioner_reference_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+            )
         return _to_intent_response(intent)
 
     @router.get(
@@ -2574,7 +2575,9 @@ def build_exchange_router(
             display_name=identities.get(principal.identity_id).display_name,
         )
         if caller.id != intent.practitioner_reference_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order intent not found"
+            )
         return _to_intent_response(intent)
 
     @router.post(

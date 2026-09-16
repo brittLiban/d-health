@@ -148,6 +148,7 @@ class LabOrderRepository:
         patient_reference_id: uuid.UUID,
         practitioner_reference_id: uuid.UUID,
         items: list[OrderItemInput],
+        intent_id: uuid.UUID | None = None,
         session: Session | None = None,
     ) -> CreateOrderResult:
         """DH-EX-004: ``session`` lets a caller (the HTTP order-creation command) fold this into
@@ -187,6 +188,7 @@ class LabOrderRepository:
                 patient_reference_id=patient_reference_id,
                 practitioner_reference_id=practitioner_reference_id,
                 items=items,
+                intent_id=intent_id,
                 snapshots=snapshots,
             )
         with self._sessions() as owned_session:
@@ -197,6 +199,7 @@ class LabOrderRepository:
                 patient_reference_id=patient_reference_id,
                 practitioner_reference_id=practitioner_reference_id,
                 items=items,
+                intent_id=intent_id,
                 snapshots=snapshots,
             )
             owned_session.commit()
@@ -212,12 +215,14 @@ class LabOrderRepository:
         practitioner_reference_id: uuid.UUID,
         items: list[OrderItemInput],
         snapshots: list[tuple[uuid.UUID, object]],
+        intent_id: uuid.UUID | None,
     ) -> CreateOrderResult:
         order = LabOrder(
             idempotency_key=idempotency_key,
             provider_organization_id=provider_organization_id,
             patient_reference_id=patient_reference_id,
             practitioner_reference_id=practitioner_reference_id,
+            intent_id=intent_id,
             status=LabOrderStatus.AWAITING_LAB_SELECTION.value,
         )
         order.items = [
@@ -276,7 +281,17 @@ class LabOrderRepository:
                 ) from None
             return CreateOrderResult(order=existing_record, created=False)
 
-    def get(self, order_id: uuid.UUID) -> LabOrderRecord:
+    def get(self, order_id: uuid.UUID, *, session: Session | None = None) -> LabOrderRecord:
+        """Read an order through an optional caller-owned transaction.
+
+        Intent commit replay must use this form: an order and its ownership pointer can
+        be visible to the locking transaction before they are visible to another connection.
+        """
+        if session is not None:
+            order = session.get(LabOrder, order_id)
+            if order is None:
+                raise OrderNotFound(str(order_id))
+            return _to_order_record(order)
         with self._sessions() as session:
             order = session.get(LabOrder, order_id)
             if order is None:

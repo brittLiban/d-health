@@ -104,7 +104,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0020_exchange_order_intents
+          EXPECTED_HEAD: 0021_exchange_order_intent_ownership
         working-directory: adapter
         run: |
           alembic upgrade head
@@ -116,6 +116,18 @@ jobs:
           test -n "$current" || { echo "::error::alembic current produced no revision"; exit 1; }
           test "$current" = "$heads" || { echo "::error::current ($current) does not match heads ($heads)"; exit 1; }
           test "$current" = "$EXPECTED_HEAD" || { echo "::error::migration history reached ${current}, not the expected ${EXPECTED_HEAD} -- a migration file is likely missing from this build"; exit 1; }
+      - name: DH-CLINIC-003C real PostgreSQL intent qualification
+        # This is the job's disposable postgres:16-alpine service, never an
+        # external or clinical database. The opt-in test intentionally uses
+        # separate sessions so row locking and replay visibility are real.
+        env:
+          DHEX003C_PG_HOST: localhost
+          DHEX003C_PG_PORT: 5432
+          DHEX003C_PG_USER: adapter
+          DHEX003C_PG_PASSWORD: adapter
+          DHEX003C_PG_DATABASE: adapter
+        working-directory: adapter
+        run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhex003c_postgres_qualification.py
 
   provisioning:
     name: provisioning — ruff + pytest

@@ -173,6 +173,33 @@ def test_order_intent_commit_and_commit_replay(sessions: sessionmaker[Session]) 
     assert commit_res2.order.id == order.id
 
 
+def test_order_intent_replay_reads_uncommitted_order_in_same_session(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Regression: replay is valid before the outer transaction becomes visible elsewhere."""
+    organizations, catalog, patients, practitioners, orders, intents = _build(sessions)
+    provider = make_provider(organizations)
+    lab = make_lab(organizations)
+    entry, _ = make_priced_offering(catalog, lab_organization_id=lab.id, code="DH-INTENT-REPLAY")
+    patient = make_patient_reference(patients, provider_org_id=provider.id)
+    practitioner = make_practitioner_reference(practitioners, provider_org_id=provider.id)
+    intent = intents.create(
+        idempotency_key="same-session-replay",
+        provider_organization_id=provider.id,
+        patient_reference_id=patient.id,
+        practitioner_reference_id=practitioner.id,
+        catalog_entry_ids=[entry.id],
+    ).intent
+
+    with sessions() as session:
+        first = intents.commit(provider.id, intent.id, orders, session=session)
+        replay = intents.commit(provider.id, intent.id, orders, session=session)
+        assert first.created is True
+        assert replay.created is False
+        assert replay.order.id == first.order.id
+        session.commit()
+
+
 def test_order_intent_validation_guards(sessions: sessionmaker[Session]) -> None:
     organizations, catalog, patients, practitioners, orders, intents = _build(sessions)
     provider = make_provider(organizations)
