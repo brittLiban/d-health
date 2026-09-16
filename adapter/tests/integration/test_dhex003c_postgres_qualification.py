@@ -231,7 +231,7 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
     )
     app, private_key = _race_clients(sessions)
     token = _race_clinician(app, private_key, organizations, provider)
-    key = f"{prefix}-key"
+    key = str(uuid.uuid4())
     headers = {**_auth(token), "Idempotency-Key": key}
     intent_url = f"/exchange/v1/organizations/{provider.id}/order-intents"
     order_url = f"/exchange/v1/organizations/{provider.id}/orders"
