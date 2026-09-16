@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -2309,6 +2309,26 @@ def build_exchange_router(
             _to_order_summary_response(order)
             for order in orders.list_for_organization(provider_id, limit=limit)
         ]
+
+    @router.get(
+        "/organizations/{provider_id}/orders/by-idempotency-key/{idempotency_key}",
+        response_model=LabOrderResponse,
+    )
+    def get_order_by_idempotency_key(
+        provider_id: uuid.UUID,
+        idempotency_key: Annotated[str, Path(min_length=1, max_length=256)],
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabOrderResponse:
+        # DH-CLINIC-003A: clinician authorization checked strictly before key lookup.
+        # Anti-enumeration: 404 when key is unknown or belongs to another provider.
+        _require_clinician(principal, provider_id)
+        try:
+            order = orders.get_by_idempotency_key(provider_id, idempotency_key)
+        except LabOrderNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        return _to_order_response(order)
 
     @router.get("/organizations/{provider_id}/orders/{order_id}", response_model=LabOrderResponse)
     def get_lab_order(

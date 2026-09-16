@@ -1410,3 +1410,117 @@ def test_list_patient_orders_limit_invalid(
         headers=_auth(token),
     )
     assert resp.status_code == 422
+
+
+# -- DH-CLINIC-003A: order reconciliation by idempotency key -------------------------------------
+
+
+def test_get_order_by_idempotency_key_positive_control(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "IdempClinician")
+    patient = _create_patient(client, private_key, patients, provider.id, "PatientIdemp")
+    test_ids = _make_tests(catalog, 2)
+    key = _new_key()
+
+    res = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient),
+            "catalog_entry_ids": [str(test_ids[0]), str(test_ids[1])],
+        },
+    )
+    assert res.status_code == 201
+    created_order = res.json()
+
+    # Query by idempotency key
+    lookup = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/by-idempotency-key/{key}",
+        headers=_auth(token),
+    )
+    assert lookup.status_code == 200, lookup.text
+    retrieved = lookup.json()
+    assert retrieved["id"] == created_order["id"]
+    assert retrieved["provider_organization_id"] == str(provider.id)
+    assert retrieved["patient_reference_id"] == str(patient)
+    assert retrieved["status"] == "AWAITING_LAB_SELECTION"
+    assert len(retrieved["items"]) == 2
+    assert {it["catalog_entry_id"] for it in retrieved["items"]} == {str(t) for t in test_ids}
+
+
+def test_get_order_by_idempotency_key_unknown_returns_404(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "UnknownKey")
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/by-idempotency-key/non-existent-key-123",
+        headers=_auth(token),
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "order not found"
+
+
+def test_get_order_by_idempotency_key_cross_provider_isolation(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "IdempProvA")
+    provider_b, token_b, _ = _setup_clinician(client, private_key, organizations, "IdempProvB")
+    patient_a = _create_patient(client, private_key, patients, provider_a.id, "PatientA")
+    test_ids = _make_tests(catalog, 1)
+    key_a = _new_key()
+
+    res = client.post(
+        f"/exchange/v1/organizations/{provider_a.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": key_a},
+        json={
+            "patient_reference_id": str(patient_a),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert res.status_code == 201
+
+    # Clinician B queries Key A under Provider B -> 404 (does not leak Key A exists under A)
+    resp_cross = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/by-idempotency-key/{key_a}",
+        headers=_auth(token_b),
+    )
+    assert resp_cross.status_code == 404
+
+    # Clinician B queries Key A under Provider A -> 404 (Clinician B has zero relation to A)
+    resp_cross_a = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/orders/by-idempotency-key/{key_a}",
+        headers=_auth(token_b),
+    )
+    assert resp_cross_a.status_code == 404
+
+
+def test_get_order_by_idempotency_key_non_clinician_refused(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token_admin, _ = _setup_clinician(
+        client, private_key, organizations, "AdminOrgOnly", roles=["ORG_ADMIN"]
+    )
+    # ORG_ADMIN without CLINICIAN -> 403
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/by-idempotency-key/some-key-123",
+        headers=_auth(token_admin),
+    )
+    assert resp.status_code == 403
+
+
+def test_get_order_by_idempotency_key_length_validation(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "LengthVal")
+    too_long = "a" * 257
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/by-idempotency-key/{too_long}",
+        headers=_auth(token),
+    )
+    assert resp.status_code == 422

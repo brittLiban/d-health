@@ -44,7 +44,12 @@ from daher_adapter.exchange.models import (
     LabPrice,
     ResultDelivery,
 )
-from daher_adapter.exchange.orders import InvalidOrderTransition, LabOrderRepository, OrderItemInput
+from daher_adapter.exchange.orders import (
+    InvalidOrderTransition,
+    LabOrderRepository,
+    OrderItemInput,
+    OrderNotFound,
+)
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.selection import LabSelectionRepository
 
@@ -345,3 +350,31 @@ def test_list_for_patient_postgres_qualification(sessions: sessionmaker) -> None
     p2_results = orders.list_for_patient(provider.id, patient_2.id, limit=10)
     assert len(p2_results) == 1
     assert p2_results[0].id == order2.id
+
+
+def test_get_by_idempotency_key_postgres_qualification(sessions: sessionmaker) -> None:
+    """DH-CLINIC-003A: real PostgreSQL qualification of get_by_idempotency_key
+    with eager item loading and provider isolation."""
+    key_prefix = f"pgidemp-{uuid.uuid4().hex[:8]}"
+    _org, _cat, orders, _sel, provider_1, _lab, entry, _off, patient, practitioner = _seed(
+        sessions, key_prefix=f"{key_prefix}-1"
+    )
+    key = f"{key_prefix}-k1"
+    created = orders.create(
+        idempotency_key=key,
+        provider_organization_id=provider_1.id,
+        patient_reference_id=patient.id,
+        practitioner_reference_id=practitioner.id,
+        items=[OrderItemInput(catalog_entry_id=entry.id)],
+    ).order
+
+    # Retrieve by idempotency key
+    retrieved = orders.get_by_idempotency_key(provider_1.id, key)
+    assert retrieved.id == created.id
+    assert len(retrieved.items) == 1
+    assert retrieved.items[0].catalog_entry_id == entry.id
+
+    # Provider 2 isolation: unknown key under another provider raises OrderNotFound
+    other_provider_id = uuid.uuid4()
+    with pytest.raises(OrderNotFound):
+        orders.get_by_idempotency_key(other_provider_id, key)

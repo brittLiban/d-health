@@ -340,9 +340,12 @@ class LabOrderRepository:
     def get_by_idempotency_key(
         self, provider_organization_id: uuid.UUID, idempotency_key: str
     ) -> LabOrderRecord:
+        """DH-CLINIC-003A: provider-scoped lookup by idempotency key with eager item loading."""
         with self._sessions() as session:
             order = session.scalar(
-                select(LabOrder).where(
+                select(LabOrder)
+                .options(selectinload(LabOrder.items))
+                .where(
                     LabOrder.provider_organization_id == provider_organization_id,
                     LabOrder.idempotency_key == idempotency_key,
                 )

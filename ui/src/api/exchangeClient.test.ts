@@ -628,4 +628,58 @@ describe('ExchangeClient', () => {
       Authorization: 'Bearer tok-2',
     })
   })
+
+  it('getOrderByIdempotencyKey sends GET /organizations/{id}/orders/by-idempotency-key/{key}', async () => {
+    const mockOrder = {
+      id: 'ord-1',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-ref-1',
+      practitioner_reference_id: 'prac-1',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:00:00Z',
+      items: [],
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrder), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrderByIdempotencyKey('prov-1', 'key-123', {
+      token: 'tok-3',
+    })
+
+    expect(result).toEqual(mockOrder)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/by-idempotency-key/key-123')
+    expect(url).not.toContain('/openmrs')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer tok-3',
+    })
+  })
+
+  it('getOrderByIdempotencyKey returns null on 404', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'order not found' }), {
+        status: 404,
+        statusText: 'Not Found',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getOrderByIdempotencyKey('prov-1', 'missing-key')
+    expect(result).toBeNull()
+  })
+
+  it('getOrderByIdempotencyKey throws on non-404 error', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'server error' }), {
+        status: 500,
+        statusText: 'Server Error',
+      }),
+    )
+
+    const client = new ExchangeClient()
+    await expect(client.getOrderByIdempotencyKey('prov-1', 'err-key')).rejects.toThrow()
+  })
 })

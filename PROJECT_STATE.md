@@ -14384,3 +14384,105 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 **DH-CLINIC-003 CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+## 2026-09-16 · DH-CLINIC-003A — Native Order Reconciliation & Idempotency Safety Hardening
+
+**Base Commit:** `473bf880294276738ab760bf28a8d71880d97de7`
+**Completed Commit:** HEAD
+**Status:** CLOSED · READY FOR LIBAN REVIEW
+
+### Objective & Context
+
+Narrow safety correction to `DH-CLINIC-003` addressing 3 critical safety blockers identified by independent review:
+1. **BLOCKER 1:** Eliminate discarding of unresolved ambiguous order intent (K1). Once mutation enters `uncertain` state, freeze exact order intent (authenticated identity, provider, patient reference ID, catalog entry IDs, and idempotency key). Disable/hide "Modifier les services"; "Annuler" / closing wizard ("Fermer") retains intent; reopening wizard returns to frozen review/retry intent.
+2. **BLOCKER 2:** Prevent navigation / provider / patient switching and page reload from losing unresolved intent. Rehydrate pending order per `(userId, providerId, patientReferenceId)` scope in memory (`ClinicApp.tsx`) and durable technical non-PHI metadata in browser storage (`pendingOrderStorage.ts`). Resolve reload deadlock: query server by idempotency key (`getOrderByIdempotencyKey`); if found, authoritatively confirm; if 404, allow clinician to explicitly abandon uncommitted attempt or retry.
+3. **BLOCKER 3:** Fix misleading patient order history lab text. Replace hardcoded `"Laboratoire : Pas encore sélectionné"` with truthful status-derived text (`formatOrderLabText`): only `"Pas encore sélectionné"` for `AWAITING_LAB_SELECTION`; `"Non assigné (ordre annulé)"` for `CANCELLED`; `"Laboratoire sélectionné"` for routed statuses (`SELECTED`, `ACCEPTED`, `IN_PROGRESS`, `COMPLETED`, `REJECTED`).
+
+### Scope Boundaries & Invariants Preserved
+- Do NOT start `DH-CLINIC-004` (Provider Lab Selection & Order Routing).
+- Zero `/openmrs/*` calls across the entire native Clinic ordering flow.
+- Zero clinical PHI and zero test IDs/codes/names in persistent browser storage (`localStorage`). Technical non-PHI metadata only (`user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`, optional `confirmed_order_id`).
+- Schema validation and corruption fail-closed behavior: malformed JSON or missing fields in storage throws `PendingOrderStorageReadError`, surfaces alert banner, and disables new order creation.
+- Decoupled auxiliary reads: successful order creation immediately updates local state, so subsequent failures of `loadPatientOrders` do not cause false error states or re-POSTing.
+
+### Changes Implemented
+
+#### 1. Backend (`adapter/`)
+- **`orders.py`:**
+  - Added `.options(selectinload(LabOrder.items))` to `LabOrderRepository.get_by_idempotency_key` (eliminates N+1 detached instance risk).
+- **`api.py`:**
+  - Added `GET /organizations/{provider_id}/orders/by-idempotency-key/{idempotency_key}` endpoint before `.../orders/{order_id}` route to prevent route shadowing.
+  - Enforces `_require_clinician(principal, provider_id)` before database query.
+  - Validates `idempotency_key` path parameter with `Path(min_length=1, max_length=256)`.
+  - Maps `LabOrderNotFound` to 404; enforces provider isolation anti-enumeration (returns 404 for orders belonging to another provider).
+- **`test_exchange_orders_api.py`:**
+  - Added 5 unit tests: positive control key lookup, unknown key 404, cross-provider 404 anti-enumeration, non-clinician 403 refusal, path length validation 422.
+- **`test_dhex001r_postgres_qualification.py`:**
+  - Added `test_get_by_idempotency_key_postgres_qualification` verifying real PostgreSQL eager loading and provider isolation.
+
+#### 2. Frontend Client & Storage (`ui/`)
+- **`exchangeClient.ts`:**
+  - Added `getOrderByIdempotencyKey(providerId: string, idempotencyKey: string, options?: RequestOptions): Promise<LabOrder | null>` mapping 404 to `null`.
+- **`exchangeClient.test.ts`:**
+  - Added 3 unit tests covering 200 return, 404 returning null, and non-404 error throwing.
+- **`pendingOrderStorage.ts`:**
+  - Created non-PHI, non-clinical technical storage module with strict JSON parsing and schema validation.
+  - Throws `PendingOrderStorageReadError` on corrupt JSON or missing required fields.
+  - Provided user-scoped and global teardown clearing functions (`clearStoredPendingOrder`, `clearAllStoredPendingOrdersForUser`, `clearAllStoredPendingOrders`).
+- **`pendingOrderStorage.test.ts`:**
+  - Added 8 unit tests validating non-PHI storage, optional confirmed ID, user/provider/patient isolation, corrupt JSON handling, missing fields handling, zero clinical content in localStorage, and bulk cleanup helpers.
+
+#### 3. Frontend UI (`ui/`)
+- **`ClinicApp.tsx`:**
+  - Added in-memory `pendingOrders` state managed at application level, scoped by `${userId}:${providerId}:${patientReferenceId}`.
+  - Passed `pendingOrders` and `onPendingOrderChange` to `ClinicPatientsPage`.
+- **`ClinicPatientsPage.tsx`:**
+  - Freezes exact intent once ambiguous submission occurs (`orderSubmitState === 'uncertain'`); hides "Modifier les services"; "Annuler" becomes "Fermer".
+  - Rehydrates pending order intent upon selecting patient.
+  - Persists technical metadata in `pendingOrderStorage` before POST.
+  - Checks server reconciliation on reload via `getOrderByIdempotencyKey`. Resolves reload deadlock: if 404, surfaces "Abandonner la tentative non confirmée".
+  - Decoupled auxiliary history read from mutation completion.
+  - Replaced hardcoded order history lab label with `formatOrderLabText(order.status)`.
+  - Added alert banner and disabled "Nouvel ordre de laboratoire" when local storage is corrupt.
+- **`ClinicPatientsPage.test.tsx`:**
+  - Added comprehensive test suite for all 17 scenarios, expanding UI tests to 43 passing tests in this suite.
+
+### Negative Controls (AGENTS.md Evidence Discipline)
+
+1. **NC 1: Ambiguous order cancellation loses intent (`ClinicPatientsPage.tsx`)**
+   - Property: Closing the wizard ("Fermer") must not discard the frozen draft intent or idempotency key.
+   - Mutation: In `handleCloseOrderWizard`, removed `if (orderSubmitState !== 'uncertain' && !hadPriorAmbiguousAttempt)` condition and unconditionally wiped `orderDraftIdempotencyKey`, `selectedCatalogEntryIds`, and `orderStep`.
+   - Result: RED (`findByRole('heading', { name: 'Révision de l’ordre de laboratoire' })` timed out because reopening returned to catalog step).
+   - Restored: GREEN.
+
+2. **NC 2: Ambiguous order service modification (`ClinicPatientsPage.tsx`)**
+   - Property: "Modifier les services" must be hidden/disabled when intent is frozen.
+   - Mutation: Removed `orderSubmitState !== 'uncertain'` check and always rendered "Modifier les services".
+   - Result: RED (`Error: expect(element).not.toBeInTheDocument() expected document not to contain element, found <button>Modifier les services</button> instead`).
+   - Restored: GREEN.
+
+### Verification & Test Evidence
+
+- **Adapter Tests:** 829 passed, 93 skipped (100% green in WSL Python 3.14 / pytest 9.1).
+- **UI Tests:** 26 test files passed, 342 passed (100% green in Vitest, +20 tests added).
+- **UI Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 81 files).
+- **UI Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
+- **UI Production Build:** `npm run build` succeeded; bundle postbuild secret check reported `No secrets found across 4 built file(s)`.
+- **Git Diff Hygiene:** `git diff --check` passed cleanly (0 whitespace/conflict errors).
+
+### Independent Advisor Review (`dhealth_advisor`)
+
+- **Phase 3 Review:** Completed by `dhealth_advisor` (conversation `12db7f58-dfd7-4cd8-a5e7-5c64eef01c47`). All 6 findings (1 BLOCKER on reload 404 deadlock, 1 HUMAN DECISION on clinical storage governance, 4 SHOULD FIX) reconciled into plan.
+- **Phase 6 Final Review:** Completed by `dhealth_advisor` (conversation `12db7f58-dfd7-4cd8-a5e7-5c64eef01c47`). Inspected complete diff, negative controls, migrations, and test evidence. Disposition: **FULLY APPROVED WITH 1 MINOR SHOULD-FIX** (resolved by updating `PROJECT_STATE.md`).
+
+### Next Recommended Ticket
+
+`DH-CLINIC-004 — Provider Lab Selection & Order Routing` (not started here).
+
+**Human Decision Required: NO**
+
+**DH-CLINIC-003A CLOSED: YES.**
+
+**READY FOR LIBAN REVIEW: YES**

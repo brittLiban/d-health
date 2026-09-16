@@ -24,7 +24,7 @@ import {
   TextInput,
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
-import type { PendingPatientCreation } from '../ClinicApp'
+import type { PendingOrderMutation, PendingPatientCreation } from '../ClinicApp'
 import {
   clearStoredPendingPatient,
   canReadPendingPatientStorage,
@@ -33,14 +33,24 @@ import {
   setStoredPendingPatient,
   type OpaquePendingPatientIdentity,
 } from '../pendingPatientStorage'
+import {
+  canReadPendingOrderStorage,
+  clearStoredPendingOrder,
+  getStoredPendingOrder,
+  type OpaquePendingOrderIdentity,
+  PendingOrderStorageReadError,
+  setStoredPendingOrder,
+} from '../pendingOrderStorage'
 import styles from './ClinicPatientsPage.module.css'
 
 const NATIVE_PATIENT_SOURCE_SYSTEM = 'dhealth-clinic'
 const NATIVE_PATIENT_IDENTITY_SYSTEM = 'urn:dhealth:clinic:patient-reference-id'
 
 interface ClinicPatientsPageProps {
-  pendingCreations: Record<string, PendingPatientCreation>
-  onPendingCreationChange: (scopeKey: string, pending: PendingPatientCreation | null) => void
+  pendingCreations?: Record<string, PendingPatientCreation>
+  onPendingCreationChange?: (scopeKey: string, pending: PendingPatientCreation | null) => void
+  pendingOrders?: Record<string, PendingOrderMutation>
+  onPendingOrderChange?: (scopeKey: string, pending: PendingOrderMutation | null) => void
 }
 
 function patientLabel(patient: ClinicPatientSummary): string {
@@ -72,9 +82,21 @@ function formatOrderStatus(status: string): { label: string; tone: StatusTone } 
   }
 }
 
+function formatOrderLabText(status: string): string {
+  if (status === 'AWAITING_LAB_SELECTION') {
+    return 'Pas encore sélectionné'
+  }
+  if (status === 'CANCELLED') {
+    return 'Non assigné (ordre annulé)'
+  }
+  return 'Laboratoire sélectionné'
+}
+
 export function ClinicPatientsPage({
-  pendingCreations,
-  onPendingCreationChange,
+  pendingCreations = {},
+  onPendingCreationChange = () => {},
+  pendingOrders = {},
+  onPendingOrderChange = () => {},
 }: ClinicPatientsPageProps) {
   const { activeProvider, user, client, authToken } = useClinic()
   const providerId = activeProvider?.organization_id ?? null
@@ -121,6 +143,13 @@ export function ClinicPatientsPage({
   const [orderSubmitErrorCode, setOrderSubmitErrorCode] = useState<ErrorCode>('SERVER_ERROR')
   const [orderOutcome, setOrderOutcome] = useState<LabOrderCreateOutcome | null>(null)
   const [orderDraftIdempotencyKey, setOrderDraftIdempotencyKey] = useState<string | null>(null)
+
+  // -- DH-CLINIC-003A: Pending order reconciliation state --
+  const [unresolvedStoredOrder, setUnresolvedStoredOrder] = useState<OpaquePendingOrderIdentity | null>(null)
+  const [reconcilingStoredOrder, setReconcilingStoredOrder] = useState(false)
+  const [orderStorageUnreadable, setOrderStorageUnreadable] = useState(false)
+  const [orderReconciled404, setOrderReconciled404] = useState(false)
+  const [hadPriorAmbiguousAttempt, setHadPriorAmbiguousAttempt] = useState(false)
 
 
   useEffect(() => {
@@ -256,6 +285,10 @@ export function ClinicPatientsPage({
   const visibleResults = results?.providerId === providerId ? results.values : []
   const selectedPatient = selected?.providerId === providerId ? selected.value : null
   currentPatientRef.current = selectedPatient?.patient_reference_id ?? null
+  const orderScopeKey =
+    providerId && user && selectedPatient
+      ? `${user.identity_id}:${providerId}:${selectedPatient.patient_reference_id}`
+      : null
 
   const loadPatientOrders = useCallback(
     async (targetProviderId: string, targetPatientRefId: string) => {
@@ -293,6 +326,96 @@ export function ClinicPatientsPage({
   useEffect(() => {
     if (providerId && selectedPatient) {
       void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
+
+      // Rehydrate in-memory pending order for this patient if any
+      const inMemoryPendingOrder = orderScopeKey ? pendingOrders[orderScopeKey] : undefined
+      if (inMemoryPendingOrder) {
+        setOrderDraftIdempotencyKey(inMemoryPendingOrder.idempotencyKey)
+        setSelectedCatalogEntryIds(inMemoryPendingOrder.catalogEntryIds)
+        setOrderSubmitState('uncertain')
+        setHadPriorAmbiguousAttempt(true)
+        setOrderStep('review')
+        setShowOrderWizard(false)
+      } else {
+        setOrderDraftIdempotencyKey(null)
+        setSelectedCatalogEntryIds([])
+        setOrderSubmitState('idle')
+        setOrderSubmitError(null)
+        setHadPriorAmbiguousAttempt(false)
+        setOrderOutcome(null)
+        setShowOrderWizard(false)
+        setOrderStep('catalog')
+      }
+
+      // Check persistent storage for cross-reload recovery
+      if (user) {
+        if (!canReadPendingOrderStorage()) {
+          setOrderStorageUnreadable(true)
+        }
+        let storedOrder: OpaquePendingOrderIdentity | null = null
+        try {
+          storedOrder = getStoredPendingOrder(
+            user.identity_id,
+            providerId,
+            selectedPatient.patient_reference_id,
+          )
+        } catch (error) {
+          if (error instanceof PendingOrderStorageReadError) {
+            setOrderStorageUnreadable(true)
+          } else throw error
+        }
+
+        if (storedOrder) {
+          setUnresolvedStoredOrder(storedOrder)
+          setReconcilingStoredOrder(true)
+          void (async () => {
+            let foundOrder: LabOrder | null = null
+            let is404 = false
+            try {
+              foundOrder = await client.getOrderByIdempotencyKey(
+                providerId,
+                storedOrder.idempotency_key,
+                { token: authToken ?? undefined },
+              )
+              if (foundOrder === null) {
+                is404 = true
+              }
+            } catch {
+              // Read failure during reconciliation
+            }
+
+            if (
+              mountedRef.current &&
+              currentProviderRef.current === providerId &&
+              currentPatientRef.current === selectedPatient.patient_reference_id
+            ) {
+              setReconcilingStoredOrder(false)
+              if (foundOrder) {
+                clearStoredPendingOrder(
+                  user.identity_id,
+                  providerId,
+                  selectedPatient.patient_reference_id,
+                )
+                if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
+                setUnresolvedStoredOrder(null)
+                setOrderOutcome({ order: foundOrder, created: false })
+                setOrderStep('confirmation')
+                setShowOrderWizard(true)
+                setPatientOrders((curr) => {
+                  if (!curr) return [foundOrder]
+                  if (curr.some((o) => o.id === foundOrder.id)) return curr
+                  return [foundOrder, ...curr]
+                })
+              } else if (is404) {
+                setOrderReconciled404(true)
+              }
+            }
+          })()
+        } else {
+          setUnresolvedStoredOrder(null)
+          setOrderReconciled404(false)
+        }
+      }
     } else {
       setPatientOrders(null)
       setOrdersLoadState('idle')
@@ -300,8 +423,13 @@ export function ClinicPatientsPage({
       setOrderOutcome(null)
       setOrderDraftIdempotencyKey(null)
       setSelectedCatalogEntryIds([])
+      setOrderSubmitState('idle')
+      setUnresolvedStoredOrder(null)
+      setOrderReconciled404(false)
+      setHadPriorAmbiguousAttempt(false)
     }
-  }, [providerId, selectedPatient, loadPatientOrders])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerId, selectedPatient?.patient_reference_id, loadPatientOrders])
 
   const loadCatalog = useCallback(async () => {
     setCatalogLoadState('loading')
@@ -320,20 +448,54 @@ export function ClinicPatientsPage({
   }, [client, authToken])
 
   const handleOpenOrderWizard = () => {
-    setOrderDraftIdempotencyKey(crypto.randomUUID())
-    setSelectedCatalogEntryIds([])
-    setCatalogSearch('')
-    setOrderSubmitState('idle')
-    setOrderSubmitError(null)
-    setOrderOutcome(null)
-    setOrderStep('catalog')
+    if (!orderDraftIdempotencyKey) {
+      setOrderDraftIdempotencyKey(crypto.randomUUID())
+    }
+    if (orderSubmitState !== 'uncertain') {
+      setSelectedCatalogEntryIds([])
+      setCatalogSearch('')
+      setOrderSubmitState('idle')
+      setOrderSubmitError(null)
+      setOrderOutcome(null)
+      setOrderStep('catalog')
+    }
     setShowOrderWizard(true)
     if (catalogEntries === null || catalogLoadState !== 'success') {
       void loadCatalog()
     }
   }
 
+  const handleResumeUncertainOrder = () => {
+    setShowOrderWizard(true)
+    if (selectedCatalogEntryIds.length > 0) {
+      setOrderStep('review')
+    } else {
+      setOrderStep('catalog')
+    }
+    if (catalogEntries === null || catalogLoadState !== 'success') {
+      void loadCatalog()
+    }
+  }
+
+  const handleAbandonStoredOrderAttempt = () => {
+    if (user && providerId && selectedPatient) {
+      clearStoredPendingOrder(
+        user.identity_id,
+        providerId,
+        selectedPatient.patient_reference_id,
+      )
+    }
+    if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
+    setUnresolvedStoredOrder(null)
+    setOrderReconciled404(false)
+    setOrderSubmitState('idle')
+    setHadPriorAmbiguousAttempt(false)
+    setOrderDraftIdempotencyKey(null)
+    setSelectedCatalogEntryIds([])
+  }
+
   const handleToggleService = (entryId: string) => {
+    if (orderSubmitState === 'uncertain') return
     setSelectedCatalogEntryIds((prev) =>
       prev.includes(entryId) ? prev.filter((id) => id !== entryId) : [...prev, entryId],
     )
@@ -343,6 +505,8 @@ export function ClinicPatientsPage({
     if (!providerId || !selectedPatient || selectedCatalogEntryIds.length === 0) return
     const targetProviderId = providerId
     const targetPatientRefId = selectedPatient.patient_reference_id
+    const targetUserId = user?.identity_id ?? ''
+    const currentScopeKey = orderScopeKey
     let key = orderDraftIdempotencyKey
     if (!key) {
       key = crypto.randomUUID()
@@ -373,6 +537,24 @@ export function ClinicPatientsPage({
       setOrderOutcome(outcome)
       setOrderStep('confirmation')
       setOrderSubmitState('idle')
+      setHadPriorAmbiguousAttempt(false)
+      setUnresolvedStoredOrder(null)
+      setOrderReconciled404(false)
+
+      // Immediately prepend outcome.order to local patientOrders state
+      setPatientOrders((curr) => {
+        if (!curr) return [outcome.order]
+        if (curr.some((o) => o.id === outcome.order.id)) return curr
+        return [outcome.order, ...curr]
+      })
+
+      // Authoritative commit clears pending state
+      if (currentScopeKey) onPendingOrderChange?.(currentScopeKey, null)
+      if (targetUserId) {
+        clearStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)
+      }
+
+      // Auxiliary background refresh (failure does NOT invalidate outcome or repeat POST)
       void loadPatientOrders(targetProviderId, targetPatientRefId)
     } catch (error) {
       if (
@@ -384,26 +566,65 @@ export function ClinicPatientsPage({
       }
 
       if (isDefinitiveExchangeError(error)) {
-        setOrderSubmitState('error')
-        setOrderSubmitErrorCode(safeErrorCode(error))
-        setOrderSubmitError(
-          error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la création de l’ordre',
-        )
+        if (error instanceof ExchangeApiError && error.status === 409) {
+          setOrderSubmitState('error')
+          setOrderSubmitErrorCode(safeErrorCode(error))
+          setOrderSubmitError(
+            error.detail ||
+              'Conflit d’idempotence : Cette clé a déjà été utilisée avec un contenu différent.',
+          )
+        } else if (!hadPriorAmbiguousAttempt) {
+          setOrderSubmitState('error')
+          setOrderSubmitErrorCode(safeErrorCode(error))
+          setOrderSubmitError(
+            error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la création de l’ordre',
+          )
+        } else {
+          // Definitive error on retry after earlier ambiguous attempt: keep uncertain
+          setOrderSubmitState('uncertain')
+          setOrderSubmitErrorCode(safeErrorCode(error))
+          setOrderSubmitError(
+            error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la vérification de l’ordre',
+          )
+        }
       } else {
+        // Network error / timeout -> enters uncertain state
         setOrderSubmitState('uncertain')
         setOrderSubmitErrorCode(safeErrorCode(error))
+        setHadPriorAmbiguousAttempt(true)
+
+        // Persist non-PHI token in localStorage
+        if (targetUserId) {
+          setStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId, {
+            idempotency_key: key,
+          })
+        }
+
+        // Store full intent in session memory
+        if (currentScopeKey) {
+          onPendingOrderChange?.(currentScopeKey, {
+            userId: targetUserId,
+            providerId: targetProviderId,
+            patientReferenceId: targetPatientRefId,
+            catalogEntryIds: selectedCatalogEntryIds,
+            idempotencyKey: key,
+            createdAt: Date.now(),
+          })
+        }
       }
     }
   }
 
   const handleCloseOrderWizard = () => {
     setShowOrderWizard(false)
-    setOrderOutcome(null)
-    setOrderDraftIdempotencyKey(null)
-    setSelectedCatalogEntryIds([])
-    setOrderSubmitState('idle')
-    setOrderSubmitError(null)
-    setOrderStep('catalog')
+    if (orderSubmitState !== 'uncertain' && !hadPriorAmbiguousAttempt) {
+      setOrderOutcome(null)
+      setOrderDraftIdempotencyKey(null)
+      setSelectedCatalogEntryIds([])
+      setOrderSubmitState('idle')
+      setOrderSubmitError(null)
+      setOrderStep('catalog')
+    }
   }
 
 
@@ -610,13 +831,63 @@ export function ClinicPatientsPage({
               <p><strong>Référence locale :</strong> <code>{selectedPatient.local_reference}</code></p>
             ) : null}
 
-            {!showOrderWizard ? (
-              <div className={styles.actions} style={{ justifyContent: 'flex-start', marginTop: 'var(--space-2)' }}>
-                <Button type="button" onClick={handleOpenOrderWizard}>
-                  Nouvel ordre de laboratoire
-                </Button>
-              </div>
-            ) : null}
+            {(() => {
+              const hasUnresolvedOrder = Boolean(
+                orderSubmitState === 'uncertain' ||
+                unresolvedStoredOrder ||
+                (orderScopeKey && pendingOrders[orderScopeKey])
+              )
+              return (
+                <>
+                  {hasUnresolvedOrder && !showOrderWizard ? (
+                    <div className={styles.alertBanner} role="alert" style={{ marginTop: 'var(--space-3)' }}>
+                      <p>
+                        <strong>Tentative d’ordre non confirmée :</strong> La création de cet ordre n’a pas
+                        encore pu être confirmée. Vérifiez ou réessayez cette même tentative avant de créer
+                        un nouvel ordre.
+                      </p>
+                      <div className={styles.actions}>
+                        <Button type="button" onClick={handleResumeUncertainOrder}>
+                          Vérifier / réessayer
+                        </Button>
+                        {orderReconciled404 ? (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={handleAbandonStoredOrderAttempt}
+                          >
+                            Abandonner la tentative non confirmée
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {orderStorageUnreadable ? (
+                    <div className={styles.alertBanner} role="alert" style={{ marginTop: 'var(--space-3)' }}>
+                      <ErrorState code="SERVER_ERROR" />
+                      <p>
+                        <strong>Stockage local corrompu :</strong> Le stockage local de réconciliation d’ordre
+                        est corrompu ou illisible. Pour prévenir la création d’ordres en doublon, la création
+                        de nouveaux ordres est temporairement bloquée.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {!showOrderWizard ? (
+                    <div className={styles.actions} style={{ justifyContent: 'flex-start', marginTop: 'var(--space-2)' }}>
+                      <Button
+                        type="button"
+                        disabled={Boolean(hasUnresolvedOrder || orderStorageUnreadable || reconcilingStoredOrder)}
+                        onClick={handleOpenOrderWizard}
+                      >
+                        Nouvel ordre de laboratoire
+                      </Button>
+                    </div>
+                  ) : null}
+                </>
+              )
+            })()}
           </section>
         </Card>
 
@@ -793,24 +1064,26 @@ export function ClinicPatientsPage({
                       {orderSubmitState === 'submitting'
                         ? 'Prescription en cours…'
                         : orderSubmitState === 'uncertain'
-                          ? 'Réessayer la prescription'
+                          ? 'Vérifier / réessayer'
                           : 'Confirmer et prescrire'}
                     </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      disabled={orderSubmitState === 'submitting'}
-                      onClick={() => setOrderStep('catalog')}
-                    >
-                      Modifier les services
-                    </Button>
+                    {orderSubmitState !== 'uncertain' ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={orderSubmitState === 'submitting'}
+                        onClick={() => setOrderStep('catalog')}
+                      >
+                        Modifier les services
+                      </Button>
+                    ) : null}
                     <Button
                       type="button"
                       variant="secondary"
                       disabled={orderSubmitState === 'submitting'}
                       onClick={handleCloseOrderWizard}
                     >
-                      Annuler
+                      {orderSubmitState === 'uncertain' ? 'Fermer' : 'Annuler'}
                     </Button>
                   </div>
                 </>
@@ -830,7 +1103,7 @@ export function ClinicPatientsPage({
                     <StatusBadge label="En attente de choix labo" tone="neutral" />
                   </p>
                   <p>
-                    <strong>Laboratoire :</strong> Pas encore sélectionné
+                    <strong>Laboratoire :</strong> {formatOrderLabText(orderOutcome.order.status)}
                   </p>
                   <p>
                     <strong>Date de prescription :</strong>{' '}
@@ -897,7 +1170,7 @@ export function ClinicPatientsPage({
                         <strong>Ordre :</strong> <code>{order.id}</code>
                       </p>
                       <p className={styles.orderCardMeta}>
-                        <strong>Laboratoire :</strong> Pas encore sélectionné
+                        <strong>Laboratoire :</strong> {formatOrderLabText(order.status)}
                       </p>
                       <div>
                         <strong>Services demandés ({order.items.length}) :</strong>

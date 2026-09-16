@@ -428,6 +428,30 @@ export class ExchangeClient {
       options.token,
     )
   }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/orders/by-idempotency-key/{idempotency_key}
+   * Reconciles an order by its idempotency key under a provider (DH-CLINIC-003A).
+   * Returns null on 404 (order not found under this provider), throws on other errors.
+   */
+  async getOrderByIdempotencyKey(
+    providerId: string,
+    idempotencyKey: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrder | null> {
+    try {
+      return await this.request<LabOrder>(
+        `/organizations/${encodeURIComponent(providerId)}/orders/by-idempotency-key/${encodeURIComponent(idempotencyKey)}`,
+        { method: 'GET', signal: options.signal },
+        options.token,
+      )
+    } catch (error) {
+      if (error instanceof ExchangeApiError && error.status === 404) {
+        return null
+      }
+      throw error
+    }
+  }
 }
 
 
