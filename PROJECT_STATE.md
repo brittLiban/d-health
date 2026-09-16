@@ -14619,6 +14619,14 @@ There are three long-term architectural choices for cross-reload payload recover
 
 ---
 
+**Gate RESOLVED 2026-09-16 (DH-CLINIC-003C): Liban chose Option A**, built directly under his own
+git identity (commit `91e752d82d5f398bba2ede964dc3822b2468fd1e`), not the primary agent's
+recommended Option C. Full decision record, including why Options B and C were not selected: **ADR-049**
+(`DECISIONS.md`). Detail and qualification evidence for the implementation this decision produced:
+the DH-CLINIC-003C entries below.
+
+---
+
 **DH-CLINIC-003C continuation (2026-09-16, UNFINISHED — append-only):** checkpoint
 `91e752d82d5f398bba2ede964dc3822b2468fd1e` was audited as an intermediate commit, not closure.
 The required pre-implementation independent review found a migration/model mismatch: `LabOrder`
@@ -14629,3 +14637,91 @@ passed the required focused/full suites, disposable real-PostgreSQL qualificatio
 final independent review, commit/push, or exact-SHA CI. Do not report DH-CLINIC-003C complete and
 do not start DH-CLINIC-004. Human Decision Required: No; blocker is incomplete verification and
 implementation, not a clinical/product decision.
+
+---
+
+**DH-CLINIC-003C implementation and qualification, closed out 2026-09-16 (three follow-on
+sessions after the checkpoint above):**
+
+## Implementation
+
+- Backend-owned durable `LabOrderIntent`/`LabOrderIntentItem` (migration
+  `0020_exchange_order_intents`), completed by the corrective `0021_order_intent_ownership`
+  migration that added the `exchange_lab_orders.intent_id` column the ORM already declared.
+- Bidirectional ownership invariant (`LabOrder.intent_id == LabOrderIntent.id` and
+  `LabOrderIntent.committed_lab_order_id == LabOrder.id`), written and checked in one transaction.
+- Legacy `/orders` convergence: the legacy endpoint no longer has an independent creation path — it
+  acquires or consumes the same durable intent reservation as native Clinic ordering.
+- Immutable commit: the commit endpoint accepts no request body; an adversarial body has zero
+  effect on the resulting order (permanently tested, not just structurally argued).
+- Clinician-bound recovery: intent retrieval is restricted to the original authoring clinician,
+  anti-enumerating `404` for a different clinician at the same provider.
+- Browser technical-only persistence: `pendingOrderStorage.ts` stores exactly the approved
+  non-clinical field allowlist; never catalog ids, service names/codes, or PHI.
+- A stale-reconciliation-state defect (`reconcilingStoredOrder` could remain stuck `true` after a
+  patient/provider switch, blocking "Nouvel ordre de laboratoire" for an unrelated scope) was found
+  by writing a genuine regression test for the recovery race, fixed with a synchronous scope-reset
+  at the top of the recovery effect, and covered by permanent regression tests. Full record: ADR-049.
+
+Full architectural decision record, including the rejected alternatives: **ADR-049**
+(`DECISIONS.md`). Runtime-flow detail: `docs/ARCHITECTURE.md` §17, "Durable Provider Lab Order
+Intent."
+
+## Negative-control and coverage-closure evidence
+
+A negative-control audit (temporary, reverted mutations against the qualified baseline) found
+several regression paths with no test coverage — most significantly, an entire recovery branch (a
+real, uncommitted backend intent found on reload) that no test in `ClinicPatientsPage.test.tsx` had
+ever exercised, because every intent-lookup mock in that file defaulted to `null`. Permanent tests
+were added to close each gap: exact durable-intent restore and read-only behavior; provider/patient/
+idempotency-key/intent-id mismatch failing closed; stale patient/provider async responses (which is
+also what surfaced the `reconcilingStoredOrder` defect above); commit-step-error recovery retention;
+raw browser-storage privacy (reading the serialized string directly, not just the typed getter);
+no destructive TTL; cross-clinician retrieval anti-enumeration; practitioner-spoof rejection;
+focused legacy-order ownership; and the adversarial-commit-body proof. Not every temporary mutation
+produced a RED result on its own — one repository-level duplicate-order guard was removed without
+breaking the invariant, because the `exchange_lab_orders` table's own `UNIQUE` constraint
+independently enforced it; this is recorded as genuine defense-in-depth, not turned into false
+RED→GREEN evidence.
+
+## Automated evidence (exact-SHA CI-qualified)
+
+- **SHA:** `6619e08bf3b2fe87e5ab1f8c93594b64c41e8851` · **CI run:** `35135484902` · **all 9 jobs
+  GREEN.**
+- **Adapter:** `851 passed, 98 skipped, 1 warning`; Ruff lint/format clean.
+- **Migration:** `0021_order_intent_ownership` — current == heads == expected.
+- **Real PostgreSQL (PG2–PG6, disposable `postgres:16-alpine` CI service):** `5 passed`.
+- **UI:** `26 files / 366 tests` passed, including `60` Clinic-specific tests; lint/typecheck/build
+  clean; bundle secret scan clean (`No secrets found across 4 built file(s)`).
+
+## Evidence labels — precise, not inflated
+
+BUILT. TESTED. CI-QUALIFIED. Real-PostgreSQL-qualified for the explicit PG2–PG6 scenarios listed
+above (concurrent same-intent commit; legacy/register race, matching and mismatched payload;
+legacy/commit race, matching and mismatched payload). **Not claimed:** full runtime-qualified,
+pilot-ready, clinically live, real-Keycloak/browser-qualified, real-patient-qualified, or
+deployment-qualified beyond the evidence above.
+
+## Known limitations (unchanged, not erased by this closure)
+
+- Real Keycloak/browser runtime for the Exchange track remains separately unqualified where noted
+  elsewhere in this file (registry unreachable in the working sandbox) — DH-CLINIC-003C's CI
+  qualification does not close that gap.
+- Full deployment/pilot qualification remains future work; nothing in DH-CLINIC-003C is a
+  pilot-readiness claim.
+- Historical (pre-003C) `LabOrder` rows intentionally keep `intent_id = NULL` — this is supported,
+  permanent, correct state, not a gap requiring backfill.
+- Clinical-live readiness (ADR-012) remains out of scope for this ticket, as for every ticket on
+  this track.
+
+## Status
+
+**DH-CLINIC-003C: IMPLEMENTED / QUALIFIED — FINAL ADVISOR REVIEW PENDING.**
+
+**DH-CLINIC-003C CLOSED: NO** — reserved for Liban's own final independent advisor review, per his
+explicit instruction; this entry records truthful implementation and CI-qualification status only,
+not closure.
+
+**Human Decision Required: NO.**
+
+Do not start DH-CLINIC-004 until that review closes this ticket.

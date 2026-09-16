@@ -1197,3 +1197,90 @@ history and exact-version reads use immutable manifests, while released amendmen
 shows a later proposal. SQLite tests (136 passed) and real-PostgreSQL qualification (33 passed
 across 6 test suites) pass; real Keycloak qualification, manual live/browser demonstration, and
 production deployment remain unrun, so no pilot-readiness claim follows.
+
+### Durable Provider Lab Order Intent (ADR-049, DH-CLINIC-003C, 2026-09-16)
+
+A native Clinic lab order (through the DHealth Provider Portal's own UI, not an EMR connector) is
+never created directly. It is always mediated by a backend-owned, immutable `LabOrderIntent` —
+Option A of the three options DH-CLINIC-003B's own decision gate framed (ADR-049 records the
+rejected Options B and C and why). The browser is not the source of truth for clinical order
+content once a durable intent exists.
+
+**New order flow.**
+
+1. Clinician chooses a patient (DH-CLINIC-002's provider-local patient reference).
+2. Clinician chooses the exact diagnostic services to order.
+3. Frontend generates (or reuses, on retry) an idempotency key.
+4. Frontend registers a durable `LabOrderIntent`: `POST .../order-intents`.
+5. Backend freezes, in one row: provider organization, patient reference, the practitioner
+   (server-derived from the authenticated clinician — the request schema has no
+   `practitioner_reference_id` field, so the browser cannot supply or override it), the exact
+   service set, and an immutable code/display-name snapshot of each selected catalog entry.
+6. Browser persists only an opaque technical recovery identity (allowlist below) — never the
+   service selection itself.
+7. Frontend commits the intent: `POST .../order-intents/{id}/commit`.
+8. Backend creates at most one `LabOrder` from the frozen intent content only; the commit endpoint
+   accepts no request body, so nothing client-supplied can override patient/practitioner/services at
+   this step.
+9. `LabOrder.intent_id == LabOrderIntent.id` and `LabOrderIntent.committed_lab_order_id ==
+   LabOrder.id` are written and checked together, in the same transaction.
+
+The legacy `POST .../orders` endpoint (kept for backward compatibility) is not a second creation
+path — it acquires or consumes the identical durable-intent reservation for its
+`(provider_organization_id, idempotency_key)` pair before creating anything.
+
+**Reload/recovery flow.** If a technical recovery identity exists in browser storage on open:
+
+1. First reconcile an already-committed `LabOrder` by idempotency key
+   (`GET .../orders/by-idempotency-key/{key}`).
+2. If none is found (a 404 here is not proof the order never committed — it only means "not found
+   at this moment"), retrieve the durable intent by id (if known) or idempotency key.
+3. Validate the recovered intent's `(provider_organization_id, patient_reference_id,
+   idempotency_key, id)` tuple against the current scope. Any mismatch fails closed: nothing
+   renders or commits, and the recovery record is retained, not discarded.
+4. If the intent is already committed, load the authoritative order.
+5. If uncommitted, restore the exact backend item snapshots — never a browser reconstruction of
+   which services were selected.
+6. The restored state remains immutable/read-only ("Modifier les services" does not appear);
+   committing replays the exact stored intent only.
+7. A definitive commit-step error at this point (e.g. `422`, `403`) retains the recovery identity —
+   it is never treated as a fresh, unregistered attempt.
+
+A transient lookup failure does not reopen service selection, and a stale asynchronous response for
+one patient/provider scope cannot attach its content to a different scope the clinician has since
+switched to (verified by tests that genuinely defer the mocked response across a scope switch, not
+merely by removing an identity check).
+
+**Persistent browser boundary** (`ui/src/features/clinic/pendingOrderStorage.ts`, verified against
+the code as shipped — an exact allowlist, not an approximation): `user_id`, `provider_id`,
+`patient_reference_id`, `idempotency_key`, `created_at`, and two optional fields —
+`intent_id` (once the backend intent is known) and `confirmed_order_id` (once a commit has
+succeeded). Never persisted: catalog entry ids, service codes, service display names, patient
+display name or contact details, result values, or a client-supplied practitioner. There is no
+destructive TTL of any kind — an old, unresolved recovery record is never silently discarded, since
+that would make a potentially-committed order unrecoverable and risk a clinician re-submitting it.
+
+**Concurrency model — the specific races that are qualified, not a general "race-free" claim.**
+Real PostgreSQL (`test_dhex003c_postgres_qualification.py`, CI's disposable `postgres:16-alpine`
+service, never a facility database) qualifies: concurrent commits of the same intent converge on
+exactly one `LabOrder` (PG2); native intent registration racing the legacy endpoint with the same
+canonical payload converges (PG3); the same race with a mismatched payload correctly conflicts
+(PG4); native commit racing the legacy endpoint with the same payload converges (PG5); that race
+with a mismatch correctly conflicts (PG6). Underlying mechanisms: a canonical `(provider_id,
+idempotency_key)` reservation, a database `UNIQUE` constraint as the final authority, session-aware
+transactional replay (a just-committed order is read through the locking transaction, never an
+independent session that cannot yet see it), and row locking (`SELECT ... FOR UPDATE`) on commit.
+One negative-control finding worth recording precisely: removing the commit method's own
+"already-committed" fast-path check did not, by itself, allow a duplicate order — the database
+`UNIQUE` constraint on `(provider_organization_id, idempotency_key)` independently converges that
+race regardless. That is genuine defense-in-depth; the fast path is a contention/latency
+optimization layered on top of a schema-level guarantee, not the sole mechanism preventing
+duplication.
+
+**Historical compatibility.** Pre-DH-CLINIC-003C `LabOrder` rows legitimately have `intent_id =
+NULL` — no backfill was performed or attempted, and none is planned; that is the permanent, correct
+state for orders that predate this model. Every *new* provider order path (native or legacy)
+requires intent ownership going forward.
+
+Full decision record and rejected alternatives: **ADR-049** (`DECISIONS.md`). Implementation and
+qualification detail: `PROJECT_STATE.md`'s DH-CLINIC-003C entries.

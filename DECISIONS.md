@@ -6060,3 +6060,175 @@ Implements the post-release amendment preparation and release workflow designed 
 - **Exact-version provider reads and reviews:** `GET .../release-versions/{v}` returns the exact immutable manifest and review status for that version. Unversioned review mutations reject with `ExplicitReviewVersionRequired` once multiple release versions exist.
 - **Migration `0019_exchange_amendments` downgrade safety:** downgrade fails closed if any `exchange_amendments` row exists (`DowngradeBlockedByAmendmentHistory`) or if any amendment audit event exists (`DowngradeBlockedByAmendmentAuditVocabulary`). Clean round-trip downgrade/re-upgrade verified against real PostgreSQL.
 - **All 12 negative controls verified:** NC 1 to NC 12 individually tested with red failure and restored green.
+
+## ADR-049 — ACCEPTED / IMPLEMENTED / CI-QUALIFIED (2026-09-16, DH-CLINIC-003C): Option A — a backend-owned durable `LabOrderIntent` is the sole cross-reload recovery mechanism for native Clinic lab ordering
+
+**Date raised:** 2026-09-15/16 (DH-CLINIC-003B's own "Human Decision Gate: Cross-Reload Exact
+Replay Architecture," `PROJECT_STATE.md`, which ended **STOPPED AT HUMAN DECISION GATE: YES**) ·
+**Status:** ACCEPTED, IMPLEMENTED, CI-QUALIFIED · **Ticket:** DH-CLINIC-003C.
+
+**Decided by:** Liban — **Option A**. Evidence: commit `91e752d82d5f398bba2ede964dc3822b2468fd1e`
+("Implement backend-owned `LabOrderIntent` repository with idempotency and commit functionality")
+is authored directly under Liban's own git identity and implements Option A, not the primary
+agent's recommended Option C — the decision was made by building it, not by a separate written
+memo, and is recorded here after the fact so the gate this closes is legible.
+
+### The three options, exactly as DH-CLINIC-003B originally framed them
+
+1. **Option A: Backend-owned intent (Draft Order Resource).** Before the final mutation, the
+   client creates a draft order resource on the backend. *Pros:* zero clinical data stored in the
+   browser; seamless resume across devices/browsers/reloads without re-selecting tests. *Cons:* a
+   new database table/migration, API endpoints, lifecycle management.
+2. **Option B: Scoped browser storage with test IDs.** Store `catalog_entry_ids` alongside
+   technical metadata in `localStorage`/`sessionStorage`. *Pros:* zero backend schema changes,
+   automatic payload restoration. *Cons:* places diagnostic test selections into browser storage on
+   potentially shared clinic workstation PCs, raising privacy/governance concerns under ADR-043 —
+   explicitly recorded as **do not adopt without explicit sign-off from Liban**.
+3. **Option C: Fail-closed without payload replay across reload** (the DH-CLINIC-003B baseline
+   actually shipped at the time). Browser stores strictly technical non-PHI metadata; an uncommitted
+   reload blocks new orders and requires re-selecting the same tests under the frozen idempotency
+   key. *Pros:* zero migrations, 100% compliant with zero-clinical-data-in-storage, duplicate-safe
+   via the database unique constraint. *Cons:* the clinician must re-check test checkboxes after an
+   uncommitted reload.
+
+### What was decided, and why B and C were not selected
+
+**Option A selected and built.** The browser is **not** the source of truth for clinical order
+content once a durable intent exists. The backend owns, immutably from the moment of registration:
+provider organization, patient reference, the practitioner (server-derived from the authenticated
+clinician, never client-supplied), the idempotency key, the exact diagnostic catalog selection, and
+an immutable snapshot of each selected catalog entry's code/display name at selection time — so a
+later catalog edit can never retroactively change what an already-registered intent says it asked
+for. Browser persistent storage after this ADR contains only an opaque technical recovery identity
+(§ below); it is never the record of which tests were requested.
+
+**Option B was not adopted.** The gate's own recorded risk — diagnostic test selections sitting in
+`localStorage` on a potentially shared clinic workstation — was never granted the explicit sign-off
+the gate required. Option A does not request an exception to that risk; it removes the risk
+category structurally by never needing test identifiers in the browser at all, committed and
+uncommitted alike.
+
+**Option C was superseded, not repudiated.** It was a legitimate, shipped MVP baseline — genuinely
+duplicate-safe, zero-migration, and fully compliant with the no-clinical-data-in-storage rule. Its
+one accepted cost (re-checking test checkboxes after a rare uncommitted-reload race) is what Option
+A eliminates. Nothing about Option C was found broken; it was a smaller architecture accepted as a
+stepping stone, replaced once the larger one was built.
+
+### Bidirectional ownership invariant
+
+For every order created through DH-CLINIC-003C's intent path (including the legacy endpoint, which
+converges through the same reservation — see below):
+
+- `LabOrder.intent_id == LabOrderIntent.id`
+- `LabOrderIntent.committed_lab_order_id == LabOrder.id`
+
+Both pointers are written and checked inside the same database transaction
+(`order_intents.py`'s `LabOrderIntentRepository.commit`); a mismatch raises `IdempotencyKeyConflict`
+rather than allowing one-sided provenance. `exchange_lab_orders.intent_id` is a nullable, `UNIQUE`
+foreign key added by migration `0021_order_intent_ownership` (see the migration-history note
+below) — nullable **solely** because pre-003C `LabOrder` rows legitimately predate this model and
+have no intent to point to. **No backfill was performed or attempted** for those historical rows;
+`intent_id = NULL` on an old order is the honest, permanent, correct state, not a gap to be closed
+later.
+
+### Legacy `/orders` convergence
+
+The legacy provider order-creation endpoint (`POST .../orders`) does not own a separate creation
+path. Every new provider `LabOrder` — legacy or native — is created by first acquiring (or
+consuming an already-existing) `LabOrderIntent` reservation for that `(provider_organization_id,
+idempotency_key)` pair, then committing it; the intent table's own unique constraint is the single
+owner under concurrent legacy and native-Clinic requests for the same key. The legacy endpoint
+remains, for backward compatibility, but shares the durable intent ownership model completely — it
+is not a second, independent way to create an order.
+
+### Practitioner ownership
+
+The practitioner on an intent is always derived server-side from the authenticated clinician
+(`principal.identity_id` → `PractitionerReference.get_or_create`); the request schema
+(`LabOrderIntentCreateRequest`, `extra="forbid"`) has no `practitioner_reference_id` field at all,
+so the browser has no channel to supply or override it — confirmed both structurally and by a
+permanent regression test that a spoofed field in the request body is rejected (`422`). Intent
+retrieval (`GET .../order-intents/{id}` and `GET .../order-intents/by-idempotency-key/{key}`) is
+restricted to the original authoring clinician: a different clinician at the **same** provider
+receives an anti-enumerating `404`, not `403` — the response never discloses that an intent with
+that id exists at all. This is intentionally different from the commit endpoint's own status
+contract, which does use `403 Forbidden` for a wrong-clinician commit attempt (identity is already
+known to exist by that point, since the intent id came from the clinician's own registration
+response) — the two endpoints answer different questions and are not expected to share a status
+code.
+
+### Recovery behavior
+
+- An unresolved durable intent survives a full browser reload/restart; there is no destructive TTL
+  of any kind (verified by reading the complete `pendingOrderStorage.ts` module — no expiry code
+  exists to remove).
+- There is no "Option C"-style manual catalog reconstruction once a durable intent exists: on
+  reload, the backend intent's own item snapshots restore the exact original selection, read-only.
+- A recovered intent whose provider, patient, idempotency key, or (when the browser already knows
+  it) intent id does not exactly match the current scope fails closed — the recovery record is
+  retained, but nothing is rendered or committed from it.
+- A transient lookup failure does not reopen service selection as if this were an ordinary new
+  order.
+- A definitive commit-step error (e.g. `422`, `403`) after successful registration retains the
+  durable recovery identity — it is not treated as a fresh, unregistered attempt.
+- A stale asynchronous response for one patient/provider scope cannot attach its content to a
+  different scope the clinician has since switched to.
+
+**A real defect was found and fixed during the coverage-closure pass that verified the property
+above.** `reconcilingStoredOrder` (a UI-only loading flag, not a data-integrity mechanism) was
+component-wide state whose `true` was set synchronously for whichever patient/provider was open,
+but whose `false` reset only ran inside the same staleness-guarded async callback that correctly
+blocks a stale response from attaching content — so switching scope before that callback resolved
+left the flag stuck `true`, disabling "Nouvel ordre de laboratoire" for an unrelated patient with no
+pending order of her own. Fixed by resetting the flag synchronously at the top of the recovery
+effect on every scope change, with the existing logic re-arming it immediately if the new scope
+genuinely has something to reconcile. No data ever attached to the wrong scope; this was an
+availability/usability defect, not a correctness-of-clinical-content one. Permanent regression
+tests cover both the original bug and the requirement that the fix not fail reconciliation open for
+a scope that is genuinely still pending.
+
+### Persistent browser boundary (verified against `pendingOrderStorage.ts` as shipped)
+
+Exactly: `user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`, and two
+optional fields — `intent_id` (once the backend intent is known) and `confirmed_order_id` (once a
+commit has succeeded). Never: catalog entry ids, service codes, service display names, patient
+display name or contact details, result values, or any client-supplied practitioner value. A
+permanent test reads the raw serialized `localStorage` string directly (not merely the typed
+getter, which would silently drop an unknown field) and asserts this exact key allowlist.
+
+### Concurrency, qualified specifically (not claimed generally race-free)
+
+Real PostgreSQL qualification (`test_dhex003c_postgres_qualification.py`, CI's disposable
+`postgres:16-alpine` service, never a facility database) covers exactly these scenarios, no more:
+concurrent commits of the same intent converge on exactly one `LabOrder` (PG2); native
+registration racing the legacy endpoint with the same canonical payload converges (PG3); the same
+race with a mismatched payload correctly conflicts (PG4); native commit racing the legacy endpoint
+with the same payload converges (PG5); that race with a mismatch correctly conflicts (PG6). A
+same-session commit-replay regression (reading a just-committed order through the locking
+transaction, not an independent session that cannot yet see it) is also qualified. **One
+negative-control finding is recorded honestly rather than turned into false evidence**: removing
+the commit method's early "already committed" fast-path check did not, by itself, produce a
+duplicate `LabOrder` — the `exchange_lab_orders` table's own `UNIQUE(provider_organization_id,
+idempotency_key)` constraint independently converges the race regardless. This is legitimate
+defense-in-depth, not a gap in the negative-control method; the fast path is a contention/latency
+optimization on top of a schema-level guarantee, not the sole mechanism preventing duplication.
+
+### Migration history
+
+`0020_exchange_order_intents` (2026-09-16) introduced the `exchange_lab_order_intents` and
+`exchange_lab_order_intent_items` tables. A required pre-implementation independent review found
+that `LabOrder`'s ORM model already declared a nullable `intent_id` field that `0020` never added
+to the database — an ORM/schema mismatch, not a design change. `0021_order_intent_ownership`
+(same day) is the corrective migration: it adds `exchange_lab_orders.intent_id` (nullable, `UNIQUE`,
+`FOREIGN KEY ... RESTRICT`) and its downgrade guard refuses to run while any intent-owned order
+exists. This is the true, unedited sequence — `0020` is not described as having always been
+correct, and no history was rewritten to hide the gap.
+
+### Evidence
+
+CI-qualified at commit `6619e08bf3b2fe87e5ab1f8c93594b64c41e8851` (run `35135484902`, all 9 jobs
+green): adapter `851 passed, 98 skipped, 1 warning`; migration current == heads == expected
+`0021_order_intent_ownership`; real PostgreSQL `5 passed` (PG2–PG6); UI `26 files / 366 tests`
+passed, including 60 Clinic-specific tests; bundle secret scan clean. This is CI-qualified evidence
+only — no real Keycloak/browser runtime qualification, no real-patient qualification, and no
+deployment/pilot qualification is claimed by this ADR.
