@@ -328,6 +328,14 @@ export function ClinicPatientsPage({
 
   useEffect(() => {
     const recoveryGeneration = ++orderRecoveryGenerationRef.current
+    // DH-CLINIC-003C defect fix: reconcilingStoredOrder is scope-global state, but the resets to
+    // `false` below only run inside async callbacks guarded by staleness checks -- if the scope
+    // changes before a prior scope's lookup resolves, that reset never fires, and this newly
+    // active scope silently inherits a stuck `true` (permanently disabling "Nouvel ordre de
+    // laboratoire" even for a patient with no pending order at all). The newly active scope must
+    // start from a clean slate every time; if it genuinely has a stored order to reconcile, the
+    // branch below re-arms `true` immediately, synchronously, before any async work begins.
+    setReconcilingStoredOrder(false)
     if (providerId && selectedPatient) {
       void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
 
