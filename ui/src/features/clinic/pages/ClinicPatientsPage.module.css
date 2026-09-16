@@ -94,3 +94,154 @@
   margin: 0;
 }
 
+.orderSection {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.orderSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.orderList {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.orderCard {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.orderCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.orderCardMeta {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.orderItemList {
+  margin: var(--space-1) 0 0 0;
+  padding-left: var(--space-4);
+  font-size: 0.9rem;
+}
+
+.orderWizard {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.wizardHeader {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.catalogSearch {
+  margin-bottom: var(--space-2);
+}
+
+.catalogList {
+  display: grid;
+  gap: var(--space-2);
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  list-style: none;
+  margin: 0;
+}
+
+.catalogItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.catalogItem:hover {
+  background: var(--color-surface-hover, rgba(0, 0, 0, 0.03));
+}
+
+.catalogItemContent {
+  display: grid;
+  gap: 2px;
+}
+
+.catalogCode {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.catalogName {
+  font-size: 0.95rem;
+}
+
+.reviewSummary {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-alt, #f9fafb);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.reviewRow {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+}
+
+.reviewRow dt {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.reviewRow dd {
+  margin: 0;
+  text-align: right;
+}
+
+.reviewServicesList {
+  margin: var(--space-2) 0 0 0;
+  padding-left: var(--space-4);
+  font-size: 0.9rem;
+}
+
+.confirmationBanner {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-success-bg, #f0fdf4);
+  border: 1px solid var(--color-success-border, #bbf7d0);
+  border-radius: var(--radius-md);
+}
+
+.confirmationTitle {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-success-text, #166534);
+  margin: 0;
+}
+

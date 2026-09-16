@@ -292,3 +292,56 @@ def test_invalid_transition_refused_under_real_row_lock(sessions: sessionmaker) 
     assert status == LabOrderStatus.AWAITING_LAB_SELECTION.value, (
         "a refused transition must never partially apply under a real row lock"
     )
+
+
+def test_list_for_patient_postgres_qualification(sessions: sessionmaker) -> None:
+    """DH-CLINIC-003: real PostgreSQL qualification of list_for_patient ordering, item eager loading,
+    and provider-scoped patient isolation."""
+    key_prefix = f"pgpat-{uuid.uuid4().hex[:8]}"
+    _org, _cat, orders, _sel, provider, _lab, entry, _off, patient_1, practitioner = _seed(
+        sessions, key_prefix=f"{key_prefix}-1"
+    )
+    patients = PatientReferenceRepository(sessions)
+    patient_2 = patients.get_or_create(
+        source_organization_id=provider.id,
+        source_system="test",
+        source_identity_system="urn:test:pat",
+        source_identity_value=f"{key_prefix}-p2",
+    )
+
+    # Patient 1 has order 1 and order 3
+    order1 = orders.create(
+        idempotency_key=f"{key_prefix}-p1-o1",
+        provider_organization_id=provider.id,
+        patient_reference_id=patient_1.id,
+        practitioner_reference_id=practitioner.id,
+        items=[OrderItemInput(catalog_entry_id=entry.id)],
+    ).order
+
+    # Patient 2 has order 2
+    order2 = orders.create(
+        idempotency_key=f"{key_prefix}-p2-o2",
+        provider_organization_id=provider.id,
+        patient_reference_id=patient_2.id,
+        practitioner_reference_id=practitioner.id,
+        items=[OrderItemInput(catalog_entry_id=entry.id)],
+    ).order
+
+    order3 = orders.create(
+        idempotency_key=f"{key_prefix}-p1-o3",
+        provider_organization_id=provider.id,
+        patient_reference_id=patient_1.id,
+        practitioner_reference_id=practitioner.id,
+        items=[OrderItemInput(catalog_entry_id=entry.id)],
+    ).order
+
+    p1_results = orders.list_for_patient(provider.id, patient_1.id, limit=10)
+    assert len(p1_results) == 2
+    assert [r.id for r in p1_results] == [order3.id, order1.id]
+    # Prove items are eagerly loaded and populated
+    assert len(p1_results[0].items) == 1
+    assert p1_results[0].items[0].catalog_entry_id == entry.id
+
+    p2_results = orders.list_for_patient(provider.id, patient_2.id, limit=10)
+    assert len(p2_results) == 1
+    assert p2_results[0].id == order2.id

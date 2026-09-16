@@ -76,6 +76,31 @@ export interface LabOrder {
   items: LabOrderItem[]
 }
 
+export type LabOrderResponse = LabOrder
+export type LabOrderItemResponse = LabOrderItem
+
+export interface CatalogEntry {
+  id: string
+  code: string
+  display_name: string
+  version: number
+  active: boolean
+  is_synthetic: boolean
+}
+
+export type CatalogEntryResponse = CatalogEntry
+
+export interface LabOrderCreateRequest {
+  patient_reference_id: string
+  catalog_entry_ids: string[]
+}
+
+export interface LabOrderCreateOutcome {
+  order: LabOrder
+  created: boolean
+}
+
+
 export interface ProviderObservationResponse {
   observation_id: string
   source_code: string

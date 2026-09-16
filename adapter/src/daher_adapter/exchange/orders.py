@@ -32,7 +32,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.models import (
@@ -307,7 +307,31 @@ class LabOrderRepository:
         with self._sessions() as session:
             orders = session.scalars(
                 select(LabOrder)
+                .options(selectinload(LabOrder.items))
                 .where(LabOrder.provider_organization_id == provider_organization_id)
+                .order_by(LabOrder.created_at.desc(), LabOrder.id.desc())
+                .limit(limit)
+            ).all()
+            return [_to_order_record(order) for order in orders]
+
+    def list_for_patient(
+        self,
+        provider_organization_id: uuid.UUID,
+        patient_reference_id: uuid.UUID,
+        *,
+        limit: int = 50,
+    ) -> list[LabOrderRecord]:
+        """DH-CLINIC-003: bounded, deterministically-ordered listing of orders for a specific
+        patient reference under a provider organization. Eagerly loads items to prevent N+1 queries.
+        Newest first, order UUID as a stable tie-break."""
+        with self._sessions() as session:
+            orders = session.scalars(
+                select(LabOrder)
+                .options(selectinload(LabOrder.items))
+                .where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+                    LabOrder.patient_reference_id == patient_reference_id,
+                )
                 .order_by(LabOrder.created_at.desc(), LabOrder.id.desc())
                 .limit(limit)
             ).all()

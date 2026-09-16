@@ -500,4 +500,132 @@ describe('ExchangeClient', () => {
     expect(isAmbiguousExchangeError(err422)).toBe(false)
     expect(isAmbiguousExchangeError(err401)).toBe(false)
   })
+
+  it('listCatalogTests performs GET /exchange/v1/catalog/tests without openmrs calls', async () => {
+    const mockCatalog = [
+      {
+        id: 'cat-1',
+        code: 'SYNTH-CBC',
+        display_name: 'Numération Formule Sanguine (NFS)',
+        version: 1,
+        active: true,
+        is_synthetic: true,
+      },
+    ]
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockCatalog), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.listCatalogTests({ token: 'tok-1' })
+
+    expect(result).toEqual(mockCatalog)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/catalog/tests')
+    expect(url).not.toContain('/openmrs')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer tok-1',
+    })
+  })
+
+  it('createOrderWithOutcome performs POST /organizations/{id}/orders with Idempotency-Key and distinguishes created 201 vs 200', async () => {
+    const mockOrder = {
+      id: 'ord-123',
+      provider_organization_id: 'prov-1',
+      patient_reference_id: 'pat-ref-1',
+      practitioner_reference_id: 'prac-1',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:00:00Z',
+      items: [
+        {
+          catalog_entry_id: 'cat-1',
+          catalog_code_snapshot: 'SYNTH-CBC',
+          catalog_display_name_snapshot: 'NFS',
+        },
+      ],
+    }
+
+    // 201 Created
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrder), { status: 201 }),
+    )
+
+    const client = new ExchangeClient()
+    const outcome1 = await client.createOrderWithOutcome(
+      'prov-1',
+      'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+      {
+        patient_reference_id: 'pat-ref-1',
+        catalog_entry_ids: ['cat-1'],
+      },
+      { token: 'tok-1' },
+    )
+
+    expect(outcome1.created).toBe(true)
+    expect(outcome1.order).toEqual(mockOrder)
+
+    const [url1, init1] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url1).toBe('/exchange/v1/organizations/prov-1/orders')
+    expect(url1).not.toContain('/openmrs')
+    expect(init1?.headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+      Authorization: 'Bearer tok-1',
+    })
+    expect(JSON.parse(String(init1?.body))).toEqual({
+      patient_reference_id: 'pat-ref-1',
+      catalog_entry_ids: ['cat-1'],
+    })
+
+    // 200 Replay
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrder), { status: 200 }),
+    )
+
+    const outcome2 = await client.createOrderWithOutcome(
+      'prov-1',
+      'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+      {
+        patient_reference_id: 'pat-ref-1',
+        catalog_entry_ids: ['cat-1'],
+      },
+      { token: 'tok-1' },
+    )
+    expect(outcome2.created).toBe(false)
+  })
+
+  it('listPatientOrders sends GET /organizations/{id}/patient-references/{id}/orders with query limit', async () => {
+    const mockOrders = [
+      {
+        id: 'ord-1',
+        provider_organization_id: 'prov-1',
+        patient_reference_id: 'pat-ref-1',
+        practitioner_reference_id: 'prac-1',
+        status: 'AWAITING_LAB_SELECTION',
+        created_at: '2026-09-16T08:00:00Z',
+        items: [],
+      },
+    ]
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockOrders), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.listPatientOrders('prov-1', 'pat-ref-1', {
+      limit: 25,
+      token: 'tok-2',
+    })
+
+    expect(result).toEqual(mockOrders)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe(
+      '/exchange/v1/organizations/prov-1/patient-references/pat-ref-1/orders?limit=25',
+    )
+    expect(url).not.toContain('/openmrs')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer tok-2',
+    })
+  })
 })

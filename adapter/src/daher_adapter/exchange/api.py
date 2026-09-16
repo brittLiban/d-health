@@ -2322,6 +2322,30 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return _to_order_response(order)
 
+    @router.get(
+        "/organizations/{provider_id}/patient-references/{patient_reference_id}/orders",
+        response_model=list[LabOrderResponse],
+    )
+    def list_patient_orders(
+        provider_id: uuid.UUID,
+        patient_reference_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[LabOrderResponse]:
+        # DH-CLINIC-003: clinician authorization checked strictly before patient lookup
+        # to prevent leaking patient reference existence across tenant boundaries.
+        _require_clinician(principal, provider_id)
+        if patients.get_for_organization(patient_reference_id, provider_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient reference not found"
+            )
+        return [
+            _to_order_response(order)
+            for order in orders.list_for_patient(
+                provider_id, patient_reference_id, limit=limit
+            )
+        ]
+
     # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
 
     @router.post(

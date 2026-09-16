@@ -14281,3 +14281,103 @@ An audit of the Exchange backend API (`adapter/src/daher_adapter/exchange/api.py
 **DH-CLINIC-002A CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+## Ticket: DH-CLINIC-003 — Native Diagnostic Service Ordering
+
+**Status:** COMPLETE
+**Base Commit:** `be4f7f22236c5e34b38b4189b52d48288327f96c`
+**Applicable Rules:** [AGENTS.md](AGENTS.md), [DECISIONS.md](DECISIONS.md) (ADR-042, ADR-043), [docs/MVP-1.0.md](docs/MVP-1.0.md), and [CURRENT_STATE.md](CURRENT_STATE.md).
+
+### Summary of Changes
+
+#### 1. Backend Adapter (`adapter/`)
+- **`orders.py`:**
+  - Added `list_for_patient(self, provider_organization_id: uuid.UUID, patient_reference_id: uuid.UUID, *, limit: int = 50) -> list[LabOrderRecord]` to `LabOrderRepository`.
+  - Added eager loading via `options(selectinload(LabOrder.items))` across `list_for_patient` and `list_for_organization` to eliminate N+1 queries.
+  - Enforced deterministic ordering by `(LabOrder.created_at.desc(), LabOrder.id.desc())`.
+- **`api.py`:**
+  - Added `GET /organizations/{provider_id}/patient-references/{patient_reference_id}/orders` endpoint returning `list[LabOrderResponse]`.
+  - Strictly enforced execution precedence: `_require_clinician(principal, provider_id)` is evaluated before patient reference lookup (anti-enumeration & security isolation).
+  - Bounded query limit with `Query(ge=1, le=100)` defaulting to 50.
+  - Anti-enumeration protection: returns 404 when patient does not belong to provider.
+- **`test_exchange_orders_api.py`:**
+  - Added 9 new unit tests verifying positive control listing, item population, anti-enumeration, cross-provider isolation, non-clinician 403 refusal, and limit validation (valid: 1, 50, 100; invalid: 0, -1, 101).
+- **`test_dhex001r_postgres_qualification.py`:**
+  - Added `test_list_for_patient_postgres_qualification` asserting real PostgreSQL row-locking behavior, newest-first deterministic sorting, item eager loading, and provider-scoped patient isolation.
+
+#### 2. Frontend Client & Types (`ui/`)
+- **`exchangeTypes.ts`:**
+  - Added `CatalogEntry`, `CatalogEntryResponse`, `LabOrderCreateRequest`, `LabOrderCreateOutcome`, and type aliases `LabOrderResponse`, `LabOrderItemResponse`.
+- **`exchangeClient.ts`:**
+  - Added `listCatalogTests(options: { token?: string; signal?: AbortSignal }): Promise<CatalogEntry[]>`.
+  - Added `createOrderWithOutcome(providerId: string, idempotencyKey: string, body: LabOrderCreateRequest, options: { token?: string; signal?: AbortSignal }): Promise<LabOrderCreateOutcome>` sending `Idempotency-Key` header and returning `{ order, created: status === 201 }`.
+  - Added `listPatientOrders(providerId: string, patientReferenceId: string, options: { limit?: number; token?: string; signal?: AbortSignal }): Promise<LabOrder[]>`.
+  - Strictly zero calls to `/openmrs/*`.
+- **`exchangeClient.test.ts`:**
+  - Added unit tests for all 3 methods validating URL routing, header injection, 201 vs 200 outcome distinction, and absence of `/openmrs/*` calls.
+
+#### 3. Frontend UI (`ui/`)
+- **`ClinicPatientsPage.tsx`:**
+  - Enabled `"Nouvel ordre de laboratoire"` button in patient workspace.
+  - Implemented 3-step diagnostic service ordering wizard:
+    - **Step 1 (Catalog):** Real-time client-side search/filter over active synthetic catalog entries, multi-selection checkboxes, selection counter, duplicate prevention, next step gating.
+    - **Step 2 (Review):** Displays patient context, provider establishment, authenticated practitioner, truthful lab status `"Pas encore sélectionné"`, and selected diagnostic services list.
+    - **Step 3 (Confirmation):** Replay differentiation UX: distinguishes initial creation (`created: true` -> *"Ordre de laboratoire créé avec succès"*) from idempotent replay (`created: false` -> *"Ordre de laboratoire confirmé (tentative existante récupérée sans doublon)"*), displaying order ID, status badge `"En attente de choix labo"`, lab status `"Pas encore sélectionné"`, and requested services snapshot.
+  - Implemented durable idempotent retry on ambiguous network failures, retaining the generated canonical UUIDv4 `Idempotency-Key` across retries.
+  - Implemented patient and provider switching isolation: resetting draft order state and cancelling in-flight requests when switching patients or providers.
+  - Implemented Patient Order History section in patient workspace: displays orders sorted newest first with status badges (`formatOrderStatus`), truthful lab status, and ordered services snapshots.
+- **`ClinicPatientsPage.module.css`:**
+  - Added styling for order wizard, catalog item checklist, review summary table, and order history cards.
+- **`ClinicPatientsPage.test.tsx`:**
+  - Added 6 comprehensive integration tests covering patient order history, 3-step ordering flow, 200 replay messaging, ambiguous error retry with identical idempotency key, definitive error handling, and provider/patient switching isolation.
+
+### Negative Controls (AGENTS.md Evidence Discipline)
+
+1. **NC 1: Anti-enumeration patient check in backend API (`api.py`)**
+   - Property: An unknown or cross-tenant patient reference must return 404, never 200.
+   - Mutation: Replaced `if patients.get_for_organization(...) is None:` with `if False:`.
+   - Result: RED (`assert 200 == 404` in `test_list_patient_orders_anti_enumeration_and_cross_provider`).
+   - Restored: GREEN.
+
+2. **NC 2: Idempotency key stability across ambiguous network retry (`ClinicPatientsPage.tsx`)**
+   - Property: Ambiguous network failure retry must resend the exact same `Idempotency-Key`.
+   - Mutation: Replaced `let key = orderDraftIdempotencyKey` with `const key = crypto.randomUUID()` unconditionally.
+   - Result: RED (`AssertionError: expected '11c80537-...' to be '3efb41e3-...'`).
+   - Restored: GREEN.
+
+3. **NC 3: Replay differentiation in order confirmation UI (`ClinicPatientsPage.tsx`)**
+   - Property: Idempotent replay (200 OK, `created = false`) must display confirmation text distinguishing replay from initial creation.
+   - Mutation: Removed ternary condition and always rendered `'Ordre de laboratoire créé avec succès'`.
+   - Result: RED (`findByRole('heading', { name: 'Ordre de laboratoire confirmé (tentative existante récupérée sans doublon)' })` timed out).
+   - Restored: GREEN.
+
+### Verification & Test Evidence
+
+- **Adapter Tests:** 824 passed, 92 skipped (100% green in WSL Python 3.14 / pytest 9.1).
+- **UI Tests:** 25 test files passed, 322 passed (100% green in Vitest).
+- **UI Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 79 files).
+- **UI Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
+- **UI Production Build:** `npm run build` succeeded; bundle postbuild secret check reported `No secrets found across 4 built file(s)`.
+- **Git Diff Hygiene:** `git diff --check` passed cleanly (0 whitespace/conflict errors).
+
+### Independent Advisor Review (`dhealth_advisor`)
+
+- **Phase 3 Review:** Completed by `dhealth_advisor` (conversation `12db7f58-dfd7-4cd8-a5e7-5c64eef01c47`). Reconciled BLOCKER on REST naming (`/patient-references/{id}/orders`), SHOULD FIX on client signatures, SHOULD FIX on `selectinload` N+1 queries, SHOULD FIX on `_require_clinician` execution precedence, SHOULD FIX on replay differentiation UX, and SHOULD FIX on real-PostgreSQL qualification test.
+
+### Known Gaps & Out-of-Scope (Deliberately Excluded)
+
+- Lab selection and assignment (deferred to `DH-CLINIC-004`).
+- Inventing clinical content, tests, panels, analytes, reference ranges, or prices (strictly synthetic catalog).
+- Zero `/openmrs/*` dependencies in native Clinic ordering (verified).
+
+### Next Recommended Ticket
+
+`DH-CLINIC-004 — Provider Lab Selection & Order Routing` (not started here).
+
+**Human Decision Required: NO**
+
+**DH-CLINIC-003 CLOSED: YES.**
+
+**READY FOR LIBAN REVIEW: YES**

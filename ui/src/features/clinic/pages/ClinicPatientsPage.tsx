@@ -4,7 +4,13 @@ import {
   isDefinitiveExchangeError,
   mapExchangeErrorToCode,
 } from '../../../api/exchangeClient'
-import type { ClinicPatientSummary, PatientReferenceBindRequest } from '../../../api/exchangeTypes'
+import type {
+  CatalogEntry,
+  ClinicPatientSummary,
+  LabOrder,
+  LabOrderCreateOutcome,
+  PatientReferenceBindRequest,
+} from '../../../api/exchangeTypes'
 import type { ErrorCode } from '../../../api/types'
 import {
   Button,
@@ -13,6 +19,8 @@ import {
   ErrorState,
   LoadingSkeleton,
   SearchInput,
+  StatusBadge,
+  type StatusTone,
   TextInput,
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
@@ -43,6 +51,27 @@ function safeErrorCode(error: unknown): ErrorCode {
   return error instanceof ExchangeApiError ? mapExchangeErrorToCode(error.code) : 'SERVER_ERROR'
 }
 
+function formatOrderStatus(status: string): { label: string; tone: StatusTone } {
+  switch (status) {
+    case 'AWAITING_LAB_SELECTION':
+      return { label: 'En attente de choix labo', tone: 'neutral' }
+    case 'SELECTED':
+      return { label: 'Labo sélectionné', tone: 'neutral' }
+    case 'ACCEPTED':
+      return { label: 'Accepté', tone: 'neutral' }
+    case 'IN_PROGRESS':
+      return { label: "En cours d'analyse", tone: 'neutral' }
+    case 'COMPLETED':
+      return { label: 'Résultats disponibles', tone: 'success' }
+    case 'REJECTED':
+      return { label: 'Rejeté', tone: 'danger' }
+    case 'CANCELLED':
+      return { label: 'Annulé', tone: 'neutral' }
+    default:
+      return { label: status, tone: 'neutral' }
+  }
+}
+
 export function ClinicPatientsPage({
   pendingCreations,
   onPendingCreationChange,
@@ -51,8 +80,10 @@ export function ClinicPatientsPage({
   const providerId = activeProvider?.organization_id ?? null
   const scopeKey = providerId && user ? `${user.identity_id}:${providerId}` : null
   const currentProviderRef = useRef(providerId)
+  const currentPatientRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
   const requestGenerationRef = useRef(0)
+  const ordersGenerationRef = useRef(0)
   currentProviderRef.current = providerId
 
   const [searchInput, setSearchInput] = useState('')
@@ -71,6 +102,26 @@ export function ClinicPatientsPage({
   const [confirmedReadAttempt, setConfirmedReadAttempt] = useState<OpaquePendingPatientIdentity | null>(null)
   const [reconcilingStoredAttempt, setReconcilingStoredAttempt] = useState(false)
   const [storageUnreadable, setStorageUnreadable] = useState(false)
+
+  // -- DH-CLINIC-003: Patient lab orders history state --
+  const [patientOrders, setPatientOrders] = useState<LabOrder[] | null>(null)
+  const [ordersLoadState, setOrdersLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [ordersErrorCode, setOrdersErrorCode] = useState<ErrorCode>('SERVER_ERROR')
+
+  // -- DH-CLINIC-003: Order creation wizard state --
+  const [showOrderWizard, setShowOrderWizard] = useState(false)
+  const [orderStep, setOrderStep] = useState<'catalog' | 'review' | 'confirmation'>('catalog')
+  const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[] | null>(null)
+  const [catalogLoadState, setCatalogLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [catalogErrorCode, setCatalogErrorCode] = useState<ErrorCode>('SERVER_ERROR')
+  const [catalogSearch, setCatalogSearch] = useState('')
+  const [selectedCatalogEntryIds, setSelectedCatalogEntryIds] = useState<string[]>([])
+  const [orderSubmitState, setOrderSubmitState] = useState<'idle' | 'submitting' | 'uncertain' | 'error'>('idle')
+  const [orderSubmitError, setOrderSubmitError] = useState<string | null>(null)
+  const [orderSubmitErrorCode, setOrderSubmitErrorCode] = useState<ErrorCode>('SERVER_ERROR')
+  const [orderOutcome, setOrderOutcome] = useState<LabOrderCreateOutcome | null>(null)
+  const [orderDraftIdempotencyKey, setOrderDraftIdempotencyKey] = useState<string | null>(null)
+
 
   useEffect(() => {
     mountedRef.current = true
@@ -204,6 +255,158 @@ export function ClinicPatientsPage({
 
   const visibleResults = results?.providerId === providerId ? results.values : []
   const selectedPatient = selected?.providerId === providerId ? selected.value : null
+  currentPatientRef.current = selectedPatient?.patient_reference_id ?? null
+
+  const loadPatientOrders = useCallback(
+    async (targetProviderId: string, targetPatientRefId: string) => {
+      const generation = ++ordersGenerationRef.current
+      setOrdersLoadState('loading')
+      try {
+        const orders = await client.listPatientOrders(targetProviderId, targetPatientRefId, {
+          limit: 50,
+          token: authToken ?? undefined,
+        })
+        if (
+          mountedRef.current &&
+          currentProviderRef.current === targetProviderId &&
+          currentPatientRef.current === targetPatientRefId &&
+          ordersGenerationRef.current === generation
+        ) {
+          setPatientOrders(orders)
+          setOrdersLoadState('success')
+        }
+      } catch (error) {
+        if (
+          mountedRef.current &&
+          currentProviderRef.current === targetProviderId &&
+          currentPatientRef.current === targetPatientRefId &&
+          ordersGenerationRef.current === generation
+        ) {
+          setOrdersErrorCode(safeErrorCode(error))
+          setOrdersLoadState('error')
+        }
+      }
+    },
+    [client, authToken],
+  )
+
+  useEffect(() => {
+    if (providerId && selectedPatient) {
+      void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
+    } else {
+      setPatientOrders(null)
+      setOrdersLoadState('idle')
+      setShowOrderWizard(false)
+      setOrderOutcome(null)
+      setOrderDraftIdempotencyKey(null)
+      setSelectedCatalogEntryIds([])
+    }
+  }, [providerId, selectedPatient, loadPatientOrders])
+
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoadState('loading')
+    try {
+      const entries = await client.listCatalogTests({ token: authToken ?? undefined })
+      if (mountedRef.current) {
+        setCatalogEntries(entries)
+        setCatalogLoadState('success')
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setCatalogErrorCode(safeErrorCode(error))
+        setCatalogLoadState('error')
+      }
+    }
+  }, [client, authToken])
+
+  const handleOpenOrderWizard = () => {
+    setOrderDraftIdempotencyKey(crypto.randomUUID())
+    setSelectedCatalogEntryIds([])
+    setCatalogSearch('')
+    setOrderSubmitState('idle')
+    setOrderSubmitError(null)
+    setOrderOutcome(null)
+    setOrderStep('catalog')
+    setShowOrderWizard(true)
+    if (catalogEntries === null || catalogLoadState !== 'success') {
+      void loadCatalog()
+    }
+  }
+
+  const handleToggleService = (entryId: string) => {
+    setSelectedCatalogEntryIds((prev) =>
+      prev.includes(entryId) ? prev.filter((id) => id !== entryId) : [...prev, entryId],
+    )
+  }
+
+  const handleSubmitOrder = async () => {
+    if (!providerId || !selectedPatient || selectedCatalogEntryIds.length === 0) return
+    const targetProviderId = providerId
+    const targetPatientRefId = selectedPatient.patient_reference_id
+    let key = orderDraftIdempotencyKey
+    if (!key) {
+      key = crypto.randomUUID()
+      setOrderDraftIdempotencyKey(key)
+    }
+
+    setOrderSubmitState('submitting')
+    setOrderSubmitError(null)
+
+    try {
+      const outcome = await client.createOrderWithOutcome(
+        targetProviderId,
+        key,
+        {
+          patient_reference_id: targetPatientRefId,
+          catalog_entry_ids: selectedCatalogEntryIds,
+        },
+        { token: authToken ?? undefined },
+      )
+      if (
+        !mountedRef.current ||
+        currentProviderRef.current !== targetProviderId ||
+        currentPatientRef.current !== targetPatientRefId
+      ) {
+        return
+      }
+
+      setOrderOutcome(outcome)
+      setOrderStep('confirmation')
+      setOrderSubmitState('idle')
+      void loadPatientOrders(targetProviderId, targetPatientRefId)
+    } catch (error) {
+      if (
+        !mountedRef.current ||
+        currentProviderRef.current !== targetProviderId ||
+        currentPatientRef.current !== targetPatientRefId
+      ) {
+        return
+      }
+
+      if (isDefinitiveExchangeError(error)) {
+        setOrderSubmitState('error')
+        setOrderSubmitErrorCode(safeErrorCode(error))
+        setOrderSubmitError(
+          error instanceof ExchangeApiError ? error.detail : 'Erreur lors de la création de l’ordre',
+        )
+      } else {
+        setOrderSubmitState('uncertain')
+        setOrderSubmitErrorCode(safeErrorCode(error))
+      }
+    }
+  }
+
+  const handleCloseOrderWizard = () => {
+    setShowOrderWizard(false)
+    setOrderOutcome(null)
+    setOrderDraftIdempotencyKey(null)
+    setSelectedCatalogEntryIds([])
+    setOrderSubmitState('idle')
+    setOrderSubmitError(null)
+    setOrderStep('catalog')
+  }
+
+
 
   const handleSearch = (event: FormEvent) => {
     event.preventDefault()
@@ -380,13 +583,22 @@ export function ClinicPatientsPage({
   if (selectedPatient) {
     return (
       <div className={styles.page}>
-        <Button type="button" variant="secondary" onClick={() => setSelected(null)}>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={orderSubmitState === 'submitting'}
+          onClick={() => {
+            handleCloseOrderWizard()
+            setSelected(null)
+          }}
+        >
           Retour aux patients
         </Button>
         <header className={styles.header}>
           <h1>Patients</h1>
           <p>{activeProvider?.organization_name}</p>
         </header>
+
         <Card>
           <section className={styles.workspace} aria-labelledby="patient-workspace-title">
             <h2 id="patient-workspace-title">{patientLabel(selectedPatient)}</h2>
@@ -397,10 +609,314 @@ export function ClinicPatientsPage({
             {!selectedPatient.display_name ? (
               <p><strong>Référence locale :</strong> <code>{selectedPatient.local_reference}</code></p>
             ) : null}
-            <Button type="button" disabled title="Disponible dans DH-CLINIC-003">
-              Nouvel ordre de laboratoire
-            </Button>
-            <p className={styles.hint}>La création d'ordres sera disponible dans une étape ultérieure.</p>
+
+            {!showOrderWizard ? (
+              <div className={styles.actions} style={{ justifyContent: 'flex-start', marginTop: 'var(--space-2)' }}>
+                <Button type="button" onClick={handleOpenOrderWizard}>
+                  Nouvel ordre de laboratoire
+                </Button>
+              </div>
+            ) : null}
+          </section>
+        </Card>
+
+        {showOrderWizard ? (
+          <Card>
+            <div className={styles.orderWizard} aria-labelledby="order-wizard-title">
+              {orderStep === 'catalog' ? (
+                <>
+                  <div className={styles.wizardHeader}>
+                    <h2 id="order-wizard-title">Prescrire un ordre de laboratoire</h2>
+                    <p className={styles.hint}>
+                      Sélectionnez les services diagnostiques à prescrire pour{' '}
+                      <strong>{patientLabel(selectedPatient)}</strong>.
+                    </p>
+                  </div>
+
+                  <SearchInput
+                    label="Filtrer les services diagnostiques"
+                    value={catalogSearch}
+                    maxLength={100}
+                    onChange={(e) => setCatalogSearch(e.target.value)}
+                  />
+
+                  {catalogLoadState === 'loading' ? (
+                    <LoadingSkeleton label="Chargement du catalogue de services…" />
+                  ) : catalogLoadState === 'error' ? (
+                    <ErrorState code={catalogErrorCode} onRetry={() => void loadCatalog()} />
+                  ) : (
+                    <>
+                      {(() => {
+                        const query = catalogSearch.trim().toLowerCase()
+                        const filtered = (catalogEntries ?? []).filter(
+                          (entry) =>
+                            !query ||
+                            entry.code.toLowerCase().includes(query) ||
+                            entry.display_name.toLowerCase().includes(query),
+                        )
+
+                        if (filtered.length === 0) {
+                          return (
+                            <p className={styles.hint}>
+                              Aucun service diagnostique ne correspond à votre recherche.
+                            </p>
+                          )
+                        }
+
+                        return (
+                          <ul
+                            className={styles.catalogList}
+                            role="listbox"
+                            aria-label="Services diagnostiques disponibles"
+                          >
+                            {filtered.map((entry) => {
+                              const isChecked = selectedCatalogEntryIds.includes(entry.id)
+                              return (
+                                <li key={entry.id} className={styles.catalogItem}>
+                                  <label
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 'var(--space-2)',
+                                      width: '100%',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => handleToggleService(entry.id)}
+                                    />
+                                    <div className={styles.catalogItemContent}>
+                                      <span className={styles.catalogCode}>{entry.code}</span>
+                                      <span className={styles.catalogName}>{entry.display_name}</span>
+                                    </div>
+                                  </label>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        )
+                      })()}
+
+                      <p className={styles.hint}>
+                        {selectedCatalogEntryIds.length === 0
+                          ? 'Aucun service sélectionné.'
+                          : `${selectedCatalogEntryIds.length} service${selectedCatalogEntryIds.length > 1 ? 's' : ''} sélectionné${selectedCatalogEntryIds.length > 1 ? 's' : ''}.`}
+                      </p>
+
+                      <div className={styles.actions}>
+                        <Button
+                          type="button"
+                          disabled={selectedCatalogEntryIds.length === 0}
+                          onClick={() => setOrderStep('review')}
+                        >
+                          Suivant : Réviser l’ordre
+                        </Button>
+                        <Button type="button" variant="secondary" onClick={handleCloseOrderWizard}>
+                          Annuler
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : orderStep === 'review' ? (
+                <>
+                  <div className={styles.wizardHeader}>
+                    <h2 id="order-wizard-title">Révision de l’ordre de laboratoire</h2>
+                    <p className={styles.hint}>
+                      Vérifiez les détails de l’ordre avant confirmation.
+                    </p>
+                  </div>
+
+                  <dl className={styles.reviewSummary}>
+                    <div className={styles.reviewRow}>
+                      <dt>Patient</dt>
+                      <dd>
+                        <strong>{patientLabel(selectedPatient)}</strong> (
+                        <code>{selectedPatient.patient_reference_id}</code>)
+                      </dd>
+                    </div>
+                    <div className={styles.reviewRow}>
+                      <dt>Établissement prescripteur</dt>
+                      <dd>{activeProvider?.organization_name}</dd>
+                    </div>
+                    <div className={styles.reviewRow}>
+                      <dt>Praticien prescripteur</dt>
+                      <dd>{user?.display_name || user?.email || 'Praticien connecté'}</dd>
+                    </div>
+                    <div className={styles.reviewRow}>
+                      <dt>Laboratoire</dt>
+                      <dd>Pas encore sélectionné</dd>
+                    </div>
+                  </dl>
+
+                  <div>
+                    <h3>Services sélectionnés ({selectedCatalogEntryIds.length})</h3>
+                    <ul className={styles.reviewServicesList}>
+                      {selectedCatalogEntryIds.map((id) => {
+                        const entry = (catalogEntries ?? []).find((e) => e.id === id)
+                        return (
+                          <li key={id}>
+                            <strong>{entry?.code || id}</strong> —{' '}
+                            {entry?.display_name || 'Service diagnostique'}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+
+                  {orderSubmitState === 'uncertain' ? (
+                    <div className={styles.alertBanner} role="alert">
+                      <ErrorState code={orderSubmitErrorCode} />
+                      <p>
+                        <strong>Tentative non confirmée :</strong> La requête n’a pas pu aboutir en raison
+                        d’une interruption réseau. Réessayez pour confirmer l’ordre sans créer de doublon
+                        (clé d’idempotence conservée).
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {orderSubmitState === 'error' ? (
+                    <div className={styles.createError}>
+                      <ErrorState code={orderSubmitErrorCode} />
+                      <p className={styles.errorText}>{orderSubmitError}</p>
+                    </div>
+                  ) : null}
+
+                  <div className={styles.actions}>
+                    <Button
+                      type="button"
+                      disabled={orderSubmitState === 'submitting'}
+                      onClick={() => void handleSubmitOrder()}
+                    >
+                      {orderSubmitState === 'submitting'
+                        ? 'Prescription en cours…'
+                        : orderSubmitState === 'uncertain'
+                          ? 'Réessayer la prescription'
+                          : 'Confirmer et prescrire'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={orderSubmitState === 'submitting'}
+                      onClick={() => setOrderStep('catalog')}
+                    >
+                      Modifier les services
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={orderSubmitState === 'submitting'}
+                      onClick={handleCloseOrderWizard}
+                    >
+                      Annuler
+                    </Button>
+                  </div>
+                </>
+              ) : orderStep === 'confirmation' && orderOutcome ? (
+                <div className={styles.confirmationBanner} role="status">
+                  <h2 className={styles.confirmationTitle}>
+                    {orderOutcome.created
+                      ? 'Ordre de laboratoire créé avec succès'
+                      : 'Ordre de laboratoire confirmé (tentative existante récupérée sans doublon)'}
+                  </h2>
+                  <p>
+                    <strong>Identifiant de l’ordre :</strong>{' '}
+                    <code>{orderOutcome.order.id}</code>
+                  </p>
+                  <p>
+                    <strong>Statut :</strong>{' '}
+                    <StatusBadge label="En attente de choix labo" tone="neutral" />
+                  </p>
+                  <p>
+                    <strong>Laboratoire :</strong> Pas encore sélectionné
+                  </p>
+                  <p>
+                    <strong>Date de prescription :</strong>{' '}
+                    {new Date(orderOutcome.order.created_at).toLocaleDateString('fr-FR', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </p>
+                  <h3>Services prescrits ({orderOutcome.order.items.length})</h3>
+                  <ul className={styles.orderItemList}>
+                    {orderOutcome.order.items.map((item) => (
+                      <li key={item.catalog_entry_id}>
+                        <strong>{item.catalog_code_snapshot}</strong> —{' '}
+                        {item.catalog_display_name_snapshot}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className={styles.actions}>
+                    <Button type="button" onClick={handleCloseOrderWizard}>
+                      Fermer et afficher la fiche patient
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
+
+        <Card>
+          <section className={styles.orderSection} aria-labelledby="patient-orders-title">
+            <div className={styles.orderSectionHeader}>
+              <h3 id="patient-orders-title">Historique des ordres de laboratoire</h3>
+            </div>
+
+            {ordersLoadState === 'loading' ? (
+              <LoadingSkeleton label="Chargement des ordres de laboratoire…" />
+            ) : ordersLoadState === 'error' ? (
+              <ErrorState
+                code={ordersErrorCode}
+                onRetry={() => void loadPatientOrders(providerId, selectedPatient.patient_reference_id)}
+              />
+            ) : patientOrders && patientOrders.length > 0 ? (
+              <ul className={styles.orderList}>
+                {patientOrders.map((order) => {
+                  const { label, tone } = formatOrderStatus(order.status)
+                  return (
+                    <li key={order.id} className={styles.orderCard}>
+                      <div className={styles.orderCardHeader}>
+                        <StatusBadge label={label} tone={tone} />
+                        <span className={styles.orderCardMeta}>
+                          {new Date(order.created_at).toLocaleDateString('fr-FR', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                      <p className={styles.orderCardMeta}>
+                        <strong>Ordre :</strong> <code>{order.id}</code>
+                      </p>
+                      <p className={styles.orderCardMeta}>
+                        <strong>Laboratoire :</strong> Pas encore sélectionné
+                      </p>
+                      <div>
+                        <strong>Services demandés ({order.items.length}) :</strong>
+                        <ul className={styles.orderItemList}>
+                          {order.items.map((item) => (
+                            <li key={item.catalog_entry_id}>
+                              <strong>{item.catalog_code_snapshot}</strong> —{' '}
+                              {item.catalog_display_name_snapshot}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : (
+              <p className={styles.hint}>Aucun ordre de laboratoire enregistré pour ce patient.</p>
+            )}
           </section>
         </Card>
       </div>

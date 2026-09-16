@@ -1252,3 +1252,155 @@ def test_order_list_limit_rejects_out_of_range(
         f"/exchange/v1/organizations/{provider.id}/orders?limit={limit}", headers=_auth(token)
     )
     assert response.status_code == 422
+
+
+# -- DH-CLINIC-003: patient-reference order list endpoint ----------------------------------------
+
+
+def test_list_patient_orders_positive_control(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "A")
+    patient_1 = _create_patient(client, private_key, patients, provider.id, "P1")
+    patient_2 = _create_patient(client, private_key, patients, provider.id, "P2")
+    test_ids = _make_tests(catalog, 3)
+
+    # Patient 1: Order 1 (test 0, 1)
+    res1 = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_1), "catalog_entry_ids": [str(test_ids[0]), str(test_ids[1])]},
+    )
+    assert res1.status_code == 201
+    order1_id = res1.json()["id"]
+
+    # Patient 2: Order 2 (test 2)
+    res2 = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_2), "catalog_entry_ids": [str(test_ids[2])]},
+    )
+    assert res2.status_code == 201
+    order2_id = res2.json()["id"]
+
+    # Patient 1: Order 3 (test 0)
+    res3 = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_1), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert res3.status_code == 201
+    order3_id = res3.json()["id"]
+
+    # Query Patient 1's orders: should return order3 first, then order1; should NOT contain order2
+    resp1 = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{patient_1}/orders",
+        headers=_auth(token),
+    )
+    assert resp1.status_code == 200, resp1.text
+    p1_orders = resp1.json()
+    assert len(p1_orders) == 2
+    assert p1_orders[0]["id"] == order3_id
+    assert p1_orders[1]["id"] == order1_id
+    assert len(p1_orders[0]["items"]) == 1
+    assert p1_orders[0]["items"][0]["catalog_entry_id"] == str(test_ids[0])
+    assert len(p1_orders[1]["items"]) == 2
+
+    # Query Patient 2's orders: should return only order2
+    resp2 = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{patient_2}/orders",
+        headers=_auth(token),
+    )
+    assert resp2.status_code == 200, resp2.text
+    p2_orders = resp2.json()
+    assert len(p2_orders) == 1
+    assert p2_orders[0]["id"] == order2_id
+
+
+def test_list_patient_orders_anti_enumeration_and_cross_provider(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "ProviderA")
+    provider_b, token_b, _ = _setup_clinician(client, private_key, organizations, "ProviderB")
+    patient_a = _create_patient(client, private_key, patients, provider_a.id, "PatientA")
+
+    # Non-existent patient under Provider A -> 404
+    non_existent = uuid.uuid4()
+    resp_404 = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/patient-references/{non_existent}/orders",
+        headers=_auth(token_a),
+    )
+    assert resp_404.status_code == 404
+
+    # Clinician B queries Patient A under Provider B -> 404 (anti-enumeration: never reveals Patient A belongs to Provider A)
+    resp_cross_404 = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/patient-references/{patient_a}/orders",
+        headers=_auth(token_b),
+    )
+    assert resp_cross_404.status_code == 404
+
+    # Clinician B queries Patient A under Provider A -> 404 (Clinician B has zero relationship to Provider A,
+    # anti-enumeration: never reveals Provider A exists or has orders to an unrelated caller)
+    resp_cross_404_a = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/patient-references/{patient_a}/orders",
+        headers=_auth(token_b),
+    )
+    assert resp_cross_404_a.status_code == 404
+
+    # Platform admin queries Provider A without CLINICIAN role -> 403 (platform admin has visibility
+    # of org existence, but lacks clinical ordering/viewing authority)
+    platform_admin_token = make_token(private_key, subject="network-admin", roles=[PLATFORM_ADMIN_ROLE])
+    resp_admin_403 = client.get(
+        f"/exchange/v1/organizations/{provider_a.id}/patient-references/{patient_a}/orders",
+        headers=_auth(platform_admin_token),
+    )
+    assert resp_admin_403.status_code == 403
+
+
+def test_list_patient_orders_non_clinician_refused(
+    client: TestClient, keypair, organizations, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token_admin, identity_id = _setup_clinician(
+        client, private_key, organizations, "AdminOrg", roles=["ORG_ADMIN"]
+    )
+    patient = _create_patient(client, private_key, patients, provider.id, "PatientX")
+
+    # ORG_ADMIN without CLINICIAN -> 403
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{patient}/orders",
+        headers=_auth(token_admin),
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("limit", [1, 50, 100])
+def test_list_patient_orders_limit_valid(
+    client: TestClient, keypair, organizations, patients, limit
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "LimitValid")
+    patient = _create_patient(client, private_key, patients, provider.id, "PatientLim")
+
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{patient}/orders?limit={limit}",
+        headers=_auth(token),
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("limit", [0, -1, 101])
+def test_list_patient_orders_limit_invalid(
+    client: TestClient, keypair, organizations, patients, limit
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "LimitInvalid")
+    patient = _create_patient(client, private_key, patients, provider.id, "PatientLimInv")
+
+    resp = client.get(
+        f"/exchange/v1/organizations/{provider.id}/patient-references/{patient}/orders?limit={limit}",
+        headers=_auth(token),
+    )
+    assert resp.status_code == 422

@@ -16,10 +16,13 @@
 import type { ErrorCode } from './types'
 import type {
   BindPatientReferenceOutcome,
+  CatalogEntry,
   ClinicPatientSummary,
   ExchangeErrorCode,
   ExchangeMeResponse,
   LabOrder,
+  LabOrderCreateOutcome,
+  LabOrderCreateRequest,
   LabOrderSummary,
   PatientReference,
   PatientReferenceBindRequest,
@@ -364,6 +367,68 @@ export class ExchangeClient {
       token,
     )
   }
+
+  /**
+   * GET /exchange/v1/catalog/tests
+   * Lists active synthetic diagnostic test catalog entries (DH-CLINIC-003).
+   */
+  async listCatalogTests(
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<CatalogEntry[]> {
+    return this.request<CatalogEntry[]>(
+      '/catalog/tests',
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/orders
+   * Idempotent lab order creation (DH-EX-004, DH-CLINIC-003).
+   */
+  async createOrderWithOutcome(
+    providerId: string,
+    idempotencyKey: string,
+    body: LabOrderCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<LabOrder>(
+      `/organizations/${encodeURIComponent(providerId)}/orders`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { order: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/patient-references/{patient_reference_id}/orders
+   * Lists diagnostic lab orders for a specific patient reference under a provider (DH-CLINIC-003).
+   */
+  async listPatientOrders(
+    providerId: string,
+    patientReferenceId: string,
+    options: { limit?: number; token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrder[]> {
+    const params = new URLSearchParams()
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit))
+    }
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return this.request<LabOrder[]>(
+      `/organizations/${encodeURIComponent(providerId)}/patient-references/${encodeURIComponent(patientReferenceId)}/orders${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
 }
+
 
 export const exchangeClient = new ExchangeClient()

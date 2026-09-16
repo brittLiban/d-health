@@ -4,8 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExchangeApiError, type ExchangeClient } from '../../api/exchangeClient'
 import type {
+  CatalogEntry,
   ClinicPatientSummary,
   ExchangeMeResponse,
+  LabOrder,
   PatientReferenceBindRequest,
 } from '../../api/exchangeTypes'
 import {
@@ -67,6 +69,9 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     bindPatientReferenceWithOutcome: vi.fn(),
     listPatientReferences: vi.fn().mockResolvedValue([]),
     getPatientReference: vi.fn(),
+    listCatalogTests: vi.fn().mockResolvedValue([]),
+    createOrderWithOutcome: vi.fn(),
+    listPatientOrders: vi.fn().mockResolvedValue([]),
     ...overrides,
   } as unknown as ExchangeClient
 }
@@ -107,8 +112,7 @@ describe('Clinic native patient workflow', () => {
     const openButtons = screen.getAllByRole('button', { name: 'Ouvrir' })
     await userEvent.setup().click(openButtons[1])
     expect(await screen.findByRole('heading', { name: patientWithoutName.local_reference })).toBeInTheDocument()
-    expect(screen.getByText(patientWithoutName.patient_reference_id)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
   })
 
   it('shows the empty state, creates a minimal opaque reference, fetches it, and opens the workspace', async () => {
@@ -894,5 +898,368 @@ describe('Clinic native patient workflow', () => {
     expect(bind.mock.calls[0][1].source_identity_value).toBe(unconfirmedUuid)
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
+  })
+
+  // -- DH-CLINIC-003: Native Diagnostic Service Ordering Tests -----------------------------------
+
+  const mockCatalogTests: CatalogEntry[] = [
+    {
+      id: '11111111-2222-4333-8444-555555555555',
+      code: 'SYNTH-CBC',
+      display_name: 'Numération Formule Sanguine (NFS)',
+      version: 1,
+      active: true,
+      is_synthetic: true,
+    },
+    {
+      id: '22222222-3333-4444-8555-666666666666',
+      code: 'SYNTH-GLU',
+      display_name: 'Glycémie à jeun',
+      version: 1,
+      active: true,
+      is_synthetic: true,
+    },
+    {
+      id: '33333333-4444-4555-8666-777777777777',
+      code: 'SYNTH-LIP',
+      display_name: 'Bilan lipidique complet',
+      version: 1,
+      active: true,
+      is_synthetic: true,
+    },
+  ]
+
+  const mockExistingOrder: LabOrder = {
+    id: '99999999-8888-4777-8666-555555555555',
+    provider_organization_id: 'provider-a',
+    patient_reference_id: patientWithName.patient_reference_id,
+    practitioner_reference_id: 'prac-1',
+    status: 'AWAITING_LAB_SELECTION',
+    created_at: '2026-09-16T07:00:00Z',
+    items: [
+      {
+        catalog_entry_id: mockCatalogTests[0].id,
+        catalog_code_snapshot: 'SYNTH-CBC',
+        catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
+      },
+    ],
+  }
+
+  it('fetches and displays patient order history with truthful status and lab state in patient workspace', async () => {
+    const listOrders = vi.fn().mockResolvedValue([mockExistingOrder])
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatientOrders: listOrders,
+    })
+
+    render(<ClinicApp client={client} initialTab="patients" />)
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEvent.setup().click(openButtons[0])
+
+    expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
+    expect(listOrders).toHaveBeenCalledWith(
+      'provider-a',
+      patientWithName.patient_reference_id,
+      expect.objectContaining({ limit: 50 }),
+    )
+
+    expect(await screen.findByText('Historique des ordres de laboratoire')).toBeInTheDocument()
+    expect(screen.getByText('En attente de choix labo')).toBeInTheDocument()
+    expect(screen.getByText(/Pas encore sélectionné/)).toBeInTheDocument()
+    expect(screen.getByText('SYNTH-CBC')).toBeInTheDocument()
+    expect(screen.getByText(/Numération Formule Sanguine/)).toBeInTheDocument()
+  })
+
+  it('completes 3-step diagnostic service ordering flow with catalog search, multi-selection, review, and 201 creation', async () => {
+    const createdOrder: LabOrder = {
+      id: 'aaaa1111-bb22-4c33-8d44-eeee55556666',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-clinician',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:30:00Z',
+      items: [
+        {
+          catalog_entry_id: mockCatalogTests[0].id,
+          catalog_code_snapshot: 'SYNTH-CBC',
+          catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
+        },
+        {
+          catalog_entry_id: mockCatalogTests[1].id,
+          catalog_code_snapshot: 'SYNTH-GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+        },
+      ],
+    }
+
+    const listCatalog = vi.fn().mockResolvedValue(mockCatalogTests)
+    const createOrder = vi.fn().mockResolvedValue({
+      order: createdOrder,
+      created: true,
+    })
+    const listOrders = vi.fn().mockResolvedValue([])
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: listCatalog,
+      createOrderWithOutcome: createOrder,
+      listPatientOrders: listOrders,
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    // Open patient
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    // 1. Start ordering wizard
+    const orderBtn = await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' })
+    await userEventObj.click(orderBtn)
+
+    expect(await screen.findByRole('heading', { name: 'Prescrire un ordre de laboratoire' })).toBeInTheDocument()
+    expect(listCatalog).toHaveBeenCalled()
+
+    // Next button disabled with 0 services selected
+    const nextBtn = screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' })
+    expect(nextBtn).toBeDisabled()
+
+    // Filter catalog
+    const filterInput = screen.getByLabelText('Filtrer les services diagnostiques')
+    await userEventObj.type(filterInput, 'glyc')
+    expect(screen.getByText('SYNTH-GLU')).toBeInTheDocument()
+    expect(screen.queryByText('SYNTH-CBC')).not.toBeInTheDocument()
+
+    // Clear filter
+    await userEventObj.clear(filterInput)
+    expect(await screen.findByText('SYNTH-CBC')).toBeInTheDocument()
+
+    // Select 2 services
+    const checkboxes = screen.getAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(checkboxes[1])
+    expect(screen.getByText('2 services sélectionnés.')).toBeInTheDocument()
+    expect(nextBtn).not.toBeDisabled()
+
+    // 2. Go to Review step
+    await userEventObj.click(nextBtn)
+    expect(await screen.findByRole('heading', { name: 'Révision de l’ordre de laboratoire' })).toBeInTheDocument()
+    expect(screen.getAllByText('Clinique A').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Pas encore sélectionné').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/SYNTH-CBC/)).toBeInTheDocument()
+    expect(screen.getByText(/SYNTH-GLU/)).toBeInTheDocument()
+
+    // 3. Confirm and submit order
+    const confirmBtn = screen.getByRole('button', { name: 'Confirmer et prescrire' })
+    await userEventObj.click(confirmBtn)
+
+    expect(createOrder).toHaveBeenCalledTimes(1)
+    const [calledProviderId, calledIdempotencyKey, calledBody] = createOrder.mock.calls[0]
+    expect(calledProviderId).toBe('provider-a')
+    // Valid canonical UUIDv4 idempotency key
+    expect(calledIdempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    expect(calledBody).toEqual({
+      patient_reference_id: patientWithName.patient_reference_id,
+      catalog_entry_ids: [mockCatalogTests[0].id, mockCatalogTests[1].id],
+    })
+
+    // Confirmation step
+    expect(
+      await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText(createdOrder.id)).toBeInTheDocument()
+
+    // Close wizard and return to patient workspace
+    const closeBtn = screen.getByRole('button', { name: 'Fermer et afficher la fiche patient' })
+    await userEventObj.click(closeBtn)
+
+    expect(screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeInTheDocument()
+  })
+
+  it('distinguishes idempotent replay 200 with explicit confirmation messaging', async () => {
+    const replayOrder: LabOrder = {
+      id: 'bbbb2222-cc33-4d44-8e55-ffff66667777',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-clinician',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:30:00Z',
+      items: [
+        {
+          catalog_entry_id: mockCatalogTests[0].id,
+          catalog_code_snapshot: 'SYNTH-CBC',
+          catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
+        },
+      ],
+    }
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      createOrderWithOutcome: vi.fn().mockResolvedValue({
+        order: replayOrder,
+        created: false,
+      }),
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Ordre de laboratoire confirmé (tentative existante récupérée sans doublon)',
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it('retains identical idempotency key across ambiguous network failure retry on order submission', async () => {
+    let callCount = 0
+    const successfulOrder: LabOrder = {
+      id: 'cccc3333-dd44-4e55-8f66-aaaa77778888',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-clinician',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:30:00Z',
+      items: [
+        {
+          catalog_entry_id: mockCatalogTests[0].id,
+          catalog_code_snapshot: 'SYNTH-CBC',
+          catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
+        },
+      ],
+    }
+
+    const createOrder = vi.fn().mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        throw new ExchangeApiError(0, 'NETWORK_ERROR', 'Network connection failure')
+      }
+      return Promise.resolve({ order: successfulOrder, created: true })
+    })
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      createOrderWithOutcome: createOrder,
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+
+    // First attempt fails with network error
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
+    const retryBtn = screen.getByRole('button', { name: 'Réessayer la prescription' })
+    expect(retryBtn).toBeInTheDocument()
+
+    // Retry submission
+    await userEventObj.click(retryBtn)
+
+    expect(createOrder).toHaveBeenCalledTimes(2)
+    const firstKey = createOrder.mock.calls[0][1]
+    const secondKey = createOrder.mock.calls[1][1]
+    expect(firstKey).toBe(secondKey)
+    expect(
+      await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' }),
+    ).toBeInTheDocument()
+  })
+
+  it('handles definitive error by displaying error detail and allowing review/catalog modification', async () => {
+    const createOrder = vi.fn().mockRejectedValue(
+      new ExchangeApiError(422, 'VALIDATION_ERROR', 'Le catalogue entry est inactif'),
+    )
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      createOrderWithOutcome: createOrder,
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    expect(await screen.findByText('Le catalogue entry est inactif')).toBeInTheDocument()
+
+    // Can click "Modifier les services" to go back to catalog
+    await userEventObj.click(screen.getByRole('button', { name: 'Modifier les services' }))
+    expect(await screen.findByRole('heading', { name: 'Prescrire un ordre de laboratoire' })).toBeInTheDocument()
+  })
+
+  it('switching patients or providers resets ordering wizard and maintains strict tenant isolation', async () => {
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue({
+        ...me,
+        memberships: [
+          me.memberships[0],
+          { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
+        ],
+      }),
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    // Open patient 1
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    // Open wizard for patient 1
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    expect(await screen.findByRole('heading', { name: 'Prescrire un ordre de laboratoire' })).toBeInTheDocument()
+
+    // Return to patients list
+    await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+
+    // Open patient 2: wizard must not remain open
+    const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons2[1])
+
+    expect(screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeInTheDocument()
+
+    // Switch provider: clears patient workspace
+    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+    await userEventObj.selectOptions(providerSelect, 'provider-b')
+
+    expect(screen.queryByRole('heading', { level: 2, name: patientWithoutName.local_reference })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Nouvel ordre de laboratoire' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Patients trouvés')).toBeInTheDocument()
   })
 })
