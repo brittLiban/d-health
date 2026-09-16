@@ -59,9 +59,7 @@ def _race_clinician(app: FastAPI, private_key, organizations, provider):
     token = make_token(private_key, subject=f"pg003c-{provider.id}")
     with TestClient(app, raise_server_exceptions=False) as client:
         identity = client.get("/exchange/v1/me", headers=_auth(token)).json()["identity_id"]
-        admin = make_token(
-            private_key, subject=f"admin-{provider.id}", roles=[PLATFORM_ADMIN_ROLE]
-        )
+        admin = make_token(private_key, subject=f"admin-{provider.id}", roles=[PLATFORM_ADMIN_ROLE])
         response = client.post(
             f"/exchange/v1/organizations/{provider.id}/memberships",
             headers=_auth(admin),
@@ -83,8 +81,7 @@ def _run_race(label: str, workers: dict[str, object]):
             exceptions[name] = error
 
     threads = [
-        threading.Thread(target=run, args=(name, operation))
-        for name, operation in workers.items()
+        threading.Thread(target=run, args=(name, operation)) for name, operation in workers.items()
     ]
     for thread in threads:
         thread.start()
@@ -94,21 +91,17 @@ def _run_race(label: str, workers: dict[str, object]):
     assert exceptions == {}, f"{label} worker exceptions: {exceptions!r}"
     return results
 
+
 PG_HOST = os.environ.get("DHEX003C_PG_HOST") or os.environ.get("DHEX014B_PG_HOST")
 PG_PORT = os.environ.get("DHEX003C_PG_PORT") or os.environ.get("DHEX014B_PG_PORT")
 PG_USER = os.environ.get("DHEX003C_PG_USER") or os.environ.get("DHEX014B_PG_USER")
-PG_PASSWORD = os.environ.get("DHEX003C_PG_PASSWORD") or os.environ.get(
-    "DHEX014B_PG_PASSWORD"
-)
-PG_DATABASE = os.environ.get("DHEX003C_PG_DATABASE") or os.environ.get(
-    "DHEX014B_PG_DATABASE"
-)
+PG_PASSWORD = os.environ.get("DHEX003C_PG_PASSWORD") or os.environ.get("DHEX014B_PG_PASSWORD")
+PG_DATABASE = os.environ.get("DHEX003C_PG_DATABASE") or os.environ.get("DHEX014B_PG_DATABASE")
 
 pytestmark = pytest.mark.skipif(
     not (PG_HOST and PG_PORT and PG_USER and PG_PASSWORD and PG_DATABASE),
     reason=(
-        "requires a disposable PostgreSQL database "
-        "(DHEX003C_PG_* or DHEX014B_PG_*) -- never in CI"
+        "requires a disposable PostgreSQL database (DHEX003C_PG_* or DHEX014B_PG_*) -- never in CI"
     ),
 )
 
@@ -205,9 +198,7 @@ def test_concurrent_intent_commits_converge_to_single_order(
         assert len(orders_in_db) == 1
         assert orders_in_db[0].id == single_order_id
 
-        intent_in_db = session.scalar(
-            select(LabOrderIntent).where(LabOrderIntent.id == intent_id)
-        )
+        intent_in_db = session.scalar(select(LabOrderIntent).where(LabOrderIntent.id == intent_id))
         assert intent_in_db.committed_lab_order_id == single_order_id
         assert orders_in_db[0].intent_id == intent_id
 
