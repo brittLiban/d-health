@@ -124,8 +124,11 @@ class LabOrderIntentRepository:
 
         if session is not None:
             snapshots = self._validate_canonical_request(
-                session, provider_organization_id, patient_reference_id,
-                practitioner_reference_id, catalog_entry_ids
+                session,
+                provider_organization_id,
+                patient_reference_id,
+                practitioner_reference_id,
+                catalog_entry_ids,
             )
             return self._create_in_session(
                 session,
@@ -138,8 +141,11 @@ class LabOrderIntentRepository:
             )
         with self._sessions() as owned_session:
             snapshots = self._validate_canonical_request(
-                owned_session, provider_organization_id, patient_reference_id,
-                practitioner_reference_id, catalog_entry_ids
+                owned_session,
+                provider_organization_id,
+                patient_reference_id,
+                practitioner_reference_id,
+                catalog_entry_ids,
             )
             result = self._create_in_session(
                 owned_session,
