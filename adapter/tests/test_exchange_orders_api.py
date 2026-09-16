@@ -30,6 +30,7 @@ from daher_adapter.exchange.models import (
     DoctorReview,
     ExchangeSecurityAuditEvent,
     LabOrder,
+    LabOrderIntent,
     LabOrderItem,
     LabSelection,
     PractitionerReference,
@@ -1524,3 +1525,66 @@ def test_get_order_by_idempotency_key_length_validation(
         headers=_auth(token),
     )
     assert resp.status_code == 422
+
+
+# -- DH-CLINIC-003C negative-control coverage closure: NC1 permanent focused regression -----------
+
+
+def test_legacy_order_is_backed_by_exactly_one_bidirectionally_owned_intent(
+    client: TestClient, keypair, organizations, catalog, patients, sessions: sessionmaker[Session]
+) -> None:
+    """DH-CLINIC-003C / NC1 permanent regression.
+
+    The negative-control audit found that a legacy ``POST /orders`` creating a LabOrder without a
+    backing ``LabOrderIntent`` went undetected by every local (SQLite) test -- only the real
+    PostgreSQL race suite (PG3/PG5) caught it. This test gives the same property fast, local,
+    single-request coverage: a plain legacy order create must always be backed by exactly one
+    durable intent, with bidirectional ownership agreement.
+    """
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "NC1")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "NC1")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert response.status_code == 201, response.text
+    order_id = uuid.UUID(response.json()["id"])
+
+    with sessions() as session:
+        intents = session.scalars(
+            select(LabOrderIntent).where(
+                LabOrderIntent.provider_organization_id == provider.id,
+                LabOrderIntent.idempotency_key == key,
+            )
+        ).all()
+        assert len(intents) == 1, "exactly one durable intent must exist for this provider+key"
+        intent = intents[0]
+
+        orders = session.scalars(
+            select(LabOrder).where(
+                LabOrder.provider_organization_id == provider.id,
+                LabOrder.idempotency_key == key,
+            )
+        ).all()
+        assert len(orders) == 1, "exactly one LabOrder must exist for this provider+key"
+        order = orders[0]
+        assert order.id == order_id
+
+        # Bidirectional ownership agreement (the exact property NC1/NC24 exist to protect).
+        assert order.intent_id == intent.id
+        assert intent.committed_lab_order_id == order.id
+
+        # Canonical content agreement.
+        assert intent.patient_reference_id == order.patient_reference_id
+        assert intent.practitioner_reference_id == order.practitioner_reference_id
+        intent_item_ids = {item.catalog_entry_id for item in intent.items}
+        order_item_ids = {item.catalog_entry_id for item in order.items}
+        assert intent_item_ids == order_item_ids == {test_ids[0]}

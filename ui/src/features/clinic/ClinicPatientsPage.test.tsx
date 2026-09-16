@@ -9,6 +9,7 @@ import type {
   ExchangeMeResponse,
   LabOrder,
   LabOrderCreateOutcome,
+  LabOrderIntent,
   PatientReferenceBindRequest,
 } from '../../api/exchangeTypes'
 import {
@@ -2082,5 +2083,718 @@ describe('Clinic native patient workflow', () => {
       expect(url).not.toMatch(/\/openmrs\//i)
     }
     fetchSpy.mockRestore()
+  })
+
+  // -- DH-CLINIC-003C negative-control coverage closure: the restored durable-intent branch -------
+  //
+  // The negative-control audit found that `getOrderIntent`/`getOrderIntentByIdempotencyKey` were
+  // ALWAYS mocked to resolve `null` across this entire file, so the "a real uncommitted backend
+  // intent was found on reload" branch (ClinicPatientsPage.tsx ~446-523) never executed under any
+  // existing test -- NC7, NC8, NC9, NC10, NC11, and NC20 all targeted dead code as far as this
+  // suite was concerned. These tests make that branch reachable for the first time.
+
+  function makeValidDurableIntent(overrides: Partial<LabOrderIntent> = {}): LabOrderIntent {
+    return {
+      id: 'intent-backend-real-1',
+      idempotency_key: 'reload-key-backend-real-1',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-original-author',
+      committed_lab_order_id: null,
+      created_at: '2026-09-16T08:00:00Z',
+      items: [
+        {
+          id: 'intent-item-backend-1',
+          catalog_entry_id: 'backend-only-entry-id',
+          catalog_code_snapshot: 'BACKEND-SNAP-CODE',
+          catalog_display_name_snapshot: 'Backend-Only Snapshot Display',
+        },
+      ],
+      ...overrides,
+    }
+  }
+
+  describe('restored durable-intent branch (NC7/NC8/NC9/NC10/NC11/NC20 coverage closure)', () => {
+    it('TEST A: valid durable intent restores exact backend snapshots and stays read-only', async () => {
+      const key = 'reload-key-test-a'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: key,
+      })
+
+      const intent = makeValidDurableIntent({ idempotency_key: key })
+      const getOrderIntentByIdempotencyKey = vi.fn().mockResolvedValue(intent)
+      const getOrderIntent = vi.fn().mockResolvedValue(null)
+      const createOrderIntentWithOutcome = vi.fn()
+      const commitOrderIntentWithOutcome = vi.fn()
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        getOrderIntent,
+        createOrderIntentWithOutcome,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+
+      // Reachability gate: prove the intent lookup actually fired -- without this assertion a
+      // test that silently takes the null-foundIntent path would pass for the wrong reason.
+      await waitFor(() =>
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
+          'provider-a',
+          key,
+          expect.anything(),
+        ),
+      )
+      expect(getOrderIntent).not.toHaveBeenCalled()
+
+      expect(await screen.findByText(/Tentative d’ordre non confirmée/)).toBeInTheDocument()
+      await userEventObj.click(screen.getByRole('button', { name: 'Vérifier / réessayer' }))
+
+      expect(
+        await screen.findByRole('heading', { name: 'Révision de l’ordre de laboratoire' }),
+      ).toBeInTheDocument()
+
+      // Services displayed come from foundIntent.items -- values deliberately distinct from
+      // mockCatalogTests, so a pass here proves the backend snapshot rendered, not the catalog.
+      expect(screen.getByText('BACKEND-SNAP-CODE')).toBeInTheDocument()
+      expect(screen.getByText(/Backend-Only Snapshot Display/)).toBeInTheDocument()
+
+      // Durable intent remains immutable/read-only: editable catalog never reopens.
+      expect(
+        screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Modifier les services' })).not.toBeInTheDocument()
+
+      // No new registration, no new idempotency key.
+      expect(createOrderIntentWithOutcome).not.toHaveBeenCalled()
+      expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
+
+      // Pending recovery identity remains stored, still scoped to the exact frozen key.
+      const stored = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(stored).not.toBeNull()
+      expect(stored?.idempotency_key).toBe(key)
+      expect(stored?.intent_id).toBe(intent.id)
+    })
+
+    async function renderMismatchScenario(intentOverrides: Partial<LabOrderIntent>) {
+      const key = 'reload-key-mismatch'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: key,
+      })
+
+      const intent = makeValidDurableIntent({ idempotency_key: key, ...intentOverrides })
+      const getOrderIntentByIdempotencyKey = vi.fn().mockResolvedValue(intent)
+      const commitOrderIntentWithOutcome = vi.fn()
+      const createOrderIntentWithOutcome = vi.fn()
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        commitOrderIntentWithOutcome,
+        createOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+
+      return { key, intent, commitOrderIntentWithOutcome, createOrderIntentWithOutcome, userEventObj }
+    }
+
+    async function assertFailedClosed(
+      commitOrderIntentWithOutcome: ReturnType<typeof vi.fn>,
+      createOrderIntentWithOutcome: ReturnType<typeof vi.fn>,
+      key: string,
+    ) {
+      // Fail closed: corrupted-storage banner shown, new-order creation blocked.
+      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      // Recovered services never attached/rendered -- catalog wizard never opens.
+      expect(
+        screen.queryByRole('heading', { name: 'Révision de l’ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+
+      // Commit is never called on mismatched data.
+      expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
+      // No new idempotency key/registration either.
+      expect(createOrderIntentWithOutcome).not.toHaveBeenCalled()
+
+      // Stored recovery identity remains -- fail-closed retains the record for a human to
+      // investigate, it does not discard it.
+      const stored = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(stored).not.toBeNull()
+      expect(stored?.idempotency_key).toBe(key)
+    }
+
+    it('TEST B (NC9): recovered provider mismatch fails closed', async () => {
+      const { key, commitOrderIntentWithOutcome, createOrderIntentWithOutcome } =
+        await renderMismatchScenario({ provider_organization_id: 'provider-mismatched' })
+      await assertFailedClosed(commitOrderIntentWithOutcome, createOrderIntentWithOutcome, key)
+    })
+
+    it('TEST C (NC10): recovered patient mismatch fails closed', async () => {
+      const { key, commitOrderIntentWithOutcome, createOrderIntentWithOutcome } =
+        await renderMismatchScenario({ patient_reference_id: 'patient-mismatched' })
+      await assertFailedClosed(commitOrderIntentWithOutcome, createOrderIntentWithOutcome, key)
+    })
+
+    it('TEST D (NC11): recovered idempotency-key mismatch fails closed', async () => {
+      const { key, commitOrderIntentWithOutcome, createOrderIntentWithOutcome } =
+        await renderMismatchScenario({ idempotency_key: 'a-completely-different-key' })
+      await assertFailedClosed(commitOrderIntentWithOutcome, createOrderIntentWithOutcome, key)
+    })
+
+    it('TEST E: recovered intent-ID mismatch (storage already had intent_id) fails closed', async () => {
+      const key = 'reload-key-intent-id-mismatch'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: key,
+        intent_id: 'intent-expected-by-storage',
+      })
+
+      // Storage already knows an intent_id, so this scenario resolves via getOrderIntent (by id),
+      // not getOrderIntentByIdempotencyKey.
+      const intent = makeValidDurableIntent({
+        id: 'intent-DIFFERENT-from-storage',
+        idempotency_key: key,
+      })
+      const getOrderIntent = vi.fn().mockResolvedValue(intent)
+      const commitOrderIntentWithOutcome = vi.fn()
+      const createOrderIntentWithOutcome = vi.fn()
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntent,
+        commitOrderIntentWithOutcome,
+        createOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+
+      await waitFor(() =>
+        expect(getOrderIntent).toHaveBeenCalledWith(
+          'provider-a',
+          'intent-expected-by-storage',
+          expect.anything(),
+        ),
+      )
+
+      await assertFailedClosed(commitOrderIntentWithOutcome, createOrderIntentWithOutcome, key)
+    })
+
+    it('TEST H (NC20): recovered uncommitted intent is prior ambiguity, never a fresh attempt', async () => {
+      const key = 'reload-key-test-h'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: key,
+      })
+
+      const intent = makeValidDurableIntent({ idempotency_key: key })
+      const getOrderIntentByIdempotencyKey = vi.fn().mockResolvedValue(intent)
+      const createOrderIntentWithOutcome = vi.fn()
+      const commitOrderIntentWithOutcome = vi
+        .fn()
+        .mockRejectedValue(new ExchangeApiError(422, 'VALIDATION_ERROR', 'Commit refusé'))
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        createOrderIntentWithOutcome,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+
+      // Treated as prior ambiguity/reconciliation, not a fresh attempt: the "new order" button
+      // is disabled, and opening the wizard lands directly on review (never on catalog/reselection).
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      await userEventObj.click(await screen.findByRole('button', { name: 'Vérifier / réessayer' }))
+      expect(
+        await screen.findByRole('heading', { name: 'Révision de l’ordre de laboratoire' }),
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+
+      // The review-step primary button reflects reconciliation, not a fresh "Confirmer et
+      // prescrire" -- proving orderSubmitState is 'uncertain', not 'idle'.
+      const commitButton = screen.getByRole('button', { name: 'Vérifier / réessayer' })
+      await userEventObj.click(commitButton)
+
+      // Commit was attempted using the existing intent -- never a new registration/key.
+      await waitFor(() => expect(commitOrderIntentWithOutcome).toHaveBeenCalledTimes(1))
+      expect(commitOrderIntentWithOutcome).toHaveBeenCalledWith(
+        'provider-a',
+        intent.id,
+        expect.anything(),
+      )
+      expect(createOrderIntentWithOutcome).not.toHaveBeenCalled()
+
+      // After a definitive commit failure, recovery identity must remain -- not discarded as if
+      // this were an ordinary first attempt.
+      const stored = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(stored).not.toBeNull()
+      expect(stored?.idempotency_key).toBe(key)
+      expect(stored?.intent_id).toBe(intent.id)
+    })
+
+    it('TEST F (NC8/NC25): stale Patient A reconciliation cannot lock or attach under Patient B', async () => {
+      const keyA = 'reload-key-patient-a'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+
+      let resolveA!: (intent: LabOrderIntent | null) => void
+      const intentAPromise = new Promise<LabOrderIntent | null>((resolve) => {
+        resolveA = resolve
+      })
+      const intentA = makeValidDurableIntent({ idempotency_key: keyA })
+
+      const commitOrderIntentWithOutcome = vi.fn()
+      const getOrderIntentByIdempotencyKey = vi.fn((_providerId: string, key: string) =>
+        key === keyA ? intentAPromise : Promise.resolve(null),
+      )
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      // 1-2. Open Patient A -- kicks off the (still-pending) intent lookup for A, proving
+      // reconciliation begins.
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+
+      // 3. Switch to Patient B (no stored order of her own) while A's request is unresolved.
+      await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+      const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons2[1])
+      expect(
+        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+      ).toBeInTheDocument()
+
+      // 4-5. THE DEFECT REGRESSION: Patient B must not be stuck in reconciliation and her normal
+      // new-order action must be available -- BEFORE A's stale response ever resolves. On the old
+      // implementation this failed: B inherited A's still-true `reconcilingStoredOrder` flag.
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled(),
+      )
+      expect(screen.queryByText(/Tentative d’ordre non confirmée/)).not.toBeInTheDocument()
+
+      // 6. Now resolve Patient A's delayed response with a VALID non-null durable intent.
+      await act(async () => {
+        resolveA(intentA)
+        await intentAPromise
+      })
+
+      // 7-9. A's stale response must not attach under B: no backend snapshot, no banner, new-order
+      // still available.
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+      expect(screen.queryByText(/Tentative d’ordre non confirmée/)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
+
+      // 10. No commit occurs for A while scoped to B.
+      expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
+
+      // Patient A's own recovery identity remains untouched and scoped to A.
+      const storedA = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(storedA).not.toBeNull()
+      expect(storedA?.idempotency_key).toBe(keyA)
+      const storedB = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithoutName.patient_reference_id,
+      )
+      expect(storedB).toBeNull()
+    })
+
+    it('TEST F2 (NC25): stale Patient A resolution cannot clear Patient B\'s OWN active reconciliation', async () => {
+      // Guards against the naive "fix" of always forcing reconcilingStoredOrder to false: if
+      // Patient B ALSO has her own genuinely-pending reconciliation, A's resolution (stale, from a
+      // different generation/patient) must never be the thing that clears B's flag -- only B's own
+      // current-generation completion may do that.
+      const keyA = 'reload-key-f2-patient-a'
+      const keyB = 'reload-key-f2-patient-b'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithoutName.patient_reference_id, {
+        idempotency_key: keyB,
+      })
+
+      let resolveA!: (intent: LabOrderIntent | null) => void
+      const intentAPromise = new Promise<LabOrderIntent | null>((resolve) => {
+        resolveA = resolve
+      })
+      // Patient B's own lookup never resolves in this test -- her reconciliation must stay active.
+      const intentBPromise = new Promise<LabOrderIntent | null>(() => {})
+
+      const getOrderIntentByIdempotencyKey = vi.fn((_providerId: string, key: string) => {
+        if (key === keyA) return intentAPromise
+        if (key === keyB) return intentBPromise
+        return Promise.resolve(null)
+      })
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      // Open Patient A -- her reconciliation begins.
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
+        'provider-a',
+        keyA,
+        expect.anything(),
+      ))
+
+      // Switch to Patient B, who has her OWN pending reconciliation.
+      await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+      const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons2[1])
+      await waitFor(() =>
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
+          'provider-a',
+          keyB,
+          expect.anything(),
+        ),
+      )
+
+      // B's own reconciliation is genuinely in flight -- new-order creation stays blocked.
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      // Now A's STALE response resolves. It must NOT clear B's active reconciliation.
+      await act(async () => {
+        resolveA(makeValidDurableIntent({ idempotency_key: keyA }))
+        await intentAPromise
+      })
+
+      // B remains correctly blocked -- A's stale completion did not fail B open.
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+    })
+
+    it('TEST G (NC7/NC25): stale Provider A reconciliation cannot lock or attach under Provider B', async () => {
+      const keyA = 'reload-key-provider-a'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+
+      let resolveA!: (intent: LabOrderIntent | null) => void
+      const intentAPromise = new Promise<LabOrderIntent | null>((resolve) => {
+        resolveA = resolve
+      })
+      const intentA = makeValidDurableIntent({ idempotency_key: keyA })
+
+      const commitOrderIntentWithOutcome = vi.fn()
+      const getOrderIntentByIdempotencyKey = vi.fn((providerId: string) =>
+        providerId === 'provider-a' ? intentAPromise : Promise.resolve(null),
+      )
+
+      const client = makeClient({
+        getMe: vi.fn().mockResolvedValue({
+          ...me,
+          memberships: [
+            me.memberships[0],
+            { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
+          ],
+        }),
+        listPatientReferences: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        ),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      // Open the Provider-A patient -- kicks off the (still-pending) intent lookup for A.
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+
+      // Switch to Provider B before A's lookup resolves, and open B's own (unrelated) patient.
+      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      await userEventObj.selectOptions(providerSelect, 'provider-b')
+      expect(await screen.findByText('Patients trouvés')).toBeInTheDocument()
+      const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtonsB[0])
+      expect(
+        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+      ).toBeInTheDocument()
+
+      // THE DEFECT REGRESSION: Provider B's patient must not be stuck in reconciliation, and
+      // her normal new-order action must be available -- BEFORE A's stale response resolves.
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled(),
+      )
+      expect(screen.queryByText(/Tentative d’ordre non confirmée/)).not.toBeInTheDocument()
+
+      // Now resolve Provider A's delayed response with a VALID durable intent.
+      await act(async () => {
+        resolveA(intentA)
+        await intentAPromise
+      })
+
+      // Nothing from Provider A leaks into Provider B's UI.
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+      expect(screen.queryByText(/Tentative d’ordre non confirmée/)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
+      expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
+
+      const storedA = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(storedA).not.toBeNull()
+      expect(storedA?.idempotency_key).toBe(keyA)
+    })
+
+    it('TEST G2 (NC25): stale Provider A resolution cannot clear Provider B\'s OWN active reconciliation', async () => {
+      const keyA = 'reload-key-g2-provider-a'
+      const keyB = 'reload-key-g2-provider-b'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+      setStoredPendingOrder('identity-1', 'provider-b', patientWithoutName.patient_reference_id, {
+        idempotency_key: keyB,
+      })
+
+      let resolveA!: (intent: LabOrderIntent | null) => void
+      const intentAPromise = new Promise<LabOrderIntent | null>((resolve) => {
+        resolveA = resolve
+      })
+      // Provider B's own lookup never resolves in this test -- her reconciliation must stay active.
+      const intentBPromise = new Promise<LabOrderIntent | null>(() => {})
+
+      const getOrderIntentByIdempotencyKey = vi.fn((_providerId: string, key: string) => {
+        if (key === keyA) return intentAPromise
+        if (key === keyB) return intentBPromise
+        return Promise.resolve(null)
+      })
+
+      const client = makeClient({
+        getMe: vi.fn().mockResolvedValue({
+          ...me,
+          memberships: [
+            me.memberships[0],
+            { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
+          ],
+        }),
+        listPatientReferences: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        ),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() =>
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
+          'provider-a',
+          keyA,
+          expect.anything(),
+        ),
+      )
+
+      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      await userEventObj.selectOptions(providerSelect, 'provider-b')
+      const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtonsB[0])
+      await waitFor(() =>
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
+          'provider-b',
+          keyB,
+          expect.anything(),
+        ),
+      )
+
+      // B's own reconciliation is genuinely in flight -- new-order creation stays blocked.
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      // A's STALE response resolves -- must not clear B's active reconciliation.
+      await act(async () => {
+        resolveA(makeValidDurableIntent({ idempotency_key: keyA }))
+        await intentAPromise
+      })
+
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+    })
+
+    // -- DH-CLINIC-003C negative-control coverage closure: NC4 permanent regression -------------
+    //
+    // The audit found no test mocks a rejection at the COMMIT step specifically (only at
+    // registration, via the legacy-shim path). These exercise the real two-step Option-A flow:
+    // registration succeeds, durable recovery is persisted, THEN commit is rejected.
+
+    async function commitStepRejectionScenario(error: ExchangeApiError) {
+      const commitOrderIntentWithOutcome = vi.fn().mockRejectedValue(error)
+      const createOrderIntentWithOutcome = vi.fn().mockImplementation(
+        (providerId: string, key: string, body: { patient_reference_id: string; catalog_entry_ids: string[] }) =>
+          Promise.resolve({
+            created: true,
+            intent: {
+              id: `intent-${key}`,
+              idempotency_key: key,
+              provider_organization_id: providerId,
+              patient_reference_id: body.patient_reference_id,
+              practitioner_reference_id: 'prac-clinician',
+              committed_lab_order_id: null,
+              created_at: new Date().toISOString(),
+              items: body.catalog_entry_ids.map((id) => ({
+                catalog_entry_id: id,
+                catalog_code_snapshot: 'CODE',
+                catalog_display_name_snapshot: 'Display',
+              })),
+            },
+          }),
+      )
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        createOrderIntentWithOutcome,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+      const checkboxes = await screen.findAllByRole('checkbox')
+      await userEventObj.click(checkboxes[0])
+      await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+      await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+      await waitFor(() => expect(createOrderIntentWithOutcome).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(commitOrderIntentWithOutcome).toHaveBeenCalledTimes(1))
+
+      return { createOrderIntentWithOutcome, commitOrderIntentWithOutcome, userEventObj }
+    }
+
+    it('TEST I (NC4): fresh registration succeeds, commit returns 422 -- recovery retained', async () => {
+      const { createOrderIntentWithOutcome } = await commitStepRejectionScenario(
+        new ExchangeApiError(422, 'VALIDATION_ERROR', 'Commit refusé (validation)'),
+      )
+
+      // Pending durable recovery identity remains in localStorage, WITH the intent ID.
+      const stored = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(stored).not.toBeNull()
+      expect(stored?.intent_id).toBeTruthy()
+
+      // No new key generated, no re-registration.
+      expect(createOrderIntentWithOutcome).toHaveBeenCalledTimes(1)
+
+      // Catalog does not reopen as a fresh submission; services are not reconstructed.
+      expect(
+        screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+
+      // User remains in reconciliation/retry state.
+      expect(screen.getByRole('button', { name: 'Vérifier / réessayer' })).toBeInTheDocument()
+    })
+
+    it('TEST J (NC4): fresh registration succeeds, commit returns 403 -- recovery retained', async () => {
+      const { createOrderIntentWithOutcome } = await commitStepRejectionScenario(
+        new ExchangeApiError(403, 'FORBIDDEN', 'Commit refusé (autorisation)'),
+      )
+
+      const stored = getStoredPendingOrder(
+        'identity-1',
+        'provider-a',
+        patientWithName.patient_reference_id,
+      )
+      expect(stored).not.toBeNull()
+      expect(stored?.intent_id).toBeTruthy()
+      expect(createOrderIntentWithOutcome).toHaveBeenCalledTimes(1)
+      expect(
+        screen.queryByRole('heading', { name: 'Prescrire un ordre de laboratoire' }),
+      ).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Vérifier / réessayer' })).toBeInTheDocument()
+    })
   })
 })

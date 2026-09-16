@@ -452,3 +452,212 @@ def test_order_intent_commit_cross_provider_refused_404(
         headers=_auth(token2),
     )
     assert r_commit.status_code == 404
+
+
+# -- DH-CLINIC-003C negative-control coverage closure: NC12 permanent regression ------------------
+#
+# The commit endpoint's ownership check was already covered (403, above). The negative-control
+# audit found the GET-retrieval ownership check -- same provider, a *different* clinician -- had
+# zero coverage: only cross-provider anti-enumeration and same-clinician positive control existed.
+
+
+def test_order_intent_get_by_id_different_clinician_same_provider_anti_enumerating_404(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token_a, _ = _setup_clinician(client, private_key, organizations, "NC12_A")
+    identity_b_id = _bootstrap_identity(client, private_key, "clinician-NC12_B")
+    _grant_roles(client, private_key, provider.id, identity_b_id, "clinician-NC12_B", ["CLINICIAN"])
+    token_b = make_token(private_key, subject="clinician-NC12_B")
+
+    patient_id = _create_patient(patients, provider.id, "NC12")
+    test_ids = _make_tests(catalog, 1)
+    key = str(uuid.uuid4())
+
+    r_create = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token_a), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+    intent_id = r_create.json()["id"]
+
+    # Author (clinician A) can retrieve it normally.
+    r_get_a = client.get(
+        f"/exchange/v1/organizations/{provider.id}/order-intents/{intent_id}",
+        headers=_auth(token_a),
+    )
+    assert r_get_a.status_code == 200
+
+    # A different clinician at the SAME provider must get an anti-enumerating 404, not 403 --
+    # the response must not disclose that an intent with this id exists at all.
+    r_get_b = client.get(
+        f"/exchange/v1/organizations/{provider.id}/order-intents/{intent_id}",
+        headers=_auth(token_b),
+    )
+    assert r_get_b.status_code == 404
+    assert r_get_b.json()["detail"] == "order intent not found"
+
+
+def test_order_intent_get_by_idempotency_key_different_clinician_same_provider_anti_enumerating_404(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token_a, _ = _setup_clinician(client, private_key, organizations, "NC12K_A")
+    identity_b_id = _bootstrap_identity(client, private_key, "clinician-NC12K_B")
+    _grant_roles(
+        client, private_key, provider.id, identity_b_id, "clinician-NC12K_B", ["CLINICIAN"]
+    )
+    token_b = make_token(private_key, subject="clinician-NC12K_B")
+
+    patient_id = _create_patient(patients, provider.id, "NC12K")
+    test_ids = _make_tests(catalog, 1)
+    key = str(uuid.uuid4())
+
+    r_create = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token_a), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(t) for t in test_ids],
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+
+    r_get_a = client.get(
+        f"/exchange/v1/organizations/{provider.id}/order-intents/by-idempotency-key/{key}",
+        headers=_auth(token_a),
+    )
+    assert r_get_a.status_code == 200
+
+    r_get_b = client.get(
+        f"/exchange/v1/organizations/{provider.id}/order-intents/by-idempotency-key/{key}",
+        headers=_auth(token_b),
+    )
+    assert r_get_b.status_code == 404
+    assert r_get_b.json()["detail"] == "order intent not found"
+
+
+# -- DH-CLINIC-003C negative-control coverage closure: NC17 permanent regression ------------------
+#
+# The legacy `/orders` endpoint already has
+# `test_request_body_cannot_supply_practitioner_reference_id` proving `extra="forbid"` rejects a
+# spoofed practitioner. The negative-control audit found no mirrored test for `/order-intents`.
+
+
+def test_order_intent_request_body_cannot_supply_practitioner_reference_id(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "NC17")
+    patient_id = _create_patient(patients, provider.id, "NC17")
+    test_ids = _make_tests(catalog, 1)
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token), "Idempotency-Key": str(uuid.uuid4())},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+            "practitioner_reference_id": str(uuid.uuid4()),
+        },
+    )
+    assert response.status_code == 422  # extra="forbid"
+
+    # No durable intent was created by the rejected request.
+    r_lookup = client.get(
+        f"/exchange/v1/organizations/{provider.id}/order-intents"
+        f"/by-idempotency-key/{response.request.headers['Idempotency-Key']}",
+        headers=_auth(token),
+    )
+    assert r_lookup.status_code == 404
+
+
+def test_order_intent_practitioner_is_always_derived_from_authenticated_clinician(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """Positive-proof counterpart to the spoof-rejection test above: the browser/caller never
+    chooses practitioner ownership -- it is derived once per (clinician, provider) and stays
+    identical across separate intents from the same clinician."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "NC17D")
+    patient_id = _create_patient(patients, provider.id, "NC17D")
+    test_ids = _make_tests(catalog, 2)
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token), "Idempotency-Key": str(uuid.uuid4())},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token), "Idempotency-Key": str(uuid.uuid4())},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[1])],
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    assert first.json()["practitioner_reference_id"] == second.json()["practitioner_reference_id"]
+    assert first.json()["practitioner_reference_id"] is not None
+
+
+# -- DH-CLINIC-003C negative-control coverage closure: NC13/NC14 permanent adversarial proof -------
+#
+# NC13/NC14 were marked "N/A by design" in the audit because `commit_order_intent` declares no
+# request body. This test proves that observation empirically rather than relying on structural
+# inspection alone: attempting to smuggle a different patient/practitioner/service through the
+# commit request must have zero effect on the resulting LabOrder.
+
+
+def test_order_intent_commit_ignores_extraneous_body_and_uses_only_durable_intent_content(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "NC13_14")
+    patient_a = _create_patient(patients, provider.id, "NC13_14_A")
+    patient_b = _create_patient(patients, provider.id, "NC13_14_B")
+    test_ids = _make_tests(catalog, 2)
+    service_1, service_2 = test_ids
+
+    r_create = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token), "Idempotency-Key": str(uuid.uuid4())},
+        json={
+            "patient_reference_id": str(patient_a),
+            "catalog_entry_ids": [str(service_1)],
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+    intent_id = r_create.json()["id"]
+    original_practitioner_id = r_create.json()["practitioner_reference_id"]
+
+    # Adversarial commit: attempt to smuggle a different patient, practitioner, and service
+    # through the request body even though the route declares no body parameter at all.
+    r_commit = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents/{intent_id}/commit",
+        headers=_auth(token),
+        json={
+            "patient_reference_id": str(patient_b),
+            "practitioner_reference_id": str(uuid.uuid4()),
+            "catalog_entry_ids": [str(service_2)],
+        },
+    )
+    # The endpoint accepts (or would reject cleanly); either way the resulting order must
+    # reflect ONLY the durable intent's frozen content, never the smuggled body.
+    assert r_commit.status_code in (200, 201, 403, 404, 409, 422), r_commit.text
+    if r_commit.status_code in (200, 201):
+        order = r_commit.json()
+        assert order["patient_reference_id"] == str(patient_a)
+        assert order["practitioner_reference_id"] == original_practitioner_id
+        assert order["items"][0]["catalog_entry_id"] == str(service_1)
+        assert len(order["items"]) == 1

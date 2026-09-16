@@ -112,4 +112,71 @@ describe('pendingOrderStorage', () => {
     expect(getStoredPendingOrder('user-1', 'prov-1', 'pat-1')).toBeNull()
     expect(getStoredPendingOrder('user-2', 'prov-2', 'pat-2')).toBeNull()
   })
+
+  // -- DH-CLINIC-003C negative-control coverage closure: NC18 permanent regression ----------------
+  //
+  // The negative-control audit found that round-tripping through `getStoredPendingOrder` cannot
+  // detect an extra clinical field on the serialized record: the getter only ever echoes back its
+  // own known-field allowlist, silently dropping anything else even if the setter leaked it. This
+  // test reads the RAW localStorage string directly and inspects its actual key set -- the only
+  // way to make a `catalog_entry_ids`-style leak in `setStoredPendingOrder` observably RED.
+
+  it('serializes ONLY the approved non-clinical technical field set to raw localStorage', () => {
+    setStoredPendingOrder('user-1', 'prov-1', 'pat-1', {
+      idempotency_key: 'idemp-uuid-1',
+      intent_id: 'intent-uuid-1',
+    })
+
+    const raw = localStorage.getItem('dhealth_clinic_pending_order_v1:user-1:prov-1:pat-1')
+    expect(raw).not.toBeNull()
+    const parsed = JSON.parse(raw as string) as Record<string, unknown>
+
+    const allowedKeys = new Set([
+      'user_id',
+      'provider_id',
+      'patient_reference_id',
+      'idempotency_key',
+      'created_at',
+      'intent_id',
+      'confirmed_order_id',
+    ])
+    for (const key of Object.keys(parsed)) {
+      expect(allowedKeys.has(key)).toBe(true)
+    }
+
+    // Explicit forbidden-content checks -- zero clinical/diagnostic payload of any kind.
+    expect(parsed).not.toHaveProperty('catalog_entry_ids')
+    expect(parsed).not.toHaveProperty('catalog_entry_id')
+    expect(parsed).not.toHaveProperty('items')
+    expect(parsed).not.toHaveProperty('catalog_code_snapshot')
+    expect(parsed).not.toHaveProperty('catalog_display_name_snapshot')
+    expect(parsed).not.toHaveProperty('display_name')
+    expect(parsed).not.toHaveProperty('contact_value')
+    expect(parsed).not.toHaveProperty('contact_channel_type')
+    expect(parsed).not.toHaveProperty('result')
+    expect(parsed).not.toHaveProperty('result_value')
+    expect(JSON.stringify(parsed)).not.toMatch(/catalog|display_name|contact_|result_value/i)
+  })
+
+  // -- DH-CLINIC-003C negative-control coverage closure: NC19 permanent regression ----------------
+  //
+  // The audit found no TTL/expiry code exists anywhere in this module (verified by reading the
+  // complete file) and therefore did not force a mutation -- inventing destructive TTL logic just
+  // to then prove a test catches it would mean testing a defect that does not exist in production.
+  // This test instead locks in the durability invariant itself as a permanent regression guard:
+  // an old `created_at` must never cause silent removal, so if TTL logic is added later without
+  // reading this test, it goes RED immediately.
+
+  it('never silently discards an old unresolved pending order (no destructive TTL)', () => {
+    const yearsAgo = Date.now() - 1000 * 60 * 60 * 24 * 365 * 3 // ~3 years in the past
+    setStoredPendingOrder('user-1', 'prov-1', 'pat-1', {
+      idempotency_key: 'idemp-uuid-old',
+      created_at: yearsAgo,
+    })
+
+    const stored = getStoredPendingOrder('user-1', 'prov-1', 'pat-1')
+    expect(stored).not.toBeNull()
+    expect(stored?.idempotency_key).toBe('idemp-uuid-old')
+    expect(stored?.created_at).toBe(yearsAgo)
+  })
 })
