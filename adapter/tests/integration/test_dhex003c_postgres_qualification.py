@@ -97,13 +97,18 @@ def _run_race(label: str, workers: dict[str, object]):
 PG_HOST = os.environ.get("DHEX003C_PG_HOST") or os.environ.get("DHEX014B_PG_HOST")
 PG_PORT = os.environ.get("DHEX003C_PG_PORT") or os.environ.get("DHEX014B_PG_PORT")
 PG_USER = os.environ.get("DHEX003C_PG_USER") or os.environ.get("DHEX014B_PG_USER")
-PG_PASSWORD = os.environ.get("DHEX003C_PG_PASSWORD") or os.environ.get("DHEX014B_PG_PASSWORD")
-PG_DATABASE = os.environ.get("DHEX003C_PG_DATABASE") or os.environ.get("DHEX014B_PG_DATABASE")
+PG_PASSWORD = os.environ.get("DHEX003C_PG_PASSWORD") or os.environ.get(
+    "DHEX014B_PG_PASSWORD"
+)
+PG_DATABASE = os.environ.get("DHEX003C_PG_DATABASE") or os.environ.get(
+    "DHEX014B_PG_DATABASE"
+)
 
 pytestmark = pytest.mark.skipif(
     not (PG_HOST and PG_PORT and PG_USER and PG_PASSWORD and PG_DATABASE),
     reason=(
-        "requires a disposable PostgreSQL database (DHEX003C_PG_* or DHEX014B_PG_*) -- never in CI"
+        "requires a disposable PostgreSQL database "
+        "(DHEX003C_PG_* or DHEX014B_PG_*) -- never in CI"
     ),
 )
 
@@ -117,7 +122,9 @@ def sessions() -> sessionmaker:
     engine.dispose()
 
 
-def test_concurrent_intent_commits_converge_to_single_order(sessions: sessionmaker) -> None:
+def test_concurrent_intent_commits_converge_to_single_order(
+    sessions: sessionmaker,
+) -> None:
     """5 concurrent threads attempt to commit the same intent simultaneously under Postgres.
 
     Row-level locking via `.with_for_update()` guarantees:
@@ -198,7 +205,9 @@ def test_concurrent_intent_commits_converge_to_single_order(sessions: sessionmak
         assert len(orders_in_db) == 1
         assert orders_in_db[0].id == single_order_id
 
-        intent_in_db = session.scalar(select(LabOrderIntent).where(LabOrderIntent.id == intent_id))
+        intent_in_db = session.scalar(
+            select(LabOrderIntent).where(LabOrderIntent.id == intent_id)
+        )
         assert intent_in_db.committed_lab_order_id == single_order_id
         assert orders_in_db[0].intent_id == intent_id
 
@@ -218,12 +227,16 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
     provider = organizations.create(org_type="PROVIDER", name=prefix)
     entry, _ = catalog.create_entry(code=f"{prefix}-T", display_name=prefix)
     patient_a = patients.get_or_create(
-        source_organization_id=provider.id, source_system=prefix,
-        source_identity_system=f"urn:{prefix}", source_identity_value="A"
+        source_organization_id=provider.id,
+        source_system=prefix,
+        source_identity_system=f"urn:{prefix}",
+        source_identity_value="A",
     )
     patient_b = patients.get_or_create(
-        source_organization_id=provider.id, source_system=prefix,
-        source_identity_system=f"urn:{prefix}", source_identity_value="B"
+        source_organization_id=provider.id,
+        source_system=prefix,
+        source_identity_system=f"urn:{prefix}",
+        source_identity_value="B",
     )
     app, private_key = _race_clients(sessions)
     token = _race_clinician(app, private_key, organizations, provider)
@@ -231,26 +244,37 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
     headers = {**_auth(token), "Idempotency-Key": key}
     intent_url = f"/exchange/v1/organizations/{provider.id}/order-intents"
     order_url = f"/exchange/v1/organizations/{provider.id}/orders"
-    payload_a = {"patient_reference_id": str(patient_a.id), "catalog_entry_ids": [str(entry.id)]}
-    payload_b = {"patient_reference_id": str(patient_b.id), "catalog_entry_ids": [str(entry.id)]}
+    payload_a = {
+        "patient_reference_id": str(patient_a.id),
+        "catalog_entry_ids": [str(entry.id)],
+    }
+    payload_b = {
+        "patient_reference_id": str(patient_b.id),
+        "catalog_entry_ids": [str(entry.id)],
+    }
     intent_id = None
     if pre_registered:
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.post(intent_url, headers=headers, json=payload_a)
             assert response.status_code == 201, response.text
             intent_id = response.json()["id"]
+
     def register():
         with TestClient(app, raise_server_exceptions=False) as client:
             return client.post(intent_url, headers=headers, json=payload_a)
+
     def legacy():
         with TestClient(app, raise_server_exceptions=False) as client:
             payload = payload_b if mismatch else payload_a
             return client.post(order_url, headers=headers, json=payload)
+
     def commit():
         with TestClient(app, raise_server_exceptions=False) as client:
             return client.post(f"{intent_url}/{intent_id}/commit", headers=_auth(token))
+
     results = _run_race(
-        "PG3-PG6", {"native": commit if pre_registered else register, "legacy": legacy}
+        "PG3-PG6",
+        {"native": commit if pre_registered else register, "legacy": legacy},
     )
     statuses = {result.status_code for result in results.values()}
     assert statuses <= {200, 201, 409}, statuses
