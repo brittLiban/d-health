@@ -1634,7 +1634,7 @@ describe('Clinic native patient workflow', () => {
     expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).toBeNull()
   })
 
-  it('displays truthful lab text in order history for awaiting, cancelled, and routed orders', async () => {
+  it('displays truthful lab text in order history for awaiting, cancelled, rejected, and routed orders', async () => {
     const orders: LabOrder[] = [
       {
         id: 'ord-awaiting',
@@ -1655,13 +1655,22 @@ describe('Clinic native patient workflow', () => {
         items: [{ catalog_entry_id: 'c2', catalog_code_snapshot: 'C2', catalog_display_name_snapshot: 'D2' }],
       },
       {
+        id: 'ord-rejected',
+        provider_organization_id: 'provider-a',
+        patient_reference_id: patientWithName.patient_reference_id,
+        practitioner_reference_id: 'prac-1',
+        status: 'REJECTED',
+        created_at: '2026-09-16T07:02:00Z',
+        items: [{ catalog_entry_id: 'c3', catalog_code_snapshot: 'C3', catalog_display_name_snapshot: 'D3' }],
+      },
+      {
         id: 'ord-selected',
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
         status: 'SELECTED',
-        created_at: '2026-09-16T07:02:00Z',
-        items: [{ catalog_entry_id: 'c3', catalog_code_snapshot: 'C3', catalog_display_name_snapshot: 'D3' }],
+        created_at: '2026-09-16T07:03:00Z',
+        items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
       },
       {
         id: 'ord-completed',
@@ -1669,8 +1678,8 @@ describe('Clinic native patient workflow', () => {
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
         status: 'COMPLETED',
-        created_at: '2026-09-16T07:03:00Z',
-        items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
+        created_at: '2026-09-16T07:04:00Z',
+        items: [{ catalog_entry_id: 'c5', catalog_code_snapshot: 'C5', catalog_display_name_snapshot: 'D5' }],
       },
     ]
 
@@ -1687,10 +1696,235 @@ describe('Clinic native patient workflow', () => {
 
     expect(await screen.findByText('Historique des ordres de laboratoire')).toBeInTheDocument()
 
-    // Truthful lab labels
+    // Truthful lab labels (DH-CLINIC-003B)
     expect(screen.getByText('Pas encore sélectionné')).toBeInTheDocument()
-    expect(screen.getByText('Non assigné (ordre annulé)')).toBeInTheDocument()
-    expect(screen.getAllByText('Laboratoire sélectionné').length).toBe(2)
+    // Both CANCELLED and REJECTED map to indeterminate
+    expect(screen.getAllByText('Indéterminé pour cet ordre clôturé').length).toBe(2)
+    // Routed orders (SELECTED, COMPLETED) map to Sélectionné
+    expect(screen.getAllByText('Sélectionné').length).toBe(2)
+  })
+
+  it('enforces persist-before-POST: storage contains key during in-flight POST and cleans up on success', async () => {
+    let keyInStorageDuringPost: string | null = null
+    const createdOrder: LabOrder = {
+      id: 'ord-persist-before-post',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-1',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:00:00Z',
+      items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
+    }
+
+    const createOrder = vi.fn().mockImplementation((_providerId, _key) => {
+      // Check localStorage RIGHT NOW while POST is in-flight
+      const stored = getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)
+      keyInStorageDuringPost = stored?.idempotency_key ?? null
+      return Promise.resolve({ order: createdOrder, created: true })
+    })
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+      createOrderWithOutcome: createOrder,
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    expect(await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' })).toBeInTheDocument()
+
+    // Key was verified to be in storage BEFORE POST returned
+    expect(keyInStorageDuringPost).toBeTruthy()
+    expect(keyInStorageDuringPost).toBe(createOrder.mock.calls[0][1])
+
+    // After success, storage is cleaned up
+    expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).toBeNull()
+  })
+
+  it('fails closed and NEVER calls POST if storage write fails', async () => {
+    const createOrder = vi.fn()
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+      createOrderWithOutcome: createOrder,
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    // POST was NEVER called
+    expect(createOrder).not.toHaveBeenCalled()
+
+    // Storage unreadable alert is displayed
+    expect(
+      await screen.findByText(/Le stockage local de réconciliation d’ordre est corrompu ou illisible/),
+    ).toBeInTheDocument()
+
+    setItemSpy.mockRestore()
+  })
+
+  it('fails closed and NEVER calls POST if storage read-back verification fails', async () => {
+    const createOrder = vi.fn()
+    let writeHappened = false
+    const originalSetItem = Storage.prototype.setItem
+    const originalGetItem = Storage.prototype.getItem
+
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, val) {
+      writeHappened = true
+      return originalSetItem.call(this, key, val)
+    })
+    // Mock getItem to return null on read-back
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key) {
+      if (writeHappened && key.startsWith('dhealth_clinic_pending_order_v1:')) {
+        return null // Simulate read-back failure / silent drop
+      }
+      return originalGetItem.call(this, key)
+    })
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+      createOrderWithOutcome: createOrder,
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+    await userEventObj.click(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' }))
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    // POST was NEVER called
+    expect(createOrder).not.toHaveBeenCalled()
+
+    // Storage unreadable alert is displayed
+    expect(
+      await screen.findByText(/Le stockage local de réconciliation d’ordre est corrompu ou illisible/),
+    ).toBeInTheDocument()
+
+    vi.restoreAllMocks()
+  })
+
+  it('404 on idempotency key lookup preserves unresolved state, does not show abandon button, and keeps new order disabled', async () => {
+    setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+      idempotency_key: 'stored-idemp-404-test',
+    })
+
+    const getOrderByIdempotencyKey = vi.fn().mockResolvedValue(null) // 404
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      getOrderByIdempotencyKey,
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    // Wait for reconciliation attempt
+    expect(getOrderByIdempotencyKey).toHaveBeenCalledWith('provider-a', 'stored-idemp-404-test', expect.anything())
+
+    // Banner indicates unresolved attempt
+    expect(await screen.findByText(/Tentative d’ordre non confirmée/)).toBeInTheDocument()
+
+    // Abandon button MUST NOT be present
+    expect(screen.queryByRole('button', { name: /Abandonner/i })).not.toBeInTheDocument()
+
+    // "Nouvel ordre de laboratoire" must remain disabled
+    expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+  })
+
+  it('resolves deadlock: allows re-selecting catalog items and submitting with the frozen key after reload on 404', async () => {
+    const frozenKey = 'frozen-key-after-reload-404'
+    setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+      idempotency_key: frozenKey,
+    })
+
+    const createdOrder: LabOrder = {
+      id: 'ord-resolved-after-reload',
+      provider_organization_id: 'provider-a',
+      patient_reference_id: patientWithName.patient_reference_id,
+      practitioner_reference_id: 'prac-1',
+      status: 'AWAITING_LAB_SELECTION',
+      created_at: '2026-09-16T08:00:00Z',
+      items: [{ catalog_entry_id: mockCatalogTests[0].id, catalog_code_snapshot: 'SYNTH-CBC', catalog_display_name_snapshot: 'NFS' }],
+    }
+
+    const createOrder = vi.fn().mockResolvedValue({ order: createdOrder, created: true })
+
+    const client = makeClient({
+      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+      getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null), // 404
+      createOrderWithOutcome: createOrder,
+      listPatientOrders: vi.fn().mockResolvedValue([]),
+    })
+
+    const userEventObj = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+    await userEventObj.click(openButtons[0])
+
+    expect(await screen.findByText(/Tentative d’ordre non confirmée/)).toBeInTheDocument()
+
+    // Click "Vérifier / réessayer"
+    await userEventObj.click(screen.getByRole('button', { name: 'Vérifier / réessayer' }))
+
+    // Wizard opens at catalog step because items were not in storage
+    expect(await screen.findByText('Prescrire un ordre de laboratoire')).toBeInTheDocument()
+
+    // Checkboxes are NOT deadlocked: clinician can select items
+    const checkboxes = await screen.findAllByRole('checkbox')
+    await userEventObj.click(checkboxes[0])
+    expect(checkboxes[0]).toBeChecked()
+
+    // Advance to review
+    await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
+    expect(await screen.findByText('Révision de l’ordre de laboratoire')).toBeInTheDocument()
+
+    // Submit
+    await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+
+    // Verify submission used the EXACT frozen idempotency key from reload
+    expect(createOrder).toHaveBeenCalledTimes(1)
+    expect(createOrder.mock.calls[0][1]).toBe(frozenKey)
+
+    // Succeeded and storage cleaned up
+    expect(await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' })).toBeInTheDocument()
+    expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).toBeNull()
   })
 
   it('guarantees zero calls to OpenMRS across native diagnostic ordering', async () => {

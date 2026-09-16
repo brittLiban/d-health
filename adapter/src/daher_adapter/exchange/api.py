@@ -2319,8 +2319,19 @@ def build_exchange_router(
         idempotency_key: Annotated[str, Path(min_length=1, max_length=256)],
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabOrderResponse:
-        # DH-CLINIC-003A: clinician authorization checked strictly before key lookup.
-        # Anti-enumeration: 404 when key is unknown or belongs to another provider.
+        """Lookup an existing LabOrder by its client-supplied idempotency key.
+
+        DH-CLINIC-003B: Clinician authorization is checked strictly before key lookup.
+        Anti-enumeration: returns 404 when key is unknown or belongs to another provider.
+
+        IMPORTANT SAFETY SEMANTICS (404 is not proof of absence):
+        A 404 indicates only that no committed LabOrder was found for this
+        (provider_id, idempotency_key) pair at the time of the query. It does NOT
+        prove that an earlier in-flight POST request never reached the server or
+        will never commit (e.g. concurrent transaction, network delay). Callers
+        must not interpret a 404 as permission to abandon an unconfirmed attempt
+        or mint a new idempotency key for the same diagnostic intent.
+        """
         _require_clinician(principal, provider_id)
         try:
             order = orders.get_by_idempotency_key(provider_id, idempotency_key)

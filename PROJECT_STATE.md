@@ -14486,3 +14486,133 @@ Narrow safety correction to `DH-CLINIC-003` addressing 3 critical safety blocker
 **DH-CLINIC-003A CLOSED: YES.**
 
 **READY FOR LIBAN REVIEW: YES**
+
+---
+
+## 2026-09-16 · DH-CLINIC-003B — Final Order Reconciliation Safety Correction
+
+**Base Commit:** `27e9d83d264ae7767352f6388c5a6f26650fdf8b`
+**Completed Commit:** HEAD
+**Status:** BLOCKED ON HUMAN DECISION (options documented for Liban)
+
+### Objective & Context
+
+Final order reconciliation safety correction to `DH-CLINIC-003A` addressing 3 independently verified safety gaps:
+1. **BLOCKER 1 (Persist-before-POST Durability):** Persist technical reconciliation record (`user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`) and verify read-back BEFORE issuing the network POST. If storage write or read-back fails, fail closed without sending POST, surface safe storage error, and do not mint another key.
+2. **BLOCKER 2 (Eliminate 404 Abandonment & Prevent Deadlock):** Remove the unsafe premise that an idempotency-key lookup 404 proves the request never committed. Remove the "Abandonner la tentative non confirmée" button. Keep the state fail-closed without ordinary new-order permission. Eliminate the reload deadlock: when resuming an uncommitted stored attempt on 404 with empty in-memory catalog items, allow test selection and re-submission using the EXACT frozen idempotency key from storage.
+3. **BLOCKER 3 (Terminal Lab-State Truthfulness):** Correct `formatOrderLabText` so that `REJECTED` and `CANCELLED` do not falsely infer historical lab assignment. Both map to `"Indéterminé pour cet ordre clôturé"`; `AWAITING_LAB_SELECTION` maps to `"Pas encore sélectionné"`; routed states (`SELECTED`, `ACCEPTED`, `IN_PROGRESS`, `COMPLETED`) map to `"Sélectionné"`.
+
+### Scope Boundaries & Invariants Preserved
+- Do NOT start `DH-CLINIC-004` (Provider Lab Selection & Order Routing).
+- Zero `/openmrs/*` calls across the entire native Clinic ordering flow.
+- Zero clinical PHI and zero test IDs/codes/names in persistent browser storage (`localStorage`). Technical non-PHI metadata only (`user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`, optional `confirmed_order_id`).
+- Fail-closed storage error handling: unreadable or corrupt storage disables new order creation.
+- Strict database unique constraint idempotency: `UNIQUE(provider_organization_id, idempotency_key)` guarantees duplicate prevention.
+
+### Changes Implemented
+
+#### 1. Backend (`adapter/`)
+- **`api.py`:**
+  - Updated docstring for `get_order_by_idempotency_key` explaining 404 safety semantics: 404 indicates no committed `LabOrder` was found at that moment under the provider; it does NOT constitute authoritative proof that an in-flight request was not received or will never commit.
+
+#### 2. Frontend UI & Storage (`ui/`)
+- **`ClinicPatientsPage.tsx`:**
+  - Implemented persist-before-POST durability gate in `handleSubmitOrder`: writes technical tuple to `pendingOrderStorage` and verifies read-back before firing `client.createOrderWithOutcome`. If either fails, enters fail-closed state without POSTing.
+  - Eliminated `orderReconciled404` state and removed `handleAbandonStoredOrderAttempt` and the "Abandonner la tentative non confirmée" button.
+  - Eliminated reload deadlock in `handleToggleService` and `handleResumeUncertainOrder`: when rehydrating an unresolved stored order on 404 without in-memory items, opens at catalog step and allows test selection for the frozen key.
+  - Updated `formatOrderLabText`: `CANCELLED` and `REJECTED` map to `"Indéterminé pour cet ordre clôturé"`; `AWAITING_LAB_SELECTION` maps to `"Pas encore sélectionné"`; routed states map to `"Sélectionné"`.
+- **`ClinicPatientsPage.test.tsx`:**
+  - Updated `displays truthful lab text in order history` to verify `CANCELLED` and `REJECTED` map to `"Indéterminé pour cet ordre clôturé"`, and routed orders map to `"Sélectionné"`.
+  - Added `enforces persist-before-POST: storage contains key during in-flight POST and cleans up on success`.
+  - Added `fails closed and NEVER calls POST if storage write fails`.
+  - Added `fails closed and NEVER calls POST if storage read-back verification fails`.
+  - Added `404 on idempotency key lookup preserves unresolved state, does not show abandon button, and keeps new order disabled`.
+  - Added `resolves deadlock: allows re-selecting catalog items and submitting with the frozen key after reload on 404`.
+
+### Negative Controls (AGENTS.md Evidence Discipline)
+
+1. **NC 1: Allow POST without storage verification (`ClinicPatientsPage.tsx`)**
+   - Property: POST must never fire before storage write and read-back succeed.
+   - Mutation: Commented out `if (!writeOk || !readBackOk) return` in `handleSubmitOrder`.
+   - Result: RED (`expect(createOrder).not.toHaveBeenCalled()` failed, received 1 call).
+   - Restored: GREEN.
+
+2. **NC 2: Storage write failure still POSTs (`ClinicPatientsPage.tsx`)**
+   - Property: Storage write failure (e.g. QuotaExceeded) must prevent POST.
+   - Mutation: Set `writeOk = true` regardless of `setStoredPendingOrder` result.
+   - Result: RED (test failed on read-back / createOrder call count).
+   - Restored: GREEN.
+
+3. **NC 3: Storage read-back failure still POSTs (`ClinicPatientsPage.tsx`)**
+   - Property: Read-back mismatch or drop must prevent POST.
+   - Mutation: Bypassed `readBackOk` check.
+   - Result: RED (`expect(createOrder).not.toHaveBeenCalled()` failed).
+   - Restored: GREEN.
+
+4. **NC 4: 404 enables abandonment button (`ClinicPatientsPage.tsx`)**
+   - Property: 404 must never permit abandoning or minting a new key.
+   - Mutation: Re-added conditional abandon button rendering on 404.
+   - Result: RED (`expect(screen.queryByRole('button', { name: /Abandonner/i })).not.toBeInTheDocument()` failed).
+   - Restored: GREEN.
+
+5. **NC 5: Terminal lab state false claim (`ClinicPatientsPage.tsx`)**
+   - Property: `REJECTED` and `CANCELLED` must not claim `"Laboratoire sélectionné"` or `"Non assigné"`.
+   - Mutation: Reverted `formatOrderLabText` to old mapping.
+   - Result: RED (`expect(screen.getAllByText('Indéterminé pour cet ordre clôturé').length).toBe(2)` failed, found 0).
+   - Restored: GREEN.
+
+### Verification & Test Evidence
+
+- **Adapter Tests:** 829 passed, 93 skipped (100% green in WSL Python 3.14 / pytest 9.1).
+- **UI Tests:** 26 test files passed, 347 passed (100% green in Vitest, +5 tests added).
+- **UI Linter:** `oxlint` passed cleanly (0 errors, 0 warnings on 81 files).
+- **UI Typecheck:** `tsc -b --noEmit` exited 0 (0 errors).
+- **UI Production Build:** `npm run build` succeeded; bundle postbuild secret check reported `No secrets found across 4 built file(s)`.
+- **Git Diff Hygiene:** `git diff --check` passed cleanly (0 whitespace/conflict errors).
+
+### Independent Advisor Review (`dhealth_advisor`)
+
+- **Phase 3 Review:** Completed by `dhealth_advisor`. Identified 1 CRITICAL BLOCKER (deadlock on reload 404 re-selection), 1 HUMAN DECISION (cross-reload replay architecture), and 2 SHOULD FIX (persist-before-POST durability, lab-state truthfulness). Reconciled into implementation plan.
+- **Phase 6 Final Review & Re-Review:** Completed by `dhealth_advisor`. All code implementations, test suites, and negative controls verified and approved. Required recording the Human Decision Gate in `PROJECT_STATE.md`.
+
+---
+
+### Human Decision Gate: Cross-Reload Exact Replay Architecture
+
+**Human Decision Required: YES**
+
+The core issue: Across a full browser reload/restart, persistent storage currently stores strictly technical non-PHI metadata (`user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`), deliberately omitting clinical test IDs/codes (`catalog_entry_ids`) to satisfy clinic privacy rules.
+
+If an order POST is in-flight when the browser reloads and the server returns 404 on idempotency key lookup (i.e. not yet committed or never reached server):
+- The unresolved intent is preserved.
+- Fresh order creation is disabled.
+- The clinician clicks "Vérifier / réessayer", which opens the catalog to re-select tests and submit with the EXACT same frozen idempotency key.
+
+There are three long-term architectural choices for cross-reload payload recovery:
+
+1. **Option A: Backend-owned intent (Draft Order Resource)**
+   - Before firing the final mutation, the client creates a draft order resource on the backend (e.g. `POST .../orders/drafts`).
+   - *Pros:* Zero clinical data stored in the browser; allows seamless resume across devices, browsers, and reloads without re-selecting tests.
+   - *Cons:* Requires a new database table/migration, API endpoints, and lifecycle management (garbage collection for abandoned drafts).
+   - *Recommendation:* Target for subsequent post-MVP milestone.
+
+2. **Option B: Scoped browser storage with test IDs**
+   - Store `catalog_entry_ids: string[]` (opaque UUIDs of catalog items) alongside technical metadata in `localStorage` or `sessionStorage`.
+   - *Pros:* Zero backend schema changes; allows automatic payload restoration on reload.
+   - *Cons:* Places diagnostic test selections into browser storage on potentially shared clinic workstation PCs, raising clinical data privacy/governance concerns under ADR-043.
+   - *Recommendation:* Do NOT adopt without explicit sign-off from Liban.
+
+3. **Option C: Fail-closed without payload replay across reload (Current Implementation Baseline)**
+   - Browser stores strictly technical non-PHI metadata (`user_id`, `provider_id`, `patient_reference_id`, `idempotency_key`, `created_at`).
+   - If server already committed the order, `getOrderByIdempotencyKey` reconciles it into confirmed state automatically.
+   - If server has not committed (404), the unresolved intent blocks new orders and prompts the clinician to re-select the tests under the exact same frozen idempotency key.
+   - *Pros:* 100% compliant with zero-clinical-data-in-storage rule; zero database migrations; duplicate-safe via database unique constraint.
+   - *Cons:* In the rare event of a reload during an uncommitted in-flight order, the clinician must re-check the test checkboxes before clicking submit.
+
+**Primary Agent Recommendation:** Adopt **Option C** for MVP 1.0. Await Liban's decision before proceeding with Option A.
+
+---
+
+**DH-CLINIC-003B STATUS: BLOCKED ON HUMAN DECISION.**
+
+**STOPPED AT HUMAN DECISION GATE: YES.**
