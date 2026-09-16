@@ -1588,3 +1588,237 @@ def test_legacy_order_is_backed_by_exactly_one_bidirectionally_owned_intent(
         intent_item_ids = {item.catalog_entry_id for item in intent.items}
         order_item_ids = {item.catalog_entry_id for item in order.items}
         assert intent_item_ids == order_item_ids == {test_ids[0]}
+
+
+def test_legacy_conflicts_with_uncommitted_reservation_and_creates_zero_orders(
+    client: TestClient, keypair, organizations, catalog, patients, sessions: sessionmaker[Session]
+) -> None:
+    """DH-CLINIC-003C / PG4 deterministic companion.
+
+    The real-PostgreSQL PG4 race (`test_dhex003c_postgres_qualification.py`) exercises this same
+    property under genuine thread concurrency, so its outcome depends on which side wins the race.
+    This test pins down, deterministically and without any threading, the one interleaving that
+    race can produce where native registration wins: an uncommitted reservation for one patient
+    must make a mismatched legacy request conflict (409) and must never create an order at all --
+    registration alone never commits.
+    """
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "PG4Companion")
+    patient_a = _create_patient(client, private_key, patients, provider.id, "PG4Companion-A")
+    patient_b = _create_patient(client, private_key, patients, provider.id, "PG4Companion-B")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    # 1. Register a durable intent for Patient A. Deliberately NOT committed.
+    r_register = client.post(
+        f"/exchange/v1/organizations/{provider.id}/order-intents",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_a),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert r_register.status_code == 201, r_register.text
+
+    # 2. Legacy POST under the same key with a different (mismatched) patient.
+    r_legacy = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_b),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+
+    # 3. The mismatch must conflict.
+    assert r_legacy.status_code == 409, r_legacy.text
+
+    with sessions() as session:
+        intents = session.scalars(
+            select(LabOrderIntent).where(
+                LabOrderIntent.provider_organization_id == provider.id,
+                LabOrderIntent.idempotency_key == key,
+            )
+        ).all()
+        orders = session.scalars(
+            select(LabOrder).where(
+                LabOrder.provider_organization_id == provider.id,
+                LabOrder.idempotency_key == key,
+            )
+        ).all()
+
+        # 4. Exactly one intent exists -- the original Patient-A reservation, untouched.
+        assert len(intents) == 1
+        assert intents[0].patient_reference_id == patient_a
+        assert intents[0].committed_lab_order_id is None
+
+        # 5. Zero orders -- the legacy conflict never created anything.
+        assert len(orders) == 0
+
+
+# -- DH-CLINIC-003C historical (pre-003C, intent_id IS NULL) replay compatibility -----------------
+
+
+def _make_historical_order(
+    sessions: sessionmaker[Session],
+    organizations,
+    catalog,
+    *,
+    provider_id: uuid.UUID,
+    patient_id: uuid.UUID,
+    practitioner_id: uuid.UUID,
+    idempotency_key: str,
+    catalog_entry_id: uuid.UUID,
+):
+    """Constructs an order shaped exactly like a pre-DH-CLINIC-003C `LabOrder`: created directly
+    through the repository, never through `order_intents`, so `intent_id` is `NULL` -- precisely
+    the historical state that predates durable intent ownership."""
+    from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
+
+    orders_repo = LabOrderRepository(sessions, organizations, catalog)
+    result = orders_repo.create(
+        idempotency_key=idempotency_key,
+        provider_organization_id=provider_id,
+        patient_reference_id=patient_id,
+        practitioner_reference_id=practitioner_id,
+        items=[OrderItemInput(catalog_entry_id=catalog_entry_id)],
+    )
+    assert result.created is True
+    assert result.order.intent_id is None
+    return result.order
+
+
+def test_legacy_exact_replay_of_a_historical_intentless_order_returns_200_no_new_intent(
+    client: TestClient, keypair, organizations, catalog, patients, sessions: sessionmaker[Session]
+) -> None:
+    """DH-CLINIC-003C historical compatibility (final-advisor-review BLOCKER 3).
+
+    Before durable order intents existed, the legacy `/orders` endpoint's own idempotency
+    contract was: same provider + same key + exact canonical content -> return the existing
+    order, 200, no duplicate. A pre-003C `LabOrder` legitimately has `intent_id IS NULL` and is
+    never backfilled. An exact retry of such an order must still replay idempotently -- it must
+    never become a 409 just because 003C's intent-reservation machinery didn't create it.
+    """
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "HistReplay")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "HistReplay")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    # Establish this clinician's practitioner_reference_id exactly as the endpoint would derive
+    # it, via a throwaway order under an unrelated key.
+    throwaway = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert throwaway.status_code == 201, throwaway.text
+    practitioner_id = uuid.UUID(throwaway.json()["practitioner_reference_id"])
+
+    historical = _make_historical_order(
+        sessions,
+        organizations,
+        catalog,
+        provider_id=provider.id,
+        patient_id=patient_id,
+        practitioner_id=practitioner_id,
+        idempotency_key=key,
+        catalog_entry_id=test_ids[0],
+    )
+
+    audits_before = _audit_events(sessions, "lab_order_created")
+
+    # Exact canonical retry of the historical order.
+    r_replay = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+
+    assert r_replay.status_code == 200, r_replay.text
+    assert r_replay.json()["id"] == str(historical.id)
+
+    with sessions() as session:
+        intents = session.scalars(
+            select(LabOrderIntent).where(
+                LabOrderIntent.provider_organization_id == provider.id,
+                LabOrderIntent.idempotency_key == key,
+            )
+        ).all()
+        # Zero new durable intents for that key -- the historical order stays unowned forever.
+        assert len(intents) == 0
+
+        order = session.get(LabOrder, historical.id)
+        assert order is not None
+        assert order.intent_id is None
+
+    # No duplicate audit event for this key.
+    audits_after = _audit_events(sessions, "lab_order_created")
+    assert len(audits_after) == len(audits_before)
+
+
+def test_legacy_mismatched_retry_of_a_historical_intentless_order_returns_409_unclaimed(
+    client: TestClient, keypair, organizations, catalog, patients, sessions: sessionmaker[Session]
+) -> None:
+    """The mismatch counterpart: a changed patient/service under the same key as a historical
+    order must conflict (409), exactly as it did before 003C, and must never retroactively claim
+    the historical row into a new intent."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "HistMismatch")
+    patient_a = _create_patient(client, private_key, patients, provider.id, "HistMismatch-A")
+    patient_b = _create_patient(client, private_key, patients, provider.id, "HistMismatch-B")
+    test_ids = _make_tests(catalog, 1)
+    key = _new_key()
+
+    throwaway = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(patient_a),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert throwaway.status_code == 201, throwaway.text
+    practitioner_id = uuid.UUID(throwaway.json()["practitioner_reference_id"])
+
+    historical = _make_historical_order(
+        sessions,
+        organizations,
+        catalog,
+        provider_id=provider.id,
+        patient_id=patient_a,
+        practitioner_id=practitioner_id,
+        idempotency_key=key,
+        catalog_entry_id=test_ids[0],
+    )
+
+    r_mismatch = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": key},
+        json={
+            "patient_reference_id": str(patient_b),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    assert r_mismatch.status_code == 409, r_mismatch.text
+
+    with sessions() as session:
+        order = session.get(LabOrder, historical.id)
+        assert order is not None
+        # Historical row unchanged, still unowned.
+        assert order.intent_id is None
+        assert order.patient_reference_id == patient_a
+
+        intents = session.scalars(
+            select(LabOrderIntent).where(
+                LabOrderIntent.provider_organization_id == provider.id,
+                LabOrderIntent.idempotency_key == key,
+            )
+        ).all()
+        assert len(intents) == 0

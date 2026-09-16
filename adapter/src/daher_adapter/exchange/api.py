@@ -95,6 +95,7 @@ from daher_adapter.exchange.order_intents import (
     OrderIntentNotFound,
 )
 from daher_adapter.exchange.orders import (
+    CreateOrderResult,
     EmptyOrder,
     IdempotencyKeyConflict,
     InvalidOrderTransition,
@@ -2258,6 +2259,50 @@ def build_exchange_router(
 
     # -- DH-EX-004: provider lab-order creation --------------------------------------------------
 
+    def _historical_replay_or_none(
+        provider_id: uuid.UUID,
+        idempotency_key: str,
+        body: "LabOrderCreateRequest",
+        practitioner_id: uuid.UUID,
+        *,
+        session: Session,
+    ) -> CreateOrderResult | None:
+        """DH-CLINIC-003C historical compatibility.
+
+        A pre-003C ``LabOrder`` (``intent_id IS NULL``) may already exist under this exact
+        provider+key from before durable order intents existed. Before this route reserves a
+        *new* durable intent for the key, an exact canonical retry of such a historical order
+        must still replay idempotently (200, no new intent, no second audit row) exactly as it
+        did before 003C -- never `409`, and never retroactively claimed into a new intent (a
+        historical order's `intent_id` stays `NULL` forever; this is permanent, correct,
+        unowned state, not backfilled). Returns `None` when no historical order applies, so the
+        caller falls through to normal 003C intent reservation.
+        """
+        try:
+            historical = orders.get_by_idempotency_key(
+                provider_id, idempotency_key, session=session
+            )
+        except LabOrderNotFound:
+            return None
+        if historical.intent_id is not None:
+            # Not actually historical -- an owned order under this key that the reserved-intent
+            # lookup above somehow missed. Fall through to normal reservation; the LabOrder
+            # table's own unique constraint is the backstop if this ever happens.
+            return None
+        historical_item_ids = frozenset(item.catalog_entry_id for item in historical.items)
+        requested_item_ids = frozenset(body.catalog_entry_ids)
+        if (
+            historical.patient_reference_id != body.patient_reference_id
+            or historical.practitioner_reference_id != practitioner_id
+            or historical_item_ids != requested_item_ids
+        ):
+            raise IdempotencyKeyConflict(
+                f"idempotency_key {idempotency_key!r} for provider organization {provider_id} "
+                f"was already used for a historical order with different canonical content -- "
+                f"refusing to return mismatched data"
+            )
+        return CreateOrderResult(order=historical, created=False)
+
     @router.post(
         "/organizations/{provider_id}/orders",
         response_model=LabOrderResponse,
@@ -2345,6 +2390,12 @@ def build_exchange_router(
                     result = order_intents.commit(
                         provider_id, reserved_intent.id, orders, session=session
                     )
+                elif (
+                    historical := _historical_replay_or_none(
+                        provider_id, idempotency_key, body, practitioner.id, session=session
+                    )
+                ) is not None:
+                    result = historical
                 else:
                     # All new creation, including this legacy-compatible route,
                     # first acquires the single durable provider/key reservation.

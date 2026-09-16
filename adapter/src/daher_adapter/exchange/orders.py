@@ -119,6 +119,9 @@ class LabOrderRecord:
     status: str
     created_at: datetime
     items: tuple[LabOrderItemRecord, ...]
+    intent_id: uuid.UUID | None = None
+    """``None`` for a pre-DH-CLINIC-003C historical order that predates durable intent ownership --
+    this is permanent, correct, unowned state, never backfilled."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,11 +356,32 @@ class LabOrderRepository:
             return [_to_order_record(order) for order in orders]
 
     def get_by_idempotency_key(
-        self, provider_organization_id: uuid.UUID, idempotency_key: str
+        self,
+        provider_organization_id: uuid.UUID,
+        idempotency_key: str,
+        *,
+        session: Session | None = None,
     ) -> LabOrderRecord:
-        """DH-CLINIC-003A: provider-scoped lookup by idempotency key with eager item loading."""
-        with self._sessions() as session:
+        """DH-CLINIC-003A: provider-scoped lookup by idempotency key with eager item loading.
+
+        DH-CLINIC-003C: an optional caller-owned ``session`` lets the legacy order-creation
+        command look up a possibly-historical (pre-003C, ``intent_id IS NULL``) order inside its
+        own outer transaction, the same pattern already established for ``get()``/``create()``.
+        """
+        if session is not None:
             order = session.scalar(
+                select(LabOrder)
+                .options(selectinload(LabOrder.items))
+                .where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+                    LabOrder.idempotency_key == idempotency_key,
+                )
+            )
+            if order is None:
+                raise OrderNotFound(idempotency_key)
+            return _to_order_record(order)
+        with self._sessions() as owned_session:
+            order = owned_session.scalar(
                 select(LabOrder)
                 .options(selectinload(LabOrder.items))
                 .where(
@@ -446,6 +470,7 @@ def _to_order_record(order: LabOrder) -> LabOrderRecord:
         practitioner_reference_id=order.practitioner_reference_id,
         status=order.status,
         created_at=order.created_at,
+        intent_id=order.intent_id,
         items=tuple(
             LabOrderItemRecord(
                 id=item.id,
