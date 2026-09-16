@@ -1270,7 +1270,10 @@ def test_list_patient_orders_positive_control(
     res1 = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders",
         headers={**_auth(token), "Idempotency-Key": _new_key()},
-        json={"patient_reference_id": str(patient_1), "catalog_entry_ids": [str(test_ids[0]), str(test_ids[1])]},
+        json={
+            "patient_reference_id": str(patient_1),
+            "catalog_entry_ids": [str(test_ids[0]), str(test_ids[1])],
+        },
     )
     assert res1.status_code == 201
     order1_id = res1.json()["id"]
@@ -1334,15 +1337,16 @@ def test_list_patient_orders_anti_enumeration_and_cross_provider(
     )
     assert resp_404.status_code == 404
 
-    # Clinician B queries Patient A under Provider B -> 404 (anti-enumeration: never reveals Patient A belongs to Provider A)
+    # Clinician B queries Patient A under Provider B -> 404
+    # (anti-enumeration: never reveals Patient A belongs to Provider A)
     resp_cross_404 = client.get(
         f"/exchange/v1/organizations/{provider_b.id}/patient-references/{patient_a}/orders",
         headers=_auth(token_b),
     )
     assert resp_cross_404.status_code == 404
 
-    # Clinician B queries Patient A under Provider A -> 404 (Clinician B has zero relationship to Provider A,
-    # anti-enumeration: never reveals Provider A exists or has orders to an unrelated caller)
+    # Clinician B queries Patient A under Provider A -> 404
+    # (Clinician B has zero relationship to Provider A, anti-enumeration refuses)
     resp_cross_404_a = client.get(
         f"/exchange/v1/organizations/{provider_a.id}/patient-references/{patient_a}/orders",
         headers=_auth(token_b),
@@ -1351,7 +1355,9 @@ def test_list_patient_orders_anti_enumeration_and_cross_provider(
 
     # Platform admin queries Provider A without CLINICIAN role -> 403 (platform admin has visibility
     # of org existence, but lacks clinical ordering/viewing authority)
-    platform_admin_token = make_token(private_key, subject="network-admin", roles=[PLATFORM_ADMIN_ROLE])
+    platform_admin_token = make_token(
+        private_key, subject="network-admin", roles=[PLATFORM_ADMIN_ROLE]
+    )
     resp_admin_403 = client.get(
         f"/exchange/v1/organizations/{provider_a.id}/patient-references/{patient_a}/orders",
         headers=_auth(platform_admin_token),

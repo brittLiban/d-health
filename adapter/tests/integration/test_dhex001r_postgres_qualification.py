@@ -295,8 +295,8 @@ def test_invalid_transition_refused_under_real_row_lock(sessions: sessionmaker) 
 
 
 def test_list_for_patient_postgres_qualification(sessions: sessionmaker) -> None:
-    """DH-CLINIC-003: real PostgreSQL qualification of list_for_patient ordering, item eager loading,
-    and provider-scoped patient isolation."""
+    """DH-CLINIC-003: real PostgreSQL qualification of list_for_patient ordering,
+    item eager loading, and provider-scoped patient isolation."""
     key_prefix = f"pgpat-{uuid.uuid4().hex[:8]}"
     _org, _cat, orders, _sel, provider, _lab, entry, _off, patient_1, practitioner = _seed(
         sessions, key_prefix=f"{key_prefix}-1"

@@ -2341,9 +2341,7 @@ def build_exchange_router(
             )
         return [
             _to_order_response(order)
-            for order in orders.list_for_patient(
-                provider_id, patient_reference_id, limit=limit
-            )
+            for order in orders.list_for_patient(provider_id, patient_reference_id, limit=limit)
         ]
 
     # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
