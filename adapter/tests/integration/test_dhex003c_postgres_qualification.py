@@ -19,14 +19,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.api import build_exchange_router
 from daher_adapter.exchange.audit import ExchangeAuditWriter
+from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
     PractitionerReferenceRepository,
 )
-from daher_adapter.exchange.models import LabOrder, LabOrderIntent, LabOrderItem, LabOrderIntentItem
+from daher_adapter.exchange.models import (
+    LabOrder,
+    LabOrderIntent,
+    LabOrderIntentItem,
+    LabOrderItem,
+)
 from daher_adapter.exchange.order_intents import LabOrderIntentRepository
 from daher_adapter.exchange.orders import LabOrderRepository
 from daher_adapter.exchange.organizations import OrganizationRepository
@@ -54,7 +59,9 @@ def _race_clinician(app: FastAPI, private_key, organizations, provider):
     token = make_token(private_key, subject=f"pg003c-{provider.id}")
     with TestClient(app, raise_server_exceptions=False) as client:
         identity = client.get("/exchange/v1/me", headers=_auth(token)).json()["identity_id"]
-        admin = make_token(private_key, subject=f"admin-{provider.id}", roles=[PLATFORM_ADMIN_ROLE])
+        admin = make_token(
+            private_key, subject=f"admin-{provider.id}", roles=[PLATFORM_ADMIN_ROLE]
+        )
         response = client.post(
             f"/exchange/v1/organizations/{provider.id}/memberships",
             headers=_auth(admin),
@@ -67,15 +74,22 @@ def _race_clinician(app: FastAPI, private_key, organizations, provider):
 def _run_race(label: str, workers: dict[str, object]):
     barrier = threading.Barrier(len(workers))
     results, exceptions = {}, {}
+
     def run(name, operation):
         try:
             barrier.wait(timeout=10)
             results[name] = operation()
         except BaseException as error:
             exceptions[name] = error
-    threads = [threading.Thread(target=run, args=(name, operation)) for name, operation in workers.items()]
-    for thread in threads: thread.start()
-    for thread in threads: thread.join(timeout=30)
+
+    threads = [
+        threading.Thread(target=run, args=(name, operation))
+        for name, operation in workers.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
     assert not any(thread.is_alive() for thread in threads), f"{label} deadlocked"
     assert exceptions == {}, f"{label} worker exceptions: {exceptions!r}"
     return results
@@ -189,7 +203,10 @@ def test_concurrent_intent_commits_converge_to_single_order(sessions: sessionmak
         assert orders_in_db[0].intent_id == intent_id
 
 
-@pytest.mark.parametrize("pre_registered,mismatch", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    ("pre_registered", "mismatch"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
 def test_legacy_and_intent_paths_converge_under_real_postgres(
     sessions: sessionmaker, pre_registered: bool, mismatch: bool
 ) -> None:
@@ -200,8 +217,14 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
     prefix = f"pg003c-race-{uuid.uuid4().hex[:8]}"
     provider = organizations.create(org_type="PROVIDER", name=prefix)
     entry, _ = catalog.create_entry(code=f"{prefix}-T", display_name=prefix)
-    patient_a = patients.get_or_create(source_organization_id=provider.id, source_system=prefix, source_identity_system=f"urn:{prefix}", source_identity_value="A")
-    patient_b = patients.get_or_create(source_organization_id=provider.id, source_system=prefix, source_identity_system=f"urn:{prefix}", source_identity_value="B")
+    patient_a = patients.get_or_create(
+        source_organization_id=provider.id, source_system=prefix,
+        source_identity_system=f"urn:{prefix}", source_identity_value="A"
+    )
+    patient_b = patients.get_or_create(
+        source_organization_id=provider.id, source_system=prefix,
+        source_identity_system=f"urn:{prefix}", source_identity_value="B"
+    )
     app, private_key = _race_clients(sessions)
     token = _race_clinician(app, private_key, organizations, provider)
     key = f"{prefix}-key"
@@ -225,19 +248,44 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
     def commit():
         with TestClient(app, raise_server_exceptions=False) as client:
             return client.post(f"{intent_url}/{intent_id}/commit", headers=_auth(token))
-    results = _run_race("PG3-PG6", {"native": commit if pre_registered else register, "legacy": legacy})
+    results = _run_race(
+        "PG3-PG6", {"native": commit if pre_registered else register, "legacy": legacy}
+    )
     statuses = {result.status_code for result in results.values()}
     assert statuses <= {200, 201, 409}, statuses
-    if mismatch: assert 409 in statuses
-    else: assert statuses <= {200, 201}
+    if mismatch:
+        assert 409 in statuses
+    else:
+        assert statuses <= {200, 201}
     with sessions() as session:
-        intents = session.scalars(select(LabOrderIntent).where(LabOrderIntent.provider_organization_id == provider.id, LabOrderIntent.idempotency_key == key)).all()
-        orders = session.scalars(select(LabOrder).where(LabOrder.provider_organization_id == provider.id, LabOrder.idempotency_key == key)).all()
+        intents = session.scalars(
+            select(LabOrderIntent).where(
+                LabOrderIntent.provider_organization_id == provider.id,
+                LabOrderIntent.idempotency_key == key,
+            )
+        ).all()
+        orders = session.scalars(
+            select(LabOrder).where(
+                LabOrder.provider_organization_id == provider.id,
+                LabOrder.idempotency_key == key,
+            )
+        ).all()
         assert len(intents) == 1
         intent = intents[0]
-        assert intent.patient_reference_id in {patient_a.id, patient_b.id} if mismatch and not pre_registered else intent.patient_reference_id == patient_a.id
+        if pre_registered:
+            assert intent.patient_reference_id == patient_a.id
+        elif mismatch:
+            assert intent.patient_reference_id in {patient_a.id, patient_b.id}
+        else:
+            assert intent.patient_reference_id == patient_a.id
         assert len(orders) == 1
         assert orders[0].intent_id == intent.id
         assert intent.committed_lab_order_id == orders[0].id
-        assert len(session.scalars(select(LabOrderItem).where(LabOrderItem.lab_order_id == orders[0].id)).all()) == 1
-        assert len(session.scalars(select(LabOrderIntentItem).where(LabOrderIntentItem.intent_id == intent.id)).all()) == 1
+        order_items = session.scalars(
+            select(LabOrderItem).where(LabOrderItem.lab_order_id == orders[0].id)
+        ).all()
+        intent_items = session.scalars(
+            select(LabOrderIntentItem).where(LabOrderIntentItem.intent_id == intent.id)
+        ).all()
+        assert len(order_items) == 1
+        assert len(intent_items) == 1
