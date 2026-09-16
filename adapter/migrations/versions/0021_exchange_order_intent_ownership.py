@@ -1,6 +1,6 @@
 """DH-CLINIC-003C: complete durable intent-to-order ownership schema.
 
-Revision ID: 0021_exchange_order_intent_ownership
+Revision ID: 0021_order_intent_ownership
 Revises: 0020_exchange_order_intents
 """
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0021_exchange_order_intent_ownership"
+revision: str = "0021_order_intent_ownership"
 down_revision: str | Sequence[str] | None = "0020_exchange_order_intents"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -104,7 +104,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0021_exchange_order_intent_ownership
+          EXPECTED_HEAD: 0021_order_intent_ownership
         working-directory: adapter
         run: |
           alembic upgrade head
