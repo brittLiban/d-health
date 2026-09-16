@@ -288,20 +288,58 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
         ).all()
         assert len(intents) == 1
         intent = intents[0]
+
         if pre_registered:
+            # PG5/PG6: the intent was pre-registered as Patient A before the race started; only
+            # commit-vs-legacy timing races, and Patient A's canonical content is never in doubt.
             assert intent.patient_reference_id == patient_a.id
+            assert len(orders) == 1
+            assert orders[0].patient_reference_id == patient_a.id
+            if mismatch:
+                # PG6: legacy's own payload (Patient B) can never win -- the pre-existing intent
+                # already disagrees with it before the race even starts.
+                assert results["legacy"].status_code == 409
         elif mismatch:
-            assert intent.patient_reference_id in {patient_a.id, patient_b.id}
+            # PG4: a genuine two-way race to CREATE the intent (register vs. legacy, mismatched
+            # payloads). Exactly one of two valid, mutually exclusive final states is reached --
+            # assert against whichever one actually happened, never a blanket "1 order" that is
+            # only true for one of the two interleavings.
+            if intent.patient_reference_id == patient_a.id:
+                # Interleaving 2 (native registration won the reservation race): registration
+                # alone never commits, so legacy's conflict leaves zero orders.
+                assert len(orders) == 0, (
+                    "native registration won the race (intent is Patient A) but an order "
+                    "exists anyway -- registration must never commit on its own"
+                )
+                assert results["native"].status_code == 201
+                assert results["legacy"].status_code == 409
+            else:
+                assert intent.patient_reference_id == patient_b.id
+                # Interleaving 1 (legacy won the reservation race): unlike native registration,
+                # the legacy endpoint creates AND commits in the same request -- exactly one order.
+                assert len(orders) == 1
+                assert orders[0].patient_reference_id == patient_b.id
+                assert results["legacy"].status_code == 201
+                assert results["native"].status_code == 409
         else:
+            # PG3: identical payloads racing to create+commit converge to one order regardless
+            # of who wins the reservation.
             assert intent.patient_reference_id == patient_a.id
-        assert len(orders) == 1
-        assert orders[0].intent_id == intent.id
-        assert intent.committed_lab_order_id == orders[0].id
-        order_items = session.scalars(
-            select(LabOrderItem).where(LabOrderItem.lab_order_id == orders[0].id)
-        ).all()
+            assert len(orders) == 1
+
+        # Ownership/content agreement only makes sense once an order actually exists (PG4's
+        # native-registration-won interleaving legitimately produces zero orders).
+        if orders:
+            assert orders[0].intent_id == intent.id
+            assert intent.committed_lab_order_id == orders[0].id
+            order_items = session.scalars(
+                select(LabOrderItem).where(LabOrderItem.lab_order_id == orders[0].id)
+            ).all()
+            assert len(order_items) == 1
+        else:
+            assert intent.committed_lab_order_id is None
+
         intent_items = session.scalars(
             select(LabOrderIntentItem).where(LabOrderIntentItem.intent_id == intent.id)
         ).all()
-        assert len(order_items) == 1
         assert len(intent_items) == 1
