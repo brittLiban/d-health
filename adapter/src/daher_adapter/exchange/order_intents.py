@@ -20,9 +20,9 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.models import (
+    LabOrder,
     LabOrderIntent,
     LabOrderIntentItem,
-    LabOrder,
     OrganizationType,
     PatientReference,
     PractitionerReference,

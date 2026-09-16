@@ -41,5 +41,9 @@ def downgrade() -> None:
     if owned_order_count:
         raise RuntimeError("refusing to downgrade 0021 while intent-owned orders exist")
     op.drop_constraint("uq_exchange_lab_orders_intent_id", "exchange_lab_orders", type_="unique")
-    op.drop_constraint("fk_exchange_lab_orders_intent_id", "exchange_lab_orders", type_="foreignkey")
+    op.drop_constraint(
+        "fk_exchange_lab_orders_intent_id",
+        "exchange_lab_orders",
+        type_="foreignkey",
+    )
     op.drop_column("exchange_lab_orders", "intent_id")
