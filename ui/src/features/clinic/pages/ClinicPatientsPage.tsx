@@ -328,14 +328,17 @@ export function ClinicPatientsPage({
 
   useEffect(() => {
     const recoveryGeneration = ++orderRecoveryGenerationRef.current
-    // DH-CLINIC-003C defect fix: reconcilingStoredOrder is scope-global state, but the resets to
-    // `false` below only run inside async callbacks guarded by staleness checks -- if the scope
-    // changes before a prior scope's lookup resolves, that reset never fires, and this newly
-    // active scope silently inherits a stuck `true` (permanently disabling "Nouvel ordre de
-    // laboratoire" even for a patient with no pending order at all). The newly active scope must
-    // start from a clean slate every time; if it genuinely has a stored order to reconcile, the
-    // branch below re-arms `true` immediately, synchronously, before any async work begins.
+    // DH-CLINIC-003C defect fix (NC25/NC26): reconcilingStoredOrder and orderStorageUnreadable are
+    // both scope-global state, but their resets to `false` only run guarded by staleness checks
+    // (inside the async callback, or implicitly by never re-running) -- if the scope changes before
+    // a prior scope's check completes, the newly active scope can silently inherit a stuck `true`
+    // (permanently disabling "Nouvel ordre de laboratoire" for a patient/provider with no problem
+    // of their own). The newly active scope must start from a clean slate every time; the checks
+    // immediately below re-arm `true` synchronously if THIS scope's own storage read is genuinely
+    // unreadable/corrupt, and the async mismatch guard further below re-arms it if this scope's own
+    // recovered intent tuple genuinely mismatches.
     setReconcilingStoredOrder(false)
+    setOrderStorageUnreadable(false)
     if (providerId && selectedPatient) {
       void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
 

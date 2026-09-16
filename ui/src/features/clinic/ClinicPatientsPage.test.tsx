@@ -2797,4 +2797,175 @@ describe('Clinic native patient workflow', () => {
       expect(screen.getByRole('button', { name: 'Vérifier / réessayer' })).toBeInTheDocument()
     })
   })
+
+  describe('unreadable recovery state cannot leak across scope (NC26)', () => {
+    it('NC26-A: recovered-intent mismatch on Patient A does not poison Patient B', async () => {
+      const keyA = 'nc26a-key-patient-a'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+
+      const mismatchedIntent = makeValidDurableIntent({
+        idempotency_key: keyA,
+        patient_reference_id: 'some-other-patient-entirely',
+      })
+      const getOrderIntentByIdempotencyKey = vi.fn().mockResolvedValue(mismatchedIntent)
+      const commitOrderIntentWithOutcome = vi.fn()
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+        commitOrderIntentWithOutcome,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      // Open Patient A -- the mismatch resolves and A becomes fail-closed.
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      // Switch to Patient B, who has no recovery problem of her own.
+      await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+      const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons2[1])
+      expect(
+        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+      ).toBeInTheDocument()
+
+      // B is not poisoned by A's fail-closed state.
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
+      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+      expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
+      expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
+    })
+
+    it('NC26-B: corrupt Patient A storage does not poison Patient B', async () => {
+      localStorage.setItem(
+        'dhealth_clinic_pending_order_v1:identity-1:provider-a:' +
+          patientWithName.patient_reference_id,
+        '{corrupt-json-not-parseable',
+      )
+
+      const client = makeClient({
+        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+      await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+      const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons2[1])
+      expect(
+        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+      ).toBeInTheDocument()
+
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
+      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+    })
+
+    it('NC26-C: a genuinely global storage failure re-arms fail-closed on every scope, not just the first', async () => {
+      const getItemSpy = vi
+        .spyOn(Storage.prototype, 'getItem')
+        .mockImplementation(() => {
+          throw new Error('Storage API disabled')
+        })
+
+      try {
+        const client = makeClient({
+          listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+          listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+          listPatientOrders: vi.fn().mockResolvedValue([]),
+          getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        })
+
+        const userEventObj = userEvent.setup()
+        render(<ClinicApp client={client} initialTab="patients" />)
+
+        const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+        await userEventObj.click(openButtons[0])
+        expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+
+        // Switch to Patient B -- storage is STILL globally broken, so the synchronous scope reset
+        // must NOT make B fail open; B's own effect run must detect the same global failure and
+        // re-arm fail-closed.
+        await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
+        const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
+        await userEventObj.click(openButtons2[1])
+        expect(
+          await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        ).toBeInTheDocument()
+
+        expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
+      } finally {
+        getItemSpy.mockRestore()
+      }
+    })
+
+    it('NC26-D: Provider A scoped bad recovery state does not poison Provider B', async () => {
+      const keyA = 'nc26d-key-provider-a'
+      setStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id, {
+        idempotency_key: keyA,
+      })
+
+      const mismatchedIntent = makeValidDurableIntent({
+        idempotency_key: keyA,
+        provider_organization_id: 'provider-mismatched-entirely',
+      })
+      const getOrderIntentByIdempotencyKey = vi.fn().mockResolvedValue(mismatchedIntent)
+
+      const client = makeClient({
+        getMe: vi.fn().mockResolvedValue({
+          ...me,
+          memberships: [
+            me.memberships[0],
+            { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
+          ],
+        }),
+        listPatientReferences: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        ),
+        listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
+        listPatientOrders: vi.fn().mockResolvedValue([]),
+        getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
+        getOrderIntentByIdempotencyKey,
+      })
+
+      const userEventObj = userEvent.setup()
+      render(<ClinicApp client={client} initialTab="patients" />)
+
+      const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtons[0])
+      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
+      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+
+      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      await userEventObj.selectOptions(providerSelect, 'provider-b')
+      const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
+      await userEventObj.click(openButtonsB[0])
+      expect(
+        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+      ).toBeInTheDocument()
+
+      expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
+      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+    })
+  })
 })
