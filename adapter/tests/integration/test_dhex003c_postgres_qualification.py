@@ -244,7 +244,8 @@ def test_legacy_and_intent_paths_converge_under_real_postgres(
             return client.post(intent_url, headers=headers, json=payload_a)
     def legacy():
         with TestClient(app, raise_server_exceptions=False) as client:
-            return client.post(order_url, headers=headers, json=payload_b if mismatch else payload_a)
+            payload = payload_b if mismatch else payload_a
+            return client.post(order_url, headers=headers, json=payload)
     def commit():
         with TestClient(app, raise_server_exceptions=False) as client:
             return client.post(f"{intent_url}/{intent_id}/commit", headers=_auth(token))
