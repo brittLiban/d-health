@@ -6067,11 +6067,12 @@ Implements the post-release amendment preparation and release workflow designed 
 Replay Architecture," `PROJECT_STATE.md`, which ended **STOPPED AT HUMAN DECISION GATE: YES**) ·
 **Status:** ACCEPTED, IMPLEMENTED, CI-QUALIFIED · **Ticket:** DH-CLINIC-003C.
 
-**Decided by:** Liban — **Option A**. Evidence: commit `91e752d82d5f398bba2ede964dc3822b2468fd1e`
-("Implement backend-owned `LabOrderIntent` repository with idempotency and commit functionality")
-is authored directly under Liban's own git identity and implements Option A, not the primary
-agent's recommended Option C — the decision was made by building it, not by a separate written
-memo, and is recorded here after the fact so the gate this closes is legible.
+**Decided by:** Liban — **Option A**, selected during DH-CLINIC-003C review, not the primary
+agent's recommended Option C, closing DH-CLINIC-003B's own decision gate. Implementation history:
+commit `91e752d82d5f398bba2ede964dc3822b2468fd1e` ("Implement backend-owned `LabOrderIntent`
+repository with idempotency and commit functionality") is the first commit building Option A;
+cited here as implementation evidence only, not as proof of who made the architectural call — git
+author metadata is not a record of decision authorship.
 
 ### The three options, exactly as DH-CLINIC-003B originally framed them
 
@@ -6091,6 +6092,18 @@ memo, and is recorded here after the fact so the gate this closes is legible.
    via the database unique constraint. *Cons:* the clinician must re-check test checkboxes after an
    uncommitted reload.
 
+**Clarification on what was actually qualified, versus the original framing above.** Option A's
+original description (as proposed in the DH-CLINIC-003B gate) said "seamless resume across
+devices/browsers/reloads." What DH-CLINIC-003C actually implements and has qualified is narrower:
+the backend intent itself is genuinely durable and device-independent, but the *current* UI
+recovery mechanism discovers it only through an opaque technical pointer (idempotency key,
+optionally the intent id) that the browser persists locally. Recovery is therefore qualified for
+reload, restart, and provider/patient navigation on the **same browser profile** that still holds
+that local pointer — not for opening the same unresolved order from a different device or browser.
+Nothing in the backend model prevents a future cross-device discovery workflow (e.g., listing a
+clinician's own open intents server-side), but no such workflow has been built or qualified by this
+ADR; the durable-intent architecture leaves room for it without requiring one now.
+
 ### What was decided, and why B and C were not selected
 
 **Option A selected and built.** The browser is **not** the source of truth for clinical order
@@ -6108,11 +6121,19 @@ the gate required. Option A does not request an exception to that risk; it remov
 category structurally by never needing test identifiers in the browser at all, committed and
 uncommitted alike.
 
-**Option C was superseded, not repudiated.** It was a legitimate, shipped MVP baseline — genuinely
-duplicate-safe, zero-migration, and fully compliant with the no-clinical-data-in-storage rule. Its
-one accepted cost (re-checking test checkboxes after a rare uncommitted-reload race) is what Option
-A eliminates. Nothing about Option C was found broken; it was a smaller architecture accepted as a
-stepping stone, replaced once the larger one was built.
+**Option C was superseded, for a real limitation, not repudiated as broken.** It was a legitimate,
+shipped MVP baseline that met the duplicate-safety and browser-privacy bar of its time: genuinely
+duplicate-safe via the database unique constraint, zero-migration, and fully compliant with the
+no-clinical-data-in-storage rule. Its cost was not merely a UI inconvenience — it intentionally
+required the clinician to manually re-select services after an unresolved full reload, which meant
+Option C could not durably preserve or exactly replay the *original* diagnostic selection when no
+authoritative server order yet existed. Concretely: if the first request had not committed before
+the reload, the clinician could reselect a different service set, and that altered set — not the
+one originally intended — could become the first order actually created under the retained
+idempotency key. The key stayed duplicate-safe; the clinical content it was attached to could
+still drift. Option A was selected specifically to close this exact-replay gap: once a durable
+intent exists, the backend's own frozen snapshot is what reload ever replays, never a
+browser-side reconstruction.
 
 ### Bidirectional ownership invariant
 
@@ -6134,12 +6155,27 @@ later.
 ### Legacy `/orders` convergence
 
 The legacy provider order-creation endpoint (`POST .../orders`) does not own a separate creation
-path. Every new provider `LabOrder` — legacy or native — is created by first acquiring (or
-consuming an already-existing) `LabOrderIntent` reservation for that `(provider_organization_id,
-idempotency_key)` pair, then committing it; the intent table's own unique constraint is the single
-owner under concurrent legacy and native-Clinic requests for the same key. The legacy endpoint
-remains, for backward compatibility, but shares the durable intent ownership model completely — it
-is not a second, independent way to create an order.
+path for *new* orders. Every new provider `LabOrder` — legacy or native — is created by first
+acquiring (or consuming an already-existing) `LabOrderIntent` reservation for that
+`(provider_organization_id, idempotency_key)` pair, then committing it; the intent table's own
+unique constraint is the single owner under concurrent legacy and native-Clinic requests for the
+same key. The legacy endpoint remains, for backward compatibility, but shares the durable intent
+ownership model completely — it is not a second, independent way to create a *new* order.
+
+**Historical (pre-003C, `intent_id IS NULL`) exact replay is a narrow, explicit exception,
+checked before any new intent reservation is attempted.** Final-review testing found that without
+this exception, an exact retry of a historical order regressed from its original 200-idempotent
+replay to a `409` — because the legacy route, finding no reservation, would create a *new* intent,
+and that new intent's commit would then find the historical order already sitting under the same
+key with `intent_id IS NULL`, which the bidirectional-ownership check correctly (but wrongly, for
+this one case) treats as a foreign claim. The corrected legacy route looks up an existing
+`intent_id IS NULL` order under the exact same key *before* reserving anything: an exact canonical
+match (patient, practitioner, service set) replays it unchanged — `200`, the same historical
+order id, no new `LabOrderIntent`, no new audit row, `intent_id` still `NULL` — and a mismatch
+still conflicts (`409`), exactly as the pre-003C endpoint always behaved. The historical row is
+never claimed into a new intent either way. This exception is scoped to the legacy endpoint only;
+native intent registration/commit is unaffected and still fails closed if it ever collides with a
+historical key.
 
 ### Practitioner ownership
 
@@ -6151,11 +6187,9 @@ permanent regression test that a spoofed field in the request body is rejected (
 retrieval (`GET .../order-intents/{id}` and `GET .../order-intents/by-idempotency-key/{key}`) is
 restricted to the original authoring clinician: a different clinician at the **same** provider
 receives an anti-enumerating `404`, not `403` — the response never discloses that an intent with
-that id exists at all. This is intentionally different from the commit endpoint's own status
-contract, which does use `403 Forbidden` for a wrong-clinician commit attempt (identity is already
-known to exist by that point, since the intent id came from the clinician's own registration
-response) — the two endpoints answer different questions and are not expected to share a status
-code.
+that id exists at all. The commit endpoint's own status contract differs — a wrong-clinician commit
+attempt returns `403 Forbidden`, not `404` — and this ADR does not change that contract. The two
+endpoints are simply not required to share a status code for a wrong-clinician caller.
 
 ### Recovery behavior
 

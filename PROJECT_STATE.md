@@ -14711,17 +14711,55 @@ deployment-qualified beyond the evidence above.
   pilot-readiness claim.
 - Historical (pre-003C) `LabOrder` rows intentionally keep `intent_id = NULL` — this is supported,
   permanent, correct state, not a gap requiring backfill.
+- Reload/recovery is qualified on the same browser profile that still holds its locally-persisted
+  technical recovery pointer (idempotency key, optionally the intent id) — not a cross-device or
+  cross-browser discovery workflow. The backend intent itself is durable and device-independent;
+  no server-side "list my open intents" workflow has been built or qualified. See ADR-049.
 - Clinical-live readiness (ADR-012) remains out of scope for this ticket, as for every ticket on
   this track.
 
+## Final independent advisor review (2026-09-16) — one blocker found and fixed
+
+Liban's own final independent review of the complete DH-CLINIC-003C diff found one substantive
+backend compatibility defect, everything else assessed as strong: the Option-A implementation,
+migration, UI recovery model, concurrency qualification, and coverage closure.
+
+**Blocker — pre-003C historical legacy order replay regressed to `409`.** A pre-003C `LabOrder`
+(`intent_id IS NULL`) retried through the legacy `POST .../orders` endpoint with its exact
+original canonical content should replay idempotently (`200`, same order), matching that
+endpoint's contract from before durable intents existed. Reproduced directly: the legacy route,
+finding no existing `LabOrderIntent` reservation, created a *new* one; that intent's commit then
+found the historical order already sitting under the same key and, seeing `existing_order.intent_id
+IS NULL` rather than the new intent's own id, raised `IdempotencyKeyConflict` — `409` instead of
+`200`, with detail `"idempotency key is already associated with an order outside this durable
+intent"`.
+
+**Fix:** the legacy route now looks up an existing `intent_id IS NULL` order under the exact same
+`(provider_organization_id, idempotency_key)` *before* reserving any new intent. An exact
+canonical match (patient, practitioner, service set) replays it unchanged — `200`, same order id,
+zero new `LabOrderIntent` rows, zero new `lab_order_created` audit rows, `intent_id` still `NULL`.
+A mismatch still conflicts (`409`), exactly as before. Native intent registration/commit is
+unaffected and still fails closed on any collision with a historical key. Two permanent regression
+tests added (exact historical replay → 200; mismatched retry → 409), plus the existing NC1 and
+PG3–PG6 real-PostgreSQL suites re-verified intact. Full detail: `DECISIONS.md` ADR-049's "Legacy
+`/orders` convergence" section.
+
+Two further, narrower items were also corrected in this same pass (component-wide UI state that
+could leak an unrelated patient's storage-unreadable fail-closed status across a scope switch —
+same defect class as the earlier `reconcilingStoredOrder` fix, labeled **NC26**; and an invalid
+unconditional assertion in the real-PostgreSQL PG4 race test that only tolerated one of two valid
+interleavings). Both are recorded in the session's negative-control evidence, not detailed again
+here.
+
 ## Status
 
-**DH-CLINIC-003C: IMPLEMENTED / QUALIFIED — FINAL ADVISOR REVIEW PENDING.**
+**DH-CLINIC-003C: IMPLEMENTED / QUALIFIED — FINAL ADVISOR REVIEW COMPLETE, BLOCKER FOUND AND
+FIXED.**
 
-**DH-CLINIC-003C CLOSED: NO** — reserved for Liban's own final independent advisor review, per his
-explicit instruction; this entry records truthful implementation and CI-qualification status only,
-not closure.
+**DH-CLINIC-003C CLOSED: NO** — the fix above is pushed and CI-qualified, but closure itself is
+reserved for Liban's own re-review and explicit closure decision, per his instruction; this entry
+records truthful implementation, review-finding, and fix status only, not self-declared closure.
 
 **Human Decision Required: NO.**
 
-Do not start DH-CLINIC-004 until that review closes this ticket.
+Do not start DH-CLINIC-004 until Liban's own re-review closes this ticket.

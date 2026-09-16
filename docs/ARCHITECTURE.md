@@ -1226,8 +1226,13 @@ content once a durable intent exists.
    LabOrder.id` are written and checked together, in the same transaction.
 
 The legacy `POST .../orders` endpoint (kept for backward compatibility) is not a second creation
-path — it acquires or consumes the identical durable-intent reservation for its
-`(provider_organization_id, idempotency_key)` pair before creating anything.
+path for *new* orders — it acquires or consumes the identical durable-intent reservation for its
+`(provider_organization_id, idempotency_key)` pair before creating anything. One narrow, explicit
+exception: if a pre-003C order (`intent_id IS NULL`) already exists under that exact key, the
+legacy route checks for it *before* reserving a new intent, and an exact canonical match replays
+it unchanged (`200`, no new intent, `intent_id` still `NULL`) — preserving the endpoint's original
+pre-003C idempotent-replay contract for orders that predate this model, never retroactively
+claiming a historical row into a new intent. A mismatch still conflicts (`409`).
 
 **Reload/recovery flow.** If a technical recovery identity exists in browser storage on open:
 
