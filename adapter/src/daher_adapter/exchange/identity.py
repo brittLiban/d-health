@@ -13,7 +13,16 @@ the raw identity string happens to collide. There is no code path anywhere in th
 compares two different identity values and decides they probably refer to the same person -- that
 is the fuzzy/demographic matching DH-PIVOT-001 puts out of MVP scope, permanently, not just for
 this ticket.
-"""
+
+**DH-IDENTITY-001/ADR-051: ``PatientReference.patient_id`` is now NOT NULL**, so
+``PatientReferenceRepository.get_or_create``/``get_or_create_with_outcome`` implement §36's legacy
+compatibility rule directly -- a brand-new exact source identity atomically creates its own new,
+1:1 provider-scoped ``Patient`` alongside the reference (never searches for an existing ``Patient``
+by name/contact to attach it to; the "no silent merge" law applies here too); an existing exact
+identity returns its already-linked ``Patient`` unchanged. This is the *only* place a
+``PatientReference`` is ever created in this codebase, so baking the rule in here -- rather than at
+every call site -- is what makes "every reference belongs to a Patient" (AC3) a repository
+invariant instead of a convention 40 call sites could each get wrong."""
 
 from __future__ import annotations
 
@@ -24,7 +33,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.exchange.models import PatientReference, PractitionerReference
+from daher_adapter.exchange.models import (
+    OrganizationType,
+    Patient,
+    PatientReference,
+    PractitionerReference,
+)
+from daher_adapter.exchange.organizations import OrganizationRepository
 
 
 class ReferenceNotFound(RuntimeError):
@@ -35,6 +50,7 @@ class ReferenceNotFound(RuntimeError):
 class PatientReferenceRecord:
     id: uuid.UUID
     source_organization_id: uuid.UUID
+    patient_id: uuid.UUID
     source_system: str
     source_identity_system: str
     source_identity_value: str
@@ -54,8 +70,22 @@ class PractitionerReferenceRecord:
 
 
 class PatientReferenceRepository:
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        organizations: OrganizationRepository | None = None,
+    ) -> None:
         self._sessions = session_factory
+        # DH-IDENTITY-001: optional, defaulting to `None` -- deliberately not required, even
+        # though every *new* PatientReference now also creates a Patient (see this class's own
+        # docstring). Making it required would force a constructor-signature edit across every one
+        # of this repository's ~45 pre-existing call sites (almost all test fixtures that already
+        # only ever pass a PROVIDER organization -- confirmed by inspection), for a check that is
+        # already enforced upstream of every real HTTP call path by `_require_clinician` (only a
+        # PROVIDER organization can hold a CLINICIAN membership at all). When given, it adds real
+        # defense-in-depth, matching `LabOrderRepository.create`'s identical belt-and-suspenders
+        # `organizations.require_type` call; `exchange/api.py`'s own construction passes it.
+        self._organizations = organizations
 
     def get_or_create(
         self,
@@ -69,17 +99,29 @@ class PatientReferenceRepository:
         contact_value: str | None = None,
     ) -> PatientReferenceRecord:
         _require_identity(source_system, source_identity_system, source_identity_value)
-        reference = PatientReference(
-            source_organization_id=source_organization_id,
-            source_system=source_system,
-            source_identity_system=source_identity_system,
-            source_identity_value=source_identity_value,
-            display_name=display_name,
-            contact_channel_type=contact_channel_type,
-            contact_value=contact_value,
-        )
+        _require_contact_pairing(contact_channel_type, contact_value)
+        if self._organizations is not None:
+            self._organizations.require_type(source_organization_id, OrganizationType.PROVIDER)
         with self._sessions() as session:
             try:
+                patient = Patient(
+                    provider_organization_id=source_organization_id,
+                    display_name=display_name,
+                    contact_channel_type=contact_channel_type,
+                    contact_value=contact_value,
+                )
+                session.add(patient)
+                session.flush()
+                reference = PatientReference(
+                    source_organization_id=source_organization_id,
+                    patient_id=patient.id,
+                    source_system=source_system,
+                    source_identity_system=source_identity_system,
+                    source_identity_value=source_identity_value,
+                    display_name=display_name,
+                    contact_channel_type=contact_channel_type,
+                    contact_value=contact_value,
+                )
                 session.add(reference)
                 session.commit()
                 return _to_patient_record(reference)
@@ -122,8 +164,16 @@ class PatientReferenceRepository:
         A replay with the exact same identity tuple but different ``display_name``/contact fields
         returns the existing row **unchanged** -- this is identity binding, not a patient-
         demographic update API; the new snapshot values are silently discarded, never applied,
-        exactly like ``get_or_create``'s existing behavior for the same case."""
+        exactly like ``get_or_create``'s existing behavior for the same case.
+
+        **DH-IDENTITY-001 (ADR-051 Decision/§36):** a brand-new exact identity also creates its own
+        new, 1:1 ``Patient`` in the identical SAVEPOINT -- never searched for or attached to an
+        existing ``Patient`` by name/contact similarity. An existing exact identity's already-linked
+        ``Patient`` is returned unchanged; no second ``Patient`` is ever created for a replay."""
         _require_identity(source_system, source_identity_system, source_identity_value)
+        _require_contact_pairing(contact_channel_type, contact_value)
+        if self._organizations is not None:
+            self._organizations.require_type(source_organization_id, OrganizationType.PROVIDER)
         if session is not None:
             return self._get_or_create_with_outcome_in_session(
                 session,
@@ -161,17 +211,26 @@ class PatientReferenceRepository:
         contact_channel_type: str | None,
         contact_value: str | None,
     ) -> tuple[PatientReferenceRecord, bool]:
-        reference = PatientReference(
-            source_organization_id=source_organization_id,
-            source_system=source_system,
-            source_identity_system=source_identity_system,
-            source_identity_value=source_identity_value,
-            display_name=display_name,
-            contact_channel_type=contact_channel_type,
-            contact_value=contact_value,
-        )
         try:
             with session.begin_nested():
+                patient = Patient(
+                    provider_organization_id=source_organization_id,
+                    display_name=display_name,
+                    contact_channel_type=contact_channel_type,
+                    contact_value=contact_value,
+                )
+                session.add(patient)
+                session.flush()
+                reference = PatientReference(
+                    source_organization_id=source_organization_id,
+                    patient_id=patient.id,
+                    source_system=source_system,
+                    source_identity_system=source_identity_system,
+                    source_identity_value=source_identity_value,
+                    display_name=display_name,
+                    contact_channel_type=contact_channel_type,
+                    contact_value=contact_value,
+                )
                 session.add(reference)
                 session.flush()
             return _to_patient_record(reference), True
@@ -356,6 +415,17 @@ def _require_identity(
             raise ValueError(f"{name} is required -- exact source identity only, never inferred")
 
 
+def _require_contact_pairing(contact_channel_type: str | None, contact_value: str | None) -> None:
+    """DH-IDENTITY-001: every new ``PatientReference`` now also creates a ``Patient`` row, whose
+    own ``ck_exchange_patients_contact_pairing`` CHECK constraint requires both contact fields or
+    neither -- validated here, before any insert is attempted, so an unpaired combination fails
+    with a clear ``ValueError`` instead of an opaque database constraint violation."""
+    if (contact_channel_type is None) != (contact_value is None):
+        raise ValueError(
+            "contact_channel_type and contact_value must both be provided or both omitted"
+        )
+
+
 def _escape_like(val: str) -> str:
     return val.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -364,6 +434,7 @@ def _to_patient_record(reference: PatientReference) -> PatientReferenceRecord:
     return PatientReferenceRecord(
         id=reference.id,
         source_organization_id=reference.source_organization_id,
+        patient_id=reference.patient_id,
         source_system=reference.source_system,
         source_identity_system=reference.source_identity_system,
         source_identity_value=reference.source_identity_value,

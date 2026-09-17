@@ -27,7 +27,7 @@ per the anti-enumeration policy documented on ``authorization.py``.
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -110,6 +110,11 @@ from daher_adapter.exchange.patient_access import (
     PatientAccessGrantRepository,
 )
 from daher_adapter.exchange.patient_access import OrderNotFound as GrantOrderNotFound
+from daher_adapter.exchange.patients import (
+    PatientRecord,
+    PatientRegistrationConflict,
+    PatientRepository,
+)
 from daher_adapter.exchange.results import (
     AmendmentAlreadyInProgress,
     AmendmentBaseVersionSuperseded,
@@ -547,6 +552,74 @@ class ProviderPatientReferenceSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_query_not_blank(self) -> "ProviderPatientReferenceSearchRequest":
+        if not self.query.strip():
+            raise ValueError("query must not be blank")
+        return self
+
+
+# -- DH-IDENTITY-001: provider-scoped native Patient directory -------------------------------------
+
+
+class PatientCreateRequest(BaseModel):
+    """No ``patient_id``, ``patient_reference_id``, ``source_system``/``source_identity_system``/
+    ``source_identity_value``, provider organization, or creator identity -- every one of those is
+    server-controlled (DH-IDENTITY-001 §15). ``date_of_birth`` is optional and exact only -- never
+    required, never a placeholder date for an unknown birthday."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=256)
+    date_of_birth: date | None = None
+    contact_channel_type: str | None = Field(default=None, max_length=32)
+    contact_value: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "PatientCreateRequest":
+        if not self.display_name.strip():
+            raise ValueError("display_name must not be blank")
+        if (self.contact_channel_type is None) != (self.contact_value is None):
+            raise ValueError(
+                "contact_channel_type and contact_value must both be provided or both omitted"
+            )
+        return self
+
+
+class PatientDirectoryEntry(BaseModel):
+    """The one Patient response shape used by every native-directory endpoint (create, get, list,
+    search, registration recovery) -- durable product/domain naming (DH-IDENTITY-001 §22), not the
+    Clinic-specific ``ClinicPatientSummary`` name the legacy patient-reference endpoints use for
+    their own, deliberately different, minimal binding-selection view.
+
+    ``primary_patient_reference_id`` is a compatibility bridge only: every existing ``LabOrder``
+    API still takes a ``patient_reference_id``, and DH-IDENTITY-001 explicitly does not rationalize
+    those APIs onto ``patient_id`` in this ticket. Every Patient created or migrated by this ticket
+    starts with exactly one reference, so "primary" is trivial today -- not a ranking/preference
+    engine (§23); a future multi-reference linking ticket may need to revisit this field's meaning,
+    not this one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+    contact_channel_type: str | None
+    contact_value: str | None
+    primary_patient_reference_id: uuid.UUID
+    created_at: datetime
+
+
+class PatientSearchRequest(BaseModel):
+    """Search body kept out of the URL, same reasoning as ``ProviderPatientReferenceSearchRequest``
+    above."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=50, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _validate_query_not_blank(self) -> "PatientSearchRequest":
         if not self.query.strip():
             raise ValueError("query must not be blank")
         return self
@@ -1317,7 +1390,8 @@ def build_exchange_router(
     security_audit = ExchangeSecurityAuditRepository()
     catalog = CatalogRepository(session_factory, organizations)
     directory = LabDirectoryProfileRepository(session_factory, organizations)
-    patients = PatientReferenceRepository(session_factory)
+    patients = PatientReferenceRepository(session_factory, organizations)
+    patient_directory = PatientRepository(session_factory, organizations)
     practitioners = PractitionerReferenceRepository(session_factory)
     orders = LabOrderRepository(session_factory, organizations, catalog)
     order_intents = LabOrderIntentRepository(session_factory, organizations, catalog)
@@ -2256,6 +2330,136 @@ def build_exchange_router(
             contact_value=record.contact_value,
             local_reference=record.source_identity_value,
         )
+
+    # -- DH-IDENTITY-001: provider-scoped native Patient directory --------------------------------
+
+    def _to_patient_directory_entry(record: PatientRecord) -> PatientDirectoryEntry:
+        return PatientDirectoryEntry(
+            patient_id=record.id,
+            provider_organization_id=record.provider_organization_id,
+            display_name=record.display_name,
+            date_of_birth=record.date_of_birth,
+            contact_channel_type=record.contact_channel_type,
+            contact_value=record.contact_value,
+            primary_patient_reference_id=record.primary_patient_reference_id,
+            created_at=record.created_at,
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/patients",
+        response_model=PatientDirectoryEntry,
+    )
+    def create_patient(
+        provider_id: uuid.UUID,
+        body: PatientCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> PatientDirectoryEntry:
+        # CLINICIAN specifically -- native patient registration is clinical workflow authority,
+        # the same gate `bind_patient_reference`/`create_lab_order` already require.
+        _require_clinician(principal, provider_id)
+
+        # The Patient, its native PatientReference, its immutable registration-request record, and
+        # the authoritative `patient_created` audit row all commit or roll back together, in one
+        # transaction -- the identical atomicity discipline `create_lab_order` already establishes.
+        try:
+            with session_factory.begin() as session:
+                result = patient_directory.create(
+                    provider_organization_id=provider_id,
+                    idempotency_key=idempotency_key,
+                    display_name=body.display_name,
+                    date_of_birth=body.date_of_birth,
+                    contact_channel_type=body.contact_channel_type,
+                    contact_value=body.contact_value,
+                    created_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                if result.created:
+                    security_audit.record(
+                        session,
+                        event_type="patient_created",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="created",
+                        resource_type="patient",
+                        resource_id=result.patient.id,
+                    )
+        except (InvalidOrganizationType, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except PatientRegistrationConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_patient_directory_entry(result.patient)
+
+    @router.get(
+        "/organizations/{provider_id}/patient-registrations/{idempotency_key}",
+        response_model=PatientDirectoryEntry,
+    )
+    def get_patient_registration(
+        provider_id: uuid.UUID,
+        idempotency_key: Annotated[str, Path(min_length=1, max_length=256)],
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientDirectoryEntry:
+        """DH-IDENTITY-001 §19: server-side recovery for an ambiguous create response -- a caller
+        that lost the response to a `POST .../patients` (network failure, reload) resolves its own
+        opaque idempotency key to the authoritative Patient here, rather than reconstructing the
+        patient payload from browser storage or silently retrying into a second registration."""
+        _require_clinician(principal, provider_id)
+        result = patient_directory.get_registration(provider_id, idempotency_key)
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient registration not found"
+            )
+        return _to_patient_directory_entry(result.patient)
+
+    @router.get(
+        "/organizations/{provider_id}/patients",
+        response_model=list[PatientDirectoryEntry],
+    )
+    def list_patients(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[PatientDirectoryEntry]:
+        _require_clinician(principal, provider_id)
+        return [
+            _to_patient_directory_entry(record)
+            for record in patient_directory.list_for_organization(provider_id, limit=limit)
+        ]
+
+    @router.post(
+        "/organizations/{provider_id}/patients/search",
+        response_model=list[PatientDirectoryEntry],
+    )
+    def search_patients(
+        provider_id: uuid.UUID,
+        body: PatientSearchRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[PatientDirectoryEntry]:
+        _require_clinician(principal, provider_id)
+        records = patient_directory.list_for_organization(
+            provider_id, query=body.query, limit=body.limit
+        )
+        return [_to_patient_directory_entry(record) for record in records]
+
+    @router.get(
+        "/organizations/{provider_id}/patients/{patient_id}",
+        response_model=PatientDirectoryEntry,
+    )
+    def get_patient(
+        provider_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientDirectoryEntry:
+        _require_clinician(principal, provider_id)
+        record = patient_directory.get_for_organization(patient_id, provider_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="patient not found")
+        return _to_patient_directory_entry(record)
 
     # -- DH-EX-004: provider lab-order creation --------------------------------------------------
 

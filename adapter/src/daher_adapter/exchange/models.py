@@ -1,11 +1,20 @@
 """DH-EX-001 ORM models for the DHealth Exchange core.
 
 Deliberately transaction-scoped, not a longitudinal medical record (DH-PIVOT-001's approved data
-boundary): there is no general ``Patient`` table modeled like an EMR, no free-text clinical notes,
-no medication list, no diagnosis history. ``PatientReference``/``PractitionerReference`` exist to
-support one exchange transaction, holding only what the golden journey needs plus an explicit
-source-identity binding -- never a fuzzy or demographic match (DH-PIVOT-001's patient/practitioner
-identity model).
+boundary): no free-text clinical notes, no medication list, no diagnosis history anywhere in this
+module. ``PatientReference``/``PractitionerReference`` exist to support one exchange transaction,
+holding only what the golden journey needs plus an explicit source-identity binding -- never a
+fuzzy or demographic match (DH-PIVOT-001's patient/practitioner identity model).
+
+**2026-09-17 dated note (DH-IDENTITY-001):** the sentence above originally read "there is no
+general ``Patient`` table modeled like an EMR" -- true when DH-EX-001 wrote it and left unedited
+here as accurate history, not retroactively corrected. As of DH-IDENTITY-001, ``Patient`` now
+exists below, but it does not contradict the original claim: it is a provider-scoped native
+*directory* record (display name, optional exact DOB, optional contact), never a national/global
+identity, never a longitudinal medical record, still no clinical notes/medication/diagnosis
+anywhere in this module. ``PatientReference`` keeps its exact, no-fuzzy-matching original meaning
+unchanged -- it is now explicitly the source-identity/provenance binding *for* a ``Patient``
+(``patient_id``, DH-IDENTITY-001), not an overloaded stand-in for one.
 
 Shares ``Base`` with ``daher_adapter.models`` (imported, not redefined) so a single Alembic chain
 and a single ``Base.metadata.create_all()`` test fixture cover both the connector-specific tables
@@ -16,15 +25,17 @@ OpenMRS/OpenELIS-specific modules from here).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -68,9 +79,11 @@ __all__ = [
     "OrganizationRoleAssignment",
     "OrganizationStatus",
     "OrganizationType",
+    "Patient",
     "PatientAccessGrant",
     "PatientAccessMode",
     "PatientReference",
+    "PatientRegistrationRequest",
     "PractitionerReference",
     "ResultDelivery",
     "ResultDeliveryStatus",
@@ -162,6 +175,106 @@ class Organization(Base):
     )
 
 
+class Patient(Base):
+    """DH-IDENTITY-001/ADR-051: a provider-scoped native patient-*directory* record -- the human
+    workflow identity a provider organization's own DHealth Clinic uses, never a national identity,
+    never a cross-provider/global DHealth person registry, never an EMR, never a longitudinal
+    medical record. Two different provider organizations may hold two separate ``Patient`` rows for
+    the same real human on purpose -- cross-provider identity resolution is explicitly out of
+    Launch-1 scope (ADR-051), not an oversight this table works around.
+
+    **No fuzzy/demographic matching anywhere.** ``display_name``/``date_of_birth``/contact are
+    directory fields, never an identity key -- two rows with identical demographics are always
+    allowed to coexist (see ``exchange/patients.py``'s own module docstring for the concrete test
+    proving this). The only thing that ever decides "is this the same ``Patient``" is an explicit
+    ``PatientReference.patient_id`` link, created once, atomically, at registration time -- never
+    inferred later by comparing names, phones, or birth dates.
+
+    ``display_name`` is nullable **only** at the database level, for legacy-backfill compatibility
+    (a pre-DH-IDENTITY-001 ``PatientReference`` may truthfully have no snapshot name) -- the native
+    creation API (``exchange/patients.py``'s ``PatientRepository.create``) requires a non-blank one.
+    ``date_of_birth`` is optional and exact only: no year-only/approximate semantics, and nothing in
+    this codebase invents a placeholder date for an unknown birthday. Contact is optional and
+    pair-validated (``ck_exchange_patients_contact_pairing``) -- exactly the same pairing rule
+    ``PatientReference`` already established for its own contact snapshot.
+
+    The composite ``UniqueConstraint(id, provider_organization_id)`` exists solely so
+    ``PatientReference`` can target it with a composite foreign key (see that class's own
+    docstring) -- the database-enforced guarantee that a reference can never point at a Patient
+    belonging to a different provider organization than the reference's own
+    ``source_organization_id`` (DH-IDENTITY-001 §8's explicit "the database itself must reject a
+    cross-provider link" instruction, not merely an application-level check)."""
+
+    __tablename__ = "exchange_patients"
+    __table_args__ = (
+        UniqueConstraint("id", "provider_organization_id", name="uq_exchange_patients_id_provider"),
+        CheckConstraint(
+            "(contact_channel_type IS NULL) = (contact_value IS NULL)",
+            name="ck_exchange_patients_contact_pairing",
+        ),
+        Index("ix_exchange_patients_provider_organization_id", "provider_organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    display_name: Mapped[str | None] = mapped_column(String(256))
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    contact_channel_type: Mapped[str | None] = mapped_column(String(32))
+    contact_value: Mapped[str | None] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class PatientRegistrationRequest(Base):
+    """DH-IDENTITY-001: the immutable idempotency/replay record for native ``Patient`` creation
+    (``exchange/patients.py``'s ``PatientRepository.create``) -- deliberately a separate table from
+    ``Patient`` itself, not a reused-column trick, so idempotency/conflict decisions never depend on
+    ``Patient``'s own mutable state (there is no demographic-update API in this ticket, but this
+    table's shape does not assume that stays true forever -- see its own repository docstring).
+
+    ``request_fingerprint`` is a SHA-256 hex digest over a fixed, deterministically-canonicalized
+    field tuple (``exchange/patients.py``'s ``_fingerprint`` is the single place this is computed,
+    both at creation and at replay-comparison time) -- never Python's process-randomized ``hash()``,
+    which would make a replay's own fingerprint uncomparable across process restarts.
+
+    Uniqueness is ``(provider_organization_id, idempotency_key)``, the identical cross-tenant-safe
+    shape ``LabOrder``/``LabOrderIntent`` already established -- a bare global-unique
+    ``idempotency_key`` would let two different provider organizations' clients collide by pure
+    accident and silently receive each other's patient."""
+
+    __tablename__ = "exchange_patient_registration_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_organization_id",
+            "idempotency_key",
+            name="uq_exchange_patient_registration_requests_provider_key",
+        ),
+        Index(
+            "ix_exchange_patient_registration_requests_patient_id",
+            "patient_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_patients.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class PatientReference(Base):
     """A patient reference scoped to this exchange, never a national/longitudinal identity.
 
@@ -177,7 +290,20 @@ class PatientReference(Base):
     implicitly relied on too -- that table only ever saw one facility's one OpenMRS instance, so
     the narrower key was never actually exercised across two independent organizations there. No
     fuzzy/demographic matching is implemented anywhere in this model, in either version of the key.
-    """
+
+    **DH-IDENTITY-001: ``patient_id`` is the exact source-identity-to-directory-record link every
+    reference now carries** -- exactly one ``Patient`` per reference, though one ``Patient`` may
+    have many references (``patient_id`` is indexed, deliberately not database-``unique``). The
+    composite foreign key below (targeting ``Patient``'s own composite unique key, see its
+    docstring) makes "this reference's ``source_organization_id`` equals its Patient's
+    ``provider_organization_id``" a database-enforced fact -- a cross-provider link is a foreign-key
+    violation, not merely an application bug waiting to happen. No reference-linking/merge API
+    exists in this ticket (ADR-051 Decision 12) -- every reference is bound to its ``Patient`` at
+    creation time only, by ``exchange/identity.py``'s ``PatientReferenceRepository`` (legacy exact
+    binding: a new source identity always creates its own new 1:1 ``Patient``, an existing one
+    returns its existing ``Patient`` unchanged) or by ``exchange/patients.py``'s
+    ``PatientRepository`` (native registration: the ``Patient`` and its one native reference are
+    always created together, atomically)."""
 
     __tablename__ = "exchange_patient_references"
     __table_args__ = (
@@ -188,13 +314,21 @@ class PatientReference(Base):
             "source_identity_value",
             name="uq_exchange_patient_references_source_identity",
         ),
+        ForeignKeyConstraint(
+            ["patient_id", "source_organization_id"],
+            ["exchange_patients.id", "exchange_patients.provider_organization_id"],
+            name="fk_exchange_patient_references_patient_tenant",
+            ondelete="RESTRICT",
+        ),
         Index("ix_exchange_patient_references_source_organization_id", "source_organization_id"),
+        Index("ix_exchange_patient_references_patient_id", "patient_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     source_organization_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
     )
+    patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     source_system: Mapped[str] = mapped_column(String(64), nullable=False)
     source_identity_system: Mapped[str] = mapped_column(String(256), nullable=False)
     source_identity_value: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -1326,7 +1460,15 @@ class ExchangeSecurityAuditEvent(Base):
             "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded', "
             "'lab_results_released', 'lab_observation_recorded', 'lab_result_entry_completed', "
             "'lab_observation_corrected', 'lab_result_amendment_started', "
-            "'lab_observation_amended', 'lab_result_amendment_released'"
+            "'lab_observation_amended', 'lab_result_amendment_released', "
+            # DH-IDENTITY-001: native Patient directory registration. Deliberately not reused for
+            # the legacy `patient_reference_bound` event above -- that event already means "a
+            # source identity was bound", and stays unchanged; this one means "a new provider-scoped
+            # Patient directory record was created", which the legacy bind path also does
+            # internally (see `PatientReference`'s own docstring) but does not separately audit as
+            # its own event, matching how e.g. a new `LabResultRelease` row does not get its own
+            # audit event distinct from `lab_results_released`.
+            "'patient_created'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1341,7 +1483,7 @@ class ExchangeSecurityAuditEvent(Base):
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
-            "'patient_access_grant', 'patient_reference')",
+            "'patient_access_grant', 'patient_reference', 'patient')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

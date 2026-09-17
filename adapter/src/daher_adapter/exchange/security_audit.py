@@ -100,6 +100,8 @@ SecurityEventType = Literal[
     "lab_result_amendment_started",
     "lab_observation_amended",
     "lab_result_amendment_released",
+    # DH-IDENTITY-001: native provider-scoped Patient directory registration.
+    "patient_created",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
@@ -110,6 +112,7 @@ SecurityResourceType = Literal[
     "lab_order",
     "patient_access_grant",
     "patient_reference",
+    "patient",
 ]
 
 

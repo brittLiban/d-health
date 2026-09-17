@@ -79,6 +79,20 @@ jobs:
         # PYTHONPATH mirrors the image's ENV PYTHONPATH=/app/src.
         run: PYTHONPATH=src python -m pytest -q
         working-directory: adapter
+      - name: DH-IDENTITY-001 migration qualification (0021 -> 0022 backfill, M1-M6, downgrade guard)
+        # Runs against the same fresh disposable postgres:16-alpine service, before the next step
+        # (which then runs `alembic upgrade head` -- a no-op by that point, since this script
+        # already brought the database to head as a side effect of proving the 0022 migration's
+        # backfill/downgrade-guard behavior against real, seeded legacy data). See the script's
+        # own module docstring for exactly which M1-M7/§41 claims it proves.
+        env:
+          ADAPTER_DB_HOST: localhost
+          ADAPTER_DB_PORT: 5432
+          ADAPTER_DB_USER: adapter
+          ADAPTER_DB_PASSWORD: adapter
+          ADAPTER_DB_NAME: adapter
+        working-directory: adapter
+        run: PYTHONPATH=src python scripts/qualify_dh_identity_001_migration.py
       - name: Migration history reaches head on a fresh database
         # DAHER (adapter live-recovery ticket): a stale runtime image bound to an
         # older container silently regressed to a database revision Alembic's own
@@ -104,7 +118,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0021_order_intent_ownership
+          EXPECTED_HEAD: 0022_exchange_patient_directory
         working-directory: adapter
         run: |
           alembic upgrade head
@@ -128,6 +142,20 @@ jobs:
           DHEX003C_PG_DATABASE: adapter
         working-directory: adapter
         run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhex003c_postgres_qualification.py
+      - name: DH-IDENTITY-001 real PostgreSQL patient directory qualification
+        # Same disposable postgres:16-alpine service as the step above. Proves, against a real
+        # database (SQLite does not enforce foreign keys by default): concurrent identical native
+        # patient registrations converge to exactly one Patient, a concurrent conflicting payload
+        # never creates two, and the composite (patient_id, source_organization_id) foreign key
+        # actually rejects a cross-provider PatientReference-to-Patient link.
+        env:
+          DHIDENTITY001_PG_HOST: localhost
+          DHIDENTITY001_PG_PORT: 5432
+          DHIDENTITY001_PG_USER: adapter
+          DHIDENTITY001_PG_PASSWORD: adapter
+          DHIDENTITY001_PG_DATABASE: adapter
+        working-directory: adapter
+        run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhidentity001_postgres_qualification.py
 
   provisioning:
     name: provisioning — ruff + pytest

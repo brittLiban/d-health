@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
 from daher_adapter.exchange.audit import ExchangeAuditWriter
-from daher_adapter.exchange.models import ExchangeSecurityAuditEvent, PatientReference
+from daher_adapter.exchange.models import ExchangeSecurityAuditEvent, Patient, PatientReference
 from daher_adapter.exchange.organizations import OrganizationRepository
 
 
@@ -245,6 +245,123 @@ def test_cross_organization_same_raw_identity_yields_distinct_references(
         "-- the organization boundary is part of the identity"
     )
     assert _reference_count(sessions) == 2
+
+
+# -- DH-IDENTITY-001 L1-L7: legacy binding compatibility under the new Patient model -------------
+
+
+def test_l1_existing_exact_reference_returns_same_binding(
+    client: TestClient, keypair, organizations
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L1")
+    first = _bind(client, token, provider.id)
+    second = _bind(client, token, provider.id)
+    assert first.status_code == 201, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["id"] == second.json()["id"]
+
+
+def test_l2_existing_binding_keeps_its_patient(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L2")
+    first = _bind(client, token, provider.id)
+    second = _bind(client, token, provider.id)
+    with sessions() as session:
+        first_ref = session.get(PatientReference, uuid.UUID(first.json()["id"]))
+        second_ref = session.get(PatientReference, uuid.UUID(second.json()["id"]))
+        assert first_ref.patient_id == second_ref.patient_id
+        assert session.get(Patient, first_ref.patient_id) is not None
+
+
+def test_l3_new_external_reference_creates_a_new_patient_1to1(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L3")
+    response = _bind(client, token, provider.id, display_name="Newly Bound Patient")
+    assert response.status_code == 201, response.text
+    with sessions() as session:
+        reference = session.get(PatientReference, uuid.UUID(response.json()["id"]))
+        assert reference.patient_id is not None
+        patient = session.get(Patient, reference.patient_id)
+        assert patient is not None
+        assert patient.provider_organization_id == provider.id
+        assert patient.display_name == "Newly Bound Patient"
+        assert patient.date_of_birth is None, "legacy binding never sets a date of birth"
+
+
+def test_l4_same_demographics_different_source_identity_do_not_auto_link(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    """The no-fuzzy-matching law applies to the legacy bind endpoint too -- two different exact
+    source identities with byte-identical demographics must never be silently attached to the
+    same Patient."""
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L4")
+    first = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="EXT-1",
+        display_name="Mohamed Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377000000",
+    )
+    second = _bind(
+        client,
+        token,
+        provider.id,
+        source_identity_value="EXT-2",
+        display_name="Mohamed Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377000000",
+    )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    with sessions() as session:
+        first_ref = session.get(PatientReference, uuid.UUID(first.json()["id"]))
+        second_ref = session.get(PatientReference, uuid.UUID(second.json()["id"]))
+        assert first_ref.patient_id != second_ref.patient_id, (
+            "identical demographics under two different exact source identities must produce two "
+            "different Patient rows, never an automatic link"
+        )
+
+
+def test_l5_cross_provider_source_identity_collision_remains_isolated(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a = _setup_clinician(client, private_key, organizations, "L5A")
+    provider_b, token_b = _setup_clinician(client, private_key, organizations, "L5B")
+    from_a = _bind(client, token_a, provider_a.id, source_identity_value="SAME-ID")
+    from_b = _bind(client, token_b, provider_b.id, source_identity_value="SAME-ID")
+    with sessions() as session:
+        ref_a = session.get(PatientReference, uuid.UUID(from_a.json()["id"]))
+        ref_b = session.get(PatientReference, uuid.UUID(from_b.json()["id"]))
+        patient_a = session.get(Patient, ref_a.patient_id)
+        patient_b = session.get(Patient, ref_b.patient_id)
+        assert patient_a.id != patient_b.id
+        assert patient_a.provider_organization_id == provider_a.id
+        assert patient_b.provider_organization_id == provider_b.id
+
+
+def test_l6_snapshot_replay_behavior_remains_unchanged(
+    client: TestClient, keypair, organizations, sessions
+) -> None:
+    """Same assertion as `test_repeat_with_changed_display_name_does_not_rewrite_existing_snapshot`
+    above, re-run explicitly under the DH-IDENTITY-001 name to keep this ticket's own required L6
+    proof easy to find -- the underlying behavior was already correct and is unchanged."""
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L6")
+    first = _bind(client, token, provider.id, display_name="Original")
+    second = _bind(client, token, provider.id, display_name="Replayed")
+    assert first.json()["id"] == second.json()["id"]
+    with sessions() as session:
+        reference = session.get(PatientReference, uuid.UUID(first.json()["id"]))
+        assert reference.display_name == "Original"
 
 
 # -- authorization -----------------------------------------------------------------------------
@@ -618,9 +735,16 @@ def test_patient_list_uses_uuid_tie_break_for_equal_created_at(
     with sessions.begin() as session:
         session.add_all(
             [
+                # DH-IDENTITY-001: every PatientReference now requires a linked Patient -- reusing
+                # the reference's own id as its Patient's id, the identical technique migration
+                # 0022's own backfill uses, since this test constructs rows directly rather than
+                # through the repository (it needs exact control over `created_at`).
+                Patient(id=higher_id, provider_organization_id=provider.id, created_at=same_time),
+                Patient(id=lower_id, provider_organization_id=provider.id, created_at=same_time),
                 PatientReference(
                     id=higher_id,
                     source_organization_id=provider.id,
+                    patient_id=higher_id,
                     source_system="synthetic",
                     source_identity_system="urn:synthetic:patient",
                     source_identity_value="TIE-HIGH",
@@ -629,6 +753,7 @@ def test_patient_list_uses_uuid_tie_break_for_equal_created_at(
                 PatientReference(
                     id=lower_id,
                     source_organization_id=provider.id,
+                    patient_id=lower_id,
                     source_system="synthetic",
                     source_identity_system="urn:synthetic:patient",
                     source_identity_value="TIE-LOW",
