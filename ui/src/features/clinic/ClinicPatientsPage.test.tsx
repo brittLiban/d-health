@@ -10,7 +10,8 @@ import type {
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderIntent,
-  PatientReferenceBindRequest,
+  PatientCreateRequest,
+  PatientDirectoryEntry,
 } from '../../api/exchangeTypes'
 import {
   clearAllStoredPendingPatients,
@@ -71,6 +72,43 @@ const authoritativeReplayPatient: ClinicPatientSummary = {
   ...patientWithName,
   display_name: 'Nom stocké autoritatif',
   contact_value: '+25377111111',
+}
+
+// DH-IDENTITY-001: the native Patient-directory response shape. `toClinicPatientSummary()` in
+// ClinicPatientsPage.tsx maps `primary_patient_reference_id -> patient_reference_id` and
+// `patient_id -> local_reference` -- these fixtures are the exact preimage of
+// `patientWithName`/`patientWithoutName`/`authoritativeReplayPatient` under that mapping, so every
+// existing rendered-output assertion keeps working unchanged.
+function toPatientDirectoryEntry(
+  summary: ClinicPatientSummary,
+  overrides: Partial<Pick<PatientDirectoryEntry, 'provider_organization_id' | 'date_of_birth' | 'created_at'>> = {},
+): PatientDirectoryEntry {
+  return {
+    patient_id: summary.local_reference,
+    provider_organization_id: overrides.provider_organization_id ?? 'provider-a',
+    display_name: summary.display_name,
+    date_of_birth: overrides.date_of_birth ?? null,
+    contact_channel_type: summary.contact_channel_type,
+    contact_value: summary.contact_value,
+    primary_patient_reference_id: summary.patient_reference_id,
+    created_at: overrides.created_at ?? new Date().toISOString(),
+  }
+}
+
+const patientEntryWithName: PatientDirectoryEntry = toPatientDirectoryEntry(patientWithName)
+const patientEntryWithoutName: PatientDirectoryEntry = toPatientDirectoryEntry(patientWithoutName)
+
+/**
+ * Builds a `createPatientWithOutcome`-shaped mock outcome from a `ClinicPatientSummary` fixture --
+ * the DH-IDENTITY-001-era equivalent of the old `{reference: {...}, created}` bind-outcome
+ * literals every creation test used to construct by hand.
+ */
+function makePatientCreateOutcome(
+  summary: ClinicPatientSummary,
+  created: boolean,
+  overrides: Partial<Pick<PatientDirectoryEntry, 'provider_organization_id' | 'date_of_birth'>> = {},
+) {
+  return { patient: toPatientDirectoryEntry(summary, overrides), created }
 }
 
 const me: ExchangeMeResponse = {
@@ -148,9 +186,10 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getOrder: vi.fn(),
     getOrderResults: vi.fn(),
     getReleaseVersions: vi.fn(),
-    bindPatientReference: vi.fn(),
-    bindPatientReferenceWithOutcome: vi.fn(),
-    listPatientReferences: vi.fn().mockResolvedValue([]),
+    createPatientWithOutcome: vi.fn(),
+    listPatients: vi.fn().mockResolvedValue([]),
+    searchPatients: vi.fn().mockResolvedValue([]),
+    getPatientRegistration: vi.fn().mockResolvedValue(null),
     getPatientReference: vi.fn(),
     listCatalogTests: vi.fn().mockResolvedValue([]),
     createOrderWithOutcome: vi.fn(),
@@ -212,7 +251,7 @@ describe('Clinic native patient workflow', () => {
 
   it('accepts completed patient requests under the application Strict Mode lifecycle', async () => {
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
     })
 
     render(
@@ -225,14 +264,14 @@ describe('Clinic native patient workflow', () => {
   })
 
   it('renders loading, results, opens an existing patient, and uses the truthful null-name fallback', async () => {
-    let resolveList!: (patients: ClinicPatientSummary[]) => void
-    const listPromise = new Promise<ClinicPatientSummary[]>((resolve) => { resolveList = resolve })
-    const client = makeClient({ listPatientReferences: vi.fn().mockReturnValue(listPromise) })
+    let resolveList!: (patients: PatientDirectoryEntry[]) => void
+    const listPromise = new Promise<PatientDirectoryEntry[]>((resolve) => { resolveList = resolve })
+    const client = makeClient({ listPatients: vi.fn().mockReturnValue(listPromise) })
 
     render(<ClinicApp client={client} initialTab="patients" />)
     expect(await screen.findByText('Chargement des patients…')).toBeInTheDocument()
 
-    resolveList([patientWithName, patientWithoutName])
+    resolveList([patientEntryWithName, patientEntryWithoutName])
     expect(await screen.findByText('Patient Synthétique')).toBeInTheDocument()
     expect(screen.getAllByText(patientWithoutName.local_reference)).toHaveLength(2)
 
@@ -243,19 +282,10 @@ describe('Clinic native patient workflow', () => {
   })
 
   it('shows the empty state, creates a minimal opaque reference, fetches it, and opens the workspace', async () => {
-    const bind = vi.fn().mockResolvedValue({
-      reference: {
-        id: patientWithName.patient_reference_id,
-        source_organization_id: 'provider-a',
-        source_system: 'dhealth-clinic',
-        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-        source_identity_value: patientWithName.local_reference,
-      },
-      created: true,
-    })
+    const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
     const get = vi.fn().mockResolvedValue(patientWithName)
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: get,
     })
 
@@ -269,25 +299,28 @@ describe('Clinic native patient workflow', () => {
 
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(bind).toHaveBeenCalledTimes(1)
-    const submitted = bind.mock.calls[0][1]
+    // DH-IDENTITY-001: source_system/source_identity_system/source_identity_value are gone from
+    // the create request body -- the server owns identity now, there is nothing left to assert
+    // about a source-identity namespace the browser no longer sends. What the browser DOES still
+    // generate is a request-identity Idempotency-Key (argument index 1), asserted below.
+    const [calledProviderId, calledIdempotencyKey, submitted] = bind.mock.calls[0]
+    expect(calledProviderId).toBe('provider-a')
     expect(submitted).toMatchObject({
-      source_system: 'dhealth-clinic',
-      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
       display_name: 'Patient Synthétique',
       contact_channel_type: 'PHONE',
       contact_value: '+25377000000',
     })
-    expect(submitted.source_identity_value).toMatch(
+    expect(calledIdempotencyKey).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     )
     expect(get).toHaveBeenCalledWith('provider-a', patientWithName.patient_reference_id)
   })
 
   it('submits provider-local search text and renders the returned result', async () => {
-    const list = vi.fn()
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([patientWithName])
-    const client = makeClient({ listPatientReferences: list })
+    // Mount always calls listPatients (empty search); submitting the form calls searchPatients.
+    const list = vi.fn().mockResolvedValue([])
+    const search = vi.fn().mockResolvedValue([patientEntryWithName])
+    const client = makeClient({ listPatients: list, searchPatients: search })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="patients" />)
 
@@ -296,29 +329,16 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
 
     expect(await screen.findByText('Patient Synthétique')).toBeInTheDocument()
-    expect(list).toHaveBeenLastCalledWith('provider-a', {
-      query: 'Synthétique',
-      limit: 50,
-      token: undefined,
-    })
+    expect(search).toHaveBeenLastCalledWith('provider-a', 'Synthétique', { limit: 50 })
   })
 
   it('reuses the original opaque identity and payload after an ambiguous response and tab navigation', async () => {
     const bind = vi
       .fn()
       .mockRejectedValueOnce(new ExchangeApiError(0, 'NETWORK_ERROR', 'raw transport detail'))
-      .mockResolvedValueOnce({
-        reference: {
-          id: patientWithName.patient_reference_id,
-          source_organization_id: 'provider-a',
-          source_system: 'dhealth-clinic',
-          source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-          source_identity_value: patientWithName.local_reference,
-        },
-        created: false,
-      })
+      .mockResolvedValueOnce(makePatientCreateOutcome(patientWithName, false))
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(authoritativeReplayPatient),
     })
     const user = userEvent.setup()
@@ -347,21 +367,12 @@ describe('Clinic native patient workflow', () => {
   })
 
   it('retains the exact pending tuple when authoritative detail retrieval fails', async () => {
-    const bind = vi.fn().mockResolvedValue({
-      reference: {
-        id: patientWithName.patient_reference_id,
-        source_organization_id: 'provider-a',
-        source_system: 'dhealth-clinic',
-        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-        source_identity_value: patientWithName.local_reference,
-      },
-      created: false,
-    })
+    const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, false))
     const get = vi.fn()
       .mockRejectedValueOnce(new ExchangeApiError(403, 'FORBIDDEN', 'raw detail failure'))
       .mockResolvedValueOnce(authoritativeReplayPatient)
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: get,
     })
     const user = userEvent.setup()
@@ -408,21 +419,12 @@ describe('Clinic native patient workflow', () => {
   ])(
     'matrix: $label with $failureType detail GET failure keeps mutation confirmed, retries GET only, and opens on success',
     async ({ created, error }) => {
-      const bind = vi.fn().mockResolvedValue({
-        reference: {
-          id: patientWithName.patient_reference_id,
-          source_organization_id: 'provider-a',
-          source_system: 'dhealth-clinic',
-          source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-          source_identity_value: patientWithName.local_reference,
-        },
-        created,
-      })
+      const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, created))
       const get = vi
         .fn()
         .mockRejectedValueOnce(error)
         .mockResolvedValueOnce(patientWithName)
-      const client = makeClient({ bindPatientReferenceWithOutcome: bind, getPatientReference: get })
+      const client = makeClient({ createPatientWithOutcome: bind, getPatientReference: get })
       const user = userEvent.setup()
       render(<ClinicApp client={client} initialTab="patients" />)
       await screen.findByText('Aucun patient trouvé')
@@ -435,10 +437,10 @@ describe('Clinic native patient workflow', () => {
       expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
       expect(screen.getByText(/Patient créé/)).toBeInTheDocument()
       expect(bind).toHaveBeenCalledTimes(1)
-      const identity = bind.mock.calls[0][1].source_identity_value
+      const identity = bind.mock.calls[0][1]
       expect(typeof identity).toBe('string')
       expect(getStoredPendingPatient('identity-1', 'provider-a')).toMatchObject({
-        source_identity_value: identity,
+        idempotency_key: identity,
         confirmed_patient_reference_id: patientWithName.patient_reference_id,
       })
 
@@ -453,7 +455,7 @@ describe('Clinic native patient workflow', () => {
 
   it('fails closed without POST when durable pending storage cannot be written', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -468,11 +470,11 @@ describe('Clinic native patient workflow', () => {
 
   it('fails closed without POST when storage read-back throws during pre-POST verification', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     const originalGetItem = Storage.prototype.getItem
     // Allow initial mount check to succeed, but throw when verifying write before POST
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
-      if (key.startsWith('dhealth_clinic_pending_patient_v1:identity-1:provider-a')) {
+      if (key.startsWith('dhealth_clinic_pending_patient_v2:identity-1:provider-a')) {
         // Return null for the initial query, but throw if setStoredPendingPatient calls getItem
         if (this.length > 0) {
           throw new Error('read-after-write failed')
@@ -492,10 +494,10 @@ describe('Clinic native patient workflow', () => {
 
   it('fails closed without POST when storage read-back is mismatched during pre-POST verification', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     const originalGetItem = Storage.prototype.getItem
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
-      if (key.startsWith('dhealth_clinic_pending_patient_v1:identity-1:provider-a')) {
+      if (key.startsWith('dhealth_clinic_pending_patient_v2:identity-1:provider-a')) {
         // If an entry was written, simulate corrupted read-back
         if (this.length > 0) {
           return '{"corrupted":true}'
@@ -515,7 +517,7 @@ describe('Clinic native patient workflow', () => {
 
   it('fails closed when the scoped pending-store cannot be read', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
     render(<ClinicApp client={client} initialTab="patients" />)
     await screen.findByText('Aucun patient trouvé')
@@ -526,12 +528,12 @@ describe('Clinic native patient workflow', () => {
 
   it('fails closed when scoped pending-store record contains corrupted fields and leaves raw entry intact', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     const rawCorrupted = JSON.stringify({
-      source_system: 12345, // invalid type
+      idempotency_key: 12345, // invalid type
       corrupted_payload: true,
     })
-    localStorage.setItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a', rawCorrupted)
+    localStorage.setItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a', rawCorrupted)
 
     render(<ClinicApp client={client} initialTab="patients" />)
     await screen.findByText('Aucun patient trouvé')
@@ -540,14 +542,14 @@ describe('Clinic native patient workflow', () => {
     expect(screen.queryByText(/corrupted_payload/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     expect(bind).not.toHaveBeenCalled()
-    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a')).toBe(rawCorrupted)
+    expect(localStorage.getItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a')).toBe(rawCorrupted)
   })
 
   it('fails closed when scoped pending-store record contains invalid JSON and leaves raw entry intact', async () => {
     const bind = vi.fn()
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     const rawInvalidJson = '{not valid json'
-    localStorage.setItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a', rawInvalidJson)
+    localStorage.setItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a', rawInvalidJson)
 
     render(<ClinicApp client={client} initialTab="patients" />)
     await screen.findByText('Aucun patient trouvé')
@@ -555,12 +557,12 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     expect(bind).not.toHaveBeenCalled()
-    expect(localStorage.getItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a')).toBe(rawInvalidJson)
+    expect(localStorage.getItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a')).toBe(rawInvalidJson)
   })
 
   it('renders a sanitized recoverable error without exposing raw backend details', async () => {
     const client = makeClient({
-      listPatientReferences: vi.fn().mockRejectedValue(
+      listPatients: vi.fn().mockRejectedValue(
         new ExchangeApiError(500, 'SERVER_ERROR', 'Traceback: secret database details'),
       ),
     })
@@ -572,8 +574,8 @@ describe('Clinic native patient workflow', () => {
   })
 
   it('does not restore stale provider A results after switching to provider B', async () => {
-    let resolveA!: (patients: ClinicPatientSummary[]) => void
-    const providerAPromise = new Promise<ClinicPatientSummary[]>((resolve) => { resolveA = resolve })
+    let resolveA!: (patients: PatientDirectoryEntry[]) => void
+    const providerAPromise = new Promise<PatientDirectoryEntry[]>((resolve) => { resolveA = resolve })
     const client = makeClient({
       getMe: vi.fn().mockResolvedValue({
         ...me,
@@ -582,8 +584,8 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      listPatientReferences: vi.fn((providerId: string) =>
-        providerId === 'provider-a' ? providerAPromise : Promise.resolve([patientWithoutName]),
+      listPatients: vi.fn((providerId: string) =>
+        providerId === 'provider-a' ? providerAPromise : Promise.resolve([patientEntryWithoutName]),
       ),
     })
     const user = userEvent.setup()
@@ -592,7 +594,7 @@ describe('Clinic native patient workflow', () => {
     await user.selectOptions(await screen.findByLabelText("Sélectionner l'établissement"), 'provider-b')
     expect(await screen.findAllByText(patientWithoutName.local_reference)).toHaveLength(2)
     await act(async () => {
-      resolveA([patientWithName])
+      resolveA([patientEntryWithName])
       await providerAPromise
     })
     await waitFor(() => expect(screen.queryByText('Patient Synthétique')).not.toBeInTheDocument())
@@ -607,8 +609,8 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      listPatientReferences: vi.fn((providerId: string) =>
-        Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+      listPatients: vi.fn((providerId: string) =>
+        Promise.resolve(providerId === 'provider-a' ? [patientEntryWithName] : [patientEntryWithoutName]),
       ),
     })
     const user = userEvent.setup()
@@ -625,22 +627,13 @@ describe('Clinic native patient workflow', () => {
 
   it('keeps unresolved creation identities isolated through an A to B to A provider roundtrip', async () => {
     let providerAAttempts = 0
-    const bind = vi.fn((providerId: string, _body: PatientReferenceBindRequest) => {
+    const bind = vi.fn((providerId: string, _idempotencyKey: string, _body: PatientCreateRequest) => {
       if (providerId === 'provider-a') {
         providerAAttempts += 1
         if (providerAAttempts === 1) {
           return Promise.reject(new ExchangeApiError(0, 'NETWORK_ERROR', 'provider A transport'))
         }
-        return Promise.resolve({
-          reference: {
-            id: patientWithName.patient_reference_id,
-            source_organization_id: 'provider-a',
-            source_system: 'dhealth-clinic',
-            source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-            source_identity_value: patientWithName.local_reference,
-          },
-          created: false,
-        })
+        return Promise.resolve(makePatientCreateOutcome(patientWithName, false))
       }
       return Promise.reject(new ExchangeApiError(0, 'NETWORK_ERROR', 'provider B transport'))
     })
@@ -652,7 +645,7 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(authoritativeReplayPatient),
     })
     const user = userEvent.setup()
@@ -679,10 +672,10 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByRole('heading', { name: 'Nom stocké autoritatif' })).toBeInTheDocument()
 
     expect(bind).toHaveBeenCalledTimes(3)
+    // Same idempotency key reused across provider A's two attempts (retry, not a fresh attempt).
     expect(bind.mock.calls[2][1]).toEqual(bind.mock.calls[0][1])
-    expect(bind.mock.calls[1][1].source_identity_value).not.toBe(
-      bind.mock.calls[0][1].source_identity_value,
-    )
+    // Provider A and provider B never share an idempotency key -- independent request identities.
+    expect(bind.mock.calls[1][1]).not.toBe(bind.mock.calls[0][1])
   })
 
   it('does not open a patient when provider A creation resolves after switching to provider B', async () => {
@@ -696,7 +689,7 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      bindPatientReferenceWithOutcome: vi.fn().mockReturnValue(bindPromise),
+      createPatientWithOutcome: vi.fn().mockReturnValue(bindPromise),
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const user = userEvent.setup()
@@ -710,16 +703,7 @@ describe('Clinic native patient workflow', () => {
     await user.selectOptions(providerSelect, 'provider-b')
     await waitFor(() => expect(providerSelect).toHaveValue('provider-b'))
 
-    resolveBind({
-      reference: {
-        id: patientWithName.patient_reference_id,
-        source_organization_id: 'provider-a',
-        source_system: 'dhealth-clinic',
-        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-        source_identity_value: patientWithName.local_reference,
-      },
-      created: true,
-    })
+    resolveBind(makePatientCreateOutcome(patientWithName, true))
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: 'Patient Synthétique' })).not.toBeInTheDocument()
       expect(screen.getByText('Aucun patient trouvé')).toBeInTheDocument()
@@ -741,7 +725,7 @@ describe('Clinic native patient workflow', () => {
   it('blocks patient creation when display name is empty or only whitespace', async () => {
     const bind = vi.fn()
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
     })
     const user = userEvent.setup()
 
@@ -765,18 +749,9 @@ describe('Clinic native patient workflow', () => {
     const bind = vi
       .fn()
       .mockRejectedValueOnce(new ExchangeApiError(422, 'VALIDATION_ERROR', 'invalid format'))
-      .mockResolvedValueOnce({
-        reference: {
-          id: patientWithName.patient_reference_id,
-          source_organization_id: 'provider-a',
-          source_system: 'dhealth-clinic',
-          source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-          source_identity_value: patientWithName.local_reference,
-        },
-        created: true,
-      })
+      .mockResolvedValueOnce(makePatientCreateOutcome(patientWithName, true))
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const user = userEvent.setup()
@@ -806,15 +781,15 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(2)
-    const firstCallUUID = bind.mock.calls[0][1].source_identity_value
-    const secondCallUUID = bind.mock.calls[1][1].source_identity_value
+    const firstCallUUID = bind.mock.calls[0][1]
+    const secondCallUUID = bind.mock.calls[1][1]
     expect(firstCallUUID).not.toBe(secondCallUUID)
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
   })
 
   it('persists strictly non-PHI tuple to storage on ambiguous failure', async () => {
     const bind = vi.fn().mockRejectedValue(new ExchangeApiError(0, 'NETWORK_ERROR', 'network down'))
-    const client = makeClient({ bindPatientReferenceWithOutcome: bind })
+    const client = makeClient({ createPatientWithOutcome: bind })
     const user = userEvent.setup()
 
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -828,43 +803,30 @@ describe('Clinic native patient workflow', () => {
 
     const stored = getStoredPendingPatient('identity-1', 'provider-a')
     expect(stored).not.toBeNull()
-    expect(stored?.source_system).toBe('dhealth-clinic')
-    expect(stored?.source_identity_system).toBe('urn:dhealth:clinic:patient-reference-id')
-    expect(stored?.source_identity_value).toMatch(
+    expect(stored?.idempotency_key).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     )
     expect(typeof stored?.created_at).toBe('number')
 
     // Verify localStorage contains ZERO PHI
-    const rawStorage = localStorage.getItem('dhealth_clinic_pending_patient_v1:identity-1:provider-a')
+    const rawStorage = localStorage.getItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a')
     expect(rawStorage).not.toBeNull()
     expect(rawStorage).not.toContain('Patient Secret PHI')
     expect(rawStorage).not.toContain('+25377999888')
   })
 
   it('recovers from reload without allowing discard or a fresh identity', async () => {
-    // Pre-populate storage with an unresolved UUID
-    const staleUuid = '99999999-9999-4999-8999-999999999999'
+    // Pre-populate storage with an unresolved idempotency key
+    const staleKey = '99999999-9999-4999-8999-999999999999'
     setStoredPendingPatient('identity-1', 'provider-a', {
-      source_system: 'dhealth-clinic',
-      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-      source_identity_value: staleUuid,
+      idempotency_key: staleKey,
       created_at: Date.now(),
     })
 
-    const bind = vi.fn().mockResolvedValue({
-      reference: {
-        id: patientWithName.patient_reference_id,
-        source_organization_id: 'provider-a',
-        source_system: 'dhealth-clinic',
-        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-        source_identity_value: patientWithName.local_reference,
-      },
-      created: true,
-    })
+    const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
     const client = makeClient({
-      bindPatientReferenceWithOutcome: bind,
-      listPatientReferences: vi.fn().mockResolvedValue([]),
+      createPatientWithOutcome: bind,
+      listPatients: vi.fn().mockResolvedValue([]),
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const user = userEvent.setup()
@@ -884,15 +846,13 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(1)
-    expect(bind.mock.calls[0][1].source_identity_value).toBe(staleUuid)
+    expect(bind.mock.calls[0][1]).toBe(staleKey)
   })
 
   it('recovers a confirmed reference by its stored authoritative id', async () => {
-    const committedUuid = '88888888-8888-4888-8888-888888888888'
     setStoredPendingPatient('identity-1', 'provider-a', {
-      source_system: 'dhealth-clinic',
-      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-      source_identity_value: committedUuid,
+      idempotency_key: 'committed-request-key',
+      confirmed_patient_id: '44444444-4444-4444-8444-444444444444',
       confirmed_patient_reference_id: '33333333-3333-4333-8333-333333333333',
       created_at: Date.now(),
     })
@@ -902,7 +862,7 @@ describe('Clinic native patient workflow', () => {
       display_name: 'Patient Déjà Sauvegardé',
       contact_channel_type: 'PHONE',
       contact_value: '+25377222333',
-      local_reference: committedUuid,
+      local_reference: '44444444-4444-4444-8444-444444444444',
     }
 
     const client = makeClient({
@@ -919,9 +879,7 @@ describe('Clinic native patient workflow', () => {
 
   it('retains non-PHI pending identities on logout for safe later reconciliation', async () => {
     setStoredPendingPatient('identity-1', 'provider-a', {
-      source_system: 'dhealth-clinic',
-      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-      source_identity_value: 'test-uuid',
+      idempotency_key: 'test-uuid',
       created_at: Date.now(),
     })
     expect(getStoredPendingPatient('identity-1', 'provider-a')).not.toBeNull()
@@ -935,32 +893,21 @@ describe('Clinic native patient workflow', () => {
 
     await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
     expect(onLogout).toHaveBeenCalledTimes(1)
-    expect(getStoredPendingPatient('identity-1', 'provider-a')?.source_identity_value).toBe('test-uuid')
+    expect(getStoredPendingPatient('identity-1', 'provider-a')?.idempotency_key).toBe('test-uuid')
   })
 
   it('maintains strict user and provider isolation of unconfirmed state across logout and login', async () => {
-    const unconfirmedUuid = '11111111-2222-4333-8444-555555555555'
+    const unconfirmedKey = '11111111-2222-4333-8444-555555555555'
     setStoredPendingPatient('identity-1', 'provider-a', {
-      source_system: 'dhealth-clinic',
-      source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-      source_identity_value: unconfirmedUuid,
+      idempotency_key: unconfirmedKey,
       created_at: Date.now(),
     })
 
-    const bind = vi.fn().mockResolvedValue({
-      reference: {
-        id: patientWithName.patient_reference_id,
-        source_organization_id: 'provider-a',
-        source_system: 'dhealth-clinic',
-        source_identity_system: 'urn:dhealth:clinic:patient-reference-id',
-        source_identity_value: unconfirmedUuid,
-      },
-      created: true,
-    })
+    const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
     // 1. User 1 logs in with Provider A: sees unconfirmed banner
     const clientUser1 = makeClient({
       getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-1' }),
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const { unmount: unmount1 } = render(
@@ -973,7 +920,7 @@ describe('Clinic native patient workflow', () => {
     // 2. Different user (identity-2) logs in with Provider A: CANNOT consume or see identity-1 attempt
     const clientUser2 = makeClient({
       getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-2' }),
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const { unmount: unmount2 } = render(
@@ -994,7 +941,7 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      bindPatientReferenceWithOutcome: bind,
+      createPatientWithOutcome: bind,
       getPatientReference: vi.fn().mockResolvedValue(patientWithName),
     })
     const { unmount: unmount3 } = render(
@@ -1018,7 +965,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(1)
-    expect(bind.mock.calls[0][1].source_identity_value).toBe(unconfirmedUuid)
+    expect(bind.mock.calls[0][1]).toBe(unconfirmedKey)
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
   })
@@ -1071,7 +1018,7 @@ describe('Clinic native patient workflow', () => {
   it('fetches and displays patient order history with truthful status and lab state in patient workspace', async () => {
     const listOrders = vi.fn().mockResolvedValue([mockExistingOrder])
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listPatientOrders: listOrders,
     })
 
@@ -1123,7 +1070,7 @@ describe('Clinic native patient workflow', () => {
     const listOrders = vi.fn().mockResolvedValue([])
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: listCatalog,
       createOrderWithOutcome: createOrder,
       listPatientOrders: listOrders,
@@ -1220,7 +1167,7 @@ describe('Clinic native patient workflow', () => {
     }
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: vi.fn().mockResolvedValue({
         order: replayOrder,
@@ -1275,7 +1222,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1318,7 +1265,7 @@ describe('Clinic native patient workflow', () => {
     )
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1352,7 +1299,7 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
     })
@@ -1393,7 +1340,7 @@ describe('Clinic native patient workflow', () => {
     )
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1462,7 +1409,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1522,7 +1469,7 @@ describe('Clinic native patient workflow', () => {
           { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
         ],
       }),
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1597,7 +1544,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: listOrders,
@@ -1639,7 +1586,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1676,7 +1623,7 @@ describe('Clinic native patient workflow', () => {
     )
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
     })
@@ -1722,7 +1669,7 @@ describe('Clinic native patient workflow', () => {
     const getOrderByIdempotencyKey = vi.fn().mockResolvedValue(existingOrder)
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       getOrderByIdempotencyKey,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1796,7 +1743,7 @@ describe('Clinic native patient workflow', () => {
     ]
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listPatientOrders: vi.fn().mockResolvedValue(orders),
     })
 
@@ -1836,7 +1783,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
       createOrderWithOutcome: createOrder,
@@ -1870,7 +1817,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
       createOrderWithOutcome: createOrder,
@@ -1917,7 +1864,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
       createOrderWithOutcome: createOrder,
@@ -1953,7 +1900,7 @@ describe('Clinic native patient workflow', () => {
     const getOrderByIdempotencyKey = vi.fn().mockResolvedValue(null) // 404
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       getOrderByIdempotencyKey,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -1987,7 +1934,7 @@ describe('Clinic native patient workflow', () => {
     const createOrder = vi.fn()
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null), // 404
       createOrderWithOutcome: createOrder,
       listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -2038,7 +1985,7 @@ describe('Clinic native patient workflow', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
     const client = makeClient({
-      listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+      listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       listPatientOrders: vi.fn().mockResolvedValue([]),
       createOrderWithOutcome: vi.fn().mockResolvedValue({
@@ -2120,7 +2067,7 @@ describe('Clinic native patient workflow', () => {
       const commitOrderIntentWithOutcome = vi.fn()
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2188,7 +2135,7 @@ describe('Clinic native patient workflow', () => {
       const createOrderIntentWithOutcome = vi.fn()
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2278,7 +2225,7 @@ describe('Clinic native patient workflow', () => {
       const createOrderIntentWithOutcome = vi.fn()
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2314,7 +2261,7 @@ describe('Clinic native patient workflow', () => {
         .mockRejectedValue(new ExchangeApiError(422, 'VALIDATION_ERROR', 'Commit refusé'))
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2382,7 +2329,7 @@ describe('Clinic native patient workflow', () => {
       )
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2474,7 +2421,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2538,8 +2485,8 @@ describe('Clinic native patient workflow', () => {
             { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
           ],
         }),
-        listPatientReferences: vi.fn((providerId: string) =>
-          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        listPatients: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientEntryWithName] : [patientEntryWithoutName]),
         ),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -2625,8 +2572,8 @@ describe('Clinic native patient workflow', () => {
             { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
           ],
         }),
-        listPatientReferences: vi.fn((providerId: string) =>
-          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        listPatients: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientEntryWithName] : [patientEntryWithoutName]),
         ),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
@@ -2694,7 +2641,7 @@ describe('Clinic native patient workflow', () => {
       )
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         createOrderIntentWithOutcome,
@@ -2779,7 +2726,7 @@ describe('Clinic native patient workflow', () => {
       const commitOrderIntentWithOutcome = vi.fn()
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2820,7 +2767,7 @@ describe('Clinic native patient workflow', () => {
       )
 
       const client = makeClient({
-        listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+        listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),
         getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2854,7 +2801,7 @@ describe('Clinic native patient workflow', () => {
 
       try {
         const client = makeClient({
-          listPatientReferences: vi.fn().mockResolvedValue([patientWithName, patientWithoutName]),
+          listPatients: vi.fn().mockResolvedValue([patientEntryWithName, patientEntryWithoutName]),
           listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
           listPatientOrders: vi.fn().mockResolvedValue([]),
           getOrderByIdempotencyKey: vi.fn().mockResolvedValue(null),
@@ -2905,8 +2852,8 @@ describe('Clinic native patient workflow', () => {
             { ...me.memberships[0], organization_id: 'provider-b', organization_name: 'Clinique B' },
           ],
         }),
-        listPatientReferences: vi.fn((providerId: string) =>
-          Promise.resolve(providerId === 'provider-a' ? [patientWithName] : [patientWithoutName]),
+        listPatients: vi.fn((providerId: string) =>
+          Promise.resolve(providerId === 'provider-a' ? [patientEntryWithName] : [patientEntryWithoutName]),
         ),
         listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
         listPatientOrders: vi.fn().mockResolvedValue([]),

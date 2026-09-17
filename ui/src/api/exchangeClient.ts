@@ -27,6 +27,9 @@ import type {
   LabOrderIntentCreateOutcome,
   LabOrderIntentCreateRequest,
   LabOrderSummary,
+  PatientCreateOutcome,
+  PatientCreateRequest,
+  PatientDirectoryEntry,
   PatientReference,
   PatientReferenceBindRequest,
   ProviderOrderResults,
@@ -368,6 +371,101 @@ export class ExchangeClient {
       `/organizations/${encodeURIComponent(providerId)}/patient-references/${encodeURIComponent(patientReferenceId)}`,
       { method: 'GET' },
       token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/patients
+   * DH-IDENTITY-001: native, provider-scoped Patient directory registration. Server owns the
+   * Patient id and its native PatientReference identity -- the caller supplies only demographic
+   * fields plus a request-identity Idempotency-Key, never a patient_id or source identity.
+   */
+  async createPatientWithOutcome(
+    providerId: string,
+    idempotencyKey: string,
+    body: PatientCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<PatientDirectoryEntry>(
+      `/organizations/${encodeURIComponent(providerId)}/patients`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { patient: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/patient-registrations/{idempotency_key}
+   * DH-IDENTITY-001 §19: server-side recovery for an ambiguous createPatientWithOutcome response.
+   * Returns null on 404 (registration never committed under this provider), throws on other
+   * errors.
+   */
+  async getPatientRegistration(
+    providerId: string,
+    idempotencyKey: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientDirectoryEntry | null> {
+    try {
+      return await this.request<PatientDirectoryEntry>(
+        `/organizations/${encodeURIComponent(providerId)}/patient-registrations/${encodeURIComponent(idempotencyKey)}`,
+        { method: 'GET', signal: options.signal },
+        options.token,
+      )
+    } catch (error) {
+      if (error instanceof ExchangeApiError && error.status === 404) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  async listPatients(
+    providerId: string,
+    options: { limit?: number; token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientDirectoryEntry[]> {
+    const limit = options.limit ?? 50
+    const params = new URLSearchParams({ limit: String(limit) })
+    return this.request<PatientDirectoryEntry[]>(
+      `/organizations/${encodeURIComponent(providerId)}/patients?${params.toString()}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  async searchPatients(
+    providerId: string,
+    query: string,
+    options: { limit?: number; token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientDirectoryEntry[]> {
+    return this.request<PatientDirectoryEntry[]>(
+      `/organizations/${encodeURIComponent(providerId)}/patients/search`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, limit: options.limit ?? 50 }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  async getPatient(
+    providerId: string,
+    patientId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientDirectoryEntry> {
+    return this.request<PatientDirectoryEntry>(
+      `/organizations/${encodeURIComponent(providerId)}/patients/${encodeURIComponent(patientId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
     )
   }
 

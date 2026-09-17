@@ -56,9 +56,10 @@ describe('Clinic Accessibility', () => {
         order_id: 'ord-1111-2222',
         versions: [],
       }),
-      bindPatientReference: vi.fn(),
-      bindPatientReferenceWithOutcome: vi.fn(),
-      listPatientReferences: vi.fn().mockResolvedValue([]),
+      createPatientWithOutcome: vi.fn(),
+      listPatients: vi.fn().mockResolvedValue([]),
+      searchPatients: vi.fn().mockResolvedValue([]),
+      getPatientRegistration: vi.fn().mockResolvedValue(null),
       getPatientReference: vi.fn(),
     } as unknown as ExchangeClient
   })
@@ -91,13 +92,16 @@ describe('Clinic Accessibility', () => {
   })
 
   it('Clinic native patient workspace has no detectable axe violations', async () => {
-    mockClient.listPatientReferences = vi.fn().mockResolvedValue([
+    mockClient.listPatients = vi.fn().mockResolvedValue([
       {
-        patient_reference_id: '11111111-1111-4111-8111-111111111111',
+        patient_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        provider_organization_id: 'provider-a',
         display_name: 'Patient Synthétique',
+        date_of_birth: null,
         contact_channel_type: 'PHONE',
         contact_value: '+25377000000',
-        local_reference: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        primary_patient_reference_id: '11111111-1111-4111-8111-111111111111',
+        created_at: new Date().toISOString(),
       },
     ])
     const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)

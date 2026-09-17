@@ -11,7 +11,8 @@ import type {
   LabOrderCreateOutcome,
   LabOrderIntent,
   LabOrderIntentItem,
-  PatientReferenceBindRequest,
+  PatientCreateRequest,
+  PatientDirectoryEntry,
 } from '../../../api/exchangeTypes'
 import type { ErrorCode } from '../../../api/types'
 import {
@@ -45,8 +46,25 @@ import {
 } from '../pendingOrderStorage'
 import styles from './ClinicPatientsPage.module.css'
 
-const NATIVE_PATIENT_SOURCE_SYSTEM = 'dhealth-clinic'
-const NATIVE_PATIENT_IDENTITY_SYSTEM = 'urn:dhealth:clinic:patient-reference-id'
+/**
+ * DH-IDENTITY-001 §33: the explicit, documented compatibility bridge -- existing LabOrder APIs
+ * still take a `patient_reference_id`, not a `patient_id`, and this ticket deliberately does not
+ * rationalize those APIs. Converting every Patient-directory response to a `ClinicPatientSummary`
+ * at this one boundary means the rest of this page's order/results machinery (already built
+ * against `ClinicPatientSummary`) needs no further change. `local_reference` mirrors the native
+ * reference's own `source_identity_value`, which the backend sets to the Patient's own id
+ * (`urn:dhealth:patient-id`, DH-IDENTITY-001 §13) -- so using `patient_id` here is exact, not an
+ * approximation.
+ */
+function toClinicPatientSummary(entry: PatientDirectoryEntry): ClinicPatientSummary {
+  return {
+    patient_reference_id: entry.primary_patient_reference_id,
+    display_name: entry.display_name,
+    contact_channel_type: entry.contact_channel_type,
+    contact_value: entry.contact_value,
+    local_reference: entry.patient_id,
+  }
+}
 
 interface ClinicPatientsPageProps {
   pendingCreations?: Record<string, PendingPatientCreation>
@@ -166,10 +184,10 @@ export function ClinicPatientsPage({
     const generation = ++requestGenerationRef.current
     setLoadState('loading')
     try {
-      const values = await client.listPatientReferences(targetProviderId, {
-        query,
-        limit: 50,
-      })
+      const entries = query.trim()
+        ? await client.searchPatients(targetProviderId, query.trim(), { limit: 50 })
+        : await client.listPatients(targetProviderId, { limit: 50 })
+      const values = entries.map(toClinicPatientSummary)
       if (
         mountedRef.current &&
         currentProviderRef.current === targetProviderId &&
@@ -212,9 +230,8 @@ export function ClinicPatientsPage({
     setCreateState(inMemoryPending && !inMemoryPending.confirmedPatientReferenceId ? 'uncertain' : 'idle')
     if (inMemoryPending?.confirmedPatientReferenceId) {
       setConfirmedReadAttempt({
-        source_system: inMemoryPending.body.source_system,
-        source_identity_system: inMemoryPending.body.source_identity_system,
-        source_identity_value: inMemoryPending.body.source_identity_value,
+        idempotency_key: inMemoryPending.idempotencyKey,
+        confirmed_patient_id: inMemoryPending.confirmedPatientId,
         confirmed_patient_reference_id: inMemoryPending.confirmedPatientReferenceId,
         created_at: Date.now(),
       })
@@ -237,7 +254,7 @@ export function ClinicPatientsPage({
         } else throw error
       }
       if (stored) {
-        // Block new creation immediately. A stored UUID may identify a POST which the server
+        // Block new creation immediately. A stored key may identify a POST which the server
         // committed before its response was lost, so it must be reconciled exactly, never replaced.
         setReconcilingStoredAttempt(true)
         if (!stored.confirmed_patient_reference_id) setUnresolvedStoredAttempt(stored)
@@ -245,10 +262,21 @@ export function ClinicPatientsPage({
           let found: ClinicPatientSummary | null = null
           try {
             if (stored.confirmed_patient_reference_id) {
+              // Confirmed by an earlier successful create response -- a real, usable
+              // patient_reference_id already, no idempotency-key lookup needed.
               found = await client.getPatientReference(
                 providerId,
                 stored.confirmed_patient_reference_id,
               )
+            } else {
+              // Ambiguous: the create POST's outcome was never observed. §19's server-side
+              // recovery endpoint resolves the opaque idempotency key to the authoritative
+              // Patient if (and only if) the registration actually committed.
+              const registration = await client.getPatientRegistration(
+                providerId,
+                stored.idempotency_key,
+              )
+              found = registration ? toClinicPatientSummary(registration) : null
             }
           } catch {
             // A read failure cannot undo a confirmed bind POST.
@@ -848,16 +876,17 @@ export function ClinicPatientsPage({
     setDefinitiveError(null)
 
     const existingPending = pendingCreations[scopeKey]
-    const identityValue =
-      existingPending?.body.source_identity_value ??
-      unresolvedStoredAttempt?.source_identity_value ??
+    // DH-IDENTITY-001 §13/§28: a request identity only -- the server owns the authoritative
+    // Patient id and its native source-identity binding. Never persisted as, or treated as, a
+    // patient identity.
+    const idempotencyKey =
+      existingPending?.idempotencyKey ??
+      unresolvedStoredAttempt?.idempotency_key ??
       globalThis.crypto.randomUUID()
 
-    const body: PatientReferenceBindRequest = {
-      source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
-      source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
-      source_identity_value: identityValue,
+    const body: PatientCreateRequest = {
       display_name: trimmedName,
+      date_of_birth: null,
       contact_channel_type: contactValue.trim() ? 'PHONE' : null,
       contact_value: contactValue.trim() || null,
     }
@@ -865,20 +894,16 @@ export function ClinicPatientsPage({
     const targetProviderId = providerId
     const hadEarlierAmbiguousAttempt = Boolean(existingPending || unresolvedStoredAttempt)
     // Durability is a precondition of issuing a mutation whose response may be lost.
-    if (!setStoredPendingPatient(user.identity_id, targetProviderId, {
-      source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
-      source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
-      source_identity_value: identityValue,
-    })) {
+    if (!setStoredPendingPatient(user.identity_id, targetProviderId, { idempotency_key: idempotencyKey })) {
       setCreateErrorCode('SERVER_ERROR')
       setDefinitiveError("Impossible de preparer la recuperation sure de cette creation. Aucun envoi n'a ete effectue.")
       return
     }
-    onPendingCreationChange(scopeKey, { body })
+    onPendingCreationChange(scopeKey, { body, idempotencyKey })
     setCreateState('submitting')
     let outcome
     try {
-      outcome = await client.bindPatientReferenceWithOutcome(targetProviderId, body)
+      outcome = await client.createPatientWithOutcome(targetProviderId, idempotencyKey, body)
     } catch (error) {
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
 
@@ -892,24 +917,28 @@ export function ClinicPatientsPage({
         setCreateState('idle')
       } else {
         // A later retry refusal cannot prove that an earlier ambiguous POST did not commit.
-        onPendingCreationChange(scopeKey, { body })
+        onPendingCreationChange(scopeKey, { body, idempotencyKey })
         setCreateErrorCode(safeErrorCode(error))
         setCreateState('uncertain')
       }
       return
     }
 
-    // Phase A is now authoritatively confirmed. Persist the returned reference before
+    // Phase A is now authoritatively confirmed. Persist the returned Patient before
     // Phase B so a failed read, reload, or navigation cannot turn it into a fresh create.
     const confirmed = {
-      source_system: NATIVE_PATIENT_SOURCE_SYSTEM,
-      source_identity_system: NATIVE_PATIENT_IDENTITY_SYSTEM,
-      source_identity_value: identityValue,
-      confirmed_patient_reference_id: outcome.reference.id,
+      idempotency_key: idempotencyKey,
+      confirmed_patient_id: outcome.patient.patient_id,
+      confirmed_patient_reference_id: outcome.patient.primary_patient_reference_id,
     }
     if (!setStoredPendingPatient(user.identity_id, targetProviderId, confirmed)) {
       // The mutation is confirmed; retain it in memory and avoid any second create.
-      onPendingCreationChange(scopeKey, { body, confirmedPatientReferenceId: outcome.reference.id })
+      onPendingCreationChange(scopeKey, {
+        body,
+        idempotencyKey,
+        confirmedPatientId: outcome.patient.patient_id,
+        confirmedPatientReferenceId: outcome.patient.primary_patient_reference_id,
+      })
       if (mountedRef.current && currentProviderRef.current === targetProviderId) {
         setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
         setCreateErrorCode('SERVER_ERROR')
@@ -923,11 +952,14 @@ export function ClinicPatientsPage({
     // whatever provider the clinician may have selected while the POST was in flight.
     if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
     // Phase B is a read only. Gate creation before awaiting it so cancel/navigation
-    // cannot mint another source identity while this confirmed reference is loading.
+    // cannot mint another registration while this confirmed patient is loading.
     setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
     setShowCreate(false)
     try {
-      const authoritative = await client.getPatientReference(targetProviderId, outcome.reference.id)
+      const authoritative = await client.getPatientReference(
+        targetProviderId,
+        outcome.patient.primary_patient_reference_id,
+      )
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
       clearStoredPendingPatient(user.identity_id, targetProviderId)
       setUnresolvedStoredAttempt(null)

@@ -328,6 +328,126 @@ describe('ExchangeClient', () => {
     )
   })
 
+  it('createPatientWithOutcome sends POST /organizations/{id}/patients with Idempotency-Key', async () => {
+    const entry = {
+      patient_id: 'patient-1',
+      provider_organization_id: 'prov-1',
+      display_name: 'Amina Hassan',
+      date_of_birth: null,
+      contact_channel_type: null,
+      contact_value: null,
+      primary_patient_reference_id: 'pat-ref-1',
+      created_at: '2026-09-17T00:00:00Z',
+    }
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(entry), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(entry), { status: 200 }))
+    const client = new ExchangeClient()
+    const body = { display_name: 'Amina Hassan' }
+
+    await expect(
+      client.createPatientWithOutcome('prov-1', 'idem-1', body),
+    ).resolves.toEqual({ patient: entry, created: true })
+    await expect(
+      client.createPatientWithOutcome('prov-1', 'idem-1', body),
+    ).resolves.toEqual({ patient: entry, created: false })
+
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/patients')
+    expect(init?.method).toBe('POST')
+    expect((init as RequestInit).headers as Record<string, string>).toMatchObject({
+      'Idempotency-Key': 'idem-1',
+    })
+    expect(JSON.parse(init?.body as string)).toEqual(body)
+  })
+
+  it('getPatientRegistration returns null on 404 and the entry otherwise', async () => {
+    const entry = {
+      patient_id: 'patient-1',
+      provider_organization_id: 'prov-1',
+      display_name: 'Amina Hassan',
+      date_of_birth: null,
+      contact_channel_type: null,
+      contact_value: null,
+      primary_patient_reference_id: 'pat-ref-1',
+      created_at: '2026-09-17T00:00:00Z',
+    }
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(entry), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'patient registration not found' }), {
+          status: 404,
+        }),
+      )
+    const client = new ExchangeClient()
+
+    await expect(client.getPatientRegistration('prov-1', 'idem-1')).resolves.toEqual(entry)
+    await expect(client.getPatientRegistration('prov-1', 'idem-2')).resolves.toBeNull()
+
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe(
+      '/exchange/v1/organizations/prov-1/patient-registrations/idem-1',
+    )
+  })
+
+  it('lists and searches the native Patient directory with GET/POST respectively', async () => {
+    const entries = [
+      {
+        patient_id: 'patient-1',
+        provider_organization_id: 'prov-1',
+        display_name: 'Patient Synthétique',
+        date_of_birth: null,
+        contact_channel_type: null,
+        contact_value: null,
+        primary_patient_reference_id: 'pat-ref-1',
+        created_at: '2026-09-17T00:00:00Z',
+      },
+    ]
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(entries), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(entries), { status: 200 }))
+    const client = new ExchangeClient()
+
+    await expect(client.listPatients('prov-1')).resolves.toEqual(entries)
+    await expect(client.searchPatients('prov-1', 'Synthétique', { limit: 25 })).resolves.toEqual(
+      entries,
+    )
+
+    const [listUrl, listInit] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(listUrl).toBe('/exchange/v1/organizations/prov-1/patients?limit=50')
+    expect(listInit?.method).toBe('GET')
+
+    const [searchUrl, searchInit] = vi.mocked(globalThis.fetch).mock.calls[1]
+    expect(searchUrl).toBe('/exchange/v1/organizations/prov-1/patients/search')
+    expect(String(searchUrl)).not.toContain('Synth')
+    expect(searchInit?.method).toBe('POST')
+    expect(JSON.parse(searchInit?.body as string)).toEqual({
+      query: 'Synthétique',
+      limit: 25,
+    })
+  })
+
+  it('gets one provider-scoped Patient by id', async () => {
+    const entry = {
+      patient_id: 'patient-1',
+      provider_organization_id: 'prov-1',
+      display_name: null,
+      date_of_birth: null,
+      contact_channel_type: null,
+      contact_value: null,
+      primary_patient_reference_id: 'pat-ref-1',
+      created_at: '2026-09-17T00:00:00Z',
+    }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(entry), { status: 200 }),
+    )
+    const client = new ExchangeClient()
+
+    await expect(client.getPatient('prov-1', 'patient-1')).resolves.toEqual(entry)
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe(
+      '/exchange/v1/organizations/prov-1/patients/patient-1',
+    )
+  })
+
   it('normalizes 401 Unauthorized with isAuthError = true', async () => {
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: 'invalid or missing credentials' }), {

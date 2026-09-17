@@ -1,9 +1,17 @@
 /**
- * Non-PHI storage for unresolved native Clinic patient creation (DH-CLINIC-002A).
+ * Non-PHI storage for unresolved native Clinic patient creation (DH-CLINIC-002A, updated
+ * DH-IDENTITY-001).
  *
- * Requirements:
- * - Persists ONLY technical opaque identity tuple across reload/restart.
- * - ZERO patient PHI: no name, no phone, no contact, no demographics.
+ * DH-IDENTITY-001 rewrite: the persisted identity is now a request-identity `idempotency_key`
+ * (a value the browser generates for retry/recovery purposes only), never a patient identity --
+ * the server owns the authoritative Patient id and its native source-identity binding (§13/§28).
+ * The old shape (`source_system`/`source_identity_system`/`source_identity_value`) is gone; those
+ * fields never described a real patient identity to begin with, only the browser's own stand-in
+ * for one, which this ticket explicitly retires.
+ *
+ * Requirements (unchanged from before this rewrite):
+ * - Persists ONLY technical opaque identity across reload/restart.
+ * - ZERO patient PHI: no name, DOB, phone, contact, or other demographics (§30).
  * - Bound strictly to authenticated user identity + active provider scope.
  * - Provider A cannot access Provider B's pending token.
  * - User A cannot access User B's pending token.
@@ -13,11 +21,13 @@
  */
 
 export interface OpaquePendingPatientIdentity {
-  source_system: string
-  source_identity_system: string
-  source_identity_value: string
+  idempotency_key: string
   created_at: number
-  /** Set only after the exact bind POST has returned successfully; still non-PHI. */
+  /** Set only after the create POST has returned successfully; still non-PHI. */
+  confirmed_patient_id?: string
+  /** Compatibility-bridge id (§33) -- avoids a second network round trip to resolve the
+   * existing patient-reference-scoped order/results UI once a Patient is confirmed. Still
+   * non-PHI: an opaque reference id, not a demographic field. */
   confirmed_patient_reference_id?: string
 }
 
@@ -28,7 +38,7 @@ export class PendingPatientStorageReadError extends Error {
   }
 }
 
-const STORAGE_PREFIX = 'dhealth_clinic_pending_patient_v1:'
+const STORAGE_PREFIX = 'dhealth_clinic_pending_patient_v2:'
 
 function makeKey(userId: string, providerId: string): string {
   return `${STORAGE_PREFIX}${userId}:${providerId}`
@@ -45,7 +55,7 @@ function getStorage(): Storage | null {
   return null
 }
 
-/** A read failure means we cannot prove that this scoped browser has no pending UUID. */
+/** A read failure means we cannot prove that this scoped browser has no pending registration. */
 export function canReadPendingPatientStorage(): boolean {
   const storage = getStorage()
   if (!storage) return false
@@ -87,33 +97,34 @@ export function getStoredPendingPatient(
 
   // 3. Schema validation: must be a plain object
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new PendingPatientStorageReadError('Corrupted pending patient storage: expected JSON object')
+    throw new PendingPatientStorageReadError(
+      'Corrupted pending patient storage: expected JSON object',
+    )
   }
 
   const obj = parsed as Record<string, unknown>
 
   // 4. Validate required technical fields
-  const hasValidSourceSystem =
-    typeof obj.source_system === 'string' && obj.source_system.trim().length > 0
-  const hasValidSourceIdentitySystem =
-    typeof obj.source_identity_system === 'string' && obj.source_identity_system.trim().length > 0
-  const hasValidSourceIdentityValue =
-    typeof obj.source_identity_value === 'string' && obj.source_identity_value.trim().length > 0
-  const hasValidCreatedAt =
-    typeof obj.created_at === 'number' && Number.isFinite(obj.created_at)
+  const hasValidIdempotencyKey =
+    typeof obj.idempotency_key === 'string' && obj.idempotency_key.trim().length > 0
+  const hasValidCreatedAt = typeof obj.created_at === 'number' && Number.isFinite(obj.created_at)
 
-  if (
-    !hasValidSourceSystem ||
-    !hasValidSourceIdentitySystem ||
-    !hasValidSourceIdentityValue ||
-    !hasValidCreatedAt
-  ) {
+  if (!hasValidIdempotencyKey || !hasValidCreatedAt) {
     throw new PendingPatientStorageReadError(
       'Corrupted pending patient storage: missing or invalid required technical fields',
     )
   }
 
-  // 5. Optional confirmed_patient_reference_id must be valid string if present
+  // 5. Optional confirmed_patient_id must be a valid string if present
+  if ('confirmed_patient_id' in obj && obj.confirmed_patient_id !== undefined) {
+    if (typeof obj.confirmed_patient_id !== 'string' || obj.confirmed_patient_id.trim().length === 0) {
+      throw new PendingPatientStorageReadError(
+        'Corrupted pending patient storage: invalid confirmed_patient_id',
+      )
+    }
+  }
+
+  // 6. Optional confirmed_patient_reference_id must be a valid string if present
   if ('confirmed_patient_reference_id' in obj && obj.confirmed_patient_reference_id !== undefined) {
     if (
       typeof obj.confirmed_patient_reference_id !== 'string' ||
@@ -126,10 +137,11 @@ export function getStoredPendingPatient(
   }
 
   return {
-    source_system: obj.source_system as string,
-    source_identity_system: obj.source_identity_system as string,
-    source_identity_value: obj.source_identity_value as string,
+    idempotency_key: obj.idempotency_key as string,
     created_at: obj.created_at as number,
+    ...(typeof obj.confirmed_patient_id === 'string'
+      ? { confirmed_patient_id: obj.confirmed_patient_id }
+      : {}),
     ...(typeof obj.confirmed_patient_reference_id === 'string'
       ? { confirmed_patient_reference_id: obj.confirmed_patient_reference_id }
       : {}),
@@ -145,10 +157,11 @@ export function setStoredPendingPatient(
   if (!storage || !userId || !providerId) return false
 
   const record: OpaquePendingPatientIdentity = {
-    source_system: pending.source_system,
-    source_identity_system: pending.source_identity_system,
-    source_identity_value: pending.source_identity_value,
+    idempotency_key: pending.idempotency_key,
     created_at: pending.created_at ?? Date.now(),
+    ...(typeof pending.confirmed_patient_id === 'string'
+      ? { confirmed_patient_id: pending.confirmed_patient_id }
+      : {}),
     ...(typeof pending.confirmed_patient_reference_id === 'string'
       ? { confirmed_patient_reference_id: pending.confirmed_patient_reference_id }
       : {}),

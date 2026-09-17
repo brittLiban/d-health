@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ExchangeClient } from '../../api/exchangeClient'
-import type { LabOrder, PatientReferenceBindRequest } from '../../api/exchangeTypes'
+import type { LabOrder, PatientCreateRequest } from '../../api/exchangeTypes'
 import { ClinicProvider } from './ClinicContext'
 import { ClinicShell, type ClinicTabId } from './ClinicShell'
 import { ClinicHomePage } from './pages/ClinicHomePage'
@@ -9,7 +9,10 @@ import { ClinicPatientsPage } from './pages/ClinicPatientsPage'
 import { ClinicResultsPage } from './pages/ClinicResultsPage'
 
 export interface PendingPatientCreation {
-  body: PatientReferenceBindRequest
+  body: PatientCreateRequest
+  /** DH-IDENTITY-001: a request identity only, never a patient identity (§13/§28). */
+  idempotencyKey: string
+  confirmedPatientId?: string
   confirmedPatientReferenceId?: string
 }
 

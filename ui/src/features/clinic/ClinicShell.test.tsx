@@ -29,7 +29,7 @@ describe('ClinicShell', () => {
     getOrder: vi.fn().mockResolvedValue({}),
     getOrderResults: vi.fn().mockResolvedValue({}),
     getReleaseVersions: vi.fn().mockResolvedValue({}),
-    bindPatientReference: vi.fn().mockResolvedValue({}),
+    createPatientWithOutcome: vi.fn().mockResolvedValue({}),
   } as unknown as ExchangeClient
 
   it('renders French-first navigation items and marks active tab with aria-current="page"', async () => {

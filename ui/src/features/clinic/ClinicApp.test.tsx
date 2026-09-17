@@ -96,9 +96,10 @@ describe('ClinicApp', () => {
           },
         ],
       }),
-      bindPatientReference: vi.fn(),
-      bindPatientReferenceWithOutcome: vi.fn(),
-      listPatientReferences: vi.fn().mockResolvedValue([]),
+      createPatientWithOutcome: vi.fn(),
+      listPatients: vi.fn().mockResolvedValue([]),
+      searchPatients: vi.fn().mockResolvedValue([]),
+      getPatientRegistration: vi.fn().mockResolvedValue(null),
       getPatientReference: vi.fn(),
     } as unknown as ExchangeClient
   })

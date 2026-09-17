@@ -228,6 +228,35 @@ export interface BindPatientReferenceOutcome {
   created: boolean
 }
 
+/**
+ * DH-IDENTITY-001: the native, provider-scoped Patient directory record -- distinct from
+ * ClinicPatientSummary/PatientReference above, which stay exactly what they were (the legacy
+ * exact source-identity binding view). `primary_patient_reference_id` is a compatibility bridge
+ * only: existing LabOrder APIs still take a patient_reference_id, not a patient_id.
+ */
+export interface PatientDirectoryEntry {
+  patient_id: string
+  provider_organization_id: string
+  display_name: string | null
+  date_of_birth: string | null
+  contact_channel_type: string | null
+  contact_value: string | null
+  primary_patient_reference_id: string
+  created_at: string
+}
+
+export interface PatientCreateRequest {
+  display_name: string
+  date_of_birth?: string | null
+  contact_channel_type?: string | null
+  contact_value?: string | null
+}
+
+export interface PatientCreateOutcome {
+  patient: PatientDirectoryEntry
+  created: boolean
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'
