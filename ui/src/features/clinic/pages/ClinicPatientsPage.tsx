@@ -136,6 +136,7 @@ export function ClinicPatientsPage({
   const [selected, setSelected] = useState<{ providerId: string; value: ClinicPatientSummary } | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [displayName, setDisplayName] = useState('')
+  const [dateOfBirth, setDateOfBirth] = useState('')
   const [contactValue, setContactValue] = useState('')
   const [displayNameError, setDisplayNameError] = useState<string | null>(null)
   const [createState, setCreateState] = useState<'idle' | 'submitting' | 'uncertain'>('idle')
@@ -225,6 +226,7 @@ export function ClinicPatientsPage({
     // 1. In-memory pending attempt from tab switching within the same React session
     const inMemoryPending = scopeKey ? pendingCreations[scopeKey] : undefined
     setDisplayName(String(inMemoryPending?.body.display_name ?? ''))
+    setDateOfBirth(String(inMemoryPending?.body.date_of_birth ?? ''))
     setContactValue(String(inMemoryPending?.body.contact_value ?? ''))
     setShowCreate(Boolean(inMemoryPending && !inMemoryPending.confirmedPatientReferenceId))
     setCreateState(inMemoryPending && !inMemoryPending.confirmedPatientReferenceId ? 'uncertain' : 'idle')
@@ -856,6 +858,7 @@ export function ClinicPatientsPage({
     // source identity remains available for exact reconciliation.
     if (!unresolvedStoredAttempt && !pendingCreations[scopeKey ?? '']) {
       setDisplayName('')
+      setDateOfBirth('')
       setContactValue('')
       setDisplayNameError(null)
       setDefinitiveError(null)
@@ -886,7 +889,7 @@ export function ClinicPatientsPage({
 
     const body: PatientCreateRequest = {
       display_name: trimmedName,
-      date_of_birth: null,
+      date_of_birth: dateOfBirth.trim() || null,
       contact_channel_type: contactValue.trim() ? 'PHONE' : null,
       contact_value: contactValue.trim() || null,
     }
@@ -1463,6 +1466,13 @@ export function ClinicPatientsPage({
                 </p>
               ) : null}
             </div>
+            <TextInput
+              label="Date de naissance (facultatif)"
+              type="date"
+              value={dateOfBirth}
+              disabled={createState !== 'idle'}
+              onChange={(event) => setDateOfBirth(event.target.value)}
+            />
             <TextInput
               label="Téléphone (facultatif)"
               type="tel"

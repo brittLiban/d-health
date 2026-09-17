@@ -316,6 +316,32 @@ describe('Clinic native patient workflow', () => {
     expect(get).toHaveBeenCalledWith('provider-a', patientWithName.patient_reference_id)
   })
 
+  it('creates a patient with an optional exact date of birth', async () => {
+    const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
+    const get = vi.fn().mockResolvedValue(patientWithName)
+    const client = makeClient({
+      createPatientWithOutcome: bind,
+      getPatientReference: get,
+    })
+
+    render(<ClinicApp client={client} initialTab="patients" />)
+    expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
+    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Avec Naissance')
+    await user.type(screen.getByLabelText('Date de naissance (facultatif)'), '1990-05-14')
+    await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
+
+    expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
+    const [, , submitted] = bind.mock.calls[0]
+    expect(submitted).toMatchObject({
+      display_name: 'Patient Avec Naissance',
+      date_of_birth: '1990-05-14',
+      contact_channel_type: null,
+      contact_value: null,
+    })
+  })
+
   it('submits provider-local search text and renders the returned result', async () => {
     // Mount always calls listPatients (empty search); submitting the form calls searchPatients.
     const list = vi.fn().mockResolvedValue([])
@@ -873,6 +899,32 @@ describe('Clinic native patient workflow', () => {
 
     // Automatically reconciled and opened
     expect(await screen.findByRole('heading', { name: 'Patient Déjà Sauvegardé' })).toBeInTheDocument()
+    // Cleared from pending storage
+    expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
+  })
+
+  it('recovers an unconfirmed attempt via server-side registration lookup when the create response was lost', async () => {
+    // No confirmed_patient_reference_id was ever recorded -- the create POST's response never
+    // reached the browser, but the server may have committed it anyway. Only the opaque request
+    // identity survives to reconcile against.
+    setStoredPendingPatient('identity-1', 'provider-a', {
+      idempotency_key: 'lost-response-key',
+      created_at: Date.now(),
+    })
+
+    const getPatientRegistration = vi.fn().mockResolvedValue(patientEntryWithName)
+    const client = makeClient({
+      listPatients: vi.fn().mockResolvedValue([]),
+      getPatientRegistration,
+      getPatientReference: vi.fn(),
+    })
+
+    render(<ClinicApp client={client} initialTab="patients" />)
+
+    // Automatically reconciled and opened via the idempotency-key lookup, never getPatientReference
+    expect(await screen.findByRole('heading', { name: patientWithName.display_name! })).toBeInTheDocument()
+    expect(getPatientRegistration).toHaveBeenCalledWith('provider-a', 'lost-response-key')
+    expect(client.getPatientReference).not.toHaveBeenCalled()
     // Cleared from pending storage
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
   })
