@@ -15408,3 +15408,231 @@ item is unchanged by this ticket.**
 **NEXT: DH-CLINIC-006 — Provider-assigned laboratory workflow.** Not started in this ticket. No pull
 request was created or used for this ticket's work, per its own explicit instruction; every change
 landed as a focused commit directly on `master`.
+
+## DH-CLINIC-006 (2026-09-18) — Provider-assigned laboratory workflow
+
+**Starting master SHA:** `741af6423a9725d038e2ea5cc0025e44044e6379` (DH-CLINIC-005's own final
+documentation commit). **No branch, no PR** — this ticket's own explicit instruction. **Does not
+touch, does not runtime-qualify, and does not change DH-CLINIC-004B's own open item** — unchanged
+by this ticket. **Does not claim ADR-043 Law 2 ("no double entry") is solved** — this ticket proves
+DHealth-side routing to a DHealth lab *organization* only, never that any real lab staff system
+received the order; that remains DH-PILOT-TOPOLOGY-001's own future choice.
+
+**Objective and scope.** DH-EX-010 built `LabSelectionRepository.assign_by_provider` — ADR-043's
+pre-authorized launch option (a) — but never answered "which labs is a given provider actually
+configured to work with?" Without an explicit answer, the only concept already in the codebase that
+could plausibly fill that gap is `LabDirectoryProfile.listed`, the public marketplace-visibility
+flag — reaching for it would silently turn provider routing into marketplace browsing, exactly what
+ADR-043 Law 1 forbids. This ticket introduces `ProviderLabRoute`, the missing routing-authority
+concept, and wires the Clinic frontend to it end to end, without rebuilding or weakening anything
+`assign_by_provider`/`LabSelectionRepository` already did.
+
+**What was built — backend, commit 1 `c096cca` (model/migration/CI), commit 2 `c48a7e5`
+(enforcement/API/tests), fix commits `1b354f0`/`efb628c` (CI-found migration-revision-id and
+qualification-script fixes):**
+
+- **`adapter/src/daher_adapter/exchange/provider_lab_routes.py`** (new): `ProviderLabRouteRepository`
+  — idempotent `upsert` (unique on `(provider_organization_id, lab_organization_id)`,
+  IntegrityError-as-race-retry, mirroring `LabDirectoryProfileRepository`'s own pattern),
+  organization-type enforcement at the repository layer (`InvalidProviderLabRouteOrganizationType`;
+  deliberately does *not* also require ACTIVE status, so a route to a since-deactivated lab can
+  still be read/deactivated, never permanently stuck), `list_for_provider` (the provider's own
+  directory read), and `find_whole_order_eligible_labs` — a three-pass narrowing read mirroring
+  `catalog.find_whole_order_eligible_labs` exactly, but keyed on `ProviderLabRoute.active` instead
+  of `listed`, and with **no `LabPrice` join anywhere**. Deliberately does not force `REPEATABLE
+  READ` (unlike the marketplace version) — this read is advisory UI data only; `assign_by_provider`
+  is the sole authoritative re-check under its own row lock.
+- **`adapter/src/daher_adapter/exchange/models.py`**: new `ProviderLabRoute` model
+  (`exchange_provider_lab_routes`), widened `ExchangeSecurityAuditEvent` CHECK constraints for
+  `provider_lab_route_created`/`provider_lab_route_updated`/`provider_lab_route`.
+  **`adapter/src/daher_adapter/exchange/security_audit.py`**: matching `SecurityEventType`/
+  `SecurityResourceType` Literal additions.
+- **Migration `0023_provider_lab_routes`** (renamed from an initial `0023_exchange_provider_lab_routes`
+  after CI caught it exceeding Alembic's default 32-character `version_num` column — see "Errors
+  found and fixed" below): new table, widened CHECK constraints, downgrade guard refusing to drop
+  the table while any route row exists. `EXPECTED_HEAD` bumped in `.github/workflows/ci.yml`.
+- **`adapter/src/daher_adapter/exchange/selection.py`**: `assign_by_provider` now checks for an
+  active `ProviderLabRoute` *inside its own locked mutation*, first among the fresh eligibility
+  re-checks (before the org/profile/offering checks), raising the new `ProviderLabRouteNotActive`
+  — so a future caller bypassing HTTP cannot skip the routing boundary, and the check is
+  serialized against a concurrent same-order assignment by the `LabOrder` row lock already held
+  (it does genuinely race a concurrent route *deactivation*, since that takes its own separate lock
+  on the route row — see PG5 below for why that race is benign). New `LabAssignmentSummaryRecord` +
+  `get_assignment_summaries_for_orders`/`get_assignment_summary_for_order` (batched, N+1-safe,
+  joined straight to `Organization` for the lab's current display name) + `LabAssignmentIntegrityError`
+  + `STATUSES_REQUIRING_LAB_SELECTION` (`SELECTED`/`ACCEPTED`/`IN_PROGRESS`/`COMPLETED` — the
+  statuses only reachable via SELECTED, which both `select()` and `assign_by_provider()` always
+  write in the same flush as the `LabSelection` row itself; `REJECTED`/`CANCELLED` are deliberately
+  excluded since they're reachable *directly* from `AWAITING_LAB_SELECTION` with no prior routing).
+- **`adapter/src/daher_adapter/exchange/api.py`**: new `PUT /organizations/{provider_id}/lab-routes/{lab_id}`
+  (platform-admin only via `authz.require_platform_admin`, never `_require_org_admin` — a route
+  spans two organizations and needs neutral platform authority; idempotent, audited including an
+  `"unchanged"` outcome on a true no-op replay, mirroring `put_directory_profile`'s own convention
+  rather than `assign_lab_to_order`'s different idempotent-mutation-suppression one); new
+  `GET /organizations/{provider_id}/lab-routes` (CLINICIAN minimum, same gate as `assign_lab_to_order`);
+  new `GET /organizations/{provider_id}/orders/{order_id}/eligible-labs` (CLINICIAN, order id alone
+  determines the required test set, anti-enumerating — cross-provider order id is 404, same as every
+  other provider-scoped order read). `LabOrderResponse`/`LabOrderSummaryResponse` gained
+  `lab_assignment`, resolved via new `_lab_assignment_for_order`/`_lab_assignments_for_orders`
+  closures at all 6 order-returning call sites — resolved from the canonical `LabSelection`
+  *whenever one exists*, regardless of the order's current status (so a SELECTED-then-REJECTED
+  order still truthfully shows the lab that rejected it), and raising `LabAssignmentIntegrityError`
+  only when a status in `STATUSES_REQUIRING_LAB_SELECTION` has none.
+- **Tests**: `test_exchange_provider_lab_routes.py` (new, 21: R1-R7 route CRUD/type-enforcement/
+  historical-selection-survives-deactivation, E1-E9/E11/E12 eligibility); `test_exchange_provider_lab_routes_api.py`
+  (new, 18: PUT/GET authorization/idempotency/audit, eligible-labs anti-enumeration, A7-A9
+  revalidate-at-commit — route deactivated/`accepting_orders` flipped/offering deactivated *after*
+  an eligible-labs read all correctly refuse assignment with zero `LabSelection` rows created);
+  `test_exchange_orders_api.py` gained OR1-OR7 (unassigned=null, assigned=id/name/timestamp present,
+  batched-not-N+1 by SQL-statement counting, unlisted-lab-displays-correctly, cross-provider
+  anti-enumeration, patient+lab_assignment coexist, REJECTED-order-that-was-routed still shows its
+  lab) plus a dangling-`LabSelection` adversarial construction proving `LabAssignmentIntegrityError`
+  fires rather than fabricating `lab_assignment: null`; `tests/integration/test_dhclinic006_postgres_qualification.py`
+  (new, real-PostgreSQL-only, opt-in) — PG1 (5 concurrent same-lab assignments converge to exactly
+  one `LabSelection`), PG2 (2 concurrent different-lab assignments produce exactly one winner and
+  one clean `DifferentLabAlreadySelected` loser, never two rows), PG5 (a route deactivation racing
+  an assignment resolves to one of exactly two truthful outcomes only — the assignment either reads
+  the route active and succeeds cleanly with the later deactivation never touching the resulting
+  `LabSelection`, or reads it already inactive and fails closed with `ProviderLabRouteNotActive` —
+  never a torn state); a new CI step runs this against the job's own disposable `postgres:16-alpine`
+  service. Existing DH-EX-010 fixtures across `test_exchange_provider_assignment.py`,
+  `test_exchange_provider_assignment_api.py`, `test_exchange_access_mode.py`,
+  `test_exchange_sample_collection.py`, `test_exchange_audit_atomicity.py` all updated to configure
+  an active route before calling assign-lab, matching the new required precondition (two of
+  `test_exchange_provider_assignment.py`'s own negative-control tests — targeting a non-LAB
+  organization and a nonexistent lab id — now correctly assert `ProviderLabRouteNotActive` instead
+  of `LabCannotFulfillOrder`, since no route can ever exist to either target).
+
+**What was built — frontend, commit 3 `3975c9b`:**
+
+- **`ui/src/api/exchangeTypes.ts`/`exchangeClient.ts`** (landed in backend commit 2, alongside the
+  API contract they mirror): `LabAssignmentSummary`, `ProviderEligibleLab`, `ProviderLabRoute`,
+  `AssignLabRequest`, `LabAssignmentResponse` (exactly the 3 fields the backend response actually
+  has — deliberately *not* `lab_organization_name`, so nothing can render a lab name straight from
+  an assign response instead of a fresh authoritative order read); `getEligibleLabs`/`assignLab`/
+  `listProviderLabRoutes` client methods, both list-shaped types gaining `lab_assignment`.
+- **`ui/src/features/clinic/components/LabRoutingStep.tsx`** (new, + its own `.module.css` and a
+  9-test standalone suite): the one shared provider-routing UI — patient identity + ordered tests
+  shown alongside the eligible-lab list (never the lab alone), name/address/phone only per lab (no
+  price/ranking/"best"/star-rating/distance/sponsored badge of any kind), an explicit
+  "Confirmer l'envoi au laboratoire" button gating assignment even with exactly one eligible lab,
+  the exact truthful zero-eligible-labs French message, a 409-conflict path that keeps its own
+  error banner visible while silently refreshing the now-stale list underneath it (an early bug:
+  the list-refresh helper's own state reset was clobbering the just-set conflict message in the
+  same render batch — fixed by moving the assignment-outcome banner outside the eligible-list's own
+  conditional tree so the two are rendered independently), and generation-ref/provider-ref/order-ref
+  stale-response protection matching `ClinicResultsPage.tsx`'s own established discipline. After a
+  successful `assignLab`, always re-reads via `getOrder` for the authoritative, *named* assignment
+  before calling `onAssigned` — never trusts the assign response's own (unnamed) body. Structurally
+  cannot call the marketplace/price/patient-selection endpoints: the Clinic-facing `ExchangeClient`
+  has no such methods to call at all.
+- **`ClinicPatientsPage.tsx`**: the order wizard's `orderStep` gains `'routing'`, inserted strictly
+  after a successful durable commit (fresh *or* recovered — a new `stepForCommittedOrder` helper
+  checks the actual committed order's real status, so a recovered-but-still-unassigned order
+  correctly re-enters routing rather than being fabricated as "confirmed") and strictly before
+  `'confirmation'` — the order already exists by that point, so this step's only actions are
+  retry-routing or a fresh `getOrder` re-read, never a second `POST` of the original intent. The
+  order-history list's previously-fabricated `formatOrderLabText` ("Sélectionné"/"Pas encore
+  sélectionné"/"Indéterminé pour cet ordre clôturé", derived from status alone) is deleted and
+  replaced by the order's real `lab_assignment` (or a truthful "Non attribué"), with a "Choisir un
+  laboratoire" action — reusing `LabRoutingStep` inline — for any order still
+  `AWAITING_LAB_SELECTION`.
+- **`ClinicOrdersPage.tsx`**: new "Laboratoire destinataire" column (real destination or "Non
+  attribué" + routing action for unassigned orders, gated on `status === 'AWAITING_LAB_SELECTION'`,
+  never on `lab_assignment === null` alone — a rejected-but-previously-routed order must never grow
+  a spurious action). Opening the action fetches the full order (for its `items`) before mounting
+  `LabRoutingStep`; a stale-response guard uses the panel's own `routingState.orderId` identity
+  check rather than a numeric generation counter, since re-opening the same row mid-load is an
+  idempotent no-op, not a race to guard against.
+- **French wording unified**: `SELECTED`'s label on both pages is now "Laboratoire destinataire
+  sélectionné" (previously `'Laboratoire sélectionné'` on Orders, `'Labo sélectionné'` on Patients)
+  — distinct from `ACCEPTED`'s own "Accepté", never implying the lab has accepted, collected a
+  specimen, or started analysis.
+
+**Errors found and fixed during this ticket (all before any commit landed, or caught by CI and
+fixed in a same-day follow-up commit — see the advisor-review discipline this session used):**
+
+1. **`PUT lab-routes` returned an unhandled 500 for a nonexistent organization** — the repository's
+   `_require_org_type` calls `organizations.get()`, which raises `OrganizationNotFound`, but the
+   route handler only caught `InvalidProviderLabRouteOrganizationType`. Fixed: `OrganizationNotFound`
+   → 404, with 2 new tests.
+2. **`lab_assignment` was initially hidden for a REJECTED/CANCELLED order that *was* routed before
+   closing** — the first implementation skipped resolution entirely outside
+   `STATUSES_REQUIRING_LAB_SELECTION`, which would have rendered "Non attribué" for a
+   SELECTED-then-REJECTED order even though its `LabSelection` is real and the clinician needs to
+   see which lab rejected it. Fixed: always resolve from `LabSelection` when one exists; the
+   integrity-error fail-closed path applies only when a status that structurally requires one is
+   missing it.
+3. **Frontend `LabAssignmentResponse` type initially claimed a `lab_organization_name` field the
+   backend response doesn't have** — load-bearing for §30 (never render a lab name from the assign
+   response itself). Fixed to the exact 3 fields the backend actually returns.
+4. **A code comment overclaimed the route-deactivation-race check as "never racing" a concurrent
+   deactivation** — it does genuinely race (the `LabOrder` row lock does not serialize against
+   `ProviderLabRouteRepository.upsert`'s own separate lock on the route row); what makes the race
+   *benign* is PostgreSQL READ COMMITTED handing the read a consistent, genuinely-committed view
+   either way. Fixed the comment in `selection.py` and the PG5 test's own docstring to state the
+   true, weaker, still-sufficient guarantee.
+5. **Migration revision id too long for Alembic's own bookkeeping** — CI's real-PostgreSQL run (not
+   any local/SQLite test) caught `0023_exchange_provider_lab_routes` (33 characters) exceeding
+   Alembic's default `alembic_version.version_num` `VARCHAR(32)` column, failing the migration's own
+   `UPDATE alembic_version SET version_num=...` bookkeeping statement before any of this migration's
+   actual DDL mattered. Fixed by renaming to `0023_provider_lab_routes` (24 characters) throughout
+   (filename, `revision` string, `EXPECTED_HEAD`, the PG-qualification test's docstring) — commit
+   `1b354f0`.
+6. **DH-IDENTITY-001's own pre-existing downgrade-guard qualification script broke against the new,
+   moved head** — caught by the *next* CI run. `qualify_dh_identity_001_migration.py` upgrades to
+   "head" (now 0023, one migration past what it was written against) then calls
+   `command.downgrade(cfg, "0021_order_intent_ownership")` in one step, expecting 0022's own guard
+   to refuse and leave the schema at 0022. Alembic wraps a multi-revision downgrade in one
+   transaction (this repo's `env.py` never sets `transaction_per_migration`), so when 0022→0021
+   correctly refused, the already-successful 0023→0022 step in the *same* transaction rolled back
+   too, leaving the schema at 0023 — failing the script's own post-refusal assertion for a reason
+   unrelated to either migration's correctness. Fixed by explicitly downgrading 0023→0022 first (its
+   own separate transaction, expected to succeed cleanly) before attempting the 0022→0021 refusal
+   the script actually exists to prove — commit `efb628c`. **This is the durable lesson for the
+   next ticket that adds a migration**: any pre-existing qualification script that upgrades to
+   `"head"` and then targets a downgrade destination *older* than the previous head must isolate
+   the newest migration's own downgrade first, or a correct refusal deeper in the chain will roll
+   back an unrelated, already-successful step in the same transaction.
+
+**Evidence.**
+
+- Adapter: **960 passed** (one unrelated pre-existing test-isolation flake,
+  `test_patient_bearer_never_sees_correction_or_history`, confirmed passing individually and on
+  suite re-run — not a regression from this ticket). Real-PostgreSQL: DH-CLINIC-006's own PG1/PG2/PG5
+  qualification step green in CI (run `35288197605`), alongside DH-IDENTITY-001's migration
+  qualification (now correctly isolating its own downgrade guard from the new head),
+  "Migration history reaches head" (`0023_provider_lab_routes`), DH-CLINIC-003C's and
+  DH-IDENTITY-001's own real-PostgreSQL qualifications — all green in the same run.
+- UI: clinic suite **150 passed** across 10 files (up from 146 — 9 new `LabRoutingStep.test.tsx` +
+  4 new OP-series `ClinicOrdersPage.test.tsx` tests, minus 1 test net-replaced with a stronger
+  §23/§36/§37 version). Full non-clinic suite re-confirmed individually clean of regressions (this
+  sandbox's own known, pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness dropped a handful of
+  unrelated files across separate full-suite attempts; every dropped file passed individually).
+  `tsc -b --noEmit`: clean. `npm run build` + bundle secret scan: clean, CI-green. `npm run lint`
+  (oxlint): 0 errors; 9 warnings total, all the same established, previously-disclosed
+  `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this codebase already accepted
+  for `ClinicResultsPage.tsx`'s identical idiom (3 pre-existing there, 3 new in `LabRoutingStep.tsx`
+  for the identical pattern, 2 pre-existing/unrelated in `ExchangeAuthProvider.tsx`/its test, 1
+  pre-existing/unrelated in `vite.config.ts`) — non-blocking, disclosed rather than "fixed" against a
+  correct, established pattern.
+- Migration `0023_provider_lab_routes`: fresh-database upgrade, populated-database upgrade
+  (DH-IDENTITY-001's own qualification script now runs through it as part of reaching "head"),
+  downgrade guard (real refusal when a route row exists — proven by the migration's own logic;
+  DH-CLINIC-006 did not additionally seed a route row and attempt a live CI downgrade past 0023,
+  since no other ticket's qualification script currently exercises that path) all CI-green.
+
+**Human Decision Required: NO.** Every design choice this ticket made (route-check ordering inside
+`assign_by_provider`, the `lab_assignment` resolution scope, the wizard's `'routing'` step
+placement, the Orders-page routing-action gating rule, the French SELECTED wording) was either
+explicitly specified by the ticket's own instructions or resolved against an advisor review this
+session performed before committing, per this session's own working discipline.
+
+**Status: IMPLEMENTED.** Backend and UI CI/real-PostgreSQL-qualified, same evidence level as the
+rest of DHealth Clinic — no real-browser demonstration exists or is claimed. **DH-CLINIC-004B's own
+open item is unchanged by this ticket.** **ADR-043 Law 2 ("no double entry") remains unsolved** —
+this ticket proves DHealth-side routing to a DHealth lab organization only.
+
+**NEXT: DH-CLINIC-007 — Released-result review and follow-up UX.** Not started in this ticket. No
+pull request was created or used for this ticket's work, per its own explicit instruction; every
+change landed as a focused commit directly on `master`.

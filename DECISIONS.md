@@ -6512,3 +6512,99 @@ human identity" and by this codebase's existing tenant-scoping/anti-enumeration 
 recorded here, appended, because DH-CLINIC-005 is the ticket that first made them load-bearing UI
 requirements rather than only a backend invariant. See `PROJECT_STATE.md`'s DH-CLINIC-005 entry for
 the concurrency-race test evidence (RR1-RR7) this second rule rests on.
+
+## ADR-052 — ACCEPTED / IMPLEMENTED (2026-09-18, DH-CLINIC-006): provider-assigned launch routing uses explicit provider-lab relationships, not marketplace discovery
+
+**Date raised:** 2026-09-18, DH-CLINIC-006 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
+DH-CLINIC-006.
+
+**Why this needed a decision, not just an implementation.** DH-EX-010 built
+`LabSelectionRepository.assign_by_provider` -- ADR-043's pre-authorized launch option (a), a
+provider routing an order to a known lab with no price marketplace/consent step. It never answered
+a prior question: *which* labs is a given provider actually configured to work with at all? Without
+an explicit answer, the only concept already in the codebase that could plausibly fill that gap is
+`LabDirectoryProfile.listed` -- the public marketplace-visibility flag -- and reaching for it would
+silently convert "provider routes to a known partner" into "provider browses the public directory,"
+reintroducing exactly the price-shopping/marketplace framing ADR-043 Law 1 forbids for this launch
+path. This ADR records the concept that closes that gap instead.
+
+### Decisions
+
+1. **`ProviderLabRoute` (`exchange_provider_lab_routes`) is the configured provider-lab
+   relationship** -- an explicit, platform-admin-created fact answering only "may this provider
+   route orders to this DHealth lab organization?" It carries no lis_type/emr_type/api_url/
+   transport/credential field of any kind; how an order physically reaches a lab's own production
+   system is a future pilot-topology ticket's question, not this ADR's.
+2. **Launch-1 route configuration is platform-admin-only.** No provider self-service network
+   onboarding and no bilateral invitation/acceptance flow exist yet
+   (`PUT /organizations/{provider_id}/lab-routes/{lab_id}`, platform-admin-gated, idempotent,
+   audited). A provider or lab administering their own membership/roles cannot create or modify a
+   route between themselves and anyone else.
+3. **Clinic never browses the public marketplace to route an order.** The order-specific
+   eligibility read (`GET .../orders/{order_id}/eligible-labs`) and the provider's own directory
+   read (`GET .../lab-routes`) are both keyed on `ProviderLabRoute.active`, never on
+   `LabDirectoryProfile.listed` -- structurally, not just by convention: neither query joins the
+   marketplace listing table, and the Clinic-facing frontend client has no method that calls
+   `GET /labs` or the marketplace lab-options endpoint at all.
+4. **`listed` is irrelevant to provider-configured routing.** An unlisted (private, not publicly
+   discoverable) lab with an active route remains a fully valid, fully assignable destination.
+   Configuring a route to a lab never makes that lab publicly listed, and listing a lab never
+   implies any provider is routed to it -- the two facts are independent by design, in both
+   directions.
+5. **`accepting_orders` remains the required, separately-tracked operational state.** A route can
+   be active while the lab is not currently accepting orders (and vice versa); neither flag is ever
+   auto-toggled from the other. Whole-order eligibility and assignment both require an active route
+   *and* `accepting_orders=True` *and* an ACTIVE `LAB` organization -- three independent conditions,
+   never conflated into one.
+6. **`LabOffering` remains the sole capability-matrix source.** No test/catalog identifier is ever
+   copied onto `ProviderLabRoute`; whether a lab can perform a given test is answered exactly as it
+   already was, by that lab's own offerings.
+7. **Price is never a prerequisite for provider-assigned routing** -- unchanged from DH-EX-010, and
+   now proven again at the route layer: the eligibility read joins no `LabPrice` table, and a lab
+   with zero price rows is fully eligible and fully assignable, with every item's
+   `selected_price_amount`/`selected_price_currency` staying `NULL` (never an implied `0`).
+8. **One order, one lab, whole-order-only** -- unchanged from DH-EX-010's own MVP architecture. A
+   lab covering only some ordered tests is not eligible at all; an order is never split across labs
+   or given a partial/child assignment.
+9. **Lab assignment is a separate durable step strictly after order creation**, never folded into
+   `LabOrderIntent`. The intent/commit architecture DH-CLINIC-003C built is unchanged; routing an
+   already-committed order to a lab is a second, independent mutation against the existing
+   `LabSelection` model, matching this codebase's established two-named-methods discipline
+   (`select()` vs. `assign_by_provider()`) rather than growing either into a wider, boolean-flagged
+   operation.
+10. **No automatic or implicit reassignment.** Deactivating a route never touches an
+    already-created `LabSelection` -- it only prevents a *new* assignment. A different-lab
+    assignment attempt against an order that already has a selection is refused
+    (`DifferentLabAlreadySelected`), exactly as before; there is no change-lab/re-route/replace-
+    selected-lab workflow in this ticket.
+11. **`ProviderLabRoute` says nothing about Native Lab vs. LIS/Connect integration.** It is a
+    DHealth-side routing permission only -- it does not model, and never will model, how a
+    real lab's own OpenELIS/other-LIS/EMR system receives an order. That choice belongs entirely to
+    a future pilot-topology ticket.
+12. **This does not solve "no double entry."** DH-CLINIC-006 proves DHealth-side routing to a
+    DHealth lab *organization* -- not that any real lab staff member received the order in any real
+    system, and not that any production transport is qualified. ADR-043 Law 2 remains unresolved
+    until the pilot-topology ticket's own choice (Native DHealth Lab, or DHealth Connect) is made
+    and implemented.
+
+### What this explicitly does not do
+
+- Does not remove, deprecate, or reinterpret any existing marketplace/price API, `LabPrice` model,
+  or patient price-consent workflow (DH-EX-003/DH-EX-005) -- this is a separate, additive launch
+  path alongside the existing one, not a replacement.
+- Does not build provider self-service network onboarding, bilateral invitation/acceptance, or any
+  provider-facing route-configuration UI -- Launch-1 configuration is a platform-admin action only.
+- Does not add a reassignment/change-lab/re-route workflow.
+- Does not model or contact any LIS/EMR system (OpenELIS or otherwise), FHIR, HL7, or any
+  transport/credential mechanism.
+- Does not change DH-CLINIC-004B's real-browser-Keycloak qualification status in any way -- that
+  ticket remains separately OPEN/PARTIALLY QUALIFIED, unrelated to this ADR.
+
+### Evidence
+
+Adapter full suite, real-PostgreSQL concurrency qualification (§20 PG1/PG2/PG5: concurrent
+same-lab assignment converges to one `LabSelection`; concurrent different-lab assignment has
+exactly one winner and one clean conflict; a route deactivation racing an assignment resolves to
+one of two truthful outcomes only), and migration qualification (fresh-database upgrade to
+`0023_provider_lab_routes`, downgrade guard). UI lint/typecheck/test/build. See
+`PROJECT_STATE.md`'s DH-CLINIC-006 entry for exact commands, run evidence, and counts.

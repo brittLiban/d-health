@@ -6,12 +6,12 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-17, DH-CLINIC-005, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `4c55f0418b09c11f85ccbddfbbecf7c36bd9e583`
-(DH-IDENTITY-001's own final documentation commit). All facts below were re-verified directly against
+**2026-09-18, DH-CLINIC-006, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `741af6423a9725d038e2ea5cc0025e44044e6379`
+(DH-CLINIC-005's own final documentation commit). All facts below were re-verified directly against
 the current repository and fresh local test runs on this exact commit — none are carried forward
 from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
-unchanged by this ticket** — patient-identity UX work does not prove authentication runtime, and is
+unchanged by this ticket** — provider-lab routing work does not prove authentication runtime, and is
 not represented as doing so anywhere below.
 
 ## B. Product direction
@@ -38,11 +38,12 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   observation correction (ADR-045 Qs 1-3); an immutable release-version manifest and versioned
   `DoctorReview` (ADR-048 Model 3, DH-EX-014A); post-release amendment preparation/release under the
   same model (DH-EX-014B); a provider-scoped native Patient directory, separated from
-  `PatientReference` source-identity provenance (ADR-051, DH-IDENTITY-001). All CI-qualified and
-  real-PostgreSQL-qualified (SQLite + disposable `postgres:16-alpine`), migration head
-  `0022_exchange_patient_directory` current == heads == CI's `EXPECTED_HEAD`. **Not**
-  real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
-  ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
+  `PatientReference` source-identity provenance (ADR-051, DH-IDENTITY-001); explicit,
+  platform-admin-configured provider-lab routing relationships, distinct from marketplace listing
+  (ADR-052, DH-CLINIC-006). All CI-qualified and real-PostgreSQL-qualified (SQLite + disposable
+  `postgres:16-alpine`), migration head `0023_provider_lab_routes` current == heads == CI's
+  `EXPECTED_HEAD`. **Not** real-Keycloak-qualified, not runtime/browser-demonstrated, not
+  production-deployed. Full ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
 - **DH-IDENTITY-001 — provider-scoped native Patient directory (ADR-051)**: `Patient`
   (`exchange_patients`) now exists as the provider-scoped human-workflow identity record, separated
   from `PatientReference`'s unchanged exact source-identity/provenance meaning. Native, idempotent
@@ -86,6 +87,40 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   clinic suite: **171 passed** across 10 files. **Not** real-Keycloak/browser-runtime-qualified —
   same CI/vitest evidence level as the rest of DHealth Clinic. See `DECISIONS.md` ADR-051's
   2026-09-17 clarification and `PROJECT_STATE.md`'s DH-CLINIC-005 entry.
+- **DH-CLINIC-006 — provider-assigned laboratory workflow (ADR-052)**: `ProviderLabRoute`
+  (`exchange_provider_lab_routes`, migration `0023_provider_lab_routes`) is the missing
+  routing-authority concept behind DH-EX-010's `assign_by_provider` — a platform-admin-configured,
+  explicit "may this provider route to this lab" fact, independent of `LabDirectoryProfile.listed`
+  and never joined against `LabPrice` anywhere in the new code path. New APIs: route management
+  (`PUT .../lab-routes/{lab_id}`, platform-admin only, idempotent, audited), the provider's own
+  route directory (`GET .../lab-routes`, CLINICIAN), and the order-specific whole-order eligibility
+  read (`GET .../orders/{order_id}/eligible-labs`) that the routing UI actually consumes — zero
+  eligible labs is a real, valid `[]` response, never an error or a fabricated fallback.
+  `assign_by_provider` now requires an active route *inside its own locked mutation*
+  (`ProviderLabRouteNotActive` → 409), checked before every other re-check, so a future caller
+  bypassing HTTP cannot skip the routing boundary; deactivating a route never touches an
+  already-made `LabSelection`. `LabOrderResponse`/`LabOrderSummaryResponse` gained a batched,
+  N+1-safe `lab_assignment` projection resolved from the canonical `LabSelection`, present whenever
+  one exists regardless of the order's current status (a SELECTED-then-REJECTED order still shows
+  the lab that rejected it) and failing closed (`LabAssignmentIntegrityError`) only when a status
+  that structurally requires one has none. Real-PostgreSQL-qualified (§20 PG1/PG2/PG5: concurrent
+  same-lab assignment converges to one `LabSelection`; concurrent different-lab assignment has
+  exactly one winner and one clean conflict; a route-deactivation race resolves to one of two
+  truthful outcomes only, never a torn state). Frontend: a new shared `LabRoutingStep` component
+  (patient + ordered tests + eligible labs + explicit confirmation, no price/ranking of any kind,
+  structurally unable to call the marketplace/price/patient-selection endpoints) drives a new
+  `'routing'` step in the order wizard (strictly after durable commit, strictly before
+  confirmation) and a new "Choisir un laboratoire" action on both the Orders page and the Patient
+  workspace's order history, for any order still `AWAITING_LAB_SELECTION`. Adapter: **960 passed**
+  (adapter suite grew by ~49 tests; one unrelated pre-existing test-isolation flake confirmed by
+  individual re-run, not a regression). UI: full suite passes (WSL2/vitest worker-pool flakiness
+  non-deterministically drops a handful of unrelated files per run, confirmed individually green;
+  clinic suite alone: **150 passed** across 10 files, up from 146). **Not**
+  real-Keycloak/browser-runtime-qualified — same evidence level as the rest of DHealth Clinic.
+  **Does not solve "no double entry"** (ADR-043 Law 2) — this proves DHealth-side routing to a
+  DHealth lab *organization* only, not that any real lab staff system received the order; that is
+  DH-PILOT-TOPOLOGY-001's own future choice. **DH-CLINIC-004B remains separately open, unchanged.**
+  See `DECISIONS.md` ADR-052 and `PROJECT_STATE.md`'s DH-CLINIC-006 entry.
 - **DH-CLINIC-003C — durable provider lab order intent (ADR-049)**: re-verified this ticket, fresh
   local run on this exact commit, not carried forward — **adapter: 854 passed, 98 skipped**;
   **UI: 26 test files, 370 tests, all passing**. Bidirectional `LabOrder.intent_id`/
@@ -236,10 +271,17 @@ Same evidence-level boundary as above: identity-UX work does not touch, does not
 and does not change DH-CLINIC-004B's own open item. See `DECISIONS.md` ADR-051's 2026-09-17
 clarification and `PROJECT_STATE.md`'s DH-CLINIC-005 entry for full evidence.
 
-**Forward context only, not started:** DH-CLINIC-006 — provider-assigned laboratory workflow;
-DH-CLINIC-007 — released-result review/follow-up UX; DH-PILOT-TOPOLOGY-001 and its successors
-(DH-LAB-001+/DH-CONNECT-001+, DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-E2E-001,
-DH-PILOT-READINESS-001).
+**DH-CLINIC-006 — provider-assigned laboratory workflow — is now implemented** (§C): explicit,
+platform-admin-configured provider-lab routing, closing the "which labs is a provider actually
+configured to work with" gap behind DH-EX-010's own `assign_by_provider`. Same evidence-level
+boundary as above: routing work does not touch, does not runtime-qualify, and does not change
+DH-CLINIC-004B's own open item; it also does not claim ADR-043 Law 2 ("no double entry") is solved
+— that remains DH-PILOT-TOPOLOGY-001's own future decision. See `DECISIONS.md` ADR-052 and
+`PROJECT_STATE.md`'s DH-CLINIC-006 entry for full evidence.
+
+**Forward context only, not started:** DH-CLINIC-007 — released-result review/follow-up UX;
+DH-PILOT-TOPOLOGY-001 and its successors (DH-LAB-001+/DH-CONNECT-001+, DH-SEC-001, DH-OPS-001,
+DH-RECOVERY-001, DH-E2E-001, DH-PILOT-READINESS-001).
 
 ## J. Documentation precedence
 

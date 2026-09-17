@@ -950,6 +950,18 @@ side API addition only. Native Clinic's Orders/Results screens now render this i
 primary patient signal instead of a UUID fragment -- see `DECISIONS.md` ADR-051's 2026-09-17
 clarification for the two durable UX rules this made explicit.
 
+**2026-09-18 dated note (DH-CLINIC-006/ADR-052):** a new `ProviderLabRoute` model
+(`exchange_provider_lab_routes`) records an explicit, platform-admin-configured fact -- "this
+provider may route orders to this lab organization" -- answering the question `assign_by_provider`
+(DH-EX-010) always needed but never had: which labs a provider is actually configured to work with.
+It is deliberately orthogonal to two existing concepts it could otherwise be confused with:
+`LabDirectoryProfile.listed` (public marketplace visibility) and `accepting_orders` (current
+operational capacity) -- neither is ever auto-toggled from route activity, and an unlisted lab with
+an active route remains a fully valid, fully assignable destination. `LabOrderResponse`/
+`LabOrderSummaryResponse` gained a `lab_assignment` field (destination lab id/name/timestamp),
+resolved from the canonical `LabSelection`, batched. See `DECISIONS.md` ADR-052 for the full
+decision record, including why this is not a "no double entry" (ADR-043 Law 2) solution.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |
