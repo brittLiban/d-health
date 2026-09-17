@@ -144,6 +144,16 @@ PY
     echo "Case B setup invariant violated: dhealth-native-ui should be absent before reconciliation" >&2
     exit 1
   fi
+
+  echo "--- creating a representative pre-existing user + realm role that must survive reconciliation untouched ---"
+  compose exec -T keycloak /opt/keycloak/bin/kcadm.sh create users \
+    --config /tmp/qualify-kcadm.config -r dhealth-exchange \
+    -s username=pre-existing-e2e@example.invalid -s enabled=true \
+    -s 'attributes."dh-clinic-004b-pre-existing"=["true"]' >/dev/null
+  compose exec -T keycloak /opt/keycloak/bin/kcadm.sh create roles \
+    --config /tmp/qualify-kcadm.config -r dhealth-exchange \
+    -s name=dh-clinic-004b-pre-existing-role -s description="Case B survival marker" >/dev/null
+
   echo "confirmed absent — restarting Keycloak against the REAL committed realm file (still absent, by design)"
   compose stop keycloak
   cp "$REALM_FILE_BACKUP" "$REALM_FILE"
@@ -187,6 +197,21 @@ if [[ "$api_public" != "false" ]]; then
   exit 1
 fi
 
+if [[ "$MODE" == "upgrade" ]]; then
+  echo "--- Case B: confirming the pre-existing user and role survived reconciliation untouched ---"
+  user_count=$(compose exec -T keycloak /opt/keycloak/bin/kcadm.sh get users \
+    --config /tmp/qualify-kcadm.config -r dhealth-exchange \
+    -q username=pre-existing-e2e@example.invalid -F id --format csv --noquotes | grep -c . || true)
+  role_count=$(compose exec -T keycloak /opt/keycloak/bin/kcadm.sh get roles \
+    --config /tmp/qualify-kcadm.config -r dhealth-exchange \
+    -q name=dh-clinic-004b-pre-existing-role -F id --format csv --noquotes | grep -c . || true)
+  if [[ "$user_count" -ne 1 || "$role_count" -ne 1 ]]; then
+    echo "Case B invariant violated: the pre-existing user/role did not survive reconciliation (user_count=$user_count role_count=$role_count)" >&2
+    exit 1
+  fi
+  echo "confirmed: pre-existing user and role both survived reconciliation unchanged"
+fi
+
 echo "--- app.localhost / id.localhost host resolution ---"
 for host in app.localhost id.localhost; do
   if ! getent hosts "$host" >/dev/null 2>&1; then
@@ -206,6 +231,15 @@ KEYCLOAK_ADMIN_PASSWORD=$(grep ^KEYCLOAK_ADMIN_PASSWORD= "$ENV_FILE" | cut -d= -
 export E2E_STATE_FILE="$STATE_FILE"
 export E2E_SHORT_TOKEN_LIFESPAN_SECONDS="${E2E_SHORT_TOKEN_LIFESPAN_SECONDS:-20}"
 export E2E_REPORT_JSON="$WORKDIR/e2e-results.json"
+# Same deliberate, documented transport-trust relaxation as
+# playwright.config.ts's ignoreHTTPSErrors (Caddy issues from its own
+# internal CA for a non-public BASE_DOMAIN) -- but that setting only covers
+# Playwright's own browser/request contexts. global-setup.ts/global-teardown.ts
+# and support/adminApi.ts call plain Node `fetch` directly (they run the
+# Keycloak/Exchange admin-API provisioning, not the browser flow under test),
+# which Playwright's config cannot reach. Scoped to this qualification
+# process only -- never set in a real deployment's environment.
+export NODE_TLS_REJECT_UNAUTHORIZED=0
 
 pushd "$ROOT/ui" >/dev/null
 npm ci
