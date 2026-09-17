@@ -6,11 +6,13 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-17, DH-CLINIC-004B, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `2cf0350ae168df6cb3596324550ed858f028d141`
-(DH-CLINIC-004A, merged fast-forward). All facts below were re-verified directly against the current
-repository, fresh local test runs, and a real qualification-workflow run's actual CI evidence — none
-are carried forward from an earlier session's report without re-checking.
+**2026-09-17, DH-IDENTITY-001, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `0ed86b8d85ade6a260ec27c49395032ebafb9210`
+(DH-CLINIC-004B's own final documentation commit). All facts below were re-verified directly against
+the current repository and fresh local test runs on this exact commit — none are carried forward
+from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
+unchanged by this ticket** — identity-directory work does not prove authentication runtime, and is
+not represented as doing so anywhere below.
 
 ## B. Product direction
 
@@ -35,10 +37,34 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   ADR-047); an explicit, separately authorized release step (ADR-044); immutable pre-release
   observation correction (ADR-045 Qs 1-3); an immutable release-version manifest and versioned
   `DoctorReview` (ADR-048 Model 3, DH-EX-014A); post-release amendment preparation/release under the
-  same model (DH-EX-014B). All CI-qualified and real-PostgreSQL-qualified (SQLite + disposable
-  `postgres:16-alpine`), migration head `0021_order_intent_ownership` current == heads == CI's
-  `EXPECTED_HEAD`. **Not** real-Keycloak-qualified, not runtime/browser-demonstrated, not
-  production-deployed. Full ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
+  same model (DH-EX-014B); a provider-scoped native Patient directory, separated from
+  `PatientReference` source-identity provenance (ADR-051, DH-IDENTITY-001). All CI-qualified and
+  real-PostgreSQL-qualified (SQLite + disposable `postgres:16-alpine`), migration head
+  `0022_exchange_patient_directory` current == heads == CI's `EXPECTED_HEAD`. **Not**
+  real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
+  ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
+- **DH-IDENTITY-001 — provider-scoped native Patient directory (ADR-051)**: `Patient`
+  (`exchange_patients`) now exists as the provider-scoped human-workflow identity record, separated
+  from `PatientReference`'s unchanged exact source-identity/provenance meaning. Native, idempotent
+  registration (`POST .../organizations/{provider_id}/patients`), provider-scoped directory
+  read/list/search, §19 registration recovery by idempotency key, and the legacy exact-identity
+  bind endpoint's own compatibility behavior (new identity → new 1:1 Patient; existing identity →
+  unchanged) are all implemented. Migration `0022` backfills every pre-existing `PatientReference`
+  1:1, never merged. **No fuzzy/demographic matching anywhere** — proven by test that identical
+  demographics under a different idempotency key or a different source identity always produce a
+  second, distinct Patient. Database-level tenant safety: `PatientReference`'s composite foreign key
+  to `Patient(id, provider_organization_id)` rejects a cross-provider link, proven against real
+  PostgreSQL (`tests/integration/test_dhidentity001_postgres_qualification.py`, CI-wired) — SQLite
+  does not enforce foreign keys by default, so this claim rests on the Postgres run, not the
+  SQLite-based unit suite. Real-PostgreSQL-qualified: registration concurrency (PG1-PG8), the FK
+  rejection above, and migration backfill/downgrade-guard qualification
+  (`scripts/qualify_dh_identity_001_migration.py`, CI-wired). Adapter: **896 passed, 101 skipped**
+  (855 pre-existing + 35 new patient-directory tests + 6 new legacy-binding-compatibility tests, 3
+  new Postgres-only tests correctly skipped locally). Native Clinic frontend (`ClinicPatientsPage.tsx`)
+  migrated to the new directory API; `pendingPatientStorage.ts` rewritten so persistent browser
+  recovery state carries an idempotency key only, never any demographic field. **Not** real-Keycloak/
+  browser-runtime-qualified — same CI/vitest evidence level as the rest of DHealth Clinic, no new
+  claim beyond that. See `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry.
 - **DH-CLINIC-003C — durable provider lab order intent (ADR-049)**: re-verified this ticket, fresh
   local run on this exact commit, not carried forward — **adapter: 854 passed, 98 skipped**;
   **UI: 26 test files, 370 tests, all passing**. Bidirectional `LabOrder.intent_id`/
@@ -80,8 +106,10 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
-- **DHealth Clinic native frontend** (`ui/src/features/clinic/`): patient search against existing
-  `PatientReference` bindings, diagnostic order creation against the Exchange catalog, durable
+- **DHealth Clinic native frontend** (`ui/src/features/clinic/`): patient registration/search
+  against the native Patient directory (DH-IDENTITY-001, §C), diagnostic order creation against the
+  Exchange catalog using the directory entry's `primary_patient_reference_id` compatibility bridge,
+  durable
   order-intent recovery across reload/restart, order status, results/release-version history, and
   (as of DH-CLINIC-004A, §C) a complete, config-qualified authentication path. Built and
   component/UI-tested. **Still cannot be called deployed.** DH-CLINIC-004B has since observed a real
@@ -113,10 +141,13 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   cold boot being a manual/fresh-VM procedure, not a shared-runner one — see `.github/workflows/ci.yml`'s
   header. Not a code defect found in this attempt; next step is a runner with more capacity
   (self-hosted or a larger GitHub runner), not a different test design.
-- **Full patient lookup/search/registration by name or demographic**: does not exist at the API or
-  frontend level. What exists is narrower — provider-scoped `PatientReference` *binding* to an
-  already-known exact source identity (DH-EX-009). This is a real, current gap, not a stale claim —
-  re-confirmed by inspection this ticket.
+- **Cross-provider or national patient lookup/matching by demographic**: does not exist and is
+  explicitly out of Launch-1 scope (ADR-051 Decision 11) — this is a boundary, not a gap. **2026-09-17
+  dated update (DH-IDENTITY-001):** provider-scoped native patient *registration* by name (display
+  name, optional exact DOB, optional contact) and provider-scoped substring search now exist
+  (§C) — the narrower claim this bullet originally made ("what exists is only exact-identity
+  binding, DH-EX-009") is superseded for the provider-scoped case; DH-EX-009's exact-identity bind
+  endpoint itself is unchanged and still exists for connector/integration use.
 
 ## F. NOT BUILT
 
@@ -174,8 +205,13 @@ capacity (self-hosted or a larger GitHub-hosted runner) — not a different test
 successful Case A run through the full Playwright suite, then Case B (upgrade path), then the
 idempotent-repeat check. See `PROJECT_STATE.md`'s DH-CLINIC-004B entry for full evidence.
 
-**Forward context only, not started:** DH-IDENTITY-001 — Native patient identity/directory
-contract.
+**DH-IDENTITY-001 — native patient identity/directory contract — is now implemented** (§C), and did
+not touch, did not runtime-qualify, and does not change DH-CLINIC-004B's own open item above in any
+way. See `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry for full evidence.
+
+**Forward context only, not started:** DH-CLINIC-005 — Wrong-patient-safe human identity UX
+(consumes the Patient directory this ticket built to eliminate UUID fragments as the primary way
+humans identify patients in Orders/Results).
 
 ## J. Documentation precedence
 

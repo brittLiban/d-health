@@ -933,6 +933,13 @@ price snapshot at selection time, order status, the lab result value, result-del
 the doctor's follow-up disposition. It is explicitly **not** a longitudinal medical record: no
 free-text clinical notes, no medication list, no diagnosis history, no general encounter data.
 
+**2026-09-17 dated note (DH-IDENTITY-001/ADR-051):** a provider-scoped `Patient` directory record
+now also exists, additively -- display name, optional exact date of birth, optional contact. This
+does not widen the boundary above: still no clinical notes/medications/diagnosis, still no national
+identity, still no fuzzy matching, still no cross-provider person graph. `PatientReference` keeps
+its exact original meaning unchanged, now explicitly binding *to* a `Patient` rather than standing
+in for one on its own. See `DECISIONS.md` ADR-051 for the full decision record.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |

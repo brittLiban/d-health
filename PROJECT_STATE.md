@@ -15049,3 +15049,173 @@ not merely unqualified, and should not be treated as done until a run with adequ
 actually completes Case A and Case B end to end. No pull request was created or used for this
 ticket's work, per its own explicit instruction; every change landed as a focused commit directly on
 `master`.
+
+## DH-IDENTITY-001 (2026-09-17) — provider-scoped native Patient directory contract
+
+**Starting master SHA:** `0ed86b8d85ade6a260ec27c49395032ebafb9210` (DH-CLINIC-004B's own final
+documentation commit, confirmed via `git status`/`git fetch` before starting). **No branch, no
+PR** — per this ticket's own explicit instruction, identical to DH-CLINIC-004B's workflow. **Does
+not touch, does not runtime-qualify, and does not change DH-CLINIC-004B's own open item** — that
+ticket remains exactly as open as its own entry above states.
+
+**Objective and scope.** `PatientReference` (DH-EX-001) was deliberately designed as an exact
+source-identity/provenance binding, never a patient record — but native DHealth Clinic had grown to
+treat a browser-generated UUID bound through it as a de facto patient identity. This ticket
+establishes the correct underlying model before DH-CLINIC-005 builds wrong-patient-safe human
+identity UX on top of it: a real, provider-scoped `Patient` directory, `PatientReference` restored
+to its original exact-provenance meaning (now explicitly linked *to* a Patient), zero fuzzy/
+demographic matching anywhere, and 1:1 backfill of every existing reference. Full decision record:
+`DECISIONS.md` ADR-051.
+
+**What was built:**
+
+- **`adapter/src/daher_adapter/exchange/models.py`**: new `Patient` (`exchange_patients` —
+  `provider_organization_id`, nullable `display_name`/`date_of_birth`/paired contact, composite
+  `UniqueConstraint(id, provider_organization_id)` so `PatientReference` can target it with a
+  composite FK) and `PatientRegistrationRequest` (`exchange_patient_registration_requests` — the
+  immutable idempotency/replay fingerprint record). `PatientReference` gains a NOT NULL
+  `patient_id` plus a composite `ForeignKeyConstraint(["patient_id", "source_organization_id"],
+  ["exchange_patients.id", "exchange_patients.provider_organization_id"])` — the database-enforced
+  guarantee a reference can never point at a Patient belonging to a different provider than the
+  reference's own `source_organization_id` (§8). `ExchangeSecurityAuditEvent`'s `event_type`/
+  `resource_type` CHECK constraints widened for `patient_created`/`patient`.
+- **`adapter/src/daher_adapter/exchange/identity.py`**: `PatientReferenceRepository.get_or_create`/
+  `get_or_create_with_outcome` now also create the linked `Patient` atomically, in the same
+  SAVEPOINT as the reference — a brand-new exact identity gets its own new 1:1 Patient; an existing
+  one returns its already-linked Patient unchanged (the legacy endpoint's §36 compatibility rule,
+  baked into the repository so it is a structural invariant, not a convention 45 call sites could
+  each get wrong). `organizations: OrganizationRepository | None = None` added as an *optional*
+  constructor param (defense-in-depth `require_type(PROVIDER)` check) rather than required, to
+  avoid a breaking constructor-signature edit across ~45 pre-existing call sites that already only
+  ever pass a PROVIDER organization — real HTTP call paths already enforce this via
+  `_require_clinician` regardless.
+- **`adapter/src/daher_adapter/exchange/patients.py`** (new): `PatientRepository` — the native
+  registration path. `create()` atomically inserts Patient + native PatientReference
+  (`source_system="dhealth"`, `source_identity_system="urn:dhealth:patient-id"`,
+  `source_identity_value=str(patient.id)` — deliberately not `"dhealth-clinic"`, so a future
+  DHealth Lab frontend shares the identical namespace) + registration-request row, in one SAVEPOINT.
+  Idempotency: exact replay (same provider + key + canonical fingerprint) returns the same Patient
+  unchanged; a conflicting replay raises `PatientRegistrationConflict` (409). Fingerprint is a
+  SHA-256 digest over a fixed, deterministically-canonicalized field tuple
+  (`json.dumps(..., sort_keys=True, separators=(",",":"))`), computed identically at creation and
+  replay time — never Python's process-randomized `hash()`. `list_for_organization`'s search uses a
+  correlated scalar subquery (not a JOIN) for the "primary reference" match, so a Patient can never
+  appear twice in a result regardless of how many references it has (D8) — no de-duplication logic
+  needed because the query cannot produce a duplicate row.
+- **`adapter/migrations/versions/0022_exchange_patient_directory.py`**: creates both new tables;
+  backfills 1:1 (`INSERT INTO exchange_patients SELECT id, source_organization_id, ... FROM
+  exchange_patient_references` — reusing the reference's own id as its Patient's id, a one-time
+  backfill convenience, not a general invariant; then `UPDATE exchange_patient_references SET
+  patient_id = id`); widens the two CHECK constraints (`0012`'s exact drop/recreate pattern). A
+  §11 safety guard runs first and refuses (before any DDL) if any existing reference's
+  `source_organization_id` resolves to a non-PROVIDER or missing organization. Downgrade refuses if
+  any native registration-request row exists or any Patient carries a recorded `date_of_birth` —
+  the two signals that distinguish genuinely new, non-backfill-equivalent data from a
+  legacy-bind-created Patient (which is, by construction, a byte-for-byte duplicate of its own
+  reference's existing snapshot, safe to drop). CI's `EXPECTED_HEAD` bumped to
+  `0022_exchange_patient_directory` in the same commit as the migration.
+- **`adapter/src/daher_adapter/exchange/api.py`**: `PatientCreateRequest`/`PatientDirectoryEntry`/
+  `PatientSearchRequest` Pydantic models (durable product naming, not `ClinicPatientSummary` — §22);
+  `POST /organizations/{provider_id}/patients` (idempotent create, reuses the existing
+  `_require_idempotency_key` canonical-UUIDv4 dependency), `GET .../patients`, `POST
+  .../patients/search`, `GET .../patients/{patient_id}`, `GET
+  .../patient-registrations/{idempotency_key}` (§19 recovery). All gated by the existing
+  `_require_clinician` authorization (PROVIDER + ACTIVE CLINICIAN membership; a LAB org member is
+  refused regardless of role, since CLINICIAN is not an assignable LAB role). Atomic
+  Patient+reference+registration+`patient_created` audit commit, mirroring `create_lab_order`'s own
+  transaction discipline exactly.
+- **`adapter/tests/test_exchange_patients_api.py`** (new, 35 tests): P1-P12 (creation/authorization),
+  I1-I8 (idempotency, including I6's explicit proof that identical demographics under a new key
+  create a second Patient), D1-D11 (directory/tenancy/search/anti-enumeration), plus registration-
+  recovery and audit tests.
+- **`adapter/tests/test_exchange_patient_references_api.py`** (+6 tests, L1-L6): the legacy
+  exact-identity bind endpoint's new Patient-linkage behavior under the updated model — L4 in
+  particular proves the no-fuzzy-matching law applies to the legacy path too (two different exact
+  source identities with byte-identical demographics never auto-link). One pre-existing test
+  (`test_patient_list_uses_uuid_tie_break_for_equal_created_at`) that directly constructed
+  `PatientReference` ORM rows (bypassing the repository) was updated to also construct the now-
+  required linked `Patient` row, using the same id-reuse technique the migration itself uses.
+- **`adapter/tests/integration/test_dhidentity001_postgres_qualification.py`** (new, CI-wired
+  into `.github/workflows/ci.yml`'s adapter job, `DHIDENTITY001_PG_*` env vars, immediately after
+  the existing DH-CLINIC-003C Postgres step): PG1-PG8 (10 concurrent identical registrations →
+  exactly one Patient/reference/registration-request; concurrent conflicting payload → exactly one
+  created, one conflict, zero orphans) and a direct real-database proof that the composite FK
+  rejects a cross-provider PatientReference→Patient link (`IntegrityError`) — SQLite does not
+  enforce foreign keys by default, so this claim rests on this real-Postgres run, not the SQLite
+  unit suite.
+- **`adapter/scripts/qualify_dh_identity_001_migration.py`** (new, CI-wired as its own step
+  immediately before the existing "Migration history reaches head" step, same disposable Postgres
+  service): seeds legacy `PatientReference` rows (5 across provider A including 2 with identical
+  `display_name`, 1 with no snapshot at all; 1 more on provider B reusing provider A's exact raw
+  `source_identity_value`) at revision `0021`, upgrades to `0022`, and asserts M2 (every legacy
+  reference linked), M3 (the 2 identical-demographic references produced 2 distinct Patients), M4
+  (the cross-provider raw-value collision produced 2 distinct Patients), M5 (no fabricated
+  `display_name`/DOB), M6 (every backfilled Patient's `provider_organization_id` matches its own
+  reference's `source_organization_id`) — 6 legacy references used in total. M1 is implicit (the
+  upgrade starts from an empty database); M7 is covered by the adjacent, pre-existing "reaches
+  head" CI step, which runs immediately after. Also exercises §41's downgrade guard end-to-end:
+  creates one native Patient with a recorded DOB, asserts `alembic downgrade` past `0022` raises
+  the specific refusal and leaves the schema unchanged.
+- **UI (`ui/src/`)**: `exchangeTypes.ts` gains `PatientDirectoryEntry`/`PatientCreateRequest`/
+  `PatientCreateOutcome`; `exchangeClient.ts` gains `createPatientWithOutcome`/`listPatients`/
+  `searchPatients`/`getPatient`/`getPatientRegistration` (the legacy `bindPatientReference*`/
+  `listPatientReferences`/`getPatientReference` methods are unchanged and still exist — the last
+  is still used by Clinic's own Phase-B confirmation-read step, unchanged). `ClinicPatientsPage.tsx`
+  migrated its create/list/search calls to the new directory API behind one explicit compatibility-
+  bridge conversion, `toClinicPatientSummary()` (§33) — every existing order/results code path in
+  that same file, already built against `ClinicPatientSummary`, needed zero further change.
+  `pendingPatientStorage.ts` rewritten (`v1` → `v2` storage-key prefix, deliberately not
+  reinterpreting old-shape entries under the new schema): the persisted recovery record now carries
+  an opaque `idempotency_key` (plus, once confirmed, `confirmed_patient_id`/
+  `confirmed_patient_reference_id`) and never any demographic field — the browser no longer mints a
+  patient identity (`crypto.randomUUID()` remains, but only as a request identity). Ambiguous-POST
+  recovery on reload now resolves through the new §19 `getPatientRegistration` lookup when no
+  confirmation was ever observed, and through the existing `getPatientReference` lookup once one
+  was.
+
+**Deliberately not built (out of scope, per the ticket's own explicit instruction):**
+
+- No patient merge/link API, no fuzzy/demographic matching, no duplicate scoring, anywhere.
+- No national/cross-provider MPI, no government identifier integration, no biometric matching.
+- No `Patient` demographic update API (`PATCH`/`PUT`) — correction semantics need their own
+  audit/versioning decision, not silently added here.
+- No Orders/Results page redesign — DH-CLINIC-005's explicit job, not combined into this ticket.
+- No sex/gender/race/nationality/religion/address/marital-status/diagnosis/medication/insurance
+  fields — identity architecture only, not a step toward a full EMR demographic record.
+
+**Qualification, all run locally before each commit:**
+
+- Adapter: full suite — **896 passed, 101 skipped** (855 pre-existing + 35 new
+  `test_exchange_patients_api.py` + 6 new L-series legacy-compatibility tests; 3 new Postgres-only
+  tests correctly skipped without `DHIDENTITY001_PG_*` set). `ruff check`/`ruff format --check`
+  clean across `src`/`tests`/`migrations`/`scripts`.
+- UI: `tsc -b --noEmit` clean project-wide; `oxlint` **0 errors** (3 pre-existing warnings, all in
+  files this ticket never touched); `npm run build` succeeds, bundle secret scan clean
+  (315.48 kB / gzip 91.58 kB, no bloat). The 6 files this ticket actually changed test coverage for
+  (`ClinicPatientsPage.test.tsx`, `pendingPatientStorage.test.ts`, `ClinicApp.test.tsx`,
+  `ClinicA11y.test.tsx`, `ClinicShell.test.tsx`, `exchangeClient.test.ts`) were run together in
+  isolation and passed cleanly: **127 tests, 6/6 files, zero failures, zero flakiness**. The
+  project's full 29-file suite could not be verified in one single clean run in this sandbox: its
+  `vitest` worker-process pool intermittently times out starting a handful of *unrelated* files
+  across the `/mnt/c` WSL2 filesystem boundary (a different random subset each attempt --
+  `App.test.tsx`, maternity/admission/auth-exchange files, never anything this ticket touched) --
+  the same class of environment limitation already on record for this sandbox. Four full-suite
+  attempts were made; every test that did start passed (290/290, then 352/352, then 302/302, then
+  365/365 -- zero real assertion failures in any attempt, only worker-spawn timeouts). CI's own
+  `ui-frontend` job runs on a clean GitHub-hosted runner without this constraint and is the
+  authoritative full-suite check; see this ticket's push-triggered CI result for the real full count.
+- `git diff --check` clean.
+
+**Human Decision Required: NO.** Every architectural choice was already scoped by this ticket's own
+explicit instructions (provider-scoped directory, no fuzzy matching, 1:1 backfill, server-owned
+identity, idempotent creation) — nothing here required an unscripted judgment call outside the
+ticket's own text.
+
+**Status: IMPLEMENTED.** Backend real-PostgreSQL-qualified (concurrency, FK rejection, migration
+backfill/downgrade guard); UI CI/vitest-qualified only, same evidence level as the rest of DHealth
+Clinic — no real-browser demonstration exists or is claimed. **DH-CLINIC-004B's own open item is
+unchanged by this ticket.**
+
+**NEXT: DH-CLINIC-005 — Wrong-patient-safe human identity UX.** Not started in this ticket. No pull
+request was created or used for this ticket's work, per its own explicit instruction; every change
+landed as a focused commit directly on `master`.

@@ -6397,3 +6397,96 @@ header note that full-stack boot is a documented ~50-minute-plus manual/fresh-VM
 something a shared CI runner is expected to complete quickly. No real browser has completed the
 Authorization Code + PKCE round trip against this stack. See `PROJECT_STATE.md`'s DH-CLINIC-004B
 entry for the full evidence and the honest completion status.
+
+## ADR-051 — ACCEPTED / IMPLEMENTED (2026-09-17, DH-IDENTITY-001): provider-scoped Patient
+directory separated from source-identity PatientReference provenance
+
+**Date raised:** 2026-09-17, DH-IDENTITY-001 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
+DH-IDENTITY-001.
+
+**Why this needed a decision, not just an implementation.** `PatientReference` (DH-EX-001) was
+deliberately designed as an exact source-system identity/provenance binding, never a patient
+record -- but native DHealth Clinic had no other identity primitive to build on, so it grew into a
+de facto lightweight patient registry: the browser minted a UUID, called the binding endpoint, and
+treated the resulting reference as "the patient." That was sufficient to bootstrap Clinic (DH-CLINIC-002A)
+but is not a safe long-term identity architecture -- DH-CLINIC-005's wrong-patient-safe human
+identity UX needs a real provider-scoped patient directory to consume, not a UUID the browser
+invented for itself.
+
+### Decisions
+
+1. **`Patient` is a provider-scoped native patient-*directory* record** (`exchange_patients`) --
+   display name, optional exact date of birth, optional paired contact. Never a national identity,
+   never a cross-provider/global DHealth person registry, never an EMR, never a longitudinal
+   medical record. Two different provider organizations may hold two separate `Patient` rows for
+   the same real human, on purpose -- cross-provider identity resolution is out of Launch-1 scope.
+2. **`PatientReference` keeps its exact, unmodified DH-EX-001 meaning**: the source-system
+   identity/provenance binding. It is now explicitly *for* a `Patient` (`patient_id`, NOT NULL),
+   never an overloaded stand-in for one. Its own uniqueness key, snapshot fields, and no-fuzzy-
+   matching discipline are all unchanged.
+3. **Many `PatientReference` rows may eventually point at one `Patient`** (`patient_id` indexed,
+   deliberately not unique) -- schema-permitted, but no linking/merge API exists in this ticket
+   (Decision 12). Every reference created by any code path in this ticket is 1:1 with its own new
+   `Patient`; multi-reference linkage requires a future, separately-designed workflow.
+4. **No fuzzy/demographic matching, anywhere, ever.** Two `Patient` rows with byte-identical
+   `display_name`/`date_of_birth`/contact are always allowed to coexist. The only thing that ever
+   links two records is an explicit `patient_id`, set once, atomically, at creation time -- never
+   inferred later by comparing names, phones, or birth dates. Proven by test
+   (`test_i6_same_demographics_new_key_creates_second_patient`,
+   `test_l4_same_demographics_different_source_identity_do_not_auto_link`).
+5. **Existing `PatientReference` rows backfill 1:1, never merged or grouped by similarity**
+   (migration `0022_exchange_patient_directory`). 500 existing references become 500 new `Patient`
+   rows, even where several clearly describe the same real person under different local ids --
+   duplicates are preferable to an unapproved identity merge.
+6. **The native server owns every new `Patient`'s id** -- the browser can never supply one
+   (`PatientCreateRequest` rejects it at the schema layer, `extra="forbid"`).
+7. **Native reference identity belongs to DHealth itself, not to "Clinic.**" A natively-created
+   Patient's own `PatientReference` uses `source_system="dhealth"`,
+   `source_identity_system="urn:dhealth:patient-id"`, `source_identity_value=str(patient.id)` --
+   deliberately not `"dhealth-clinic"`, so a future DHealth Lab frontend registering through the
+   same endpoint carries the identical, already-shared namespace.
+8. **Native registration is idempotent**, keyed on `(provider_organization_id, idempotency_key)`
+   against an immutable `exchange_patient_registration_requests` fingerprint record -- exact replay
+   returns the same Patient; a conflicting replay (same key, different content) is refused (`409`),
+   never silently returns mismatched data. The same idempotency key, or identical demographics,
+   under a *different* key, are both explicitly allowed to create a second, different Patient
+   (Decision 4's direct consequence, not a bug).
+9. **`PatientReference` remains the current `LabOrder` API's compatibility bridge.** Every
+   existing order/result endpoint still takes a `patient_reference_id`; this ticket does not
+   rationalize those APIs onto `patient_id`. `PatientDirectoryEntry.primary_patient_reference_id`
+   is the explicit, documented transition bridge Clinic's frontend uses to keep calling them
+   unchanged.
+10. **Database-level tenant safety, not just an application check.** `PatientReference`'s
+    composite foreign key `(patient_id, source_organization_id)` →
+    `Patient(id, provider_organization_id)` makes a cross-provider reference-to-patient link a
+    rejected write, proven against real PostgreSQL (SQLite does not enforce foreign keys by
+    default) by `test_pg_composite_fk_rejects_cross_provider_reference_to_patient_link`.
+11. **Global/national MPI is explicitly not Launch-1 scope** -- no cross-provider identity graph,
+    no government identifier integration, no biometric matching, anywhere in this codebase.
+12. **Demographic correction, reference-linking, and merge workflows are explicitly deferred.**
+    No `PATCH`/`PUT` on `Patient`, no `POST .../merge`, no `POST .../references/{id}/attach` exist
+    in this ticket -- each is a patient-safety action requiring its own authorization/audit/
+    correction/undo/UX/governance contract this ticket does not design.
+
+### What this explicitly does not do
+
+- Does not touch `LabOrder`/`LabOrderItem`/results/release-version schemas or APIs in any way --
+  every existing order/result endpoint is unchanged, still keyed on `patient_reference_id`.
+- Does not remove, rename, or change the meaning of any existing `PatientReference` column or its
+  own uniqueness constraint.
+- Does not add sex, gender, race, nationality, religion, address, marital status, diagnosis,
+  medical history, medications, or insurance fields -- identity architecture only, not a step
+  toward a full EMR demographic record.
+- Does not implement a patient merge/link API, duplicate-scoring, or any demographic-matching
+  logic, temporarily or otherwise.
+- Does not redesign the Orders or Results pages -- that is DH-CLINIC-005's explicit job, not
+  combined into this ticket.
+
+### Evidence
+
+Real-Keycloak/browser runtime qualification is unrelated to this ticket and remains whatever
+DH-CLINIC-004B's own status says (see its entry; this ticket does not change that claim). For
+DH-IDENTITY-001 itself: adapter full suite, real PostgreSQL concurrency (PG1-PG8, composite-FK
+rejection) and migration qualification (M1-M6, plus a real §41 downgrade-guard refusal), and UI
+lint/typecheck/test/build. See `PROJECT_STATE.md`'s DH-IDENTITY-001 entry for exact commands, run
+evidence, and counts.
