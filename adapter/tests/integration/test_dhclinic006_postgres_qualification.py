@@ -1,7 +1,7 @@
 """DH-CLINIC-006 §20/§55: real-PostgreSQL concurrent provider-lab-assignment qualification.
 
 Opt-in only, against a disposable database migrated through
-``0023_exchange_provider_lab_routes``. SQLite does not enforce ``SELECT ... FOR UPDATE`` row
+``0023_provider_lab_routes``. SQLite does not enforce ``SELECT ... FOR UPDATE`` row
 locking the same way real PostgreSQL does, which is exactly what these tests need to prove:
 
 - PG1/PG2: two clinicians concurrently assigning the *same* order to the *same* lab converge to

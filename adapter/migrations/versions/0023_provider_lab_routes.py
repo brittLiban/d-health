@@ -16,7 +16,7 @@ Changed table:
   values, the same purely-additive drop/recreate pattern ``0006`` through ``0022`` already
   established.
 
-Revision ID: 0023_exchange_provider_lab_routes
+Revision ID: 0023_provider_lab_routes
 Revises: 0022_exchange_patient_directory
 Create Date: 2026-09-18
 """
@@ -26,7 +26,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0023_exchange_provider_lab_routes"
+revision: str = "0023_provider_lab_routes"
 down_revision: str | Sequence[str] | None = "0022_exchange_patient_directory"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -111,7 +111,7 @@ def upgrade() -> None:
 class DowngradeBlockedByProviderLabRoutes(RuntimeError):
     """0023 -> 0022 was refused because at least one ``exchange_provider_lab_routes`` row exists --
     a provider-lab routing relationship the pre-0023 schema has no table to represent. No schema
-    change is made; the database remains at 0023_exchange_provider_lab_routes."""
+    change is made; the database remains at 0023_provider_lab_routes."""
 
 
 def downgrade() -> None:
@@ -122,10 +122,10 @@ def downgrade() -> None:
     ).scalar_one()
     if route_count:
         raise DowngradeBlockedByProviderLabRoutes(
-            f"refusing to downgrade past 0023_exchange_provider_lab_routes: {route_count} "
+            f"refusing to downgrade past 0023_provider_lab_routes: {route_count} "
             f"exchange_provider_lab_routes row(s) exist, which the narrower 0022 schema cannot "
             f"represent. No schema change has been made -- the database is unchanged and remains "
-            f"at 0023_exchange_provider_lab_routes."
+            f"at 0023_provider_lab_routes."
         )
 
     op.drop_constraint(
