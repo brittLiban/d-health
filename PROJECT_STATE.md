@@ -15225,6 +15225,186 @@ backfill/downgrade guard); UI CI/vitest-qualified only, same evidence level as t
 Clinic — no real-browser demonstration exists or is claimed. **DH-CLINIC-004B's own open item is
 unchanged by this ticket.**
 
-**NEXT: DH-CLINIC-005 — Wrong-patient-safe human identity UX.** Not started in this ticket. No pull
+**Addendum, 2026-09-17, found during DH-CLINIC-005's own adversarial self-review (not this
+ticket's own original scope, fixed the same day):** two real defects, both fixed and re-verified
+green, three more commits directly on `master` (`afa5acd`, `5c123c9`, `4c55f04`):
+
+1. The legacy `POST .../patient-references` bind endpoint inherited the new linked-`Patient`
+   `ck_exchange_patients_contact_pairing` CHECK constraint (one of `contact_channel_type`/
+   `contact_value` set, not both) but the route never caught the resulting `ValueError` — an
+   unpaired contact regressed from a pre-existing 200/201 to an opaque 500. Fixed by mapping it to
+   422, matching every other repository-validation error this endpoint already handles; covered by
+   a new regression test (L7). The same CHECK-constraint class was also added as an explicit
+   pre-flight guard to migration `0022`'s own backfill INSERT, so a real legacy database with an
+   unpaired contact fails the migration loudly and explainably instead of hitting an opaque
+   database CHECK-violation mid-migration.
+2. The native Clinic create-patient form hardcoded `date_of_birth: null` even though the backend
+   (P8) already supported it and the ticket's own frontend requirement was "DOB-and-contact-
+   optional" — an optional date field was added, plus a creation test proving it round-trips.
+   Separately, the unconfirmed-registration-recovery branch (`getPatientRegistration`, §19/§30 —
+   "server committed the create but the browser never saw the response") had zero test coverage:
+   every existing test mocked it to `null`, so the one scenario that endpoint exists for was never
+   actually exercised. Added a dedicated test.
+
+Adapter final count after the addendum: **897 passed, 101 skipped** (896 → +1 for L7). UI: 66/66 on
+`ClinicPatientsPage.test.tsx` (was 65). Final CI run `35254286371`, all 9 jobs green.
+
+**NEXT: DH-CLINIC-005 — Wrong-patient-safe human identity UX.** Started and completed in a later
+session — see its own entry below.
+
+## DH-CLINIC-005 (2026-09-17) — wrong-patient-safe human identity UX
+
+**Starting master SHA:** `4c55f0418b09c11f85ccbddfbbecf7c36bd9e583` (DH-IDENTITY-001's own final
+documentation commit, including its addendum above). **No branch, no PR** — this ticket's own
+explicit instruction. **Does not touch, does not runtime-qualify, and does not change
+DH-CLINIC-004B's own open item** — unchanged by this ticket, exactly as its own entry states.
+
+**Objective and scope.** DH-IDENTITY-001 built the correct backend identity model (`Patient`
+directory vs. `PatientReference` provenance); Native Clinic's Orders and Results screens had not
+yet been migrated to use it, and still identified patients to a human by a truncated UUID fragment
+(`Réf. Patient: af2b64d1…`) — a real wrong-patient-selection risk in a clinical ordering/results
+workflow, not cosmetic. This ticket makes the provider `Patient` directory the human-facing identity
+source everywhere a clinician acts on a specific patient, without touching `LabOrder`'s own identity
+semantics, without adding fuzzy matching, and without any schema migration.
+
+**What was built — backend (commit `9fc288d`, N+1 proof `0224a9b`):**
+
+- **`adapter/src/daher_adapter/exchange/patients.py`**: `PatientIdentitySummaryRecord`
+  (`patient_id`/`display_name`/`date_of_birth`/`contact_channel_type`/`contact_value` — nothing
+  else, deliberately distinct from `PatientRecord`/`PatientDirectoryEntry`'s directory-specific
+  fields) and `PatientIdentityIntegrityError`. `PatientRepository.get_identity_summaries_for_references`
+  resolves a batch of `PatientReference.id`s to their linked `Patient` identity in one query
+  (`JOIN` on `PatientReference.patient_id == Patient.id`, filtered by both
+  `PatientReference.source_organization_id` and `Patient.provider_organization_id` against the
+  caller's own provider — the same tenant check the composite FK already enforces at the database
+  level, re-asserted at this read layer) — never one query per row. A single-reference convenience
+  wrapper (`get_identity_summary_for_reference`) backs the detail/results routes.
+- **`adapter/src/daher_adapter/exchange/api.py`**: new `PatientIdentitySummaryResponse` embedded
+  (as `patient`) in `LabOrderResponse`, `LabOrderSummaryResponse`, `ProviderOrderResultsResponse`,
+  and `ProviderReleaseVersionContentResponse` — all four additive, `patient_reference_id` and every
+  existing field unchanged. Two closures (`_require_patient_identity`/`_require_patient_identities`)
+  resolve identity after `_require_clinician` and after the tenant 404 check, raising
+  `PatientIdentityIntegrityError` (an unhandled exception → 500) rather than ever returning
+  `patient=None` for a reference whose linked Patient cannot be resolved — structurally prevented by
+  DH-IDENTITY-001's own composite tenant FK, but checked again here since SQLite (the unit-test
+  database) does not enforce that FK by default.
+- Tests: OI1-OI8 (`test_exchange_orders_api.py`) and RI1-RI6, folded into 4 test functions
+  (`test_exchange_results_api.py`) — OI2/RI3 prove the source is the live `Patient` directory, not
+  the `PatientReference` snapshot, by constructing mismatched rows directly at the ORM layer (the
+  repository's own `get_or_create` always keeps them in sync, so this is the only way to
+  distinguish which one the API actually reads). A dedicated test constructs a `PatientReference`
+  with a dangling `patient_id` (again only possible because SQLite doesn't enforce the composite FK)
+  and proves both the list and detail routes raise `PatientIdentityIntegrityError` rather than
+  rendering `patient=None`. A separate test counts actual SQL `SELECT` statements for a 5-order list
+  vs. a 1-order list and asserts they're equal, proving the batched resolution is not N+1.
+- **No migration.** All four response fields are purely additive; `EXPECTED_HEAD` in
+  `.github/workflows/ci.yml` stays at `0022_exchange_patient_directory`.
+
+**What was built — frontend (commit `e2e2e53`):**
+
+- **`ui/src/features/clinic/components/PatientIdentity.tsx`** (+ `patientIdentityFormat.ts`, its
+  own `.module.css`): the one shared presentation of human patient identity across Patients, Orders,
+  and Results. `compact` variant (list/table rows): name, then DOB/contact/limited-identity as small
+  secondary lines, no technical identifier at all. `full` variant (workspace header, order review,
+  order confirmation, result-detail banner): the same fields more prominent, plus the complete
+  (never truncated) technical `Patient` id as a de-emphasized "Réf. DHealth" fallback line. Missing
+  name renders `Nom non renseigné`, never blank space and never the raw technical id. Missing
+  DOB/contact are simply omitted — never fabricated, never a defaulted January 1. A patient with
+  only a name gets a truthful, non-blocking `Identité limitée — vérifiez le patient avant de
+  continuer.` notice; care is never blocked on it. Two patients with byte-identical demographics
+  render as two separate DOM nodes (`data-patient-id`-keyed), proven by `PI10`/`OU7`. Nothing is
+  conveyed by color alone.
+- **`formatDateOfBirth`**: a pure string transform on the `"YYYY-MM-DD"` value — splits the string,
+  indexes a French month-name array, never constructs a `Date` object. `PI3` proves specific
+  UTC-boundary dates (`1990-01-01`, `2000-12-31`) render the identical calendar day regardless of
+  environment — the exact class of bug `new Date(dob).toLocaleDateString(...)` is vulnerable to in a
+  viewer west of UTC.
+- **`ui/src/api/exchangeTypes.ts`**: new `PatientIdentitySummary` type, embedded as `patient` on
+  `LabOrderSummary`/`LabOrder`/`ProviderOrderResultsResponse`/`ProviderReleaseVersionContentResponse`
+  — mirrors the backend response shapes exactly.
+- **`ClinicOrdersPage.tsx`/`ClinicResultsPage.tsx`**: Patient is now the first table column
+  (rendered via `<PatientIdentity>`); the order's own technical id remains visible as a small,
+  de-emphasized, right-aligned secondary column (`Référence de l'ordre`), never removed (§37
+  additive-compatibility instruction).
+- **`ClinicResultsPage.tsx` — a real, previously-untested async race, found and fixed.** The
+  pre-existing `handleSelectOrder` started two requests (`getOrderResults`/`getReleaseVersions`) with
+  no binding to the current selection, provider, or mount state — selecting a different order while
+  an earlier one was still in flight could let the earlier response's stale content silently
+  overwrite the current one once it resolved late. Both requests now resolve into one atomic
+  `detail` state object, gated by a monotonic generation counter bumped on every new selection and
+  on every provider switch, a `currentProviderRef`, and a `mountedRef` — a response updates state
+  only if the generation, provider, and mount state it was issued under all still hold. The
+  response's own `order_id`/release-history `order_id`/`patient.patient_id` are additionally cross-
+  checked against what was actually requested and against the clicked list row's own patient
+  identity; any disagreement fails closed to one fixed, generic French string
+  (`Impossible de vérifier de manière sûre le résultat demandé.`) that never names an order or
+  patient identifier, never a per-case message. The page's list/detail layout was restructured
+  (list always visible, detail panel below it, rows stay clickable while a detail is loading) so
+  this race is reachable through the actual rendered UI, not only through directly-invoked
+  callbacks — a second `Consulter` click while the first is still loading is now an ordinary
+  interaction, not something the UI physically prevented. 7 mandatory tests (RR1: out-of-order
+  resolution: `select A, select B, resolve B then A late → only B renders`; RR2: a late failure
+  from A cannot replace B's success; RR3: a late success from A cannot replace B's truthful error;
+  RR4: a stale response from Provider A cannot render after switching to Provider B; RR5/RR6:
+  mismatched `order_id` in either response fails closed; RR7: a response after unmount produces no
+  state update) plus RS1-RS6 cover this in `ClinicResultsPage.test.tsx` (new, this page previously
+  had zero test coverage).
+- **`ClinicPatientsPage.tsx` — AC4, full `PatientDirectoryEntry` migration.** The
+  `toClinicPatientSummary` DH-IDENTITY-001-era compatibility bridge and its `patientLabel()` helper
+  are both removed; `results`/`selected` state, and every function that reads them, now operate on
+  `PatientDirectoryEntry` directly. Both confirmed-patient reads (`handleCreate`'s Phase B, and the
+  mount-recovery effect's confirmed branch) now call `client.getPatient(providerId, patient_id)`
+  instead of the legacy `client.getPatientReference(providerId, patient_reference_id)` — the latter
+  cannot represent DOB/`provider_organization_id`/`created_at` at all, so it could never have been
+  kept as the native workspace's own read source. **§14 durable-identity discipline, verified, not
+  merely asserted:** `currentPatientRef`, `orderScopeKey`, `loadPatientOrders`, the DH-CLINIC-003C
+  intent-recovery mismatch check, and the order-creation request body itself all stay keyed on
+  `primary_patient_reference_id` (renamed from `patient_reference_id`, same underlying value) — none
+  were rekeyed to `patient_id`. 003C's own full existing recovery test suite (persist-before-POST,
+  ambiguous-response recovery, durable-intent-recovery, A→B→A provider/patient isolation) passes
+  unmodified except for fixture-shape updates (added `patient` fields, updated one stale
+  fallback-string assertion), proving no 003C recovery invariant was disturbed. The directory
+  list/workspace header/order-review row/order-confirmation banner all now render `<PatientIdentity>`
+  instead of the old `patientLabel()`/manual reference-id lines.
+- **`aria-label`** added to each Results-list `Consulter` button naming its patient — multiple
+  identical, undifferentiated `Consulter` buttons previously shared one accessible name.
+
+**Evidence.**
+
+- Adapter: **911 passed, 101 skipped** (897 baseline + 8 OI + 4 RI-group functions + 1 §36
+  fail-closed + 1 N+1 proof = +14).
+- UI: full clinic suite **171 passed** across 10 files — `PatientIdentity.test.tsx` (14, new),
+  `ClinicOrdersPage.test.tsx` (6, new), `ClinicResultsPage.test.tsx` (11, new, including all 7
+  mandatory RR tests), `ClinicPatientsPage.test.tsx` (66, was 44 immediately after the production
+  migration — 22 test-file-only fixes: confirmed-read mocks switched from `getPatientReference` to
+  `getPatient`, missing-name fallback assertions updated to `'Nom non renseigné'`, one
+  label/value-text-node disambiguation, and one genuine bug the fixing pass caught by watching for
+  it rather than because a test failed on it — a stale `getPatientReference` mock left in place for
+  a flow whose production code now calls the then-unmocked `getPatient`, which returned `undefined`
+  and crashed the render), `ClinicApp.test.tsx` (8, one test renamed and re-pointed at the new
+  patient-name assertion, replacing its own prior "opaque patient reference tokens" claim),
+  `ClinicA11y.test.tsx` (6, zero axe violations on the Orders view with the new `PatientIdentity`
+  component), `ClinicShell.test.tsx` (3), `pendingOrderStorage.test.ts` (11),
+  `pendingPatientStorage.test.ts` (12). Full non-clinic UI suite re-run separately: 339 passed
+  automatically + 36 more confirmed individually after this sandbox's own known, pre-existing
+  WSL2/`/mnt/c` vitest worker-pool flakiness (documented in DH-IDENTITY-001's own entry) dropped 4
+  unrelated files from one full-suite run — none touched by this ticket, all pass in isolation.
+  `tsc -b --noEmit`: clean. `npm run build` + bundle secret scan: clean. `npm run lint`: 0 errors, 6
+  warnings (3 pre-existing/unrelated; 3 new in `ClinicResultsPage.tsx` from a
+  ref-mutated-during-render pattern — the identical, established idiom `ClinicPatientsPage.tsx`
+  already uses for its own generation-ref tracking, which oxlint's React-Compiler-based heuristic
+  does not flag there; not a behavior difference, non-blocking).
+- No migration created; `EXPECTED_HEAD` unchanged.
+
+**Human Decision Required: NO.** Every design choice (batched resolution shape, fail-closed
+integrity error, the two-variant `PatientIdentity` component, keeping durable recovery identity on
+`primary_patient_reference_id`, the race-condition fix's generation-counter design) was already
+scoped by this ticket's own explicit, detailed instructions.
+
+**Status: IMPLEMENTED.** Backend and UI CI/vitest-qualified, same evidence level as the rest of
+DHealth Clinic — no real-browser demonstration exists or is claimed. **DH-CLINIC-004B's own open
+item is unchanged by this ticket.**
+
+**NEXT: DH-CLINIC-006 — Provider-assigned laboratory workflow.** Not started in this ticket. No pull
 request was created or used for this ticket's work, per its own explicit instruction; every change
 landed as a focused commit directly on `master`.

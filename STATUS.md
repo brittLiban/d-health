@@ -6,12 +6,12 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-17, DH-IDENTITY-001, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `0ed86b8d85ade6a260ec27c49395032ebafb9210`
-(DH-CLINIC-004B's own final documentation commit). All facts below were re-verified directly against
+**2026-09-17, DH-CLINIC-005, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `4c55f0418b09c11f85ccbddfbbecf7c36bd9e583`
+(DH-IDENTITY-001's own final documentation commit). All facts below were re-verified directly against
 the current repository and fresh local test runs on this exact commit — none are carried forward
 from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
-unchanged by this ticket** — identity-directory work does not prove authentication runtime, and is
+unchanged by this ticket** — patient-identity UX work does not prove authentication runtime, and is
 not represented as doing so anywhere below.
 
 ## B. Product direction
@@ -58,13 +58,34 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   does not enforce foreign keys by default, so this claim rests on the Postgres run, not the
   SQLite-based unit suite. Real-PostgreSQL-qualified: registration concurrency (PG1-PG8), the FK
   rejection above, and migration backfill/downgrade-guard qualification
-  (`scripts/qualify_dh_identity_001_migration.py`, CI-wired). Adapter: **896 passed, 101 skipped**
-  (855 pre-existing + 35 new patient-directory tests + 6 new legacy-binding-compatibility tests, 3
-  new Postgres-only tests correctly skipped locally). Native Clinic frontend (`ClinicPatientsPage.tsx`)
-  migrated to the new directory API; `pendingPatientStorage.ts` rewritten so persistent browser
-  recovery state carries an idempotency key only, never any demographic field. **Not** real-Keycloak/
-  browser-runtime-qualified — same CI/vitest evidence level as the rest of DHealth Clinic, no new
-  claim beyond that. See `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry.
+  (`scripts/qualify_dh_identity_001_migration.py`, CI-wired). Adapter: **897 passed, 101 skipped**
+  (855 pre-existing + 35 new patient-directory tests + 7 new legacy-binding-compatibility tests
+  including a post-completion-review regression fix, 3 new Postgres-only tests correctly skipped
+  locally; count corrected here from an earlier stale 896 — the fix landed after this line was first
+  written). Native Clinic frontend (`ClinicPatientsPage.tsx`) migrated to the new directory API;
+  `pendingPatientStorage.ts` rewritten so persistent browser recovery state carries an idempotency
+  key only, never any demographic field. **Not** real-Keycloak/browser-runtime-qualified — same
+  CI/vitest evidence level as the rest of DHealth Clinic, no new claim beyond that. See
+  `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry.
+- **DH-CLINIC-005 — wrong-patient-safe human identity UX**: Native Clinic's Orders/Results screens
+  no longer identify patients by truncated UUID fragments. Order/result read APIs
+  (`LabOrderResponse`, `LabOrderSummaryResponse`, `ProviderOrderResultsResponse`,
+  `ProviderReleaseVersionContentResponse`) now carry a server-resolved `patient` identity projection
+  (name/DOB/contact only), resolved through `patient_reference_id -> PatientReference.patient_id ->
+  Patient`, batched per list (proven not N+1 by counting actual SQL statements) — never a
+  client-supplied id, never the legacy `PatientReference.display_name` snapshot. A reference whose
+  linked Patient cannot be resolved fails closed as a server integrity error, never silently renders
+  `patient=None`. No schema migration — additive read-side API only. Frontend: a shared
+  `PatientIdentity` component (name prominent, truthful "Nom non renseigné"/"Identité limitée"
+  fallbacks, timezone-safe DOB formatting, full technical id never truncated) now drives
+  Orders/Results/Patients; `ClinicPatientsPage.tsx`'s native workflow operates on
+  `PatientDirectoryEntry` directly (no more `ClinicPatientSummary` compatibility bridge); a real,
+  previously-untested async race in `ClinicResultsPage`'s result-detail loading (a stale earlier
+  selection's response could overwrite the current one) is fixed and covered by 7 mandatory
+  concurrency tests (RR1-RR7). Adapter: **911 passed, 101 skipped** (897 baseline + 14 new). UI
+  clinic suite: **171 passed** across 10 files. **Not** real-Keycloak/browser-runtime-qualified —
+  same CI/vitest evidence level as the rest of DHealth Clinic. See `DECISIONS.md` ADR-051's
+  2026-09-17 clarification and `PROJECT_STATE.md`'s DH-CLINIC-005 entry.
 - **DH-CLINIC-003C — durable provider lab order intent (ADR-049)**: re-verified this ticket, fresh
   local run on this exact commit, not carried forward — **adapter: 854 passed, 98 skipped**;
   **UI: 26 test files, 370 tests, all passing**. Bidirectional `LabOrder.intent_id`/
@@ -205,13 +226,20 @@ capacity (self-hosted or a larger GitHub-hosted runner) — not a different test
 successful Case A run through the full Playwright suite, then Case B (upgrade path), then the
 idempotent-repeat check. See `PROJECT_STATE.md`'s DH-CLINIC-004B entry for full evidence.
 
-**DH-IDENTITY-001 — native patient identity/directory contract — is now implemented** (§C), and did
-not touch, did not runtime-qualify, and does not change DH-CLINIC-004B's own open item above in any
-way. See `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry for full evidence.
+**DH-IDENTITY-001 — native patient identity/directory contract — is implemented** (§C), and did not
+touch, did not runtime-qualify, and does not change DH-CLINIC-004B's own open item above in any way.
+See `DECISIONS.md` ADR-051 and `PROJECT_STATE.md`'s DH-IDENTITY-001 entry for full evidence.
 
-**Forward context only, not started:** DH-CLINIC-005 — Wrong-patient-safe human identity UX
-(consumes the Patient directory this ticket built to eliminate UUID fragments as the primary way
-humans identify patients in Orders/Results).
+**DH-CLINIC-005 — wrong-patient-safe human identity UX — is now implemented** (§C), consuming that
+directory to eliminate UUID fragments as the primary way humans identify patients in Orders/Results.
+Same evidence-level boundary as above: identity-UX work does not touch, does not runtime-qualify,
+and does not change DH-CLINIC-004B's own open item. See `DECISIONS.md` ADR-051's 2026-09-17
+clarification and `PROJECT_STATE.md`'s DH-CLINIC-005 entry for full evidence.
+
+**Forward context only, not started:** DH-CLINIC-006 — provider-assigned laboratory workflow;
+DH-CLINIC-007 — released-result review/follow-up UX; DH-PILOT-TOPOLOGY-001 and its successors
+(DH-LAB-001+/DH-CONNECT-001+, DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-E2E-001,
+DH-PILOT-READINESS-001).
 
 ## J. Documentation precedence
 

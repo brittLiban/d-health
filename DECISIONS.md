@@ -6489,3 +6489,26 @@ DH-IDENTITY-001 itself: adapter full suite, real PostgreSQL concurrency (PG1-PG8
 rejection) and migration qualification (M1-M6, plus a real §41 downgrade-guard refusal), and UI
 lint/typecheck/test/build. See `PROJECT_STATE.md`'s DH-IDENTITY-001 entry for exact commands, run
 evidence, and counts.
+
+### 2026-09-17 clarification (DH-CLINIC-005): the patient-safety UX rule this ADR's architecture exists to enforce
+
+DH-CLINIC-005 consumed this ADR's `Patient`/`PatientReference` split to remove UUID fragments as
+the primary way Native Clinic's Orders/Results screens identify a patient to a human. That work
+surfaced two durable engineering rules this ADR's own architecture was always meant to imply, now
+stated explicitly rather than left implicit:
+
+- **Human-facing clinical workflows must identify patients using the provider `Patient` directory.**
+  `PatientReference` identifiers (and their own `display_name`/contact snapshot fields) remain
+  technical/provenance identifiers and must never be the primary way a clinician distinguishes one
+  patient from another -- not in a list, not in a confirmation screen, not in an error message.
+- **Clinical result/order screens must not render stale asynchronous content after patient/order/
+  provider context changes.** A response that no longer corresponds to the currently selected
+  order, patient, or active provider organization must never be assembled into what the clinician
+  sees -- it is discarded, not rendered, regardless of arrival order.
+
+Neither rule changes `Patient`/`PatientReference`'s own meaning or this ADR's 12 decisions above --
+both were already entailed by "identity is provider-scoped and exact-identity is provenance, not
+human identity" and by this codebase's existing tenant-scoping/anti-enumeration discipline. They are
+recorded here, appended, because DH-CLINIC-005 is the ticket that first made them load-bearing UI
+requirements rather than only a backend invariant. See `PROJECT_STATE.md`'s DH-CLINIC-005 entry for
+the concurrency-race test evidence (RR1-RR7) this second rule rests on.

@@ -940,6 +940,16 @@ identity, still no fuzzy matching, still no cross-provider person graph. `Patien
 its exact original meaning unchanged, now explicitly binding *to* a `Patient` rather than standing
 in for one on its own. See `DECISIONS.md` ADR-051 for the full decision record.
 
+**2026-09-17 dated note (DH-CLINIC-005):** order/result read APIs (`LabOrderResponse`,
+`LabOrderSummaryResponse`, `ProviderOrderResultsResponse`, `ProviderReleaseVersionContentResponse`)
+now additionally carry a `patient` field -- the identical minimal name/DOB/contact projection
+ADR-051 already defined, resolved server-side through `patient_reference_id -> PatientReference
+.patient_id -> Patient`, batched (one query per list, never N+1). Existing fields, including
+`patient_reference_id` itself, are unchanged. No schema migration, no new table: this is a read-
+side API addition only. Native Clinic's Orders/Results screens now render this identity as the
+primary patient signal instead of a UUID fragment -- see `DECISIONS.md` ADR-051's 2026-09-17
+clarification for the two durable UX rules this made explicit.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |
