@@ -141,6 +141,13 @@ describe('ExchangeClient', () => {
     const mockResults: ProviderOrderResultsResponse = {
       order_id: 'ord-1',
       order_status: 'COMPLETED',
+      patient: {
+        patient_id: 'patient-1',
+        display_name: 'Patient Synthétique',
+        date_of_birth: null,
+        contact_channel_type: null,
+        contact_value: null,
+      },
       release_version_id: 'rel-v1',
       release_version_number: 1,
       is_amendment: false,

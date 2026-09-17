@@ -32,6 +32,13 @@ describe('ClinicApp', () => {
       provider_organization_id: 'prov-1',
       patient_reference_id: 'pat-ref-3333',
       practitioner_reference_id: 'prac-4444',
+      patient: {
+        patient_id: 'patient-3333',
+        display_name: 'Amina Hassan',
+        date_of_birth: null,
+        contact_channel_type: null,
+        contact_value: null,
+      },
       status: 'IN_PROGRESS' as const,
       created_at: '2026-09-15T07:00:00Z',
       item_count: 2,
@@ -41,6 +48,13 @@ describe('ClinicApp', () => {
       provider_organization_id: 'prov-1',
       patient_reference_id: 'pat-ref-7777',
       practitioner_reference_id: 'prac-4444',
+      patient: {
+        patient_id: 'patient-7777',
+        display_name: 'Warsame Ali',
+        date_of_birth: '1975-11-20',
+        contact_channel_type: 'PHONE',
+        contact_value: '+25377222333',
+      },
       status: 'COMPLETED' as const,
       created_at: '2026-09-15T08:00:00Z',
       item_count: 1,
@@ -55,6 +69,13 @@ describe('ClinicApp', () => {
       getOrderResults: vi.fn().mockResolvedValue({
         order_id: 'ord-5555-6666',
         order_status: 'COMPLETED',
+        patient: {
+          patient_id: 'patient-7777',
+          display_name: 'Warsame Ali',
+          date_of_birth: '1975-11-20',
+          contact_channel_type: 'PHONE',
+          contact_value: '+25377222333',
+        },
         release_version_id: 'rel-v1',
         release_version_number: 1,
         is_amendment: false,
@@ -114,15 +135,19 @@ describe('ClinicApp', () => {
     expect(screen.getByText('À revoir')).toBeInTheDocument()
   })
 
-  it('navigates to "Ordres de laboratoire" and renders the orders table with opaque patient reference tokens', async () => {
+  it('DH-CLINIC-005: navigates to "Ordres de laboratoire" and renders the orders table with human patient identity, never a raw reference token', async () => {
     const user = userEvent.setup()
     render(<ClinicApp client={mockClient} />)
 
     await user.click(screen.getByRole('button', { name: 'Ordres de laboratoire' }))
     expect(await screen.findByRole('heading', { name: 'Ordres de laboratoire' })).toBeInTheDocument()
 
-    // Opaque patient reference token displayed honestly (Finding F-04: zero fabricated names)
-    expect(screen.getAllByText('pat-ref-…').length).toBe(2)
+    // The server-resolved Patient directory identity is the primary column now -- a raw
+    // PatientReference token is never shown as identity (DH-CLINIC-005 §22/AC6).
+    expect(screen.getByText('Amina Hassan')).toBeInTheDocument()
+    expect(screen.getByText('Warsame Ali')).toBeInTheDocument()
+    expect(screen.queryByText('pat-ref-…')).not.toBeInTheDocument()
+    expect(screen.queryByText(/pat-ref-3333|pat-ref-7777/)).not.toBeInTheDocument()
     expect(screen.getByText("En cours d'analyse")).toBeInTheDocument()
   })
 
@@ -144,7 +169,7 @@ describe('ClinicApp', () => {
     expect(await screen.findByRole('heading', { name: 'Résultats de laboratoire' })).toBeInTheDocument()
 
     // Click on Consulter for completed order
-    await user.click(screen.getByRole('button', { name: 'Consulter' }))
+    await user.click(screen.getByRole('button', { name: /^Consulter/ }))
 
     expect(await screen.findByText(/Glycémie à jeun/)).toBeInTheDocument()
     expect(screen.getByText('5.4')).toBeInTheDocument()

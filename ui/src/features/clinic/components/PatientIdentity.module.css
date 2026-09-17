@@ -1,0 +1,44 @@
+.compact,
+.full {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.full {
+  gap: var(--space-1);
+}
+
+.name {
+  margin: 0;
+  font-weight: 600;
+  color: var(--color-text, inherit);
+  overflow-wrap: anywhere;
+}
+
+.full .name {
+  font-size: 1.1rem;
+}
+
+.metaLine {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.warning {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-warning-text);
+}
+
+.technicalId {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.technicalId code {
+  overflow-wrap: anywhere;
+}

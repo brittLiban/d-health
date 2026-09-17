@@ -53,11 +53,27 @@ export interface LabOrderItem {
   catalog_display_name_snapshot: string
 }
 
+/**
+ * DH-CLINIC-005 §5/§38/§39: the minimal, reusable human-identification projection the backend
+ * embeds in every order/result read response -- name/DOB/contact only, resolved server-side
+ * through `patient_reference_id -> Patient`. Distinct from `PatientDirectoryEntry` (directory-
+ * specific fields this projection omits on purpose) and never fabricated client-side: a `null`
+ * field here means the value is genuinely unknown, never inferred or defaulted.
+ */
+export interface PatientIdentitySummary {
+  patient_id: string
+  display_name: string | null
+  date_of_birth: string | null
+  contact_channel_type: string | null
+  contact_value: string | null
+}
+
 export interface LabOrderSummary {
   id: string
   provider_organization_id: string
   patient_reference_id: string
   practitioner_reference_id: string
+  patient: PatientIdentitySummary
   status: LabOrderStatus
   created_at: string
   item_count: int_number
@@ -71,6 +87,7 @@ export interface LabOrder {
   provider_organization_id: string
   patient_reference_id: string
   practitioner_reference_id: string
+  patient: PatientIdentitySummary
   status: LabOrderStatus
   created_at: string
   items: LabOrderItem[]
@@ -158,6 +175,7 @@ export interface ProviderResultItemResponse {
 export interface ProviderOrderResultsResponse {
   order_id: string
   order_status: string
+  patient: PatientIdentitySummary
   release_version_id: string | null
   release_version_number: number | null
   is_amendment: boolean | null
@@ -184,6 +202,7 @@ export interface ProviderReleaseVersionContentResponse {
   release_version_id: string
   release_version_number: number
   is_amendment: boolean
+  patient: PatientIdentitySummary
   review_status: DoctorReviewStatus | string
   reviewed_at: string | null
   reviewed_by_practitioner_reference_id: string | null

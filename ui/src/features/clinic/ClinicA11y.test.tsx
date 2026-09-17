@@ -33,6 +33,13 @@ describe('Clinic Accessibility', () => {
       provider_organization_id: 'prov-1',
       patient_reference_id: 'pat-ref-3333',
       practitioner_reference_id: 'prac-4444',
+      patient: {
+        patient_id: 'patient-3333',
+        display_name: 'Amina Hassan',
+        date_of_birth: '1990-04-12',
+        contact_channel_type: 'PHONE',
+        contact_value: '+25377100002',
+      },
       status: 'IN_PROGRESS' as const,
       created_at: '2026-09-15T07:00:00Z',
       item_count: 2,
@@ -47,6 +54,7 @@ describe('Clinic Accessibility', () => {
       getOrderResults: vi.fn().mockResolvedValue({
         order_id: 'ord-1111-2222',
         order_status: 'COMPLETED',
+        patient: sampleOrders[0].patient,
         release_version_id: 'rel-v1',
         release_version_number: 1,
         is_amendment: false,

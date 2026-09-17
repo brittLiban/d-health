@@ -8,6 +8,7 @@ import {
   StatusBadge,
   type StatusTone,
 } from '../../../design-system'
+import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
 
 function mapOrderStatusTone(status: LabOrderStatus): StatusTone {
@@ -154,13 +155,15 @@ export function ClinicOrdersPage() {
             >
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-neutral-200)' }}>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>ID Ordre</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Réf. Patient</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Statut</th>
+                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Patient</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, textAlign: 'center' }}>
                     Analyses
                   </th>
+                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Statut</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Date de création</th>
+                  <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, textAlign: 'right' }}>
+                    Référence de l'ordre
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -169,20 +172,17 @@ export function ClinicOrdersPage() {
                     key={order.id}
                     style={{ borderBottom: '1px solid var(--color-neutral-100)' }}
                   >
-                    <td style={{ padding: 'var(--space-3) var(--space-4)', fontFamily: 'monospace' }}>
-                      {order.id.slice(0, 8)}…
+                    <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+                      <PatientIdentity patient={order.patient} />
                     </td>
-                    <td style={{ padding: 'var(--space-3) var(--space-4)', fontFamily: 'monospace' }}>
-                      {order.patient_reference_id.slice(0, 8)}…
+                    <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>
+                      {order.item_count}
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
                       <StatusBadge
                         tone={mapOrderStatusTone(order.status)}
                         label={formatOrderStatusLabel(order.status)}
                       />
-                    </td>
-                    <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>
-                      {order.item_count}
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-neutral-600)' }}>
                       {new Date(order.created_at).toLocaleDateString('fr-FR', {
@@ -192,6 +192,17 @@ export function ClinicOrdersPage() {
                         hour: '2-digit',
                         minute: '2-digit',
                       })}
+                    </td>
+                    <td
+                      style={{
+                        padding: 'var(--space-3) var(--space-4)',
+                        textAlign: 'right',
+                        fontFamily: 'monospace',
+                        fontSize: '0.8rem',
+                        color: 'var(--color-neutral-500)',
+                      }}
+                    >
+                      {order.id.slice(0, 8)}…
                     </td>
                   </tr>
                 ))}

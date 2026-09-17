@@ -6,7 +6,6 @@ import {
 } from '../../../api/exchangeClient'
 import type {
   CatalogEntry,
-  ClinicPatientSummary,
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderIntent,
@@ -26,6 +25,7 @@ import {
   type StatusTone,
   TextInput,
 } from '../../../design-system'
+import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
 import type { PendingOrderMutation, PendingPatientCreation } from '../ClinicApp'
 import {
@@ -46,26 +46,6 @@ import {
 } from '../pendingOrderStorage'
 import styles from './ClinicPatientsPage.module.css'
 
-/**
- * DH-IDENTITY-001 §33: the explicit, documented compatibility bridge -- existing LabOrder APIs
- * still take a `patient_reference_id`, not a `patient_id`, and this ticket deliberately does not
- * rationalize those APIs. Converting every Patient-directory response to a `ClinicPatientSummary`
- * at this one boundary means the rest of this page's order/results machinery (already built
- * against `ClinicPatientSummary`) needs no further change. `local_reference` mirrors the native
- * reference's own `source_identity_value`, which the backend sets to the Patient's own id
- * (`urn:dhealth:patient-id`, DH-IDENTITY-001 §13) -- so using `patient_id` here is exact, not an
- * approximation.
- */
-function toClinicPatientSummary(entry: PatientDirectoryEntry): ClinicPatientSummary {
-  return {
-    patient_reference_id: entry.primary_patient_reference_id,
-    display_name: entry.display_name,
-    contact_channel_type: entry.contact_channel_type,
-    contact_value: entry.contact_value,
-    local_reference: entry.patient_id,
-  }
-}
-
 interface ClinicPatientsPageProps {
   pendingCreations?: Record<string, PendingPatientCreation>
   onPendingCreationChange?: (scopeKey: string, pending: PendingPatientCreation | null) => void
@@ -73,8 +53,11 @@ interface ClinicPatientsPageProps {
   onPendingOrderChange?: (scopeKey: string, pending: PendingOrderMutation | null) => void
 }
 
-function patientLabel(patient: ClinicPatientSummary): string {
-  return patient.display_name?.trim() || patient.local_reference
+// DH-CLINIC-005 §16: a plain-text name for inline sentence use (e.g. "Sélectionnez... pour X.")
+// -- the full identity banner is `<PatientIdentity>` itself, used everywhere else. Never falls
+// back to a technical identifier (that fallback belongs to `<PatientIdentity>`'s own display).
+function patientDisplayName(patient: PatientDirectoryEntry): string {
+  return patient.display_name?.trim() || 'Nom non renseigné'
 }
 
 function safeErrorCode(error: unknown): ErrorCode {
@@ -130,10 +113,10 @@ export function ClinicPatientsPage({
   currentProviderRef.current = providerId
 
   const [searchInput, setSearchInput] = useState('')
-  const [results, setResults] = useState<{ providerId: string; values: ClinicPatientSummary[] } | null>(null)
+  const [results, setResults] = useState<{ providerId: string; values: PatientDirectoryEntry[] } | null>(null)
   const [loadState, setLoadState] = useState<'loading' | 'success' | 'error'>('loading')
   const [loadErrorCode, setLoadErrorCode] = useState<ErrorCode>('SERVER_ERROR')
-  const [selected, setSelected] = useState<{ providerId: string; value: ClinicPatientSummary } | null>(null)
+  const [selected, setSelected] = useState<{ providerId: string; value: PatientDirectoryEntry } | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [dateOfBirth, setDateOfBirth] = useState('')
@@ -185,10 +168,9 @@ export function ClinicPatientsPage({
     const generation = ++requestGenerationRef.current
     setLoadState('loading')
     try {
-      const entries = query.trim()
+      const values = query.trim()
         ? await client.searchPatients(targetProviderId, query.trim(), { limit: 50 })
         : await client.listPatients(targetProviderId, { limit: 50 })
-      const values = entries.map(toClinicPatientSummary)
       if (
         mountedRef.current &&
         currentProviderRef.current === targetProviderId &&
@@ -261,24 +243,19 @@ export function ClinicPatientsPage({
         setReconcilingStoredAttempt(true)
         if (!stored.confirmed_patient_reference_id) setUnresolvedStoredAttempt(stored)
         void (async () => {
-          let found: ClinicPatientSummary | null = null
+          let found: PatientDirectoryEntry | null = null
           try {
-            if (stored.confirmed_patient_reference_id) {
+            if (stored.confirmed_patient_id) {
               // Confirmed by an earlier successful create response -- a real, usable
-              // patient_reference_id already, no idempotency-key lookup needed.
-              found = await client.getPatientReference(
-                providerId,
-                stored.confirmed_patient_reference_id,
-              )
+              // patient_id already, no idempotency-key lookup needed. Reads the Patient
+              // directory record directly (DH-CLINIC-005 AC4) -- never the legacy
+              // PatientReference read, which cannot represent DOB/provider/created_at honestly.
+              found = await client.getPatient(providerId, stored.confirmed_patient_id)
             } else {
               // Ambiguous: the create POST's outcome was never observed. §19's server-side
               // recovery endpoint resolves the opaque idempotency key to the authoritative
               // Patient if (and only if) the registration actually committed.
-              const registration = await client.getPatientRegistration(
-                providerId,
-                stored.idempotency_key,
-              )
-              found = registration ? toClinicPatientSummary(registration) : null
+              found = await client.getPatientRegistration(providerId, stored.idempotency_key)
             }
           } catch {
             // A read failure cannot undo a confirmed bind POST.
@@ -293,7 +270,7 @@ export function ClinicPatientsPage({
                 providerId,
                 values:
                   curr?.providerId === providerId
-                    ? [found, ...curr.values.filter((x) => x.patient_reference_id !== found.patient_reference_id)]
+                    ? [found, ...curr.values.filter((x) => x.patient_id !== found.patient_id)]
                     : [found],
               }))
               setLoadState('success')
@@ -315,10 +292,13 @@ export function ClinicPatientsPage({
 
   const visibleResults = results?.providerId === providerId ? results.values : []
   const selectedPatient = selected?.providerId === providerId ? selected.value : null
-  currentPatientRef.current = selectedPatient?.patient_reference_id ?? null
+  // DH-CLINIC-005 §14: durable technical recovery identity stays keyed on the exact-identity
+  // PatientReference id, never rekeyed to the human-facing Patient id -- 003C's own recovery
+  // invariants (intent/order idempotency, storage scoping) are untouched by this ticket.
+  currentPatientRef.current = selectedPatient?.primary_patient_reference_id ?? null
   const orderScopeKey =
     providerId && user && selectedPatient
-      ? `${user.identity_id}:${providerId}:${selectedPatient.patient_reference_id}`
+      ? `${user.identity_id}:${providerId}:${selectedPatient.primary_patient_reference_id}`
       : null
 
   const loadPatientOrders = useCallback(
@@ -367,7 +347,7 @@ export function ClinicPatientsPage({
     setReconcilingStoredOrder(false)
     setOrderStorageUnreadable(false)
     if (providerId && selectedPatient) {
-      void loadPatientOrders(providerId, selectedPatient.patient_reference_id)
+      void loadPatientOrders(providerId, selectedPatient.primary_patient_reference_id)
 
       // Rehydrate in-memory pending order for this patient if any
       const inMemoryPendingOrder = orderScopeKey ? pendingOrders[orderScopeKey] : undefined
@@ -400,7 +380,7 @@ export function ClinicPatientsPage({
           storedOrder = getStoredPendingOrder(
             user.identity_id,
             providerId,
-            selectedPatient.patient_reference_id,
+            selectedPatient.primary_patient_reference_id,
           )
         } catch (error) {
           if (error instanceof PendingOrderStorageReadError) {
@@ -428,7 +408,7 @@ export function ClinicPatientsPage({
             if (
               mountedRef.current &&
               currentProviderRef.current === providerId &&
-              currentPatientRef.current === selectedPatient.patient_reference_id &&
+              currentPatientRef.current === selectedPatient.primary_patient_reference_id &&
               orderRecoveryGenerationRef.current === recoveryGeneration
             ) {
               if (
@@ -440,7 +420,7 @@ export function ClinicPatientsPage({
                 clearStoredPendingOrder(
                   user.identity_id,
                   providerId,
-                  selectedPatient.patient_reference_id,
+                  selectedPatient.primary_patient_reference_id,
                 )
                 if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
                 setUnresolvedStoredOrder(null)
@@ -471,14 +451,14 @@ export function ClinicPatientsPage({
                 if (
                   mountedRef.current &&
                   currentProviderRef.current === providerId &&
-                  currentPatientRef.current === selectedPatient.patient_reference_id &&
+                  currentPatientRef.current === selectedPatient.primary_patient_reference_id &&
                   orderRecoveryGenerationRef.current === recoveryGeneration
                 ) {
                   setReconcilingStoredOrder(false)
                   if (
                     foundIntent &&
                     (foundIntent.provider_organization_id !== providerId ||
-                      foundIntent.patient_reference_id !== selectedPatient.patient_reference_id ||
+                      foundIntent.patient_reference_id !== selectedPatient.primary_patient_reference_id ||
                       foundIntent.idempotency_key !== storedOrder.idempotency_key ||
                       (storedOrder.intent_id !== undefined && foundIntent.id !== storedOrder.intent_id))
                   ) {
@@ -502,14 +482,14 @@ export function ClinicPatientsPage({
                       if (
                         mountedRef.current &&
                         currentProviderRef.current === providerId &&
-                        currentPatientRef.current === selectedPatient.patient_reference_id &&
+                        currentPatientRef.current === selectedPatient.primary_patient_reference_id &&
                         orderRecoveryGenerationRef.current === recoveryGeneration &&
                         committedOrder
                       ) {
                         clearStoredPendingOrder(
                           user.identity_id,
                           providerId,
-                          selectedPatient.patient_reference_id,
+                          selectedPatient.primary_patient_reference_id,
                         )
                         if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
                         setUnresolvedStoredOrder(null)
@@ -531,7 +511,7 @@ export function ClinicPatientsPage({
                       setStoredPendingOrder(
                         user.identity_id,
                         providerId,
-                        selectedPatient.patient_reference_id,
+                        selectedPatient.primary_patient_reference_id,
                         {
                           idempotency_key: storedOrder.idempotency_key,
                           intent_id: foundIntent.id,
@@ -574,7 +554,7 @@ export function ClinicPatientsPage({
       setHadPriorAmbiguousAttempt(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerId, selectedPatient?.patient_reference_id, loadPatientOrders])
+  }, [providerId, selectedPatient?.primary_patient_reference_id, loadPatientOrders])
 
   const loadCatalog = useCallback(async () => {
     setCatalogLoadState('loading')
@@ -633,7 +613,7 @@ export function ClinicPatientsPage({
   const handleSubmitOrder = async () => {
     if (!providerId || !selectedPatient || selectedCatalogEntryIds.length === 0) return
     const targetProviderId = providerId
-    const targetPatientRefId = selectedPatient.patient_reference_id
+    const targetPatientRefId = selectedPatient.primary_patient_reference_id
     const targetUserId = user?.identity_id ?? ''
     const currentScopeKey = orderScopeKey
     let key = orderDraftIdempotencyKey
@@ -959,10 +939,10 @@ export function ClinicPatientsPage({
     setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
     setShowCreate(false)
     try {
-      const authoritative = await client.getPatientReference(
-        targetProviderId,
-        outcome.patient.primary_patient_reference_id,
-      )
+      // DH-CLINIC-005 AC4: reads the Patient directory record directly -- the native selected-
+      // patient state is `PatientDirectoryEntry`, not the legacy `ClinicPatientSummary` shape, so
+      // this read must return DOB/provider/created_at honestly rather than fabricate them.
+      const authoritative = await client.getPatient(targetProviderId, outcome.patient.patient_id)
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
       clearStoredPendingPatient(user.identity_id, targetProviderId)
       setUnresolvedStoredAttempt(null)
@@ -970,7 +950,7 @@ export function ClinicPatientsPage({
       setResults((current) => ({
         providerId: targetProviderId,
         values: [authoritative, ...(current?.providerId === targetProviderId
-          ? current.values.filter((patient) => patient.patient_reference_id !== authoritative.patient_reference_id)
+          ? current.values.filter((patient) => patient.patient_id !== authoritative.patient_id)
           : [])],
       }))
       setSelected({ providerId: targetProviderId, value: authoritative })
@@ -986,11 +966,11 @@ export function ClinicPatientsPage({
   }
 
   const handleRetryConfirmedRead = async () => {
-    if (!providerId || !user || !confirmedReadAttempt?.confirmed_patient_reference_id) return
+    if (!providerId || !user || !confirmedReadAttempt?.confirmed_patient_id) return
     try {
-      const authoritative = await client.getPatientReference(
+      const authoritative = await client.getPatient(
         providerId,
-        confirmedReadAttempt.confirmed_patient_reference_id,
+        confirmedReadAttempt.confirmed_patient_id,
       )
       if (!mountedRef.current || currentProviderRef.current !== providerId) return
       clearStoredPendingPatient(user.identity_id, providerId)
@@ -1030,14 +1010,18 @@ export function ClinicPatientsPage({
 
         <Card>
           <section className={styles.workspace} aria-labelledby="patient-workspace-title">
-            <h2 id="patient-workspace-title">{patientLabel(selectedPatient)}</h2>
-            {selectedPatient.contact_value ? (
-              <p><strong>Contact :</strong> {selectedPatient.contact_value}</p>
-            ) : null}
-            <p><strong>Référence patient :</strong> <code>{selectedPatient.patient_reference_id}</code></p>
-            {!selectedPatient.display_name ? (
-              <p><strong>Référence locale :</strong> <code>{selectedPatient.local_reference}</code></p>
-            ) : null}
+            {/* Visually hidden -- `<PatientIdentity>` below is the actual visible identity
+                display; this exists only so the section has a real accessible landmark name. */}
+            <h2 id="patient-workspace-title" className="visually-hidden">
+              {patientDisplayName(selectedPatient)}
+            </h2>
+            <PatientIdentity patient={selectedPatient} variant="full" />
+            {/* §6/§37: the legacy PatientReference id remains available for backend/integration
+                correlation, visually secondary to the Patient identity above it. */}
+            <p className={styles.hint}>
+              Réf. PatientReference (intégration) :{' '}
+              <code>{selectedPatient.primary_patient_reference_id}</code>
+            </p>
 
             {(() => {
               const hasUnresolvedOrder = Boolean(
@@ -1099,7 +1083,7 @@ export function ClinicPatientsPage({
                     <h2 id="order-wizard-title">Prescrire un ordre de laboratoire</h2>
                     <p className={styles.hint}>
                       Sélectionnez les services diagnostiques à prescrire pour{' '}
-                      <strong>{patientLabel(selectedPatient)}</strong>.
+                      <strong>{patientDisplayName(selectedPatient)}</strong>.
                     </p>
                   </div>
 
@@ -1203,8 +1187,7 @@ export function ClinicPatientsPage({
                     <div className={styles.reviewRow}>
                       <dt>Patient</dt>
                       <dd>
-                        <strong>{patientLabel(selectedPatient)}</strong> (
-                        <code>{selectedPatient.patient_reference_id}</code>)
+                        <PatientIdentity patient={selectedPatient} />
                       </dd>
                     </div>
                     <div className={styles.reviewRow}>
@@ -1298,6 +1281,10 @@ export function ClinicPatientsPage({
                       ? 'Ordre de laboratoire créé avec succès'
                       : 'Ordre de laboratoire confirmé (tentative existante récupérée sans doublon)'}
                   </h2>
+                  {/* DH-CLINIC-005 §26: confirmation must not show only "success" -- the patient
+                      this order was placed for stays visible, catching a wrong-patient selection
+                      immediately. */}
+                  <PatientIdentity patient={selectedPatient} />
                   <p>
                     <strong>Identifiant de l’ordre :</strong>{' '}
                     <code>{orderOutcome.order.id}</code>
@@ -1350,7 +1337,7 @@ export function ClinicPatientsPage({
             ) : ordersLoadState === 'error' ? (
               <ErrorState
                 code={ordersErrorCode}
-                onRetry={() => void loadPatientOrders(providerId, selectedPatient.patient_reference_id)}
+                onRetry={() => void loadPatientOrders(providerId, selectedPatient.primary_patient_reference_id)}
               />
             ) : patientOrders && patientOrders.length > 0 ? (
               <ul className={styles.orderList}>
@@ -1524,14 +1511,10 @@ export function ClinicPatientsPage({
           </div>
           <ul className={styles.patientList}>
             {visibleResults.map((patient) => (
-              <li key={patient.patient_reference_id}>
+              <li key={patient.patient_id}>
                 <Card>
                   <div className={styles.patientRow}>
-                    <div>
-                      <h3>{patientLabel(patient)}</h3>
-                      {patient.contact_value ? <p>Contact : {patient.contact_value}</p> : null}
-                      <p>Référence locale : <code>{patient.local_reference}</code></p>
-                    </div>
+                    <PatientIdentity patient={patient} />
                     <Button type="button" onClick={() => setSelected({ providerId, value: patient })}>Ouvrir</Button>
                   </div>
                 </Card>

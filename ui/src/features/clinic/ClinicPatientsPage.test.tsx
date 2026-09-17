@@ -12,6 +12,7 @@ import type {
   LabOrderIntent,
   PatientCreateRequest,
   PatientDirectoryEntry,
+  PatientIdentitySummary,
 } from '../../api/exchangeTypes'
 import {
   clearAllStoredPendingPatients,
@@ -97,6 +98,20 @@ function toPatientDirectoryEntry(
 
 const patientEntryWithName: PatientDirectoryEntry = toPatientDirectoryEntry(patientWithName)
 const patientEntryWithoutName: PatientDirectoryEntry = toPatientDirectoryEntry(patientWithoutName)
+const authoritativeReplayPatientEntry: PatientDirectoryEntry = toPatientDirectoryEntry(
+  authoritativeReplayPatient,
+)
+
+// DH-CLINIC-005: the `PatientIdentitySummary` a LabOrder fixture carries once it embeds the
+// server-resolved identity -- always in sync with `patientEntryWithName`/`patientWithName` so
+// order/result fixtures below never accidentally diverge from the selected-patient fixture.
+const patientIdentityForOrders: PatientIdentitySummary = {
+  patient_id: patientEntryWithName.patient_id,
+  display_name: patientEntryWithName.display_name,
+  date_of_birth: patientEntryWithName.date_of_birth,
+  contact_channel_type: patientEntryWithName.contact_channel_type,
+  contact_value: patientEntryWithName.contact_value,
+}
 
 /**
  * Builds a `createPatientWithOutcome`-shaped mock outcome from a `ClinicPatientSummary` fixture --
@@ -191,6 +206,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     searchPatients: vi.fn().mockResolvedValue([]),
     getPatientRegistration: vi.fn().mockResolvedValue(null),
     getPatientReference: vi.fn(),
+    getPatient: vi.fn(),
     listCatalogTests: vi.fn().mockResolvedValue([]),
     createOrderWithOutcome: vi.fn(),
     createOrderIntentWithOutcome: defaultCreateIntent,
@@ -273,20 +289,24 @@ describe('Clinic native patient workflow', () => {
 
     resolveList([patientEntryWithName, patientEntryWithoutName])
     expect(await screen.findByText('Patient Synthétique')).toBeInTheDocument()
-    expect(screen.getAllByText(patientWithoutName.local_reference)).toHaveLength(2)
+    // DH-CLINIC-005 §16: a missing name never falls back to the raw technical id -- it renders
+    // the truthful placeholder instead.
+    expect(screen.getByText('Nom non renseigné')).toBeInTheDocument()
 
     const openButtons = screen.getAllByRole('button', { name: 'Ouvrir' })
     await userEvent.setup().click(openButtons[1])
-    expect(await screen.findByRole('heading', { name: patientWithoutName.local_reference })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Nom non renseigné' })).toBeInTheDocument()
+    // The full identity banner still makes the complete technical id available (§17).
+    expect(screen.getByText(patientWithoutName.local_reference)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
   })
 
   it('shows the empty state, creates a minimal opaque reference, fetches it, and opens the workspace', async () => {
     const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
-    const get = vi.fn().mockResolvedValue(patientWithName)
+    const get = vi.fn().mockResolvedValue(patientEntryWithName)
     const client = makeClient({
       createPatientWithOutcome: bind,
-      getPatientReference: get,
+      getPatient: get,
     })
 
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -313,15 +333,15 @@ describe('Clinic native patient workflow', () => {
     expect(calledIdempotencyKey).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     )
-    expect(get).toHaveBeenCalledWith('provider-a', patientWithName.patient_reference_id)
+    expect(get).toHaveBeenCalledWith('provider-a', patientEntryWithName.patient_id)
   })
 
   it('creates a patient with an optional exact date of birth', async () => {
     const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, true))
-    const get = vi.fn().mockResolvedValue(patientWithName)
+    const get = vi.fn().mockResolvedValue(patientEntryWithName)
     const client = makeClient({
       createPatientWithOutcome: bind,
-      getPatientReference: get,
+      getPatient: get,
     })
 
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -365,7 +385,7 @@ describe('Clinic native patient workflow', () => {
       .mockResolvedValueOnce(makePatientCreateOutcome(patientWithName, false))
     const client = makeClient({
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(authoritativeReplayPatient),
+      getPatient: vi.fn().mockResolvedValue(authoritativeReplayPatientEntry),
     })
     const user = userEvent.setup()
 
@@ -386,8 +406,8 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(await screen.findByRole('heading', { name: 'Nom stocké autoritatif' })).toBeInTheDocument()
-    expect(screen.getByText('+25377111111')).toBeInTheDocument()
-    expect(screen.queryByText('+25377000000')).not.toBeInTheDocument()
+    expect(screen.getByText('Téléphone : +25377111111')).toBeInTheDocument()
+    expect(screen.queryByText('Téléphone : +25377000000')).not.toBeInTheDocument()
     expect(bind).toHaveBeenCalledTimes(2)
     expect(bind.mock.calls[1][1]).toEqual(bind.mock.calls[0][1])
   })
@@ -396,10 +416,10 @@ describe('Clinic native patient workflow', () => {
     const bind = vi.fn().mockResolvedValue(makePatientCreateOutcome(patientWithName, false))
     const get = vi.fn()
       .mockRejectedValueOnce(new ExchangeApiError(403, 'FORBIDDEN', 'raw detail failure'))
-      .mockResolvedValueOnce(authoritativeReplayPatient)
+      .mockResolvedValueOnce(authoritativeReplayPatientEntry)
     const client = makeClient({
       createPatientWithOutcome: bind,
-      getPatientReference: get,
+      getPatient: get,
     })
     const user = userEvent.setup()
 
@@ -449,8 +469,8 @@ describe('Clinic native patient workflow', () => {
       const get = vi
         .fn()
         .mockRejectedValueOnce(error)
-        .mockResolvedValueOnce(patientWithName)
-      const client = makeClient({ createPatientWithOutcome: bind, getPatientReference: get })
+        .mockResolvedValueOnce(patientEntryWithName)
+      const client = makeClient({ createPatientWithOutcome: bind, getPatient: get })
       const user = userEvent.setup()
       render(<ClinicApp client={client} initialTab="patients" />)
       await screen.findByText('Aucun patient trouvé')
@@ -618,7 +638,7 @@ describe('Clinic native patient workflow', () => {
     render(<ClinicApp client={client} initialTab="patients" />)
 
     await user.selectOptions(await screen.findByLabelText("Sélectionner l'établissement"), 'provider-b')
-    expect(await screen.findAllByText(patientWithoutName.local_reference)).toHaveLength(2)
+    expect(await screen.findByText('Nom non renseigné')).toBeInTheDocument()
     await act(async () => {
       resolveA([patientEntryWithName])
       await providerAPromise
@@ -647,7 +667,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
 
     await user.selectOptions(screen.getByLabelText("Sélectionner l'établissement"), 'provider-b')
-    expect(await screen.findAllByText(patientWithoutName.local_reference)).toHaveLength(2)
+    expect(await screen.findByText('Nom non renseigné')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Patient Synthétique' })).not.toBeInTheDocument()
   })
 
@@ -672,7 +692,7 @@ describe('Clinic native patient workflow', () => {
         ],
       }),
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(authoritativeReplayPatient),
+      getPatient: vi.fn().mockResolvedValue(authoritativeReplayPatientEntry),
     })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -716,7 +736,7 @@ describe('Clinic native patient workflow', () => {
         ],
       }),
       createPatientWithOutcome: vi.fn().mockReturnValue(bindPromise),
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -734,7 +754,7 @@ describe('Clinic native patient workflow', () => {
       expect(screen.queryByRole('heading', { name: 'Patient Synthétique' })).not.toBeInTheDocument()
       expect(screen.getByText('Aucun patient trouvé')).toBeInTheDocument()
     })
-    expect(client.getPatientReference).not.toHaveBeenCalled()
+    expect(client.getPatient).not.toHaveBeenCalled()
     expect(getStoredPendingPatient('identity-1', 'provider-b')).toBeNull()
     expect(screen.queryByText(/Patient créé/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
@@ -743,9 +763,7 @@ describe('Clinic native patient workflow', () => {
     })
     await user.selectOptions(providerSelect, 'provider-a')
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
-    expect(client.getPatientReference).toHaveBeenCalledWith(
-      'provider-a', patientWithName.patient_reference_id,
-    )
+    expect(client.getPatient).toHaveBeenCalledWith('provider-a', patientEntryWithName.patient_id)
   })
 
   it('blocks patient creation when display name is empty or only whitespace', async () => {
@@ -778,7 +796,7 @@ describe('Clinic native patient workflow', () => {
       .mockResolvedValueOnce(makePatientCreateOutcome(patientWithName, true))
     const client = makeClient({
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const user = userEvent.setup()
 
@@ -853,7 +871,7 @@ describe('Clinic native patient workflow', () => {
     const client = makeClient({
       createPatientWithOutcome: bind,
       listPatients: vi.fn().mockResolvedValue([]),
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const user = userEvent.setup()
 
@@ -883,16 +901,19 @@ describe('Clinic native patient workflow', () => {
       created_at: Date.now(),
     })
 
-    const matchingPatient: ClinicPatientSummary = {
-      patient_reference_id: '33333333-3333-4333-8333-333333333333',
+    const matchingPatientEntry: PatientDirectoryEntry = {
+      patient_id: '44444444-4444-4444-8444-444444444444',
+      provider_organization_id: 'provider-a',
       display_name: 'Patient Déjà Sauvegardé',
+      date_of_birth: null,
       contact_channel_type: 'PHONE',
       contact_value: '+25377222333',
-      local_reference: '44444444-4444-4444-8444-444444444444',
+      primary_patient_reference_id: '33333333-3333-4333-8333-333333333333',
+      created_at: new Date().toISOString(),
     }
 
     const client = makeClient({
-      getPatientReference: vi.fn().mockResolvedValue(matchingPatient),
+      getPatient: vi.fn().mockResolvedValue(matchingPatientEntry),
     })
 
     render(<ClinicApp client={client} initialTab="patients" />)
@@ -960,7 +981,7 @@ describe('Clinic native patient workflow', () => {
     const clientUser1 = makeClient({
       getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-1' }),
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount1 } = render(
       <ClinicApp client={clientUser1} initialTab="patients" />,
@@ -973,7 +994,7 @@ describe('Clinic native patient workflow', () => {
     const clientUser2 = makeClient({
       getMe: vi.fn().mockResolvedValue({ ...me, identity_id: 'identity-2' }),
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount2 } = render(
       <ClinicApp client={clientUser2} initialTab="patients" />,
@@ -994,7 +1015,7 @@ describe('Clinic native patient workflow', () => {
         ],
       }),
       createPatientWithOutcome: bind,
-      getPatientReference: vi.fn().mockResolvedValue(patientWithName),
+      getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount3 } = render(
       <ClinicApp client={clientWithBothProviders} initialTab="patients" />,
@@ -1056,6 +1077,7 @@ describe('Clinic native patient workflow', () => {
     provider_organization_id: 'provider-a',
     patient_reference_id: patientWithName.patient_reference_id,
     practitioner_reference_id: 'prac-1',
+    patient: patientIdentityForOrders,
     status: 'AWAITING_LAB_SELECTION',
     created_at: '2026-09-16T07:00:00Z',
     items: [
@@ -1098,6 +1120,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1207,6 +1230,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1254,6 +1278,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1441,6 +1466,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1577,6 +1603,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1702,6 +1729,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-clinician',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:30:00Z',
       items: [
@@ -1752,6 +1780,7 @@ describe('Clinic native patient workflow', () => {
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
+        patient: patientIdentityForOrders,
         status: 'AWAITING_LAB_SELECTION',
         created_at: '2026-09-16T07:00:00Z',
         items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
@@ -1761,6 +1790,7 @@ describe('Clinic native patient workflow', () => {
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
+        patient: patientIdentityForOrders,
         status: 'CANCELLED',
         created_at: '2026-09-16T07:01:00Z',
         items: [{ catalog_entry_id: 'c2', catalog_code_snapshot: 'C2', catalog_display_name_snapshot: 'D2' }],
@@ -1770,6 +1800,7 @@ describe('Clinic native patient workflow', () => {
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
+        patient: patientIdentityForOrders,
         status: 'REJECTED',
         created_at: '2026-09-16T07:02:00Z',
         items: [{ catalog_entry_id: 'c3', catalog_code_snapshot: 'C3', catalog_display_name_snapshot: 'D3' }],
@@ -1779,6 +1810,7 @@ describe('Clinic native patient workflow', () => {
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
+        patient: patientIdentityForOrders,
         status: 'SELECTED',
         created_at: '2026-09-16T07:03:00Z',
         items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
@@ -1788,6 +1820,7 @@ describe('Clinic native patient workflow', () => {
         provider_organization_id: 'provider-a',
         patient_reference_id: patientWithName.patient_reference_id,
         practitioner_reference_id: 'prac-1',
+        patient: patientIdentityForOrders,
         status: 'COMPLETED',
         created_at: '2026-09-16T07:04:00Z',
         items: [{ catalog_entry_id: 'c5', catalog_code_snapshot: 'C5', catalog_display_name_snapshot: 'D5' }],
@@ -1822,6 +1855,7 @@ describe('Clinic native patient workflow', () => {
       provider_organization_id: 'provider-a',
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-1',
+      patient: patientIdentityForOrders,
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:00:00Z',
       items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
@@ -2403,7 +2437,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons2[1])
       expect(
-        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        await screen.findByRole('heading', { name: 'Nom non renseigné' }),
       ).toBeInTheDocument()
 
       // 4-5. THE DEFECT REGRESSION: Patient B must not be stuck in reconciliation and her normal
@@ -2562,7 +2596,7 @@ describe('Clinic native patient workflow', () => {
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtonsB[0])
       expect(
-        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        await screen.findByRole('heading', { name: 'Nom non renseigné' }),
       ).toBeInTheDocument()
 
       // THE DEFECT REGRESSION: Provider B's patient must not be stuck in reconciliation, and
@@ -2801,7 +2835,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons2[1])
       expect(
-        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        await screen.findByRole('heading', { name: 'Nom non renseigné' }),
       ).toBeInTheDocument()
 
       // B is not poisoned by A's fail-closed state.
@@ -2837,7 +2871,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons2[1])
       expect(
-        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        await screen.findByRole('heading', { name: 'Nom non renseigné' }),
       ).toBeInTheDocument()
 
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
@@ -2874,7 +2908,7 @@ describe('Clinic native patient workflow', () => {
         const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
         await userEventObj.click(openButtons2[1])
         expect(
-          await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+          await screen.findByRole('heading', { name: 'Nom non renseigné' }),
         ).toBeInTheDocument()
 
         expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
@@ -2926,7 +2960,7 @@ describe('Clinic native patient workflow', () => {
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtonsB[0])
       expect(
-        await screen.findByRole('heading', { name: patientWithoutName.local_reference }),
+        await screen.findByRole('heading', { name: 'Nom non renseigné' }),
       ).toBeInTheDocument()
 
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
