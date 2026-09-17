@@ -6398,8 +6398,7 @@ something a shared CI runner is expected to complete quickly. No real browser ha
 Authorization Code + PKCE round trip against this stack. See `PROJECT_STATE.md`'s DH-CLINIC-004B
 entry for the full evidence and the honest completion status.
 
-## ADR-051 — ACCEPTED / IMPLEMENTED (2026-09-17, DH-IDENTITY-001): provider-scoped Patient
-directory separated from source-identity PatientReference provenance
+## ADR-051 — ACCEPTED / IMPLEMENTED (2026-09-17, DH-IDENTITY-001): provider-scoped Patient directory separated from source-identity PatientReference provenance
 
 **Date raised:** 2026-09-17, DH-IDENTITY-001 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
 DH-IDENTITY-001.
@@ -6440,7 +6439,7 @@ invented for itself.
    duplicates are preferable to an unapproved identity merge.
 6. **The native server owns every new `Patient`'s id** -- the browser can never supply one
    (`PatientCreateRequest` rejects it at the schema layer, `extra="forbid"`).
-7. **Native reference identity belongs to DHealth itself, not to "Clinic.**" A natively-created
+7. **Native reference identity belongs to DHealth itself, not to "Clinic."** A natively-created
    Patient's own `PatientReference` uses `source_system="dhealth"`,
    `source_identity_system="urn:dhealth:patient-id"`, `source_identity_value=str(patient.id)` --
    deliberately not `"dhealth-clinic"`, so a future DHealth Lab frontend registering through the
