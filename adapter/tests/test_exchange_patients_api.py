@@ -268,9 +268,7 @@ def test_p11_lab_user_cannot_create_provider_patient(
     assert response.status_code in (403, 404), response.text
 
 
-def test_p12_unassigned_identity_cannot_create(
-    client: TestClient, keypair, organizations
-) -> None:
+def test_p12_unassigned_identity_cannot_create(client: TestClient, keypair, organizations) -> None:
     private_key, _ = keypair
     provider = make_provider(organizations, name="P12Clinic")
     token = make_token(private_key, subject="unassigned-p12")
@@ -326,9 +324,7 @@ def test_i4_exact_replay_returns_same_patient_reference_id(
     )
 
 
-def test_i5_conflicting_payload_same_key_is_409(
-    client: TestClient, keypair, organizations
-) -> None:
+def test_i5_conflicting_payload_same_key_is_409(client: TestClient, keypair, organizations) -> None:
     private_key, _ = keypair
     provider, token = _setup_clinician(client, private_key, organizations, "I5Clinic")
     key = _new_key()
