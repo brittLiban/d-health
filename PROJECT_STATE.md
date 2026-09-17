@@ -15187,24 +15187,33 @@ demographic matching anywhere, and 1:1 backfill of every existing reference. Ful
 
 - Adapter: full suite — **896 passed, 101 skipped** (855 pre-existing + 35 new
   `test_exchange_patients_api.py` + 6 new L-series legacy-compatibility tests; 3 new Postgres-only
-  tests correctly skipped without `DHIDENTITY001_PG_*` set). `ruff check`/`ruff format --check`
-  clean across `src`/`tests`/`migrations`/`scripts`.
+  tests correctly skipped without `DHIDENTITY001_PG_*` set locally -- they run for real in CI, see
+  below). `ruff check`/`ruff format --check` clean across `src`/`tests`/`migrations`/`scripts`.
 - UI: `tsc -b --noEmit` clean project-wide; `oxlint` **0 errors** (3 pre-existing warnings, all in
   files this ticket never touched); `npm run build` succeeds, bundle secret scan clean
   (315.48 kB / gzip 91.58 kB, no bloat). The 6 files this ticket actually changed test coverage for
   (`ClinicPatientsPage.test.tsx`, `pendingPatientStorage.test.ts`, `ClinicApp.test.tsx`,
-  `ClinicA11y.test.tsx`, `ClinicShell.test.tsx`, `exchangeClient.test.ts`) were run together in
-  isolation and passed cleanly: **127 tests, 6/6 files, zero failures, zero flakiness**. The
-  project's full 29-file suite could not be verified in one single clean run in this sandbox: its
-  `vitest` worker-process pool intermittently times out starting a handful of *unrelated* files
-  across the `/mnt/c` WSL2 filesystem boundary (a different random subset each attempt --
-  `App.test.tsx`, maternity/admission/auth-exchange files, never anything this ticket touched) --
-  the same class of environment limitation already on record for this sandbox. Four full-suite
-  attempts were made; every test that did start passed (290/290, then 352/352, then 302/302, then
-  365/365 -- zero real assertion failures in any attempt, only worker-spawn timeouts). CI's own
-  `ui-frontend` job runs on a clean GitHub-hosted runner without this constraint and is the
-  authoritative full-suite check; see this ticket's push-triggered CI result for the real full count.
+  `ClinicA11y.test.tsx`, `ClinicShell.test.tsx`, `exchangeClient.test.ts`) were run together locally
+  in isolation and passed cleanly: **127 tests, 6/6 files, zero failures**. The project's full
+  29-file suite could not be verified in one single clean *local* run in this sandbox: its `vitest`
+  worker-process pool intermittently times out starting a handful of unrelated files across the
+  `/mnt/c` WSL2 filesystem boundary (a different random subset each attempt, never anything this
+  ticket touched) -- the same class of environment limitation already on record for this sandbox.
+  Four local full-suite attempts were made; every test that did start passed (290/290, then
+  352/352, then 302/302, then 365/365 -- zero real assertion failures in any attempt, only
+  worker-spawn timeouts). **This is a local-sandbox limitation only, not a CI one**: CI's own
+  `ui-frontend` job runs on a clean GitHub-hosted runner and its `Vitest` step passed in full, in
+  both push-triggered CI runs below.
 - `git diff --check` clean.
+- **Push-triggered CI, both runs on `origin/master`, all 9 jobs green:** run `35250365891`
+  (commit `902c27f`) failed only on `Ruff format` inside the `adapter` job (one file needed
+  reformatting after a later edit -- fixed in commit `1690db3`, verified locally against the exact
+  check before pushing again); the corrected run, `35250765262` (commit `1690db3`), is fully green,
+  **including both brand-new steps that had never executed against real infrastructure before this
+  push** -- "DH-IDENTITY-001 migration qualification (0021 -> 0022 backfill, M1-M6, downgrade
+  guard)" and "DH-IDENTITY-001 real PostgreSQL patient directory qualification" (PG1-PG8 +
+  composite-FK rejection) -- both passed on the first real attempt against the job's disposable
+  `postgres:16-alpine` service.
 
 **Human Decision Required: NO.** Every architectural choice was already scoped by this ticket's own
 explicit instructions (provider-scoped directory, no fuzzy matching, 1:1 backfill, server-owned
