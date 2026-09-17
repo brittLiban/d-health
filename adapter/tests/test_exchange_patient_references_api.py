@@ -364,6 +364,26 @@ def test_l6_snapshot_replay_behavior_remains_unchanged(
         assert reference.display_name == "Original"
 
 
+def test_l7_unpaired_contact_on_legacy_bind_is_422(
+    client: TestClient, keypair, organizations
+) -> None:
+    """DH-IDENTITY-001: every new binding now also creates a linked ``Patient`` row, whose own
+    contact-pairing CHECK constraint an unpaired contact would otherwise violate at the database
+    layer -- this must surface as a clear 422 at the API boundary, not an opaque 500."""
+    private_key, _ = keypair
+    provider, token = _setup_clinician(client, private_key, organizations, "L7")
+
+    response = _bind(
+        client,
+        token,
+        provider.id,
+        contact_channel_type="whatsapp",
+        contact_value=None,
+    )
+
+    assert response.status_code == 422, response.text
+
+
 # -- authorization -----------------------------------------------------------------------------
 
 

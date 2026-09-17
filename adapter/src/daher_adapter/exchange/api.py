@@ -2232,26 +2232,35 @@ def build_exchange_router(
         # Exact-identity, insert-first-wins binding, and its authoritative audit event, commit or
         # roll back together in one transaction -- the same pattern `create_lab_order` already
         # establishes for its own practitioner-reference get/create and order-creation audit.
-        with session_factory.begin() as session:
-            record, created = patients.get_or_create_with_outcome(
-                source_organization_id=provider_id,
-                source_system=body.source_system,
-                source_identity_system=body.source_identity_system,
-                source_identity_value=body.source_identity_value,
-                display_name=body.display_name,
-                contact_channel_type=body.contact_channel_type,
-                contact_value=body.contact_value,
-                session=session,
-            )
-            security_audit.record(
-                session,
-                event_type="patient_reference_bound",
-                actor_identity_id=principal.identity_id,
-                organization_id=provider_id,
-                outcome="created" if created else "returned_existing",
-                resource_type="patient_reference",
-                resource_id=record.id,
-            )
+        try:
+            with session_factory.begin() as session:
+                record, created = patients.get_or_create_with_outcome(
+                    source_organization_id=provider_id,
+                    source_system=body.source_system,
+                    source_identity_system=body.source_identity_system,
+                    source_identity_value=body.source_identity_value,
+                    display_name=body.display_name,
+                    contact_channel_type=body.contact_channel_type,
+                    contact_value=body.contact_value,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="patient_reference_bound",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=provider_id,
+                    outcome="created" if created else "returned_existing",
+                    resource_type="patient_reference",
+                    resource_id=record.id,
+                )
+        except ValueError as error:
+            # DH-IDENTITY-001: since every new PatientReference now also creates a linked Patient
+            # row, this legacy binding endpoint inherits that Patient's contact-pairing rule --
+            # an unpaired contact must fail with a clear 422, not an opaque 500 from the database's
+            # own CHECK constraint.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
 
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return PatientReferenceResponse(

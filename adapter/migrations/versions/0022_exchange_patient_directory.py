@@ -73,6 +73,14 @@ class UnexpectedNonProviderPatientReferenceOwner(RuntimeError):
     new ``exchange_patients`` row this reference would need. No schema change is made."""
 
 
+class UnexpectedUnpairedPatientReferenceContact(RuntimeError):
+    """The new ``exchange_patients`` table's ``ck_exchange_patients_contact_pairing`` CHECK
+    constraint requires both contact fields or neither. An existing ``exchange_patient_references``
+    row with only one of the two set would otherwise fail the backfill INSERT with an opaque
+    database CHECK-violation error deep inside this migration -- checked explicitly up front,
+    before any DDL, so a real defect in legacy data is reported plainly instead."""
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
@@ -89,6 +97,22 @@ def upgrade() -> None:
             f"row(s) have a source_organization_id that is missing or not a PROVIDER organization "
             f"-- the new exchange_patients.provider_organization_id design assumes every existing "
             f"reference was asserted by a provider. No schema change has been made."
+        )
+
+    unpaired_contact_count = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM exchange_patient_references "
+            "WHERE (contact_channel_type IS NULL) != (contact_value IS NULL)"
+        )
+    ).scalar_one()
+    if unpaired_contact_count:
+        raise UnexpectedUnpairedPatientReferenceContact(
+            f"refusing to migrate 0021 -> 0022: {unpaired_contact_count} "
+            f"exchange_patient_references row(s) have only one of "
+            f"contact_channel_type/contact_value set -- the new "
+            f"exchange_patients.ck_exchange_patients_contact_pairing CHECK constraint "
+            f"requires both or neither, and this backfill copies both fields verbatim. "
+            f"No schema change has been made."
         )
 
     op.create_table(
