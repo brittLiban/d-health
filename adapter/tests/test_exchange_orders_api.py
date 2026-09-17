@@ -17,7 +17,7 @@ from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate
 from exchange_support import make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
@@ -2080,6 +2080,61 @@ def test_oi8_identical_demographics_remain_distinct_by_patient_id(
     patient_2 = second.json()["patient"]
     assert patient_1["display_name"] == patient_2["display_name"] == "Mohamed Ali"
     assert patient_1["patient_id"] != patient_2["patient_id"]
+
+
+def test_dhclinic005_35_patient_identity_resolution_is_not_n_plus_1(
+    client: TestClient, keypair, organizations, catalog, patients, engine: Engine
+) -> None:
+    """§35: the provider order list resolves every row's Patient identity in one batched query,
+    never one query per order. Proven by counting actual SQL SELECT statements issued for a
+    5-order list and confirming it matches the count for a 1-order list -- if identity resolution
+    were N+1, the 5-order count would be strictly larger."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI35")
+
+    def _create_order_for_new_patient(suffix: str) -> None:
+        reference = patients.get_or_create(
+            source_organization_id=provider.id,
+            source_system="dhealth_provider_portal",
+            source_identity_system="urn:daher-health:provider-portal-patient-id",
+            source_identity_value=f"OI35-{suffix}",
+            display_name=f"Patient {suffix}",
+        )
+        test_ids = _make_tests(catalog, 1)
+        response = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(token), "Idempotency-Key": _new_key()},
+            json={
+                "patient_reference_id": str(reference.id),
+                "catalog_entry_ids": [str(test_ids[0])],
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    def _measure_list_select_count() -> int:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get(
+                f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token)
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert resp.status_code == 200, resp.text
+        return len([s for s in statements if s.strip().startswith("SELECT")])
+
+    _create_order_for_new_patient("1")
+    selects_for_one_order = _measure_list_select_count()
+
+    for suffix in ("2", "3", "4", "5"):
+        _create_order_for_new_patient(suffix)
+    selects_for_five_orders = _measure_list_select_count()
+
+    assert selects_for_five_orders == selects_for_one_order
 
 
 def test_dhclinic005_36_missing_patient_relationship_fails_closed(
