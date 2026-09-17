@@ -128,6 +128,27 @@ def test_wrong_audience_is_rejected(keypair) -> None:
         validator.validate_header(f"Bearer {token}")
 
 
+def test_native_ui_client_token_with_exchange_api_audience_is_accepted(keypair) -> None:
+    """DH-CLINIC-004A/ADR-050: the public `dhealth-native-ui` browser client is a different
+    Keycloak client (`azp`) from `dhealth-exchange-api`, but its tokens carry the identical
+    `dhealth-exchange-api` audience via the realm's audience mapper (see
+    keycloak/realm-config/dhealth-exchange-realm.json). `TokenValidator` checks only `iss`/`aud`/
+    signature -- never `azp` -- so this must validate with zero backend change. Regression target:
+    a future edit narrowing audience validation to a single expected client would break the
+    browser-authenticated path silently; this proves the current validator does not do that."""
+    private_key, public_key = keypair
+    validator = build_validator(public_key)
+    token = make_token(
+        private_key,
+        subject="native-ui-user",
+        extra_claims={"aud": [AUDIENCE], "azp": "dhealth-native-ui"},
+    )
+
+    result = validator.validate_header(f"Bearer {token}")
+
+    assert result.subject == "native-ui-user"
+
+
 def test_expired_token_is_rejected(keypair) -> None:
     private_key, public_key = keypair
     validator = build_validator(public_key)

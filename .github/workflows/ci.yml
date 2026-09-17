@@ -534,6 +534,18 @@ jobs:
                       "must not be weakened (UI-011)"
                   )
 
+              # DH-CLINIC-004A: same-origin Exchange routing, path-scoped exactly
+              # like the exchange. vhost above, forwarding to the same adapter.
+              if "/exchange/v1/*" not in app_block:
+                  bad.append("app. block does not handle /exchange/v1/* (DH-CLINIC-004A)")
+              exchange_in_app_match = re.search(
+                  r"handle /exchange/v1/\*\s*\{(.*?)\n\t\t\}", app_block, re.S
+              )
+              if not exchange_in_app_match:
+                  bad.append("app. block's /exchange/v1/* handle is not a scoped block of its own")
+              elif "reverse_proxy adapter:8000" not in exchange_in_app_match.group(1):
+                  bad.append("app. block's /exchange/v1/* handle does not forward to adapter:8000")
+
           # daher-ui must only be reachable through Caddy's app. route — a
           # published host port would let a client bypass the CSRF guard
           # above entirely by talking to the container directly.
@@ -601,7 +613,8 @@ jobs:
               if "body=json.load" in adapter_block and "{'status': 'up'}" not in adapter_block:
                   bad.append("docker-compose.yml: adapter healthcheck body assertion changed unexpectedly")
 
-          # --- Exchange realm file: separate realm, separate client, separate secret, no users ---
+          # --- Exchange realm file: separate realm, two clients (confidential API +
+          # public browser), separate secret, no users ---
           realm_path = Path("keycloak/realm-config/dhealth-exchange-realm.json")
           realm: dict = {}
           if not realm_path.is_file():
@@ -611,10 +624,63 @@ jobs:
               if realm.get("realm") != "dhealth-exchange":
                   bad.append("dhealth-exchange-realm.json: realm name is not 'dhealth-exchange'")
               clients = realm.get("clients", [])
-              if len(clients) != 1 or clients[0].get("clientId") != "dhealth-exchange-api":
-                  bad.append("dhealth-exchange-realm.json: expected exactly one client, 'dhealth-exchange-api'")
-              elif clients[0].get("secret") != "${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}":
-                  bad.append("dhealth-exchange-realm.json: client secret placeholder does not match KEYCLOAK_EXCHANGE_API_CLIENT_SECRET")
+              clients_by_id = {c.get("clientId"): c for c in clients}
+              if set(clients_by_id) != {"dhealth-exchange-api", "dhealth-native-ui"}:
+                  bad.append(
+                      "dhealth-exchange-realm.json: expected exactly two clients, "
+                      "'dhealth-exchange-api' and 'dhealth-native-ui'"
+                  )
+              else:
+                  api_client = clients_by_id["dhealth-exchange-api"]
+                  if api_client.get("publicClient") is not False:
+                      bad.append("dhealth-exchange-api must remain a confidential client (publicClient: false)")
+                  if api_client.get("secret") != "${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}":
+                      bad.append("dhealth-exchange-realm.json: client secret placeholder does not match KEYCLOAK_EXCHANGE_API_CLIENT_SECRET")
+
+                  # DH-CLINIC-004A: the public browser client's security posture — this
+                  # must fail if a future edit accidentally turns it into a secret-bearing
+                  # confidential client, enables implicit/direct-grant flows, or widens its
+                  # trusted origin.
+                  ui_client = clients_by_id["dhealth-native-ui"]
+                  if ui_client.get("publicClient") is not True:
+                      bad.append("dhealth-native-ui must be a public client (publicClient: true)")
+                  if "secret" in ui_client:
+                      bad.append("dhealth-native-ui must never carry a client secret")
+                  if ui_client.get("standardFlowEnabled") is not True:
+                      bad.append("dhealth-native-ui must have the standard Authorization Code flow enabled")
+                  if ui_client.get("implicitFlowEnabled") is not False:
+                      bad.append("dhealth-native-ui must have the implicit flow disabled")
+                  if ui_client.get("directAccessGrantsEnabled") is not False:
+                      bad.append("dhealth-native-ui must have direct access grants (password grant) disabled")
+                  if ui_client.get("serviceAccountsEnabled") is not False:
+                      bad.append("dhealth-native-ui must have service accounts disabled")
+                  if ui_client.get("attributes", {}).get("pkce.code.challenge.method") != "S256":
+                      bad.append("dhealth-native-ui must enforce PKCE S256 server-side")
+                  redirect_uris = ui_client.get("redirectUris", [])
+                  web_origins = ui_client.get("webOrigins", [])
+                  if "*" in redirect_uris or "*" in web_origins:
+                      bad.append("dhealth-native-ui must not use a wildcard redirect URI or web origin")
+                  if not redirect_uris or not all("${BASE_DOMAIN}" in u for u in redirect_uris):
+                      bad.append("dhealth-native-ui redirect URIs must be scoped to app.${BASE_DOMAIN}")
+                  if not web_origins or not all("${BASE_DOMAIN}" in o for o in web_origins):
+                      bad.append("dhealth-native-ui web origins must be scoped to app.${BASE_DOMAIN}")
+                  ui_audience_mapper = next(
+                      (
+                          m
+                          for m in ui_client.get("protocolMappers", [])
+                          if m.get("protocolMapper") == "oidc-audience-mapper"
+                      ),
+                      None,
+                  )
+                  if (
+                      not ui_audience_mapper
+                      or ui_audience_mapper.get("config", {}).get("included.client.audience")
+                      != "dhealth-exchange-api"
+                  ):
+                      bad.append(
+                          "dhealth-native-ui is missing the dhealth-exchange-api audience mapper — "
+                          "its tokens would fail the backend's existing audience validation"
+                      )
               if realm.get("users"):
                   bad.append("dhealth-exchange-realm.json: must not commit real users (DH-EX-008R's job, not this ticket's)")
 

@@ -220,6 +220,20 @@ app.{$BASE_DOMAIN} {
 			}
 		}
 
+		# DH-CLINIC-004A: same-origin Exchange routing for native DHealth
+		# browser apps (Clinic today). ExchangeClient's default base path is
+		# this exact relative prefix so the browser never needs a cross-origin
+		# request to exchange.$BASE_DOMAIN, and therefore never needs CORS.
+		# Path-scoped for the same reason as the exchange. vhost above: the
+		# adapter also serves unrelated health/readiness endpoints that have
+		# never been meant to be public. No CSRF header guard here, unlike
+		# /openmrs/* above -- this route is bearer-token authenticated
+		# (Authorization header), not cookie-authenticated, so it carries none
+		# of the cross-site-form CSRF risk that guard exists for.
+		handle /exchange/v1/* {
+			reverse_proxy adapter:8000
+		}
+
 		handle {
 			reverse_proxy daher-ui:80
 		}

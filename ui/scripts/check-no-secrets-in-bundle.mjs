@@ -37,11 +37,23 @@ function listFiles(dir) {
   return out
 }
 
-const forbiddenNeedles = ['OMRS_ADMIN_PASSWORD', 'KEYCLOAK_OPENMRS_CLIENT_SECRET']
+// DH-CLINIC-004A (NS1): the confidential Exchange API client's secret must
+// never reach a browser bundle. The native browser client (dhealth-native-ui)
+// is public by design and carries no secret of its own to check for.
+const forbiddenNeedles = [
+  'OMRS_ADMIN_PASSWORD',
+  'KEYCLOAK_OPENMRS_CLIENT_SECRET',
+  'KEYCLOAK_EXCHANGE_API_CLIENT_SECRET',
+]
 
 const adminPassword = readEnvValue('OMRS_ADMIN_PASSWORD')
 if (adminPassword) {
   forbiddenNeedles.push(adminPassword)
+}
+
+const exchangeApiClientSecret = readEnvValue('KEYCLOAK_EXCHANGE_API_CLIENT_SECRET')
+if (exchangeApiClientSecret) {
+  forbiddenNeedles.push(exchangeApiClientSecret)
 }
 
 const files = listFiles(distDir)
