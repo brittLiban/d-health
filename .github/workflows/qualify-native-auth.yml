@@ -39,13 +39,13 @@ jobs:
         if: ${{ inputs.mode == 'fresh' || inputs.mode == 'both' }}
         env:
           E2E_EVIDENCE_OUTPUT: ${{ github.workspace }}/qualification-evidence-fresh.json
-        run: ./scripts/qualify-native-auth.sh --mode=fresh
+        run: bash scripts/qualify-native-auth.sh --mode=fresh
 
       - name: upgraded-realm qualification (Case B)
         if: ${{ inputs.mode == 'upgrade' || inputs.mode == 'both' }}
         env:
           E2E_EVIDENCE_OUTPUT: ${{ github.workspace }}/qualification-evidence-upgrade.json
-        run: ./scripts/qualify-native-auth.sh --mode=upgrade
+        run: bash scripts/qualify-native-auth.sh --mode=upgrade
 
       - name: Upload qualification evidence
         if: always()
