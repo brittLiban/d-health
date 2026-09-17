@@ -60,6 +60,14 @@ EVIDENCE_FILE="${E2E_EVIDENCE_OUTPUT:-$ROOT/qualification-evidence-$(date -u +%Y
 
 cleanup() {
   local exit_code=$?
+  if [[ "$exit_code" -ne 0 ]]; then
+    echo "--- DH-CLINIC-004B: failure diagnostics (mode=$MODE, exit=$exit_code) ---" >&2
+    docker compose --env-file "$ENV_FILE" ps -a 2>&1 || true
+    for svc in keycloak keycloak-sso-config keycloak-exchange-config caddy adapter; do
+      echo "----- docker compose logs $svc -----" >&2
+      docker compose --env-file "$ENV_FILE" logs --no-color --tail=200 "$svc" 2>&1 || true
+    done
+  fi
   echo "--- DH-CLINIC-004B: tearing down the ephemeral qualification stack (mode=$MODE) ---"
   cp "$REALM_FILE_BACKUP" "$REALM_FILE"
   docker compose --env-file "$ENV_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
