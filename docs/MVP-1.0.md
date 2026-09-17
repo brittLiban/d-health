@@ -81,12 +81,20 @@ clinical system. MVP purpose: patient lookup / minimum registration needed for t
 create diagnostic lab orders; see order status; receive completed results; clinician review/
 follow-up disposition. **It is not initially a complete hospital information system.**
 
-`NOT BUILT`: no dedicated DHealth Clinic frontend or branded application exists. The Exchange
-backend already exposes provider-facing order-creation/read routes a future DHealth Clinic would
-call (§8); a provider-scoped patient-reference *binding* API exists (DH-EX-009, exact source-identity
-get-or-create) **[re-audited 2026-09-13 — was "patient lookup/registration does not exist even at
-the API level"]**, but full patient lookup/search/registration by name or demographic still does not
-(§8, §10).
+~~`NOT BUILT`: no dedicated DHealth Clinic frontend or branded application exists.~~ **CORRECTED
+[DH-STATE-001, 2026-09-17]:** a native DHealth Clinic frontend now exists and is built and
+component/UI-tested (`ui/src/features/clinic/`; DH-CLINIC-002/003A/003B/003C) — patient search
+against existing `PatientReference` bindings, diagnostic order creation against the Exchange
+catalog, durable order-intent recovery across reload/restart, order status, and results/release-
+version history. It is **not runtime-deployable today**: it has no wired authentication (mounted
+with no auth token; see `ui/src/App.tsx`), the Exchange Keycloak realm defines only a confidential
+backend client with no browser-safe public client, and the reverse-proxy config does not route
+`/exchange/v1/*` from the Clinic app's own origin. See root `STATUS.md` for the full current build/
+blocked breakdown; do not duplicate that table here. The Exchange backend already exposes provider-
+facing order-creation/read routes the Clinic frontend now calls (§8); a provider-scoped patient-
+reference *binding* API exists (DH-EX-009, exact source-identity get-or-create) **[re-audited
+2026-09-13 — was "patient lookup/registration does not exist even at the API level"]**, but full
+patient lookup/search/registration by name or demographic still does not (§8, §10).
 
 **Field-validated requirement (DH-FIELD-001, 2026-09-13):** real Djibouti clinic-order artifacts
 confirm ordering is operationally simple — patient, requested diagnostic service(s), date, ordering-
@@ -340,8 +348,10 @@ here, not copied.]**
 | Patient receives status/follow-up communication | **NOT BUILT** (unchanged this pass) | `ResultDelivery` is created `PENDING` at order creation (DH-EX-001) and no code path anywhere in the repository advances it past `PENDING` — re-confirmed by grep as of this pass. No WhatsApp/SMS/email transport exists for the Exchange. `ResultDeliveryRepository.mark_delivered`/`mark_failed` exist (`results.py`) but are never called. |
 
 **RUNTIME-QUALIFIED, for any of the above: none.** Every qualification on record for DH-EX-001
-through DH-EX-012A is CI/unit/integration-test-level against SQLite and/or a disposable PostgreSQL
-instance (re-confirmed this pass — was "through DH-EX-007"). **Real Keycloak qualification: NOT RUN
+through DH-EX-014B is CI/unit/integration-test-level against SQLite and/or a disposable PostgreSQL
+instance (re-confirmed **[DH-STATE-001, 2026-09-17]** — was "through DH-EX-012A", before that
+"through DH-EX-007"; this line was previously out of step with §8's own citation range above, which
+had already been updated). **Real Keycloak qualification: NOT RUN
 for any Exchange ticket** (DH-EX-008 wired the deployment but could not qualify live, per §10 item
 14 below). **Manual live/browser demonstration: NOT RUN.** No production deployment exists. No pilot
 has begun.
@@ -433,10 +443,15 @@ legible; item numbers are kept stable since §15 and other documents point at th
     and implemented: a `LabObservation` may be corrected before release via an immutable
     supersession chain (`supersedes_observation_id`/`superseded_at`), LAB_TECH-only, no reason
     field, structurally refused once the order is released. Every new observation (entry or
-    correction) now carries `recorded_by_identity_id`; pre-existing rows stay `NULL`. **Post-release
+    correction) now carries `recorded_by_identity_id`; pre-existing rows stay `NULL`. ~~**Post-release
     amendment (ADR-045 Questions 4–5) remains fully OPEN and unimplemented** — deferred to
-    DH-EX-014, unaffected by this change. See `DECISIONS.md`'s ADR-045 addendum and
-    `PROJECT_STATE.md`'s DH-EX-013 entry.
+    DH-EX-014, unaffected by this change.~~ **RESOLVED [re-audited 2026-09-17, DH-EX-014B]:**
+    post-release amendment (ADR-045 Questions 4–5) is accepted and implemented under ADR-048
+    Model 3 — see §3 and §8 above, `DECISIONS.md`'s DH-EX-014B section, and `PROJECT_STATE.md`'s
+    DH-EX-014B entry. This item's OPEN framing was already stale before this pass — §3 and §8 had
+    been updated at DH-EX-014B time but this line was missed; see root `STATUS.md` §5 for the
+    contradiction audit that caught it. See `DECISIONS.md`'s ADR-045 addendum and
+    `PROJECT_STATE.md`'s DH-EX-013 entry for the pre-release-correction half of this item.
 16. ~~**New [DH-FIELD-001, 2026-09-13]. The current `LabOrderItem → one LabResult` model is
     confirmed not final for real panel-based laboratory workflows.** Real field evidence shows one
     ordered diagnostic service may need to return multiple observations — today's schema cannot

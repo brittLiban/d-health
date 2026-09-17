@@ -1,9 +1,16 @@
 /**
- * Non-PHI, non-clinical storage for unresolved native Clinic diagnostic order creation (DH-CLINIC-003A).
+ * Storage for unresolved native Clinic diagnostic order creation (DH-CLINIC-003A).
+ *
+ * Corrected [DH-STATE-001, 2026-09-17]: the persisted tuple carries no *direct* PHI
+ * (no name, DOB, phone, address, or other demographic field is ever written here), but
+ * it is not "non-sensitive" — it is a linkable technical health-workflow identifier set.
+ * `patient_reference_id` ties a specific browser/user session to a specific patient's
+ * order activity at a specific provider; that linkage is sensitive metadata and must be
+ * protected accordingly even though it contains no demographic content of its own.
  *
  * Requirements:
- * - Persists ONLY technical opaque identity tuple across reload/restart.
- * - ZERO patient PHI: no name, no phone, no contact, no demographics.
+ * - Persists ONLY the technical opaque identity tuple across reload/restart.
+ * - No direct PHI: no name, no phone, no contact, no demographics.
  * - ZERO clinical payload in persistent storage: no test codes, no catalog entry IDs,
  *   no test names, no clinical results.
  * - Bound strictly to authenticated user identity + active provider + patient reference scope.
@@ -21,9 +28,9 @@ export interface OpaquePendingOrderIdentity {
   patient_reference_id: string
   idempotency_key: string
   created_at: number
-  /** Set after the intent is created on backend; still non-PHI and non-clinical. */
+  /** Set after the intent is created on backend; still no direct PHI, still non-clinical. */
   intent_id?: string
-  /** Set only after the order create POST has returned successfully; still non-PHI. */
+  /** Set only after the order create POST has returned successfully; still no direct PHI. */
   confirmed_order_id?: string
 }
 

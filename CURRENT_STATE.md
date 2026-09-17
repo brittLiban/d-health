@@ -33,9 +33,15 @@
 > of a released order derive content from that manifest, never live state. **Post-release
 > amendment episodes and version releases are now implemented** (ADR-045 Questions 4–5, ADR-048
 > Model 3, DH-EX-014B) — lab tech prepares corrections in an amendment episode, authorized releaser
-> releases a new version manifest, and a fresh version-bound clinician review is required. **DHealth Clinic,
-> DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named applications anywhere
-> in this repository, on either track.
+> releases a new version manifest, and a fresh version-bound clinician review is required.
+> ~~**DHealth Clinic, DHealth Lab, DHealth Patient, and DHealth Connect are NOT BUILT** as named
+> applications anywhere in this repository, on either track.~~ **CORRECTED [DH-STATE-001,
+> 2026-09-17]:** a native DHealth Clinic frontend now exists, built and component/UI-tested
+> (`ui/src/features/clinic/`), but is not yet runtime-deployable (no wired authentication, no
+> browser-safe OIDC client, no same-origin Exchange routing). **DHealth Lab, DHealth Patient, and
+> DHealth Connect remain NOT BUILT** — no code of their own exists for any of the three. See root
+> **`STATUS.md`** for the current, single source of truth on what is built/blocked/not built across
+> the whole repository; this file remains the detailed historical ticket-by-ticket record behind it.
 
 **Assessed:** 2026-08-17 · **Target:** pilot-ready by 2026-09-01 — **historical target date for the
 maternity/reference-connector track; see the note above for the current product definition, and

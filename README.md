@@ -5,9 +5,11 @@ Facilities may run DHealth's own native software or integrate their existing EMR
 connector — never both maintained by hand for the same transaction. Full product definition,
 the five product surfaces, the golden journey, and four non-negotiable product laws (no forced
 marketplace, no double entry, faster than what it replaces, no digital-literacy requirement for
-care): **[`docs/MVP-1.0.md`](docs/MVP-1.0.md)**, decided in `DECISIONS.md`'s **ADR-043**. This
-section gives the short version and points to current evidence; it does not duplicate that
-document.
+care): **[`docs/MVP-1.0.md`](docs/MVP-1.0.md)**, decided in `DECISIONS.md`'s **ADR-043**. For
+**current, present-tense status** — what's proven, what's built but not runtime-deployed, what's
+blocked, what's next — see **[`STATUS.md`](STATUS.md)**, the canonical status document as of
+DH-STATE-001. This section gives the short version and points to current evidence; it does not
+duplicate either document.
 
 ### Current: the DHealth Exchange backend
 
@@ -135,11 +137,18 @@ CI-qualified, and (where a migration was involved) real-PostgreSQL-qualified —
   `GET .../release-versions` is the foundation read for a future multi-version history UI. **This
   ticket implements the versioning foundation only — no amendment-preparation or amendment-release
   endpoint exists, and no `version_number > 1` is creatable anywhere.** Post-release amendment
-  itself (ADR-045 Questions 4–5) remains open and unimplemented, deferred to **DH-EX-014B, which
-  Liban has decided must exist before DHealth's first real-patient pilot.** Real-PostgreSQL
+  itself (ADR-045 Questions 4–5) was, at this point in the ticket sequence, deferred to
+  **DH-EX-014B, which Liban has decided must exist before DHealth's first real-patient pilot** —
+  **since implemented; see the DH-EX-014B entry below [DH-STATE-001, 2026-09-17].** Real-PostgreSQL
   qualified, including an original-release race, a correction-vs-release race re-qualified against
   the manifest, a partial-manifest-read proof, a version-scoped review race, and downgrade-guard
   evidence — see `PROJECT_STATE.md`'s DH-EX-014A entry.
+- **DH-EX-014B (ADR-048 Model 3, IMPLEMENTED, 2026-09-14)** closes the gap the entry above left
+  open: a lab tech starts a single active `PREPARING` amendment episode, corrects observations
+  within it via the same immutable supersession chain as pre-release correction, and an authorized
+  `LAB_RESULT_RELEASER` releases it as a new immutable release-version manifest with a fresh
+  clinician-review obligation. Real-PostgreSQL qualified. See `DECISIONS.md`'s DH-EX-014B section
+  and `docs/MVP-1.0.md` §3/§8.
 
 Real Keycloak integration remains a deployment/pilot qualification gate, not yet run. The Provider
 Portal, Lab Portal, and WhatsApp/SMS integration are **still under construction, not yet built** —
@@ -152,10 +161,12 @@ connector track.
 `docs/MVP-1.0.md` names four more product surfaces beyond the Exchange backend above: **DHealth
 Clinic** (native provider software), **DHealth Lab** (native laboratory software), **DHealth
 Patient** (the assisted-digital patient layer), and **DHealth Connect** (the EMR/LIS integration
-layer). **None of the four is built as a named application today.** The Exchange backend above
-already implements much of what a future DHealth Clinic/Lab would call over HTTP; DHealth Patient
-and DHealth Connect have no code of their own yet. Full current-vs-MVP gap table:
-`docs/MVP-1.0.md` §8.
+layer). **CORRECTED [DH-STATE-001, 2026-09-17]:** a native DHealth Clinic frontend now exists,
+built and component/UI-tested (`ui/src/features/clinic/`), but is not yet runtime-deployable — see
+root `STATUS.md` for the current build/blocked breakdown. **DHealth Lab, DHealth Patient, and
+DHealth Connect remain unbuilt** — no code of their own exists yet for any of the three. The
+Exchange backend above already implements much of what DHealth Clinic/Lab call over HTTP. Full
+current-vs-MVP gap table: `docs/MVP-1.0.md` §8.
 
 ---
 

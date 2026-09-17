@@ -1200,7 +1200,7 @@ production deployment remain unrun, so no pilot-readiness claim follows.
 
 ### Durable Provider Lab Order Intent (ADR-049, DH-CLINIC-003C, 2026-09-16)
 
-A native Clinic lab order (through the DHealth Provider Portal's own UI, not an EMR connector) is
+A native Clinic lab order (through the DHealth Clinic frontend's own UI, not an EMR connector) is
 never created directly. It is always mediated by a backend-owned, immutable `LabOrderIntent` —
 Option A of the three options DH-CLINIC-003B's own decision gate framed (ADR-049 records the
 rejected Options B and C and why). The browser is not the source of truth for clinical order
@@ -1289,3 +1289,19 @@ requires intent ownership going forward.
 
 Full decision record and rejected alternatives: **ADR-049** (`DECISIONS.md`). Implementation and
 qualification detail: `PROJECT_STATE.md`'s DH-CLINIC-003C entries.
+
+**Runtime-deployability gap [DH-STATE-001, 2026-09-17]: everything above is proven at the
+component/integration-test level only, not runtime-deployed.** Three architectural facts, read
+together, mean the Clinic frontend cannot authenticate itself in a real deployment as the code
+stands: `ui/src/App.tsx` mounts `ClinicApp` with no auth token of any kind; `ClinicProvider`
+defaults that token to `null` and calls `GET /me` with it anyway; and `ExchangeClient` defaults its
+`baseUrl` to the relative, same-origin path `/exchange/v1`. That same-origin request only reaches
+the Exchange if the origin serving the Clinic app also routes `/exchange/v1/*` to the adapter —
+`caddy/Caddyfile`'s `app.{$BASE_DOMAIN}` vhost (which serves the Clinic bundle) does not; only the
+separate `exchange.{$BASE_DOMAIN}` vhost does, and that vhost serves no UI. Compounding this, the
+`dhealth-exchange` Keycloak realm defines exactly one client, `dhealth-exchange-api`, confidential
+(`publicClient: false`, client-secret-bearing) — no browser-safe public/PKCE client exists for a
+frontend to authenticate against even if the routing gap were closed. (Config inspection only —
+no live Keycloak/Caddy stack was booted to observe the actual HTTP response; see root `STATUS.md`
+§D for the same finding stated as a verification-level claim.) Closing this is DH-CLINIC-004A's
+job, not retroactive scope for DH-CLINIC-003C.

@@ -14763,3 +14763,62 @@ records truthful implementation, review-finding, and fix status only, not self-d
 **Human Decision Required: NO.**
 
 Do not start DH-CLINIC-004 until Liban's own re-review closes this ticket.
+
+## DH-STATE-001 (2026-09-17) — canonical status established, repository documentation reconciled
+
+Pure truth/convergence ticket, not a feature ticket. No API, schema, migration, or runtime behavior
+was changed. Created root **`STATUS.md`** as the single canonical present-tense status document and
+reconciled `README.md`, `docs/MVP-1.0.md`, `CURRENT_STATE.md`, and `docs/ARCHITECTURE.md` against
+it, all via dated inline corrections/overlays on their existing text — no history was rewritten or
+deleted. Full detail, evidence, and rationale for every correction: `STATUS.md` itself and this
+ticket's own diff; not restated in full here to avoid a second, divergent copy.
+
+**DH-CLINIC-003C re-verification for this ticket, fresh on this exact commit, not carried forward
+from a prior session's report:** adapter suite **854 passed, 98 skipped**; UI suite **26 files, 370
+tests, all passing**. Bidirectional intent ownership, cross-provider/cross-clinician anti-
+enumeration, server-derived practitioner identity, historical (pre-003C) order replay, and real-
+PostgreSQL concurrency PG2-PG6 all re-confirmed present. **Scope re-confirmed, not upgraded to
+closed:** qualified for same-browser-profile reload/recovery only (no cross-device or cross-browser
+claim), no real-Keycloak or browser-runtime qualification. `DH-CLINIC-003C CLOSED:` line above is
+left as **NO**, unchanged — that decision remains Liban's own, per his explicit instruction in the
+prior session, and this ticket does not infer or self-declare it from re-verification passing.
+
+**Repository-wide contradiction audit** found and corrected three stale claims, all via dated
+overlays: `README.md` and `docs/MVP-1.0.md` both previously said no dedicated DHealth Clinic
+frontend exists — stale since DH-CLINIC-002/003A/003B/003C; corrected to state it exists, is built
+and component/UI-tested, but is not runtime-deployable (native browser-auth gap, `STATUS.md` §D).
+`docs/MVP-1.0.md` §10 item 15 previously said post-release amendment "remains fully OPEN and
+unimplemented" — stale since DH-EX-014B; corrected with a dated `RESOLVED` note, consistent with the
+same item's own §3/§8 text having already been updated at DH-EX-014B time and only this one line
+missed. `docs/MVP-1.0.md`'s RUNTIME-QUALIFIED disclaimer cited "through DH-EX-012A" while §8's own
+summary line above it already said "through DH-EX-014B" — internally inconsistent; corrected to
+match. Several other patterns audited (`"Provider Portal"`, cross-device claims, categorical
+"non-PHI" framing, DH-EX ticket-range citations elsewhere) were found to be either already accurate
+or already correctly historically labelled — not touched, to avoid deleting legitimate history for
+its own sake.
+
+**`ui/src/features/clinic/pendingOrderStorage.ts`** doc-comment corrected (comments only, zero
+behavior change): the persisted technical recovery tuple is described as carrying no *direct* PHI
+but being sensitive, linkable technical health-workflow metadata — not categorically "non-PHI,
+non-clinical" as the prior wording implied. The identical "non-PHI" phrasing exists in a handful of
+other Clinic UI comments and test names (`ClinicPatientsPage.tsx`, `ClinicApp.tsx`,
+`ClinicPatientsPage.test.tsx`) — found, not fixed, in this ticket; out of its declared file scope,
+left for a future pass rather than expanded into here.
+
+**Qualification for this ticket, all run locally before commit:** `git diff --check` clean; UI
+lint/typecheck/test/build all green (`npm test -- --run`: 26 files, 370 tests, same run cited above,
+on this branch after the `pendingOrderStorage.ts` comment edit); adapter suite re-run green (854
+passed, 98 skipped, same run cited above) since this ticket touches no adapter file but the
+ticket's own gate requires confirming nothing regressed; the repository's relative-documentation-
+link-check script (`.github/workflows/ci.yml`'s "Relative documentation links resolve" step, run
+locally) passes across all 27 tracked markdown documents, including the new `STATUS.md`; the UI
+build's own bundled secret scan (`scripts/check-no-secrets-in-bundle.mjs`) found none. **CI on the
+pushed feature branch had not yet run at commit time** — its result is reported separately in this
+ticket's final report to Liban, not asserted here in advance.
+
+**Human Decision Required: NO.** This ticket does not decide, close, or start anything with
+clinical or scope surface — it only reconciles documentation against already-existing, already-
+qualified code and defers the one open human decision (DH-CLINIC-003C closure) to Liban, unchanged.
+
+**NEXT: DH-CLINIC-004A — Native browser authentication + same-origin Exchange routing.** Not
+started in this ticket.
