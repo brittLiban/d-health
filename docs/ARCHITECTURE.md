@@ -1290,7 +1290,7 @@ requires intent ownership going forward.
 Full decision record and rejected alternatives: **ADR-049** (`DECISIONS.md`). Implementation and
 qualification detail: `PROJECT_STATE.md`'s DH-CLINIC-003C entries.
 
-**Runtime-deployability gap [DH-STATE-001, 2026-09-17]: everything above is proven at the
+~~**Runtime-deployability gap [DH-STATE-001, 2026-09-17]: everything above is proven at the
 component/integration-test level only, not runtime-deployed.** Three architectural facts, read
 together, mean the Clinic frontend cannot authenticate itself in a real deployment as the code
 stands: `ui/src/App.tsx` mounts `ClinicApp` with no auth token of any kind; `ClinicProvider`
@@ -1301,7 +1301,57 @@ the Exchange if the origin serving the Clinic app also routes `/exchange/v1/*` t
 separate `exchange.{$BASE_DOMAIN}` vhost does, and that vhost serves no UI. Compounding this, the
 `dhealth-exchange` Keycloak realm defines exactly one client, `dhealth-exchange-api`, confidential
 (`publicClient: false`, client-secret-bearing) — no browser-safe public/PKCE client exists for a
-frontend to authenticate against even if the routing gap were closed. (Config inspection only —
-no live Keycloak/Caddy stack was booted to observe the actual HTTP response; see root `STATUS.md`
-§D for the same finding stated as a verification-level claim.) Closing this is DH-CLINIC-004A's
-job, not retroactive scope for DH-CLINIC-003C.
+frontend to authenticate against even if the routing gap were closed.~~ **CLOSED AT THE CONFIG
+LEVEL [DH-CLINIC-004A, ADR-050, 2026-09-17]:** see "Native browser authentication" below — a public
+PKCE client now exists, `app.{$BASE_DOMAIN}` now routes `/exchange/v1/*`, and Clinic now mounts
+behind a real auth gate. **Still not runtime/browser-qualified** — no live Keycloak/Caddy stack has
+been booted to observe an actual OIDC round trip; that remains DH-CLINIC-004B's job.
+
+### Native browser authentication (ADR-050, DH-CLINIC-004A, 2026-09-17)
+
+Native DHealth browser apps (Clinic today; Lab later) authenticate against the same
+`dhealth-exchange` realm DH-EX-008 already uses for the backend, through a separate public client,
+`dhealth-native-ui` (Authorization Code + PKCE S256, no secret, `keycloak-js`) — never the
+confidential `dhealth-exchange-api` client and never the reference-connector's `daher` realm.
+
+**Shared auth layer, not Clinic-owned** (`ui/src/features/auth/exchange/`):
+
+- `ExchangeAuthProvider`/`useExchangeAuth()` owns the `keycloak-js` session. `init()` uses
+  `onLoad: 'check-sso'`, not `'login-required'` — initialization itself never redirects the page;
+  the provider observes the result and calls `login()` as its own explicit next step only when no
+  session exists. This keeps `initializing`/`authenticating`/`authenticated`/`error` real, distinct,
+  observable states rather than a redirect happening as an initialization side effect.
+- The resulting access token never leaves memory: no `localStorage`, `IndexedDB`, or app-created
+  cookie holds it. Unmounting the provider (switching to the reference-connector app) simply drops
+  that in-memory state — which is why switching apps is explicitly not the same operation as logging
+  out (see DECISIONS.md ADR-050, decision 4).
+- Token acquisition (`exchangeTokenProvider.ts`) is the `getAuthToken` callback `ExchangeClient`
+  already supported: single-flight (concurrent requests share one `updateToken` attempt, never each
+  starting their own), and fails closed — a refresh failure returns `null` and flips the provider's
+  status to `error`, never sends a stale token.
+- `ExchangeAuthGate` is a small, generic presentational component: it renders its children only once
+  `status === 'authenticated'`, so the data layer beneath it (`ClinicProvider`'s `/me` call) cannot
+  fire before real authentication exists. `App.tsx` wraps native Clinic in
+  `ExchangeAuthProvider` + `ExchangeAuthGate` and passes the resulting authenticated `ExchangeClient`
+  into `ClinicApp`; Clinic itself contains no OAuth/OIDC code. A future DHealth Lab frontend reuses
+  the identical provider/gate pair.
+
+**Configuration, fail-closed** (`exchangeAuthConfig.ts`): the Keycloak origin is derived from the
+browser's own hostname (`app.<domain>` → `https://id.<domain>`) only when the hostname genuinely
+matches that shape; anything else (bare `localhost` under `npm run dev`, an unrecognized host) is
+refused outright rather than guessed, unless an explicit `VITE_EXCHANGE_KEYCLOAK_URL` override is
+set — all public configuration, never a secret, documented in `.env.example`.
+
+**Same-origin routing, no CORS:** `app.{$BASE_DOMAIN}`'s Caddy vhost now also proxies
+`/exchange/v1/*` to the adapter, path-scoped exactly like the pre-existing `exchange.{$BASE_DOMAIN}`
+vhost (which is unchanged and still exists). `ExchangeClient`'s default relative base path
+(`/exchange/v1`) therefore resolves from the Clinic app's own origin without any cross-origin
+request or CORS configuration.
+
+**Logout separation:** native Clinic's own logout calls `useExchangeAuth().logout()`, which invokes
+`keycloak-js`'s `logout()` against the `dhealth-exchange` realm and redirects back to the app root —
+never the reference-connector's `logoutLocalSessions()`/`navigateToKeycloakEndSession()` (OpenMRS/
+OpenELIS/`daher` realm), which continues to run only from the Maternity connector's own logout path.
+
+Full decision record: **ADR-050** (`DECISIONS.md`). Implementation and qualification detail:
+`PROJECT_STATE.md`'s DH-CLINIC-004A entry.

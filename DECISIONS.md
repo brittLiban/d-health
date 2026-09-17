@@ -6266,3 +6266,94 @@ green): adapter `851 passed, 98 skipped, 1 warning`; migration current == heads 
 passed, including 60 Clinic-specific tests; bundle secret scan clean. This is CI-qualified evidence
 only — no real Keycloak/browser runtime qualification, no real-patient qualification, and no
 deployment/pilot qualification is claimed by this ADR.
+
+## ADR-050 — ACCEPTED / IMPLEMENTED / CONFIG-QUALIFIED (2026-09-17, DH-CLINIC-004A): native DHealth browser apps authenticate against the `dhealth-exchange` realm through a shared, public PKCE client; tokens stay in memory; requests are same-origin
+
+**Date raised:** 2026-09-17, DH-CLINIC-004A · **Status:** ACCEPTED, IMPLEMENTED,
+CONFIG-QUALIFIED · **Ticket:** DH-CLINIC-004A. **Not** real-Keycloak/browser-qualified — that is
+DH-CLINIC-004B's explicit job; see the Evidence section below for exactly what "config-qualified"
+means here and what it does not claim.
+
+**Why this needed a decision, not just an implementation.** DH-CLINIC-003C (ADR-049) built the
+durable-intent recovery model assuming an authenticated caller, but no native DHealth frontend
+could actually authenticate as a real browser user in a deployment — `ClinicProvider` defaulted its
+token to `null` and called `/me` anonymously regardless. Closing that gap touches five things no
+prior ADR had decided: which realm a native browser app uses, what kind of OIDC client a browser is
+safe to be, where the resulting token lives, how the browser reaches the Exchange API without a new
+cross-origin dependency, and whether this is Clinic-specific or shared infrastructure DHealth Lab
+must later reuse. All five are decided together here because they are one architecture, not five
+independent choices.
+
+### Decisions
+
+1. **Same realm, new client — never a second identity provider.** Native DHealth browser apps
+   authenticate against the existing `dhealth-exchange` Keycloak realm (DH-EX-008), not a new realm
+   and not the reference-connector's `daher` realm. A new client, `dhealth-native-ui`, is added
+   alongside the existing confidential `dhealth-exchange-api` client — additively; `dhealth-exchange-api`
+   is unchanged and keeps its secret.
+2. **Public client, Authorization Code + PKCE S256, no hand-rolled OAuth.** `dhealth-native-ui` is
+   `publicClient: true`, carries no secret, has the standard flow enabled and implicit/direct-grant/
+   service-account flows disabled, and enforces `pkce.code.challenge.method: S256` at the Keycloak
+   client level (not merely relying on the browser adapter's own default). The official `keycloak-js`
+   browser adapter is used end to end — no manual PKCE generation, code exchange, refresh protocol,
+   or logout protocol. `redirectUris`/`webOrigins` are scoped to `https://app.${BASE_DOMAIN}` only,
+   never a wildcard.
+3. **Same audience, unmodified backend validation.** `dhealth-native-ui` carries the identical
+   `exchange-api-audience` protocol mapper the confidential client already has, stamping
+   `dhealth-exchange-api` into every access token regardless of which client issued it.
+   `identity_auth.py`'s `TokenValidator` checks only `iss`/`aud`/signature, never `azp` — proven by a
+   new unit test that mints a token with `azp: dhealth-native-ui` and confirms it validates
+   unchanged. Zero backend code was touched by this ADR.
+4. **Tokens live in memory only, never in `localStorage`/`IndexedDB`/an app-created cookie.** The
+   shared auth layer (`ui/src/features/auth/exchange/`) holds its `keycloak-js` instance and the
+   resulting access token in a React component's closure/state for the lifetime of that mounted
+   provider. Unmounting it (switching to the reference-connector app) drops that state naturally —
+   itself a deliberate consequence of decision 5's scoping, not a separate persistence mechanism.
+   The existing `pendingOrderStorage.ts`/`pendingPatientStorage.ts` technical-recovery identities
+   remain completely independent of this token; neither was touched.
+5. **Same-origin `/exchange/v1/*`, not cross-origin + CORS.** `ExchangeClient`'s pre-existing default
+   base path (`/exchange/v1`, relative) was designed for same-origin use; this ADR closes the routing
+   gap that made it unreachable rather than reaching for CORS. `app.${BASE_DOMAIN}`'s Caddy vhost now
+   proxies `/exchange/v1/*` to the adapter, path-scoped exactly like the dedicated `exchange.
+   ${BASE_DOMAIN}` vhost, which remains untouched and still exists.
+6. **Shared infrastructure, not Clinic-owned.** The OIDC session lives in `ExchangeAuthProvider`/
+   `useExchangeAuth()` under `ui/src/features/auth/exchange/`, independent of any Clinic module.
+   `ClinicApp`/`ClinicProvider` consume an already-authenticated `ExchangeClient` injected from
+   outside; Clinic itself has zero OAuth/OIDC code. A future DHealth Lab frontend reuses this layer
+   unchanged — wrap it in its own `ExchangeAuthProvider` and `ExchangeAuthGate`, exactly as
+   `App.tsx` does for Clinic.
+
+### What this explicitly does not do
+
+- Does not weaken, replace, or bypass `identity_auth.py`'s issuer/audience/signature validation in
+  any way — no backend file changed.
+- Does not turn `dhealth-exchange-api` into a public client, does not remove its secret, does not
+  merge it with `dhealth-native-ui`.
+- Does not introduce CORS, a BFF session, or a cookie-based token transport.
+- Does not touch the reference-connector's `daher` realm, its OpenMRS/OpenELIS login flow, or its
+  own logout (`navigateToKeycloakEndSession`) — native Clinic logout is a separate code path that
+  terminates only the `dhealth-exchange` session, and switching applications is explicitly not the
+  same operation as logging out of either.
+- Does not attempt real-Keycloak import/reconciliation for `dhealth-native-ui` on a deployment whose
+  Keycloak database already has the `dhealth-exchange` realm imported — `docker-compose.yml`'s
+  `--import-realm` flag refuses to overwrite an existing realm, so this client only appears
+  automatically on a fresh Keycloak database. Reconciling it into an already-imported realm (the
+  same class of problem `keycloak/reconcile-sso.sh` solves for the `daher` realm's clients, which
+  deliberately never touches this realm) is unbuilt and is DH-CLINIC-004B's concern, not silently
+  patched over here.
+
+### Evidence
+
+**CONFIG-QUALIFIED, not runtime-qualified.** Verified: the realm JSON's structure and security
+attributes (CI's extended static check, run locally before push); the Caddy route's placement and
+target (same method); `identity_auth.py` accepting a `dhealth-native-ui`-issued token (new adapter
+unit test, real RSA-signed JWT, no network) — full adapter suite re-run green, **855 passed, 98
+skipped**; the full UI test suite including new coverage for initialization states, single-flight/
+fail-closed token refresh, no-anonymous-`/me`-before-auth, and logout/app-switch separation —
+**29 files, 397 tests, all passing**. `git diff --check` clean; bundle secret scan clean including
+the new `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` needle. See `PROJECT_STATE.md`'s DH-CLINIC-004A entry
+for the exact qualifying commit and CI run id. **Not verified — explicitly DH-CLINIC-004B's job:** a
+real Keycloak import of this realm file, a real browser OIDC round trip (redirect, login, PKCE
+exchange, token acceptance), real-Keycloak session refresh/expiry behavior, and the
+realm-reconciliation gap noted
+above. No pilot-readiness or production-deployment claim follows from this ADR.

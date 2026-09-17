@@ -14822,3 +14822,99 @@ qualified code and defers the one open human decision (DH-CLINIC-003C closure) t
 
 **NEXT: DH-CLINIC-004A — Native browser authentication + same-origin Exchange routing.** Not
 started in this ticket.
+
+## DH-CLINIC-004A (2026-09-17) — native browser authentication + same-origin Exchange routing
+
+**Starting master SHA:** `357bd3578ec86024e6ff787bbd39b2327b47245e` (DH-STATE-001, confirmed merged
+via `git fetch` + `origin/master`, not trusted from a prior recap). **Branch:**
+`dh-clinic-004a-browser-auth`, cut fresh from `master`, never stacked on the unmerged
+`dh-state-001-canonical-status` branch.
+
+**Objective and scope.** Make the native DHealth Clinic frontend structurally capable of
+authenticating a real browser user against the `dhealth-exchange` Keycloak realm and calling the
+Exchange through the same `app.${BASE_DOMAIN}` origin — as reusable infrastructure future native
+apps (DHealth Lab) can adopt without copying Clinic code. Full decision record: `DECISIONS.md`
+ADR-050.
+
+**What was built:**
+
+- **Shared native auth layer**, `ui/src/features/auth/exchange/`: `ExchangeAuthProvider`/
+  `useExchangeAuth()` (owns the `keycloak-js` session, Authorization Code + PKCE S256,
+  `onLoad: 'check-sso'` so initialization itself never redirects as a side effect — `login()` is a
+  deliberate follow-up action taken only after `init()` finds no session), `exchangeTokenProvider.ts`
+  (single-flight, fail-closed `getAuthToken` callback wired into `ExchangeClient`'s existing,
+  previously-unused token-provider architecture), `exchangeAuthConfig.ts` (fails closed on any
+  hostname not matching the trusted `app.<domain>` → `id.<domain>` shape, rather than guessing),
+  `ExchangeAuthGate` (generic, presentational — blocks rendering, and therefore `/me`, until real
+  authentication exists).
+- **`App.tsx`** now wraps native Clinic in `ExchangeAuthProvider` + `ExchangeAuthGate` and injects
+  the resulting authenticated `ExchangeClient` into `ClinicApp`; Clinic's own logout calls
+  `useExchangeAuth().logout()` (terminates only the Exchange session), never the reference
+  connector's `logoutLocalSessions()`/`navigateToKeycloakEndSession()`. Switching apps unmounts the
+  provider (dropping in-memory token state) without calling either session's logout.
+- **Removed the misleading manual `authToken` prop** threaded through `ClinicApp`/`ClinicProvider`/
+  `ClinicContext` and every Clinic page — it was always `null` in every real call path (nothing ever
+  set it) and every removed argument was already silently falling through to `ExchangeClient`'s own
+  `getAuthToken`. Zero behavior change; done as its own commit.
+- **`keycloak/realm-config/dhealth-exchange-realm.json`**: added `dhealth-native-ui`, a second,
+  public, secretless client alongside the unchanged confidential `dhealth-exchange-api` — standard
+  flow only (implicit/direct-grant/service-accounts disabled), `pkce.code.challenge.method: S256`
+  enforced server-side, redirect/web-origin scoped to `https://app.${BASE_DOMAIN}` only (no
+  wildcard), and the identical `exchange-api-audience` mapper the confidential client already
+  carries.
+- **`caddy/Caddyfile`**: `app.{$BASE_DOMAIN}`'s existing `route{}` block now also handles
+  `/exchange/v1/*` → `adapter:8000`, inside the block and ahead of the `daher-ui` catch-all, mirroring
+  the dedicated `exchange.{$BASE_DOMAIN}` vhost's own path scoping (which is untouched and remains).
+  No CORS introduced; no CSRF header guard added to this route (deliberately — it is bearer-token,
+  not cookie, authenticated, so it carries none of the cross-site-form risk that guard exists for).
+- **`.github/workflows/ci.yml`**: the two existing Caddy/realm static-check steps (not new steps)
+  extended to assert the new client's full security posture (public, secretless, PKCE-enforced,
+  non-wildcard origin/redirect, correct audience mapper) and the new `app.` route. Verified locally
+  before push by extracting and re-running both embedded Python blocks against the changed files.
+- **`ui/scripts/check-no-secrets-in-bundle.mjs`**: also refuses a build containing the literal
+  `KEYCLOAK_EXCHANGE_API_CLIENT_SECRET` value (NS1) — the new public client has no secret of its own
+  to check for by design.
+- **`.env.example`**: documents the three new public Vite variables
+  (`VITE_EXCHANGE_KEYCLOAK_URL`/`_REALM`/`_CLIENT_ID`), all safe public configuration, none a
+  secret.
+- **`adapter/tests/test_exchange_token_validator.py`**: one new unit test proving `TokenValidator`
+  accepts a token whose `azp` is `dhealth-native-ui` purely on `iss`/`aud`/signature — converts the
+  "the audience mapper should make this work" reasoning into an observed result. Zero backend
+  production code changed.
+
+**Deliberately not built (DH-CLINIC-004B's job, not silently patched over here):**
+
+- Real Keycloak import/reconciliation of the two-client realm file on a deployment whose Keycloak
+  database already has `dhealth-exchange` imported. `docker-compose.yml`'s `--import-realm` flag
+  refuses to overwrite an existing realm, so `dhealth-native-ui` only appears automatically on a
+  **fresh** Keycloak database; `keycloak/reconcile-sso.sh` deliberately never touches this realm.
+  This is a genuine deployment-correctness gap, recorded honestly rather than fixed by extending the
+  reconciliation script under this ticket's scope.
+- Any real browser OIDC round trip: redirect, login, PKCE code exchange, token acceptance by a live
+  adapter, refresh/expiry against a real Keycloak, live Caddy routing observed end to end. Nothing
+  above was booted; every claim in this entry is component/unit/static-config-level.
+
+**Qualification, all run locally before commit:**
+
+- UI: lint, typecheck, build (bundle secret scan clean, includes the new NS1 needle), and the full
+  test suite — **29 files, 397 tests, all passing** (370 pre-existing + 23 new exchange-auth-layer
+  tests + 4 new App-level logout/app-switch-separation tests). Bundle size 285.19 kB → 313.99 kB
+  gzip 82.63 kB → 91.40 kB (keycloak-js's addition; noted, not treated as a problem).
+- Adapter: full suite re-run — **855 passed, 98 skipped** (854 pre-existing + 1 new audience test).
+  `keycloak-js` install verified additive-only (single package, zero dependencies of its own, zero
+  transitive bumps to react/vite/typescript — checked via `git diff` on the lockfile before
+  proceeding).
+- `git diff --check` clean. The two modified CI static-check Python blocks extracted and re-run
+  locally against the changed Caddyfile/realm file before push — both pass.
+- CI on the pushed feature branch: see this ticket's final report for the exact run id and result.
+
+**Human Decision Required: NO.** No clinical/scope-surface decision was made or required — every
+architectural choice in ADR-050 was already scoped by this ticket's own explicit instructions
+(public PKCE client, in-memory tokens, same-origin routing, shared auth layer), and the one
+genuinely new fact discovered during implementation (the realm-reconciliation gap above) is recorded
+as a limitation, not decided around.
+
+**Status: IMPLEMENTED / CONFIG-QUALIFIED.** Not runtime-qualified, not browser-qualified, not
+pilot-ready — see `STATUS.md` §C/§D for the precise claim boundary.
+
+**NEXT: DH-CLINIC-004B — Real Keycloak + browser E2E qualification.** Not started in this ticket.
