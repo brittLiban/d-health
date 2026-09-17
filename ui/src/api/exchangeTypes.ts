@@ -68,6 +68,18 @@ export interface PatientIdentitySummary {
   contact_value: string | null
 }
 
+/**
+ * DH-CLINIC-006 §22-24: the destination-lab projection embedded on an order read. `null` means
+ * the order has not yet been routed to a lab -- a real, valid state, never fabricated. Carries no
+ * price field of any kind, and no claim about *who* made the assignment (a historical patient
+ * selection and a provider `assign-lab` call are represented identically here).
+ */
+export interface LabAssignmentSummary {
+  lab_organization_id: string
+  lab_organization_name: string
+  selected_at: string
+}
+
 export interface LabOrderSummary {
   id: string
   provider_organization_id: string
@@ -77,6 +89,7 @@ export interface LabOrderSummary {
   status: LabOrderStatus
   created_at: string
   item_count: int_number
+  lab_assignment: LabAssignmentSummary | null
 }
 
 // Helper alias for integer representation in types
@@ -91,6 +104,7 @@ export interface LabOrder {
   status: LabOrderStatus
   created_at: string
   items: LabOrderItem[]
+  lab_assignment: LabAssignmentSummary | null
 }
 
 export type LabOrderResponse = LabOrder
@@ -148,6 +162,50 @@ export interface LabOrderIntentCreateOutcome {
   created: boolean
 }
 
+// -- DH-CLINIC-006: provider-assigned laboratory routing --------------------------------------
+
+/**
+ * DH-CLINIC-006 §13/§32: one currently-eligible destination lab for a specific order -- the
+ * provider is explicitly routed to it (an active `ProviderLabRoute`), and it can perform every
+ * ordered test. Deliberately carries no price, ranking, "best"/cheapest, star-rating, distance,
+ * or sponsored-placement field of any kind: this is operational routing, not a marketplace.
+ */
+export interface ProviderEligibleLab {
+  lab_organization_id: string
+  lab_organization_name: string
+  public_address: string
+  public_phone: string | null
+}
+
+export interface AssignLabRequest {
+  lab_organization_id: string
+}
+
+/**
+ * DH-CLINIC-006 §30: deliberately does NOT carry `lab_organization_name` -- the backend response
+ * this mirrors has only these three fields. After a successful `assignLab` call, the UI must
+ * re-read `getOrder()` for the authoritative, named `LabAssignmentSummary` rather than rendering a
+ * name from this response (which has none).
+ */
+export interface LabAssignmentResponse {
+  lab_order_id: string
+  lab_organization_id: string
+  selected_at: string
+}
+
+/**
+ * DH-CLINIC-006 §12: one provider's own routing-directory entry. Never exposed cross-provider,
+ * never includes price.
+ */
+export interface ProviderLabRoute {
+  id: string
+  provider_organization_id: string
+  lab_organization_id: string
+  lab_organization_name: string
+  active: boolean
+  created_at: string
+  updated_at: string
+}
 
 export interface ProviderObservationResponse {
   observation_id: string

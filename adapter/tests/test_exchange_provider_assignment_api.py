@@ -142,9 +142,26 @@ def _assign_lab(client, token, provider_id, order_id, lab_id):
     )
 
 
-def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, listed: bool = False):
+def _referral_lab(
+    organizations,
+    directory,
+    catalog,
+    *,
+    name: str,
+    entry_id,
+    listed: bool = False,
+    client: TestClient | None = None,
+    private_key=None,
+    provider_id=None,
+):
     """An ACTIVE lab, accepting orders, offering the given test -- deliberately zero LabPrice
-    rows and (by default) unlisted, matching the provider-assignment-eligible shape."""
+    rows and (by default) unlisted, matching the provider-assignment-eligible shape.
+
+    DH-CLINIC-006: when ``client``/``private_key``/``provider_id`` are given, also configures an
+    active ``ProviderLabRoute`` from ``provider_id`` to the new lab -- without one,
+    ``assign_by_provider`` now refuses with ``ProviderLabRouteNotActive`` regardless of how
+    eligible the lab otherwise is (§18). Omitted (the default) for tests that never call
+    assign-lab for this lab, or that specifically exercise the no-route-configured refusal."""
     lab = make_lab(organizations, name=name)
     directory.upsert(
         lab_organization_id=lab.id,
@@ -156,7 +173,22 @@ def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, lis
         accepting_orders=True,
     )
     catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    if client is not None:
+        _configure_route(client, private_key, provider_id, lab.id)
     return lab
+
+
+def _configure_route(client, private_key, provider_id, lab_id, *, active: bool = True) -> None:
+    """DH-CLINIC-006 §8/§9: route configuration is platform-admin-only."""
+    platform_admin_token = make_token(
+        private_key, subject=f"route-admin-{uuid.uuid4()}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.put(
+        f"/exchange/v1/organizations/{provider_id}/lab-routes/{lab_id}",
+        headers=_auth(platform_admin_token),
+        json={"active": active},
+    )
+    assert response.status_code in (200, 201), response.text
 
 
 def _audit_events(sessions, event_type: str) -> list[dict]:
@@ -188,7 +220,14 @@ def test_clinician_assigns_lab_and_lab_tech_can_accept_it(
         client, private_key, organizations, catalog, patients, name="Golden"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="GoldenReferralLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="GoldenReferralLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
 
     response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
@@ -335,7 +374,16 @@ def test_idempotent_replay_returns_200_no_second_audit(
     provider, order_id, entry_id, token = _create_order(
         client, private_key, organizations, catalog, patients, name="Replay"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="ReplayLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ReplayLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
 
     first = _assign_lab(client, token, provider.id, order_id, lab.id)
     second = _assign_lab(client, token, provider.id, order_id, lab.id)
@@ -354,7 +402,18 @@ def test_different_lab_already_selected_is_conflict(
     provider, order_id, entry_id, token = _create_order(
         client, private_key, organizations, catalog, patients, name="DiffLab"
     )
-    lab_a = _referral_lab(organizations, directory, catalog, name="DiffLabA", entry_id=entry_id)
+    lab_a = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="DiffLabA",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
+    # lab_b deliberately has no configured route -- irrelevant here, since the existing-different-
+    # lab-selection conflict is detected before the route check ever runs for the second call.
     lab_b = _referral_lab(organizations, directory, catalog, name="DiffLabB", entry_id=entry_id)
 
     first = _assign_lab(client, token, provider.id, order_id, lab_a.id)
@@ -379,7 +438,15 @@ def test_unlisted_no_price_lab_is_provider_assignable_but_not_a_marketplace_opti
         client, private_key, organizations, catalog, patients, name="Separation"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="SeparationLab", entry_id=entry_id, listed=False
+        organizations,
+        directory,
+        catalog,
+        name="SeparationLab",
+        entry_id=entry_id,
+        listed=False,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
 
     assign_response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
@@ -448,7 +515,16 @@ def test_patient_response_shows_null_price_not_zero_for_provider_assignment(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="ZeroDJF"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="ZeroDJFLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ZeroDJFLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
 
     access_response = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/patient-access",
@@ -541,7 +617,14 @@ def test_patient_selection_after_provider_assignment_same_lab_is_conflict(
         client, private_key, organizations, catalog, patients, name="ProvenanceAttack"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="ProvenanceAttackLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="ProvenanceAttackLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
 
     access_response = client.post(
@@ -641,7 +724,16 @@ def test_reproduction_issuing_access_after_provider_assignment_was_refused_pre_f
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="TimingHole"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="TimingHoleLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="TimingHoleLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
 
     assign_response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
     assert assign_response.status_code == 201, assign_response.text

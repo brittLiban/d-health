@@ -152,7 +152,21 @@ def _assign_lab(client, token, provider_id, order_id, lab_id):
     )
 
 
-def _referral_lab(organizations, directory, catalog, *, name: str, entry_id):
+def _referral_lab(
+    organizations,
+    directory,
+    catalog,
+    *,
+    name: str,
+    entry_id,
+    client=None,
+    private_key=None,
+    provider_id=None,
+):
+    """DH-CLINIC-006: when client/private_key/provider_id are given, also configures
+    an active ProviderLabRoute from provider_id to the new lab -- without one,
+    assign_by_provider refuses with ProviderLabRouteNotActive regardless of how eligible
+    the lab otherwise is (§18)."""
     lab = make_lab(organizations, name=name)
     directory.upsert(
         lab_organization_id=lab.id,
@@ -164,7 +178,21 @@ def _referral_lab(organizations, directory, catalog, *, name: str, entry_id):
         accepting_orders=True,
     )
     catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    if client is not None:
+        _configure_route(client, private_key, provider_id, lab.id)
     return lab
+
+
+def _configure_route(client, private_key, provider_id, lab_id, *, active: bool = True) -> None:
+    platform_admin_token = make_token(
+        private_key, subject=f"route-admin-{uuid.uuid4()}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.put(
+        f"/exchange/v1/organizations/{provider_id}/lab-routes/{lab_id}",
+        headers=_auth(platform_admin_token),
+        json={"active": active},
+    )
+    assert response.status_code in (200, 201), response.text
 
 
 def _setup_lab_tech_for(client, private_key, lab_id, name: str):
@@ -196,7 +224,16 @@ def test_provider_assigned_collection_journey(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="Journey"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="JourneyLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="JourneyLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "journey")
@@ -231,7 +268,16 @@ def test_collection_before_acceptance_is_conflict(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="TooEarly"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="TooEarlyLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="TooEarlyLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "tooearly")
 
@@ -249,7 +295,16 @@ def test_collection_idempotent_replay(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="Replay"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="ReplayLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ReplayLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "replay")
     client.post(
@@ -287,7 +342,16 @@ def test_collection_replay_survives_progression_to_in_progress(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="ReplayLater"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="ReplayLaterLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ReplayLaterLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "replaylater")
     client.post(
@@ -332,7 +396,16 @@ def test_legacy_in_progress_order_start_processing_replay_unaffected(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="Legacy"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="LegacyLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="LegacyLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "legacy")
     client.post(
@@ -403,6 +476,9 @@ def _seed_lab_with_n_orders(
             lab = _referral_lab(organizations, directory, catalog, name=lab_name, entry_id=entry_id)
         else:
             catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+        # Each iteration uses a distinct provider (a fresh `_create_order` call) but the same lab
+        # -- a route must be configured per provider->lab pair, not just once for the shared lab.
+        _configure_route(client, private_key, provider.id, lab.id)
         assert (
             _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
         )
@@ -601,7 +677,16 @@ def test_collection_audit_atomicity(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="AuditFail"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="AuditFailLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="AuditFailLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "auditfail")
     client.post(
@@ -643,7 +728,14 @@ def test_clinician_cannot_record_collection(
         client, private_key, organizations, catalog, patients, name="ClinicianDenied"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="ClinicianDeniedLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="ClinicianDeniedLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -662,7 +754,14 @@ def test_org_admin_alone_cannot_record_collection(
         client, private_key, organizations, catalog, patients, name="OrgAdminDenied"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="OrgAdminDeniedLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="OrgAdminDeniedLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -685,7 +784,14 @@ def test_platform_admin_alone_cannot_record_collection(
         client, private_key, organizations, catalog, patients, name="PlatAdminDenied"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="PlatAdminDeniedLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="PlatAdminDeniedLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -706,7 +812,16 @@ def test_cross_lab_lab_tech_gets_anti_enumeration_404(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="CrossLab"
     )
-    lab_a = _referral_lab(organizations, directory, catalog, name="CrossLabA", entry_id=entry_id)
+    lab_a = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="CrossLabA",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab_a.id).status_code == 201
 
     lab_b = make_lab(organizations, name="CrossLabB")
@@ -736,7 +851,16 @@ def test_extra_body_fields_rejected(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="NoBody"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="NoBodyLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="NoBodyLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "nobody")
     client.post(

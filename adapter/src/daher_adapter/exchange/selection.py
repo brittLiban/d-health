@@ -42,6 +42,7 @@ like `exchange/orders.py`'s ``transition`` does for status changes.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -60,6 +61,7 @@ from daher_adapter.exchange.models import (
     OrganizationType,
     PatientAccessGrant,
     PatientAccessMode,
+    ProviderLabRoute,
     TestCatalogEntry,
 )
 from daher_adapter.exchange.orders import InvalidOrderTransition, OrderNotFound
@@ -102,6 +104,27 @@ class LabAlreadyAssignedByProvider(RuntimeError):
     to in the first place."""
 
 
+class LabAssignmentIntegrityError(RuntimeError):
+    """DH-CLINIC-006 §23: a `LabOrder` whose status is in `STATUSES_REQUIRING_LAB_SELECTION` has no
+    resolvable canonical `LabSelection` row -- a structural impossibility given `select()`/
+    `assign_by_provider()` always write both in the same flush (see that frozenset's own
+    docstring). Mirrors `PatientIdentityIntegrityError`'s own fail-closed discipline (`exchange/
+    patients.py`): never fabricate or silently null a destination-lab projection field when the
+    canonical source data is inconsistent -- raise instead."""
+
+
+class ProviderLabRouteNotActive(RuntimeError):
+    """DH-CLINIC-006: no active ``ProviderLabRoute`` exists between this provider and this lab --
+    the provider is not currently configured to route orders here, whether because no route was
+    ever created or because a platform admin deactivated one that used to exist. Enforced *inside*
+    this locked mutation itself, not only at the HTTP/eligible-labs read layer (`exchange/api.py`),
+    matching this method's own established discipline (see the tenant-boundary check just above)
+    of never trusting a pre-route read alone -- a future caller of this repository method directly
+    cannot bypass the routing boundary just because it skipped the eligible-labs read. Deactivating
+    a route never touches any order that was already assigned before the deactivation -- this
+    exception only ever blocks a *new* assignment attempt (DH-CLINIC-006 §11)."""
+
+
 class PatientAccessGrantLacksSelectionAuthority(RuntimeError):
     """DH-EX-010A: the grant authorizing this call is real, unrevoked, and unexpired, but its
     persisted ``access_mode`` is ``ORDER_READ``, not ``LAB_SELECTION`` -- it was issued to read an
@@ -138,6 +161,33 @@ class LabSelectionRecord:
     lab_organization_id: uuid.UUID
     selected_at: datetime
     selected_via_patient_access_grant_id: uuid.UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class LabAssignmentSummaryRecord:
+    """DH-CLINIC-006: the minimal "which lab, when" projection for an order read -- deliberately
+    no price, no provenance claim about who selected it (§24)."""
+
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    selected_at: datetime
+
+
+# DH-CLINIC-006 §23: a LabOrder in any of these statuses can only have been reached by first
+# passing through SELECTED, which both `select()` and `assign_by_provider()` write in the exact
+# same flush that creates the order's own `LabSelection` row -- so a canonical `LabSelection` is
+# structurally guaranteed to exist for any of these, never merely expected. AWAITING_LAB_SELECTION,
+# REJECTED, and CANCELLED are deliberately excluded: the latter two are reachable directly from
+# AWAITING_LAB_SELECTION (see `orders.py`'s `_ALLOWED_TRANSITIONS`) without ever having a
+# `LabSelection`, which is a legitimate historical state, not an integrity problem.
+STATUSES_REQUIRING_LAB_SELECTION = frozenset(
+    {
+        LabOrderStatus.SELECTED.value,
+        LabOrderStatus.ACCEPTED.value,
+        LabOrderStatus.IN_PROGRESS.value,
+        LabOrderStatus.COMPLETED.value,
+    }
+)
 
 
 class LabSelectionRepository:
@@ -408,6 +458,28 @@ class LabSelectionRepository:
                 f"only an order still AWAITING_LAB_SELECTION may be assigned"
             )
 
+        # DH-CLINIC-006: checked first among the fresh eligibility re-checks below. This read does
+        # race a concurrent route deactivation (the `LabOrder` row lock acquired above serializes
+        # against another *assignment* attempt on this same order, but not against
+        # `ProviderLabRouteRepository.upsert`'s own separate lock on the route row) -- what makes
+        # the race benign is that PostgreSQL's READ COMMITTED isolation still hands this statement
+        # a consistent, genuinely-committed view: either the deactivation committed before this
+        # read (route reads inactive, assignment refuses) or after (route reads active, assignment
+        # proceeds and the later deactivation never touches the resulting LabSelection, per §11).
+        # Both outcomes are correct and truthful; see §20 PG5's own test for the exact assertion.
+        route = session.scalar(
+            select(ProviderLabRoute).where(
+                ProviderLabRoute.provider_organization_id == provider_organization_id,
+                ProviderLabRoute.lab_organization_id == lab_organization_id,
+            )
+        )
+        if route is None or not route.active:
+            raise ProviderLabRouteNotActive(
+                f"provider {provider_organization_id} has no active routing configuration for "
+                f"lab {lab_organization_id} -- ask a platform admin to configure or reactivate "
+                f"this route before assigning orders to it"
+            )
+
         required_entry_ids = frozenset(item.catalog_entry_id for item in order.items)
         required_count = len(required_entry_ids)
 
@@ -472,6 +544,44 @@ class LabSelectionRepository:
             if lab_selection is None:
                 return None
             return _to_selection_record(lab_selection)
+
+    def get_assignment_summaries_for_orders(
+        self, lab_order_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, LabAssignmentSummaryRecord]:
+        """DH-CLINIC-006 §22/§23: the batched, N+1-safe projection an order-list read needs to show
+        "which lab is this order headed to" -- one query for the whole page, joined straight to
+        `Organization` for the lab's current display name (never a duplicated name snapshot stored
+        anywhere for this alone). Deliberately says nothing about *who* made the selection (§24) --
+        callers needing that must inspect `LabSelectionRecord.
+        selected_via_patient_access_grant_id` themselves, this projection only ever exposes the
+        destination lab and when it was chosen."""
+        unique_ids = list(dict.fromkeys(lab_order_ids))
+        if not unique_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    LabSelection.lab_order_id,
+                    LabSelection.lab_organization_id,
+                    Organization.name,
+                    LabSelection.selected_at,
+                )
+                .join(Organization, Organization.id == LabSelection.lab_organization_id)
+                .where(LabSelection.lab_order_id.in_(unique_ids))
+            ).all()
+            return {
+                order_id: LabAssignmentSummaryRecord(
+                    lab_organization_id=lab_id,
+                    lab_organization_name=lab_name,
+                    selected_at=selected_at,
+                )
+                for order_id, lab_id, lab_name, selected_at in rows
+            }
+
+    def get_assignment_summary_for_order(
+        self, lab_order_id: uuid.UUID
+    ) -> LabAssignmentSummaryRecord | None:
+        return self.get_assignment_summaries_for_orders([lab_order_id]).get(lab_order_id)
 
 
 def _to_selection_record(lab_selection: LabSelection) -> LabSelectionRecord:

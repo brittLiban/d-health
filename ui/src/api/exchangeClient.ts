@@ -15,11 +15,13 @@
 
 import type { ErrorCode } from './types'
 import type {
+  AssignLabRequest,
   BindPatientReferenceOutcome,
   CatalogEntry,
   ClinicPatientSummary,
   ExchangeErrorCode,
   ExchangeMeResponse,
+  LabAssignmentResponse,
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderCreateRequest,
@@ -32,6 +34,8 @@ import type {
   PatientDirectoryEntry,
   PatientReference,
   PatientReferenceBindRequest,
+  ProviderEligibleLab,
+  ProviderLabRoute,
   ProviderOrderResults,
   ProviderReleaseVersionHistory,
 } from './exchangeTypes'
@@ -302,6 +306,66 @@ export class ExchangeClient {
   ): Promise<ProviderReleaseVersionHistory> {
     return this.request<ProviderReleaseVersionHistory>(
       `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions`,
+      { method: 'GET' },
+      token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/eligible-labs
+   * DH-CLINIC-006 §13: labs this provider is explicitly, currently configured to route to that
+   * can also fulfil every item on this order. Order id alone determines the required tests --
+   * never a client-submitted catalog list. An empty array is a real, valid state (§15), never an
+   * error. No price field anywhere in the response (§16/§32).
+   */
+  async getEligibleLabs(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ProviderEligibleLab[]> {
+    return this.request<ProviderEligibleLab[]>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/eligible-labs`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/orders/{order_id}/assign-lab
+   * DH-CLINIC-006/DH-EX-010: routes an order to a provider-configured lab -- no price/consent
+   * step. Same-lab replay is idempotent (200); a different lab already selected is a 409
+   * conflict; an inactive/missing route is also a 409 conflict.
+   */
+  async assignLab(
+    providerId: string,
+    orderId: string,
+    body: AssignLabRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabAssignmentResponse> {
+    return this.request<LabAssignmentResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/assign-lab`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/lab-routes
+   * DH-CLINIC-006 §12: this provider's own configured routing directory (CLINICIAN minimum). No
+   * price, no cross-provider exposure -- included for completeness; the order-scoped
+   * `getEligibleLabs` above is the endpoint the routing UI actually uses.
+   */
+  async listProviderLabRoutes(
+    providerId: string,
+    token?: string,
+  ): Promise<ProviderLabRoute[]> {
+    return this.request<ProviderLabRoute[]>(
+      `/organizations/${encodeURIComponent(providerId)}/lab-routes`,
       { method: 'GET' },
       token,
     )

@@ -80,6 +80,13 @@ def patients(sessions: sessionmaker[Session]) -> PatientReferenceRepository:
     return PatientReferenceRepository(sessions)
 
 
+@pytest.fixture
+def directory(sessions: sessionmaker[Session], organizations: OrganizationRepository):
+    from daher_adapter.exchange.directory import LabDirectoryProfileRepository
+
+    return LabDirectoryProfileRepository(sessions, organizations)
+
+
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
@@ -143,6 +150,47 @@ def _make_tests(catalog: CatalogRepository, count: int = 2) -> list[uuid.UUID]:
 
 def _new_key() -> str:
     return str(uuid.uuid4())
+
+
+def _configure_route(client, private_key, provider_id, lab_id, *, active: bool = True) -> None:
+    """DH-CLINIC-006 §8/§9: route configuration is platform-admin-only."""
+    platform_admin_token = make_token(
+        private_key, subject=f"route-admin-{uuid.uuid4()}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.put(
+        f"/exchange/v1/organizations/{provider_id}/lab-routes/{lab_id}",
+        headers=_auth(platform_admin_token),
+        json={"active": active},
+    )
+    assert response.status_code in (200, 201), response.text
+
+
+def _referral_lab(
+    organizations, directory, catalog, client, private_key, provider_id, *, name: str, entry_id
+):
+    lab = make_lab(organizations, name=name)
+    directory.upsert(
+        lab_organization_id=lab.id,
+        public_address=f"{name} Address",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=False,
+        accepting_orders=True,
+    )
+    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    _configure_route(client, private_key, provider_id, lab.id)
+    return lab
+
+
+def _assign_lab(client, token, provider_id, order_id, lab_id):
+    response = client.post(
+        f"/exchange/v1/organizations/{provider_id}/orders/{order_id}/assign-lab",
+        headers=_auth(token),
+        json={"lab_organization_id": str(lab_id)},
+    )
+    assert response.status_code in (200, 201), response.text
+    return response
 
 
 def _audit_events(sessions: sessionmaker[Session], event_type: str) -> list[dict]:
@@ -2184,3 +2232,306 @@ def test_dhclinic005_36_missing_patient_relationship_fails_closed(
             f"/exchange/v1/organizations/{provider.id}/orders/{result.order.id}",
             headers=_auth(token),
         )
+
+
+# -- DH-CLINIC-006 OR-series: the ``lab_assignment`` destination-lab read projection -------------
+
+
+def test_or1_unassigned_order_has_null_lab_assignment(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR1")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR1")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["lab_assignment"] is None
+
+    order_id = response.json()["id"]
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    )
+    assert detail.json()["lab_assignment"] is None
+
+
+def test_or2_assigned_order_has_lab_assignment_with_id_name_and_timestamp(
+    client: TestClient, keypair, organizations, catalog, patients, directory
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR2")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR2")
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        client,
+        private_key,
+        provider.id,
+        name="OR2Lab",
+        entry_id=test_ids[0],
+    )
+
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+    _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    )
+    lab_assignment = detail.json()["lab_assignment"]
+    assert lab_assignment is not None
+    assert lab_assignment["lab_organization_id"] == str(lab.id)
+    assert lab_assignment["lab_organization_name"] == "OR2Lab"
+    assert lab_assignment["selected_at"] is not None
+
+
+def test_or3_list_endpoint_lab_assignment_resolution_is_not_n_plus_1(
+    client: TestClient, keypair, organizations, catalog, patients, directory, engine: Engine
+) -> None:
+    """Mirrors ``test_dhclinic005_35_patient_identity_resolution_is_not_n_plus_1`` exactly, for
+    the new ``lab_assignment`` projection: one batched query for the whole list page, never one
+    per assigned order."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR3")
+
+    def _create_and_assign(suffix: str) -> None:
+        test_ids = _make_tests(catalog, 1)
+        patient_id = _create_patient(client, private_key, patients, provider.id, f"OR3-{suffix}")
+        lab = _referral_lab(
+            organizations,
+            directory,
+            catalog,
+            client,
+            private_key,
+            provider.id,
+            name=f"OR3Lab-{suffix}",
+            entry_id=test_ids[0],
+        )
+        response = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(token), "Idempotency-Key": _new_key()},
+            json={
+                "patient_reference_id": str(patient_id),
+                "catalog_entry_ids": [str(test_ids[0])],
+            },
+        )
+        order_id = response.json()["id"]
+        _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    def _measure_list_select_count() -> int:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get(
+                f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token)
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert resp.status_code == 200, resp.text
+        return len([s for s in statements if s.strip().startswith("SELECT")])
+
+    _create_and_assign("1")
+    selects_for_one_order = _measure_list_select_count()
+
+    for suffix in ("2", "3", "4", "5"):
+        _create_and_assign(suffix)
+    selects_for_five_orders = _measure_list_select_count()
+
+    assert selects_for_five_orders == selects_for_one_order
+
+
+def test_or4_unlisted_lab_displays_correctly_in_lab_assignment(
+    client: TestClient, keypair, organizations, catalog, patients, directory
+) -> None:
+    """DH-CLINIC-006 §17: an unlisted-but-routed lab is a fully valid assignment destination -- its
+    name must render normally in the order read, not be hidden or replaced."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR4")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR4")
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        client,
+        private_key,
+        provider.id,
+        name="OR4UnlistedLab",
+        entry_id=test_ids[0],
+    )
+
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+    _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    )
+    assert detail.json()["lab_assignment"]["lab_organization_name"] == "OR4UnlistedLab"
+
+
+def test_or5_cross_provider_cannot_learn_destination_lab(
+    client: TestClient, keypair, organizations, catalog, patients, directory
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR5A")
+    other_provider, other_token, _ = _setup_clinician(client, private_key, organizations, "OR5B")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR5")
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        client,
+        private_key,
+        provider.id,
+        name="OR5Lab",
+        entry_id=test_ids[0],
+    )
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+    _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    # provider B's own URL for provider A's order -- anti-enumeration 404, never a leaked
+    # lab_assignment (or any other field).
+    cross_read = client.get(
+        f"/exchange/v1/organizations/{other_provider.id}/orders/{order_id}",
+        headers=_auth(other_token),
+    )
+    assert cross_read.status_code == 404, cross_read.text
+
+
+def test_or6_lab_assignment_and_patient_identity_coexist_on_the_same_response(
+    client: TestClient, keypair, organizations, catalog, patients, directory
+) -> None:
+    """DH-CLINIC-005's ``patient`` projection must remain unaffected by the new ``lab_assignment``
+    field landing on the exact same response shape."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR6")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR6")
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        client,
+        private_key,
+        provider.id,
+        name="OR6Lab",
+        entry_id=test_ids[0],
+    )
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+    _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    ).json()
+    assert detail["patient"]["display_name"] == "Synthetic Patient"
+    assert detail["lab_assignment"]["lab_organization_id"] == str(lab.id)
+
+
+def test_or7_rejected_order_that_was_routed_still_shows_its_destination_lab(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    """A LabOrder that went SELECTED -> REJECTED (the lab explicitly rejected it) is NOT one of
+    the statuses that structurally requires a LabSelection to exist (only a REJECTED reached
+    *directly* from AWAITING_LAB_SELECTION, with no prior routing, has none) -- but this one *was*
+    routed first, so its LabSelection is real and must still render, never be hidden as though the
+    order had never been sent anywhere."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OR7")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OR7")
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        client,
+        private_key,
+        provider.id,
+        name="OR7Lab",
+        entry_id=test_ids[0],
+    )
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+    _assign_lab(client, token, provider.id, order_id, lab.id)
+
+    lab_tech_identity = _bootstrap_identity(client, private_key, "or7-lab-tech")
+    _grant_roles(client, private_key, lab.id, lab_tech_identity, "or7-lab-tech", ["LAB_TECH"])
+    lab_tech_token = make_token(private_key, subject="or7-lab-tech")
+    reject_response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/reject",
+        headers=_auth(lab_tech_token),
+    )
+    assert reject_response.status_code == 200, reject_response.text
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+    )
+    assert detail.json()["status"] == "REJECTED"
+    assert detail.json()["lab_assignment"]["lab_organization_id"] == str(lab.id)
+
+
+def test_or_dangling_selected_status_with_no_selection_fails_closed(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    """DH-CLINIC-006 §23: mirrors §36's own ``PatientIdentityIntegrityError`` adversarial
+    construction for the new ``lab_assignment`` resolution -- a ``LabOrder`` whose status implies a
+    selection exists, but whose canonical ``LabSelection`` row is missing, must fail closed rather
+    than silently rendering ``lab_assignment: null``."""
+    from daher_adapter.exchange.selection import LabAssignmentIntegrityError
+
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "ORDangling")
+    test_ids = _make_tests(catalog, 1)
+    patient_id = _create_patient(client, private_key, patients, provider.id, "ORDangling")
+    create_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = create_response.json()["id"]
+
+    with sessions() as session:
+        order_row = session.get(LabOrder, uuid.UUID(order_id))
+        order_row.status = "SELECTED"
+        session.commit()
+
+    with pytest.raises(LabAssignmentIntegrityError):
+        client.get(
+            f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(token)
+        )
+    with pytest.raises(LabAssignmentIntegrityError):
+        client.get(f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token))

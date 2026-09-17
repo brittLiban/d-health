@@ -103,7 +103,11 @@ from daher_adapter.exchange.orders import (
     LabOrderRepository,
 )
 from daher_adapter.exchange.orders import OrderNotFound as LabOrderNotFound
-from daher_adapter.exchange.organizations import InvalidOrganizationType, OrganizationRepository
+from daher_adapter.exchange.organizations import (
+    InvalidOrganizationType,
+    OrganizationNotFound,
+    OrganizationRepository,
+)
 from daher_adapter.exchange.patient_access import (
     ActiveGrantAlreadyExists,
     OrderNotIssuable,
@@ -116,6 +120,11 @@ from daher_adapter.exchange.patients import (
     PatientRecord,
     PatientRegistrationConflict,
     PatientRepository,
+)
+from daher_adapter.exchange.provider_lab_routes import (
+    InvalidProviderLabRouteOrganizationType,
+    ProviderLabRouteRecord,
+    ProviderLabRouteRepository,
 )
 from daher_adapter.exchange.results import (
     AmendmentAlreadyInProgress,
@@ -152,12 +161,16 @@ from daher_adapter.exchange.results import (
 )
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 from daher_adapter.exchange.selection import (
+    STATUSES_REQUIRING_LAB_SELECTION,
     DifferentLabAlreadySelected,
     LabAlreadyAssignedByProvider,
+    LabAssignmentIntegrityError,
+    LabAssignmentSummaryRecord,
     LabCannotFulfillOrder,
     LabSelectionRepository,
     PatientAccessGrantInvalidated,
     PatientAccessGrantLacksSelectionAuthority,
+    ProviderLabRouteNotActive,
     StalePriceSelection,
 )
 
@@ -690,6 +703,19 @@ class LabOrderItemResponse(BaseModel):
     catalog_display_name_snapshot: str
 
 
+class LabAssignmentSummaryResponse(BaseModel):
+    """DH-CLINIC-006 §22-24: the destination-lab projection embedded on an order read. Deliberately
+    minimal -- no price, and no claim about *who* made the assignment (a historical patient-driven
+    `LabSelection` and a provider `assign_by_provider` call are represented identically here;
+    §24 explicitly forbids inferring price-consent provenance from this shape alone)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    selected_at: datetime
+
+
 class LabOrderResponse(BaseModel):
     """Deliberately excludes ``selected_price_amount``/``selected_price_currency`` -- this ticket
     never selects a lab, so both are always ``NULL`` on every item; omitting them from the response
@@ -700,7 +726,12 @@ class LabOrderResponse(BaseModel):
     ``patient_reference_id -> PatientReference.patient_id -> Patient`` at read time -- never the
     browser's previously-selected patient state, never ``PatientReference.display_name`` (source
     provenance snapshot, not current directory identity). ``patient_reference_id`` itself is kept,
-    unchanged in meaning, for backend/integration correlation (§6/§37 additive compatibility)."""
+    unchanged in meaning, for backend/integration correlation (§6/§37 additive compatibility).
+
+    DH-CLINIC-006: ``lab_assignment`` is ``None`` for an order still ``AWAITING_LAB_SELECTION`` (or
+    ``REJECTED``/``CANCELLED`` before ever being routed) -- a real, valid, never-fabricated state,
+    resolved fresh from the canonical ``LabSelection`` at read time, never a duplicated name
+    snapshot stored for this projection alone."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -712,6 +743,7 @@ class LabOrderResponse(BaseModel):
     status: str
     created_at: datetime
     items: list[LabOrderItemResponse]
+    lab_assignment: LabAssignmentSummaryResponse | None = None
 
 
 class LabOrderSummaryResponse(BaseModel):
@@ -720,7 +752,10 @@ class LabOrderSummaryResponse(BaseModel):
     caller almost certainly does not need for a list view.
 
     DH-CLINIC-005: carries the same ``patient`` identity projection as ``LabOrderResponse`` --
-    resolved batched, one query for the whole list (§35), never per-row."""
+    resolved batched, one query for the whole list (§35), never per-row.
+
+    DH-CLINIC-006: carries the same ``lab_assignment`` projection, resolved equally batched (one
+    query for the whole page, see ``_lab_assignments_for_orders``)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -732,6 +767,7 @@ class LabOrderSummaryResponse(BaseModel):
     status: str
     created_at: datetime
     item_count: int
+    lab_assignment: LabAssignmentSummaryResponse | None = None
 
 
 # -- DH-CLINIC-003C: backend-owned durable canonical order intent ---------------------------------
@@ -813,6 +849,43 @@ class LabAssignmentResponse(BaseModel):
     lab_order_id: uuid.UUID
     lab_organization_id: uuid.UUID
     selected_at: datetime
+
+
+# -- DH-CLINIC-006: explicit provider-lab routing relationships ----------------------------------
+
+
+class ProviderLabRouteUpsertRequest(BaseModel):
+    """Deliberately nothing else in this body -- no lis_type/emr_type/api_url/transport fields
+    (those belong to a future pilot-topology ticket, never this one). ``provider_id``/``lab_id``
+    come from the URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool
+
+
+class ProviderLabRouteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EligibleProviderLabResponse(BaseModel):
+    """DH-CLINIC-006 §32: deliberately no price, no ranking, no "best"/cheapest/star-rating/
+    distance/sponsored field of any kind -- this is operational routing, not a marketplace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    lab_organization_name: str
+    public_address: str
+    public_phone: str | None
 
 
 # -- DH-EX-005: secure patient order access + patient lab selection ------------------------------
@@ -1448,6 +1521,7 @@ def build_exchange_router(
     orders = LabOrderRepository(session_factory, organizations, catalog)
     order_intents = LabOrderIntentRepository(session_factory, organizations, catalog)
     selections = LabSelectionRepository(session_factory, organizations)
+    provider_lab_routes = ProviderLabRouteRepository(session_factory, organizations)
     patient_access = PatientAccessGrantRepository(
         session_factory, ttl_hours=patient_access_ttl_hours
     )
@@ -2698,7 +2772,9 @@ def build_exchange_router(
 
         response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
         return _to_order_response(
-            result.order, _require_patient_identity(provider_id, result.order.patient_reference_id)
+            result.order,
+            _require_patient_identity(provider_id, result.order.patient_reference_id),
+            _lab_assignment_for_order(result.order),
         )
 
     @router.get("/organizations/{provider_id}/orders", response_model=list[LabOrderSummaryResponse])
@@ -2715,8 +2791,13 @@ def build_exchange_router(
         identities_by_reference = _require_patient_identities(
             provider_id, [order.patient_reference_id for order in page]
         )
+        lab_assignments_by_order = _lab_assignments_for_orders(page)
         return [
-            _to_order_summary_response(order, identities_by_reference[order.patient_reference_id])
+            _to_order_summary_response(
+                order,
+                identities_by_reference[order.patient_reference_id],
+                lab_assignments_by_order[order.id],
+            )
             for order in page
         ]
 
@@ -2750,7 +2831,9 @@ def build_exchange_router(
                 status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
             ) from error
         return _to_order_response(
-            order, _require_patient_identity(provider_id, order.patient_reference_id)
+            order,
+            _require_patient_identity(provider_id, order.patient_reference_id),
+            _lab_assignment_for_order(order),
         )
 
     @router.get("/organizations/{provider_id}/orders/{order_id}", response_model=LabOrderResponse)
@@ -2764,7 +2847,9 @@ def build_exchange_router(
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return _to_order_response(
-            order, _require_patient_identity(provider_id, order.patient_reference_id)
+            order,
+            _require_patient_identity(provider_id, order.patient_reference_id),
+            _lab_assignment_for_order(order),
         )
 
     @router.post(
@@ -2972,7 +3057,9 @@ def build_exchange_router(
 
         response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
         return _to_order_response(
-            result.order, _require_patient_identity(provider_id, result.order.patient_reference_id)
+            result.order,
+            _require_patient_identity(provider_id, result.order.patient_reference_id),
+            _lab_assignment_for_order(result.order),
         )
 
     @router.get(
@@ -2995,9 +3082,11 @@ def build_exchange_router(
         # Every order returned belongs to this exact patient_reference_id -- one resolution, not a
         # batched one, is correct and sufficient here.
         patient_identity = _require_patient_identity(provider_id, patient_reference_id)
+        page = orders.list_for_patient(provider_id, patient_reference_id, limit=limit)
+        lab_assignments_by_order = _lab_assignments_for_orders(page)
         return [
-            _to_order_response(order, patient_identity)
-            for order in orders.list_for_patient(provider_id, patient_reference_id, limit=limit)
+            _to_order_response(order, patient_identity, lab_assignments_by_order[order.id])
+            for order in page
         ]
 
     # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
@@ -3052,6 +3141,8 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except LabCannotFulfillOrder as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ProviderLabRouteNotActive as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return LabAssignmentResponse(
@@ -3059,6 +3150,111 @@ def build_exchange_router(
             lab_organization_id=record.lab_organization_id,
             selected_at=record.selected_at,
         )
+
+    # -- DH-CLINIC-006: explicit provider-lab routing relationships -------------------------------
+
+    @router.put(
+        "/organizations/{provider_id}/lab-routes/{lab_id}",
+        response_model=ProviderLabRouteResponse,
+    )
+    def put_provider_lab_route(
+        provider_id: uuid.UUID,
+        lab_id: uuid.UUID,
+        body: ProviderLabRouteUpsertRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ProviderLabRouteResponse:
+        # Launch-1 route configuration is platform-admin-only (§8) -- neither the provider's own
+        # ORG_ADMIN nor the lab's own ORG_ADMIN may configure this relationship unilaterally; a
+        # route spans two organizations and needs neutral platform-level authority, the same
+        # reasoning `create_catalog_test` gives for platform-only catalog creation.
+        try:
+            authz.require_platform_admin(principal)
+        except NotAuthorized as error:
+            _audit_refused(principal, provider_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="platform admin required"
+            ) from error
+
+        try:
+            with session_factory.begin() as session:
+                record, created, changed = provider_lab_routes.upsert(
+                    provider_organization_id=provider_id,
+                    lab_organization_id=lab_id,
+                    active=body.active,
+                    session=session,
+                )
+                event_type = (
+                    "provider_lab_route_created" if created else "provider_lab_route_updated"
+                )
+                outcome = "created" if created else ("updated" if changed else "unchanged")
+                security_audit.record(
+                    session,
+                    event_type=event_type,
+                    actor_identity_id=principal.identity_id,
+                    organization_id=provider_id,
+                    outcome=outcome,
+                    resource_type="provider_lab_route",
+                    resource_id=record.id,
+                )
+        except InvalidProviderLabRouteOrganizationType as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except OrganizationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _to_provider_lab_route_response(record)
+
+    @router.get(
+        "/organizations/{provider_id}/lab-routes",
+        response_model=list[ProviderLabRouteResponse],
+    )
+    def list_provider_lab_routes(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[ProviderLabRouteResponse]:
+        # DH-CLINIC-006 §12: CLINICIAN minimum, the same gate `assign_lab_to_order` already uses --
+        # no new routing role, no cross-provider route exposure (the tenant scope comes from the
+        # path id itself, exactly like every other provider-scoped read in this module).
+        _require_clinician(principal, provider_id)
+        return [
+            _to_provider_lab_route_response(route)
+            for route in provider_lab_routes.list_for_provider(provider_id)
+        ]
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/eligible-labs",
+        response_model=list[EligibleProviderLabResponse],
+    )
+    def list_eligible_labs_for_order(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[EligibleProviderLabResponse]:
+        # DH-CLINIC-006 §13/§39-44: order id alone is authoritative for the required test set --
+        # never a client-submitted catalog list. An order that exists but belongs to a different
+        # provider is indistinguishable from a nonexistent one, matching every other provider-
+        # scoped order read in this module (anti-enumeration).
+        _require_clinician(principal, provider_id)
+        order = orders.get_for_organization(order_id, provider_id)
+        if order is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        catalog_entry_ids = [item.catalog_entry_id for item in order.items]
+        return [
+            EligibleProviderLabResponse(
+                lab_organization_id=lab.lab_organization_id,
+                lab_organization_name=lab.lab_organization_name,
+                public_address=lab.public_address,
+                public_phone=lab.public_phone,
+            )
+            for lab in provider_lab_routes.find_whole_order_eligible_labs(
+                provider_id, catalog_entry_ids
+            )
+        ]
 
     # -- DH-EX-005: provider-issued secure patient order access ----------------------------------
 
@@ -3102,6 +3298,59 @@ def build_exchange_router(
                 f"order list with missing human identity"
             )
         return {ref_id: _to_identity_summary_response(record) for ref_id, record in records.items()}
+
+    def _to_lab_assignment_response(
+        record: LabAssignmentSummaryRecord,
+    ) -> LabAssignmentSummaryResponse:
+        return LabAssignmentSummaryResponse(
+            lab_organization_id=record.lab_organization_id,
+            lab_organization_name=record.lab_organization_name,
+            selected_at=record.selected_at,
+        )
+
+    def _lab_assignment_for_order(order: LabOrderRecord) -> LabAssignmentSummaryResponse | None:
+        """DH-CLINIC-006 §22/§23: resolved from the canonical ``LabSelection`` whenever one
+        exists, regardless of the order's *current* status -- a ``REJECTED``/``CANCELLED`` order
+        that was routed before being rejected/cancelled still had a real destination lab, and
+        hiding it there would be a false "never routed" statement, not a safety improvement. Only
+        a status that can *only* be reached via SELECTED (see
+        ``STATUSES_REQUIRING_LAB_SELECTION``'s own docstring) makes a missing ``LabSelection`` a
+        structural impossibility worth failing closed over; every other status simply reflects
+        whatever the query honestly finds, including ``None`` for an order never routed at all."""
+        record = selections.get_assignment_summary_for_order(order.id)
+        if record is None:
+            if order.status in STATUSES_REQUIRING_LAB_SELECTION:
+                raise LabAssignmentIntegrityError(
+                    f"LabOrder {order.id} has status {order.status!r}, which requires a "
+                    f"canonical LabSelection, but none was found -- refusing to render this order"
+                )
+            return None
+        return _to_lab_assignment_response(record)
+
+    def _lab_assignments_for_orders(
+        orders_page: list[LabOrderRecord],
+    ) -> dict[uuid.UUID, LabAssignmentSummaryResponse | None]:
+        """Batched sibling of ``_lab_assignment_for_order`` for order-list endpoints -- one query
+        for the *whole* page regardless of status mix, never per-row (mirrors
+        ``_require_patient_identities``'s own N+1-safe discipline)."""
+        all_ids = [order.id for order in orders_page]
+        records = selections.get_assignment_summaries_for_orders(all_ids) if all_ids else {}
+        missing_but_required = [
+            order.id
+            for order in orders_page
+            if order.id not in records and order.status in STATUSES_REQUIRING_LAB_SELECTION
+        ]
+        if missing_but_required:
+            raise LabAssignmentIntegrityError(
+                f"{len(missing_but_required)} LabOrder(s) have a status requiring a canonical "
+                f"LabSelection, but none was found -- refusing to render this order list"
+            )
+        return {
+            order.id: (
+                _to_lab_assignment_response(records[order.id]) if order.id in records else None
+            )
+            for order in orders_page
+        }
 
     @router.post(
         "/organizations/{provider_id}/orders/{order_id}/patient-access",
@@ -4700,8 +4949,22 @@ def _to_listing_response(listing: LabDirectoryListing) -> LabDirectoryListingRes
     )
 
 
+def _to_provider_lab_route_response(record: ProviderLabRouteRecord) -> ProviderLabRouteResponse:
+    return ProviderLabRouteResponse(
+        id=record.id,
+        provider_organization_id=record.provider_organization_id,
+        lab_organization_id=record.lab_organization_id,
+        lab_organization_name=record.lab_organization_name,
+        active=record.active,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
 def _to_order_response(
-    order: LabOrderRecord, patient: PatientIdentitySummaryResponse
+    order: LabOrderRecord,
+    patient: PatientIdentitySummaryResponse,
+    lab_assignment: LabAssignmentSummaryResponse | None = None,
 ) -> LabOrderResponse:
     return LabOrderResponse(
         id=order.id,
@@ -4719,11 +4982,14 @@ def _to_order_response(
             )
             for item in order.items
         ],
+        lab_assignment=lab_assignment,
     )
 
 
 def _to_order_summary_response(
-    order: LabOrderRecord, patient: PatientIdentitySummaryResponse
+    order: LabOrderRecord,
+    patient: PatientIdentitySummaryResponse,
+    lab_assignment: LabAssignmentSummaryResponse | None = None,
 ) -> LabOrderSummaryResponse:
     return LabOrderSummaryResponse(
         id=order.id,
@@ -4734,4 +5000,5 @@ def _to_order_summary_response(
         status=order.status,
         created_at=order.created_at,
         item_count=len(order.items),
+        lab_assignment=lab_assignment,
     )

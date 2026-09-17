@@ -373,6 +373,7 @@ def test_provider_lab_assignment_rolls_back_when_audit_insert_fails(
     )
     from daher_adapter.exchange.models import OrganizationRole
     from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
+    from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepository
 
     org = make_provider(organizations, name="AuditFailAssignOrg")
     lab = make_lab(organizations, name="AuditFailAssignLab")
@@ -427,6 +428,14 @@ def test_provider_lab_assignment_rolls_back_when_audit_insert_fails(
         patient_reference_id=patient.id,
         practitioner_reference_id=practitioner.id,
         items=[OrderItemInput(catalog_entry_id=entry.id)],
+    )
+
+    # DH-CLINIC-006: assign_by_provider now requires an active ProviderLabRoute -- configured
+    # directly via the repository, matching this test's own repository-direct setup style, and
+    # deliberately before the audit-insert monkeypatch below (this call has nothing to do with the
+    # atomicity contract under test).
+    ProviderLabRouteRepository(sessions, organizations).upsert(
+        provider_organization_id=org.id, lab_organization_id=lab.id, active=True
     )
 
     before = _counts(sessions)

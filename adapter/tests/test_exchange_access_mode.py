@@ -151,7 +151,22 @@ def _assign_lab(client, token, provider_id, order_id, lab_id):
     )
 
 
-def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, listed: bool = False):
+def _referral_lab(
+    organizations,
+    directory,
+    catalog,
+    *,
+    name: str,
+    entry_id,
+    listed: bool = False,
+    client: TestClient | None = None,
+    private_key=None,
+    provider_id=None,
+):
+    """DH-CLINIC-006: when ``client``/``private_key``/``provider_id`` are given, also configures
+    an active ``ProviderLabRoute`` from ``provider_id`` to the new lab -- without one,
+    ``assign_by_provider`` refuses with ``ProviderLabRouteNotActive`` regardless of how eligible
+    the lab otherwise is (§18)."""
     lab = make_lab(organizations, name=name)
     directory.upsert(
         lab_organization_id=lab.id,
@@ -163,7 +178,21 @@ def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, lis
         accepting_orders=True,
     )
     catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    if client is not None:
+        _configure_route(client, private_key, provider_id, lab.id)
     return lab
+
+
+def _configure_route(client, private_key, provider_id, lab_id, *, active: bool = True) -> None:
+    platform_admin_token = make_token(
+        private_key, subject=f"route-admin-{uuid.uuid4()}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.put(
+        f"/exchange/v1/organizations/{provider_id}/lab-routes/{lab_id}",
+        headers=_auth(platform_admin_token),
+        json={"active": active},
+    )
+    assert response.status_code in (200, 201), response.text
 
 
 def _issue_access(client, token, provider_id, order_id):
@@ -185,7 +214,16 @@ def test_provider_assigned_launch_journey(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="Journey"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="JourneyLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="JourneyLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
 
     assign_response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
     assert assign_response.status_code == 201, assign_response.text
@@ -231,7 +269,16 @@ def test_lab_can_accept_before_patient_link_issuance_read_link_still_issuable(
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="FastLab"
     )
-    lab = _referral_lab(organizations, directory, catalog, name="FastLabLab", entry_id=entry_id)
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="FastLabLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
     assign_response = _assign_lab(client, clinician_token, provider.id, order_id, lab.id)
     assert assign_response.status_code == 201, assign_response.text
 
@@ -338,7 +385,14 @@ def test_one_live_grant_enforced_for_order_read_reissuance(
         client, private_key, organizations, catalog, patients, name="OneLiveOrderRead"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="OneLiveOrderReadLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="OneLiveOrderReadLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -375,7 +429,14 @@ def test_lab_tech_cannot_issue_provider_patient_access(
         client, private_key, organizations, catalog, patients, name="LabTechIssue"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="LabTechIssueLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="LabTechIssueLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -403,7 +464,14 @@ def test_order_read_issuance_audit_atomicity(
         client, private_key, organizations, catalog, patients, name="OrderReadAuditAtomic"
     )
     lab = _referral_lab(
-        organizations, directory, catalog, name="OrderReadAuditAtomicLab", entry_id=entry_id
+        organizations,
+        directory,
+        catalog,
+        name="OrderReadAuditAtomicLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
     )
     assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
 
@@ -588,6 +656,7 @@ def test_concurrent_assignment_and_issuance_race_yields_one_coherent_mode(tmp_pa
     from daher_adapter.exchange.models import Base
     from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
     from daher_adapter.exchange.patient_access import PatientAccessGrantRepository
+    from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepository
     from daher_adapter.exchange.selection import LabSelectionRepository
 
     database = tmp_path / "assign-vs-issue-race.sqlite"
@@ -611,11 +680,15 @@ def test_concurrent_assignment_and_issuance_race_yields_one_coherent_mode(tmp_pa
     local_orders = LabOrderRepository(local_sessions, local_organizations, local_catalog)
     local_selections = LabSelectionRepository(local_sessions, local_organizations)
     local_access = PatientAccessGrantRepository(local_sessions, ttl_hours=TTL_HOURS)
+    local_provider_lab_routes = ProviderLabRouteRepository(local_sessions, local_organizations)
 
     provider = make_provider(local_organizations, name="RaceProvider")
     entry, _ = local_catalog.create_entry(code="DHEALTH-AM-RACE", display_name="Race Test")
     lab = _referral_lab(
         local_organizations, local_directory, local_catalog, name="RaceLab", entry_id=entry.id
+    )
+    local_provider_lab_routes.upsert(
+        provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
     patient = local_patients.get_or_create(
         source_organization_id=provider.id,
