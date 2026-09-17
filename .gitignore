@@ -17,6 +17,9 @@ volumes/
 caddy/data/
 caddy/config/
 
+# ---- DH-CLINIC-004B qualification output (scripts/qualify-native-auth.sh) ----
+qualification-evidence-*.json
+
 # ---- Python build/test artifacts (repo-wide: adapter/, provisioning/,
 # openmrs-config/seed/, openmrs-config/forms/, any future Python subtree) ----
 __pycache__/
@@ -27,6 +30,10 @@ __pycache__/
 
 # ---- Adapter ----
 adapter/node_modules/
+
+# ---- Node (repo-wide catch-all; ui/ and any future Node subtree carry their
+# own more specific .gitignore too) ----
+node_modules/
 
 # ---- OpenMRS module builds (Maven; root-owned when built via the pinned Docker toolchain) ----
 openmrs-config/modules/*/target/

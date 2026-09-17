@@ -9,9 +9,11 @@
     "postbuild": "node scripts/check-no-secrets-in-bundle.mjs",
     "lint": "oxlint",
     "typecheck": "tsc -b --noEmit",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts"
   },
   "dependencies": {
     "keycloak-js": "^26.2.4",
@@ -19,6 +21,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.6",

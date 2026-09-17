@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# DH-CLINIC-004B: real-Keycloak/browser qualification output. Never
+# committed -- may contain screenshots/traces from a live run, and traces can
+# capture page content. See scripts/qualify-native-auth.sh and
+# ui/e2e/playwright.config.ts.
+playwright-report/
+test-results/
+e2e-results.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

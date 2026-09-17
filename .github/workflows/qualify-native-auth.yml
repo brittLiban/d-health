@@ -1,0 +1,69 @@
+name: DH-CLINIC-004B — real Keycloak + browser qualification
+
+# Deliberately workflow_dispatch only. This boots the FULL clinical stack
+# (Caddy's app./id. vhosts depend on OpenMRS/OpenELIS/Keycloak all being
+# healthy, not just Exchange) -- the same ~50-minute cold boot
+# .github/workflows/ci.yml's own header documents keeping out of the
+# push-triggered pipeline. This workflow is the documented, explicit,
+# separate qualification path DH-CLINIC-004B's own ticket calls for; it is
+# never required for a push to go green, and no pull request is used for
+# this ticket's work (Liban's explicit workflow decision, DH-CLINIC-004B §0).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fresh, upgrade, or both"
+        required: true
+        default: both
+        type: choice
+        options: [fresh, upgrade, both]
+
+jobs:
+  qualify:
+    name: real-Keycloak + real-Caddy + real-Chromium qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve app.localhost / id.localhost to this runner
+        run: |
+          echo "127.0.0.1 app.localhost" | sudo tee -a /etc/hosts
+          echo "127.0.0.1 id.localhost" | sudo tee -a /etc/hosts
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: fresh-realm qualification (Case A)
+        if: ${{ inputs.mode == 'fresh' || inputs.mode == 'both' }}
+        env:
+          E2E_EVIDENCE_OUTPUT: ${{ github.workspace }}/qualification-evidence-fresh.json
+        run: ./scripts/qualify-native-auth.sh --mode=fresh
+
+      - name: upgraded-realm qualification (Case B)
+        if: ${{ inputs.mode == 'upgrade' || inputs.mode == 'both' }}
+        env:
+          E2E_EVIDENCE_OUTPUT: ${{ github.workspace }}/qualification-evidence-upgrade.json
+        run: ./scripts/qualify-native-auth.sh --mode=upgrade
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dh-clinic-004b-qualification-evidence
+          path: |
+            qualification-evidence-*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload Playwright report (traces/screenshots on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dh-clinic-004b-playwright-report
+          path: |
+            ui/playwright-report/
+            ui/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
