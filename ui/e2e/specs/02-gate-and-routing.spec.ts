@@ -48,38 +48,52 @@ test.describe('adapter validation, routing, and the auth gate (E2E-4..E2E-7)', (
     request,
   }) => {
     // caddy/Caddyfile's app.{$BASE_DOMAIN} block scopes ONLY /exchange/v1/*
-    // to the adapter; the adapter's own /health/ready must not be reachable
-    // through this vhost, or a future adapter route could become public by
-    // omission the same way ci.yml's DH-EX-008 static check already guards.
+    // (and /openmrs/*, /OpenELIS-Global/*) to their respective backends;
+    // everything else falls through to its catch-all `handle { reverse_proxy
+    // daher-ui:80 }`. daher-ui is an SPA server (ui/nginx.conf: `try_files
+    // $uri $uri/ /index.html`), so an unmatched path returns 200 + index.html
+    // -- NOT a 404 -- which means the real negative-control assertion is on
+    // BODY/content-type (never the adapter's own /health/ready JSON), not on
+    // status code. Getting this wrong (asserting 404) would make the test
+    // fail even when the actual security property holds.
     const response = await request.get(`${process.env.E2E_BASE_URL}/health/ready`, {
       failOnStatusCode: false,
     })
-    expect(response.status()).toBe(404)
+    const body = await response.text()
+    expect(body).not.toContain('"status"')
+    expect(body).not.toContain('"up"')
+    expect(response.headers()['content-type'] ?? '').toContain('text/html')
   })
 
   test('E2E-7: the auth gate blocks any /exchange/v1/* call until authentication completes', async ({
     page,
   }) => {
-    const exchangeRequestsBeforeAuth: string[] = []
-    let authenticated = false
+    // A vacuous version of this test would just check the array is empty
+    // right after goto() -- true whether or not the gate works, since
+    // nothing has had time to fire yet. The real, discriminating claim is
+    // ORDER: the first real network event must be the redirect to Keycloak,
+    // never an /exchange/v1/* call -- and no /exchange/v1/* call may appear
+    // before that redirect anywhere in the recorded sequence. If
+    // ExchangeAuthGate.tsx were broken and rendered ClinicApp's data layer
+    // before status === 'authenticated', ClinicProvider's /me call would
+    // race the redirect instead of strictly following it.
+    const events: Array<{ type: 'auth-redirect' | 'exchange-request'; url: string }> = []
     page.on('request', (req) => {
-      if (!authenticated && req.url().includes('/exchange/v1/')) {
-        exchangeRequestsBeforeAuth.push(req.url())
+      if (req.url().includes('/protocol/openid-connect/auth')) {
+        events.push({ type: 'auth-redirect', url: req.url() })
+      } else if (req.url().includes('/exchange/v1/')) {
+        events.push({ type: 'exchange-request', url: req.url() })
       }
     })
 
     const state = readState()
     await page.goto('/?app=clinic')
-    // At this point the gate must be showing the loading/redirecting state,
-    // never the authenticated Clinic UI, and no /exchange/v1/* call may have
-    // fired yet (ExchangeAuthGate.tsx renders children only once
-    // status === 'authenticated').
-    expect(exchangeRequestsBeforeAuth).toEqual([])
-
     await loginViaRealKeycloak(page, state.clinicianA.email, state.clinicianA.password)
     await expect(page.getByText('Accueil Clinique')).toBeVisible({ timeout: 20_000 })
-    authenticated = true
 
-    expect(exchangeRequestsBeforeAuth).toEqual([])
+    const firstAuthRedirectIndex = events.findIndex((e) => e.type === 'auth-redirect')
+    const firstExchangeRequestIndex = events.findIndex((e) => e.type === 'exchange-request')
+    expect(firstAuthRedirectIndex).toBeGreaterThanOrEqual(0)
+    expect(firstExchangeRequestIndex).toBeGreaterThan(firstAuthRedirectIndex)
   })
 })
