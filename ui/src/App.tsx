@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { OpenMrsPatient } from './api/types'
 import { AppShell, EmptyState, Navigation, type NavItem } from './design-system'
 import { logoutLocalSessions, navigateToKeycloakEndSession } from './features/auth/logout'
+import { ExchangeAuthGate, ExchangeAuthProvider, useExchangeAuth } from './features/auth/exchange'
 import { ClinicApp } from './features/clinic/ClinicApp'
 import { MaternityBoardPage } from './features/maternity/MaternityBoardPage'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
@@ -24,6 +25,23 @@ const NAV_ITEMS: NavItem[] = [
 
 export interface AppProps {
   initialApp?: 'maternity' | 'clinic'
+}
+
+/**
+ * Consumes the shared native-auth layer and hands ClinicApp an already-
+ * authenticated ExchangeClient — Clinic itself owns no OAuth/OIDC (§9/AC7).
+ * Native logout terminates the Exchange Keycloak session specifically
+ * (auth.logout), never the reference-connector's OpenMRS/OpenELIS sessions.
+ */
+function NativeClinic({ onSwitchApp }: { onSwitchApp: () => void }) {
+  const auth = useExchangeAuth()
+  return (
+    <ExchangeAuthGate auth={auth} appLabel="DHealth Clinique">
+      {auth.client ? (
+        <ClinicApp client={auth.client} onLogout={auth.logout} onSwitchApp={onSwitchApp} />
+      ) : null}
+    </ExchangeAuthGate>
+  )
 }
 
 function App({ initialApp = 'maternity' }: AppProps = {}) {
@@ -51,13 +69,17 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
     })
   }
 
-  // Native DHealth Clinic surface (DH-CLINIC-001)
+  // Native DHealth Clinic surface (DH-CLINIC-001/004A). Authenticates against
+  // the dhealth-exchange realm, never the reference-connector's daher realm —
+  // ADR-050, ADR-049. Switching back to the connector app is NOT the same
+  // operation as logging out of Clinic (§16): unmounting ExchangeAuthProvider
+  // below simply drops its in-memory token state; it must never itself call
+  // Keycloak's logout endpoint.
   if (activeApp === 'clinic') {
     return (
-      <ClinicApp
-        onLogout={handleLogout}
-        onSwitchApp={() => setActiveApp('maternity')}
-      />
+      <ExchangeAuthProvider>
+        <NativeClinic onSwitchApp={() => setActiveApp('maternity')} />
+      </ExchangeAuthProvider>
     )
   }
 

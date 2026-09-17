@@ -10,6 +10,33 @@ vi.mock('./api/client', () => ({
   getMaternityBoardVisits: vi.fn(),
 }))
 
+// Native Clinic now sits behind the shared ExchangeAuthProvider (DH-CLINIC-004A).
+// These App-level tests exercise app-switching and mounting, not OIDC itself
+// (that belongs to ExchangeAuthProvider.test.tsx) — so keycloak-js is faked
+// here as an already-authenticated session that resolves instantly. The
+// constructor itself is a spy so tests can assert whether a Keycloak session
+// was ever created at all, and inspect the latest instance's own logout().
+const { keycloakConstructorMock, getLatestKeycloakInstance } = vi.hoisted(() => {
+  const instances: Array<{ logout: ReturnType<typeof vi.fn> }> = []
+  const keycloakConstructorMock = vi.fn().mockImplementation(function FakeKeycloak() {
+    const instance = {
+      authenticated: true,
+      token: 'fake-access-token',
+      onAuthRefreshError: undefined as (() => void) | undefined,
+      onAuthLogout: undefined as (() => void) | undefined,
+      init: vi.fn().mockResolvedValue(true),
+      login: vi.fn().mockResolvedValue(undefined),
+      logout: vi.fn().mockResolvedValue(undefined),
+      updateToken: vi.fn().mockResolvedValue(false),
+    }
+    instances.push(instance)
+    return instance
+  })
+  return { keycloakConstructorMock, getLatestKeycloakInstance: () => instances.at(-1) }
+})
+
+vi.mock('keycloak-js', () => ({ default: keycloakConstructorMock }))
+
 const mockedSearch = vi.mocked(searchPatients)
 const mockedBoard = vi.mocked(getMaternityBoardVisits)
 
@@ -18,6 +45,8 @@ describe('App', () => {
     mockedSearch.mockReset()
     mockedBoard.mockReset()
     mockedBoard.mockResolvedValue({ visits: [], truncated: false })
+    vi.stubEnv('VITE_EXCHANGE_KEYCLOAK_URL', 'https://id.example.org')
+    keycloakConstructorMock.mockClear()
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
@@ -166,6 +195,74 @@ describe('App', () => {
     render(<App initialApp="clinic" />)
     expect(await screen.findByText('DHEALTH CLINIQUE')).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
+  })
+
+  // §28: staying on the reference-connector app must never initialize the
+  // native Exchange auth layer — no Keycloak instance, no OIDC round trip.
+  it('never constructs a Keycloak session while only the Maternity connector is used', async () => {
+    render(<App />)
+    expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /Maternité/ }))
+    await screen.findByText('Patientes actuellement admises')
+
+    expect(keycloakConstructorMock).not.toHaveBeenCalled()
+  })
+
+  // §15/§16: Clinic logout must terminate the Exchange session specifically —
+  // never the connector's OpenMRS/OpenELIS sessions — and switching apps must
+  // never be conflated with logging out of either.
+  it('Clinic logout calls the Exchange session logout, not OpenMRS/OpenELIS', async () => {
+    const user = userEvent.setup()
+    render(<App initialApp="clinic" />)
+    await screen.findByText('DHEALTH CLINIQUE')
+
+    const fetchMock = vi.mocked(global.fetch)
+    fetchMock.mockClear()
+
+    await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
+
+    expect(getLatestKeycloakInstance()?.logout).toHaveBeenCalledTimes(1)
+    expect(
+      fetchMock.mock.calls.some(([url]) => typeof url === 'string' && url.includes('/openmrs/')),
+    ).toBe(false)
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => typeof url === 'string' && url.includes('/OpenELIS-Global/'),
+      ),
+    ).toBe(false)
+  })
+
+  it('switching from Clinic back to Maternity does not call Exchange logout', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Basculer vers DHealth Clinique' }))
+    await screen.findByText('DHEALTH CLINIQUE')
+    const instance = getLatestKeycloakInstance()
+
+    await user.click(screen.getByRole('button', { name: 'Passer au connecteur Maternité' }))
+    await screen.findByLabelText('Rechercher un patient')
+
+    expect(instance?.logout).not.toHaveBeenCalled()
+  })
+
+  it('Maternity connector logout still performs its own OpenMRS/OpenELIS session teardown', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
+
+    const fetchMock = vi.mocked(global.fetch)
+    fetchMock.mockClear()
+
+    await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) => typeof url === 'string' && url.includes('/openmrs/ws/rest/v1/session'),
+        ),
+      ).toBe(true)
+    })
   })
 })
 
