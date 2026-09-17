@@ -39,6 +39,7 @@ from daher_adapter.exchange.models import (
     LabResultReleaseManifestEntry,
     LabResultReleaseVersion,
     LabResultType,
+    PatientReference,
     ResultDelivery,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
@@ -3471,3 +3472,150 @@ def test_amendment_release_audit_atomicity(
 
     # No amendment release audit event was committed
     assert _audit_events(sessions, "lab_result_amendment_released") == []
+
+
+# -- DH-CLINIC-005: human patient-identity projection on the results-read API (RI1-RI6) ------------
+
+
+def test_ri1_ri2_released_result_includes_patient_identity_via_directory(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """RI1: the released-result response carries a Patient identity. RI2: it is the order's own
+    ``patient_reference_id -> PatientReference.patient_id -> Patient`` chain, not any client-
+    supplied value (this endpoint takes no patient input at all)."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="RI1"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    submit = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    assert submit.status_code == 201, submit.text
+    _release_results(client, private_key, lab.id, order_id, "RI1")
+
+    results = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert results.status_code == 200, results.text
+    body = results.json()
+    assert body["patient"]["display_name"] == "Synthetic Patient RI1"
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        reference = session.get(PatientReference, order.patient_reference_id)
+        assert body["patient"]["patient_id"] == str(reference.patient_id)
+
+
+def test_ri3_legacy_reference_snapshot_disagreement_does_not_override_directory_identity(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """§4/RI3: even if a legacy ``PatientReference.display_name`` snapshot were to drift from the
+    current ``Patient`` directory record (a real historical-data possibility -- snapshots are never
+    rewritten), the results response must keep reading the live directory value, never the stale
+    provenance snapshot."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="RI3"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    _release_results(client, private_key, lab.id, order_id, "RI3")
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        reference = session.get(PatientReference, order.patient_reference_id)
+        reference.display_name = "Stale Snapshot Name"
+        session.commit()
+
+    results = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert results.status_code == 200, results.text
+    assert results.json()["patient"]["display_name"] == "Synthetic Patient RI3"
+    assert results.json()["patient"]["display_name"] != "Stale Snapshot Name"
+
+
+def test_ri4_ri5_cross_provider_result_read_is_404_and_leaks_no_patient_data(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """RI4: cross-provider result reads stay denied/anti-enumerated exactly as before this ticket.
+    RI5: neither the 404 status nor its body ever carries the real patient's name/contact."""
+    private_key, _ = keypair
+    _provider_a, _tok_a, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="RI4"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "1"},
+    )
+    _release_results(client, private_key, lab.id, order_id, "RI4")
+
+    provider_b, clinician_b_token = _setup_clinician(client, private_key, organizations, "RI4B")
+
+    real_response = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/{order_id}/results",
+        headers=_auth(clinician_b_token),
+    )
+    fake_response = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/{uuid.uuid4()}/results",
+        headers=_auth(clinician_b_token),
+    )
+    assert real_response.status_code == 404
+    assert fake_response.status_code == 404
+    assert real_response.json() == fake_response.json()
+    assert "Synthetic Patient RI4" not in real_response.text
+    assert "patient" not in real_response.json()
+
+
+def test_ri6_release_and_result_semantics_unchanged_alongside_patient_identity(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """RI6: every pre-existing workflow fact (order status, release version metadata, observation
+    values) is byte-identical to the pre-DH-CLINIC-005 contract -- ``patient`` is a pure addition,
+    not a reshape of anything that already existed."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="RI6"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    submit = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/items/{item_id}/result",
+        headers=_auth(lab_tech_token),
+        json={"result_type": "NUMERIC", "numeric_value": "13.5", "numeric_unit": "g/dL"},
+    )
+    assert submit.status_code == 201, submit.text
+    _release_results(client, private_key, lab.id, order_id, "RI6")
+
+    results = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/results",
+        headers=_auth(clinician_token),
+    )
+    assert results.status_code == 200, results.text
+    body = results.json()
+    assert body["order_status"] == "COMPLETED"
+    assert body["release_version_number"] == 1
+    assert body["is_amendment"] is False
+    assert len(body["results"]) == 1
+    observation = body["results"][0]["observations"][0]
+    assert Decimal(observation["numeric_value"]) == Decimal("13.5")
+    assert observation["numeric_unit"] == "g/dL"
+    # The new field is additive -- every pre-existing top-level key is still exactly as before.
+    assert set(body.keys()) == {
+        "order_id",
+        "order_status",
+        "patient",
+        "release_version_id",
+        "release_version_number",
+        "is_amendment",
+        "results",
+    }

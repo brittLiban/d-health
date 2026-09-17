@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -60,6 +61,15 @@ NATIVE_PATIENT_SOURCE_IDENTITY_SYSTEM = "urn:dhealth:patient-id"
 
 class PatientNotFound(RuntimeError):
     """No Patient matches the given id (or it belongs to a different provider organization)."""
+
+
+class PatientIdentityIntegrityError(RuntimeError):
+    """DH-CLINIC-005 §36: a ``PatientReference`` this provider legitimately owns has no resolvable
+    linked ``Patient`` under that same provider organization -- structurally should be impossible
+    given DH-IDENTITY-001's composite tenant foreign key (§8), but if it were ever true, silently
+    rendering ``patient=None`` would let a clinical order/result screen quietly fall back to
+    UUID-only identity. Treated as a server integrity failure, never an ordinary missing-data UI
+    state -- the caller must not catch this and substitute a blank/omitted patient."""
 
 
 class PatientRegistrationConflict(RuntimeError):
@@ -89,6 +99,21 @@ class CreatePatientResult:
     created: bool
     """``False`` means an existing Patient for this idempotency key was returned instead of a new
     one being created -- the caller's retry/duplicate-click case, not an error."""
+
+
+@dataclass(frozen=True, slots=True)
+class PatientIdentitySummaryRecord:
+    """DH-CLINIC-005 §5/§39: the minimal human-identification projection embedded in order/result
+    read responses -- deliberately distinct from ``PatientRecord``/``PatientDirectoryEntry``, which
+    carry directory-specific fields (``provider_organization_id``, primary reference id,
+    ``created_at``) this projection omits on purpose. No demographics beyond name/DOB/contact are
+    ever added here -- this is identity display, not an EMR expansion."""
+
+    patient_id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+    contact_channel_type: str | None
+    contact_value: str | None
 
 
 def _fingerprint(
@@ -382,6 +407,74 @@ class PatientRepository:
             if patient is None or reference is None:
                 return None
             return CreatePatientResult(patient=_to_record(patient, reference.id), created=False)
+
+    # -- DH-CLINIC-005: batched human-identity resolution for order/result read APIs ------------
+
+    def get_identity_summaries_for_references(
+        self,
+        provider_organization_id: uuid.UUID,
+        patient_reference_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, PatientIdentitySummaryRecord]:
+        """DH-CLINIC-005 §7/§8/§35: batched, tenant-safe resolution of ``PatientReference.id ->
+        Patient`` human identity for order/result read APIs -- exactly one query regardless of how
+        many reference ids are requested (no N+1 over a 50-order list). Keyed by
+        ``PatientReference.id`` because that is what ``LabOrder.patient_reference_id`` actually
+        carries; the caller never supplies a ``patient_id`` directly (§8's own instruction).
+
+        Both ``PatientReference.source_organization_id`` and ``Patient.provider_organization_id``
+        are checked against the caller's own provider id -- not merely trusted from the join --
+        re-asserting at this read layer the identical tenant invariant DH-IDENTITY-001's composite
+        foreign key already enforces at the database level.
+
+        A reference id absent from the returned dict must never be treated by a caller as "this
+        order/result has no patient" -- see ``PatientIdentityIntegrityError``."""
+        unique_ids = list(dict.fromkeys(patient_reference_ids))
+        if not unique_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    PatientReference.id,
+                    Patient.id,
+                    Patient.display_name,
+                    Patient.date_of_birth,
+                    Patient.contact_channel_type,
+                    Patient.contact_value,
+                )
+                .join(Patient, Patient.id == PatientReference.patient_id)
+                .where(
+                    PatientReference.id.in_(unique_ids),
+                    PatientReference.source_organization_id == provider_organization_id,
+                    Patient.provider_organization_id == provider_organization_id,
+                )
+            ).all()
+            return {
+                reference_id: PatientIdentitySummaryRecord(
+                    patient_id=patient_id,
+                    display_name=display_name,
+                    date_of_birth=date_of_birth,
+                    contact_channel_type=contact_channel_type,
+                    contact_value=contact_value,
+                )
+                for (
+                    reference_id,
+                    patient_id,
+                    display_name,
+                    date_of_birth,
+                    contact_channel_type,
+                    contact_value,
+                ) in rows
+            }
+
+    def get_identity_summary_for_reference(
+        self, provider_organization_id: uuid.UUID, patient_reference_id: uuid.UUID
+    ) -> PatientIdentitySummaryRecord | None:
+        """Single-reference convenience wrapper over
+        ``get_identity_summaries_for_references`` for order/result detail routes -- same tenant-safe
+        resolution, one reference id."""
+        return self.get_identity_summaries_for_references(
+            provider_organization_id, [patient_reference_id]
+        ).get(patient_reference_id)
 
 
 def _escape_like(val: str) -> str:

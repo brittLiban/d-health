@@ -111,6 +111,8 @@ from daher_adapter.exchange.patient_access import (
 )
 from daher_adapter.exchange.patient_access import OrderNotFound as GrantOrderNotFound
 from daher_adapter.exchange.patients import (
+    PatientIdentityIntegrityError,
+    PatientIdentitySummaryRecord,
     PatientRecord,
     PatientRegistrationConflict,
     PatientRepository,
@@ -625,6 +627,39 @@ class PatientSearchRequest(BaseModel):
         return self
 
 
+# -- DH-CLINIC-005: shared human patient identity projection --------------------------------------
+
+
+class PatientIdentitySummaryResponse(BaseModel):
+    """DH-CLINIC-005 §5/§38/§39: the minimal, reusable human-identification projection embedded in
+    order/result read responses -- name/DOB/contact only, deliberately not the directory-specific
+    ``PatientDirectoryEntry`` shape (no ``provider_organization_id``, no primary-reference id, no
+    ``created_at``). This is identity display, not an EMR expansion: no sex/gender, no address, no
+    nationality, no diagnosis, no insurance, no clinical notes. ``date_of_birth`` is a calendar date
+    (``date``, not ``datetime``) so Pydantic serializes it as a bare ``"YYYY-MM-DD"`` string with no
+    time-of-day/timezone component for the UI to ever misparse (§40)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+    contact_channel_type: str | None
+    contact_value: str | None
+
+
+def _to_identity_summary_response(
+    record: PatientIdentitySummaryRecord,
+) -> PatientIdentitySummaryResponse:
+    return PatientIdentitySummaryResponse(
+        patient_id=record.patient_id,
+        display_name=record.display_name,
+        date_of_birth=record.date_of_birth,
+        contact_channel_type=record.contact_channel_type,
+        contact_value=record.contact_value,
+    )
+
+
 # -- DH-EX-004: provider lab-order creation -------------------------------------------------------
 
 
@@ -659,7 +694,13 @@ class LabOrderResponse(BaseModel):
     """Deliberately excludes ``selected_price_amount``/``selected_price_currency`` -- this ticket
     never selects a lab, so both are always ``NULL`` on every item; omitting them from the response
     entirely rather than returning them as ``null`` keeps the contract honest about what this
-    endpoint does and does not do yet."""
+    endpoint does and does not do yet.
+
+    DH-CLINIC-005: ``patient`` is the authoritative human-identity projection, resolved through
+    ``patient_reference_id -> PatientReference.patient_id -> Patient`` at read time -- never the
+    browser's previously-selected patient state, never ``PatientReference.display_name`` (source
+    provenance snapshot, not current directory identity). ``patient_reference_id`` itself is kept,
+    unchanged in meaning, for backend/integration correlation (§6/§37 additive compatibility)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -667,6 +708,7 @@ class LabOrderResponse(BaseModel):
     provider_organization_id: uuid.UUID
     patient_reference_id: uuid.UUID
     practitioner_reference_id: uuid.UUID
+    patient: PatientIdentitySummaryResponse
     status: str
     created_at: datetime
     items: list[LabOrderItemResponse]
@@ -675,7 +717,10 @@ class LabOrderResponse(BaseModel):
 class LabOrderSummaryResponse(BaseModel):
     """The list-endpoint shape -- an ``item_count`` rather than the full item array, so a bounded
     list of up to 100 orders never has to inline a proportionally larger amount of item data a
-    caller almost certainly does not need for a list view."""
+    caller almost certainly does not need for a list view.
+
+    DH-CLINIC-005: carries the same ``patient`` identity projection as ``LabOrderResponse`` --
+    resolved batched, one query for the whole list (§35), never per-row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -683,6 +728,7 @@ class LabOrderSummaryResponse(BaseModel):
     provider_organization_id: uuid.UUID
     patient_reference_id: uuid.UUID
     practitioner_reference_id: uuid.UUID
+    patient: PatientIdentitySummaryResponse
     status: str
     created_at: datetime
     item_count: int
@@ -1164,12 +1210,17 @@ class ProviderOrderResultsResponse(BaseModel):
     ``LabResultRelease`` order, which has no release version at all and is not amendment-eligible
     (Decision 6). For every other order they are populated from the latest immutable manifest;
     ``is_amendment`` is ``version_number > 1``. No clinical interpretation is added by any of the
-    three."""
+    three.
+
+    DH-CLINIC-005 §9: ``patient`` is the authoritative human-identity projection for this order,
+    resolved server-side through ``patient_reference_id -> Patient`` -- the UI must never be
+    required to guess patient identity from a previously-selected list row (own §9 instruction)."""
 
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
     order_status: str
+    patient: PatientIdentitySummaryResponse
     release_version_id: uuid.UUID | None
     release_version_number: int | None
     is_amendment: bool | None
@@ -1280,6 +1331,7 @@ class ProviderReleaseVersionContentResponse(BaseModel):
     release_version_id: uuid.UUID
     release_version_number: int
     is_amendment: bool
+    patient: PatientIdentitySummaryResponse
     review_status: str
     reviewed_at: datetime | None
     reviewed_by_practitioner_reference_id: uuid.UUID | None
@@ -2645,7 +2697,9 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
-        return _to_order_response(result.order)
+        return _to_order_response(
+            result.order, _require_patient_identity(provider_id, result.order.patient_reference_id)
+        )
 
     @router.get("/organizations/{provider_id}/orders", response_model=list[LabOrderSummaryResponse])
     def list_lab_orders(
@@ -2657,9 +2711,13 @@ def build_exchange_router(
         # negative values, and anything above the documented maximum with a clean 422, rather than
         # silently ignoring an out-of-range value or passing it through to an unbounded query.
         _require_clinician(principal, provider_id)
+        page = orders.list_for_organization(provider_id, limit=limit)
+        identities_by_reference = _require_patient_identities(
+            provider_id, [order.patient_reference_id for order in page]
+        )
         return [
-            _to_order_summary_response(order)
-            for order in orders.list_for_organization(provider_id, limit=limit)
+            _to_order_summary_response(order, identities_by_reference[order.patient_reference_id])
+            for order in page
         ]
 
     @router.get(
@@ -2691,7 +2749,9 @@ def build_exchange_router(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
             ) from error
-        return _to_order_response(order)
+        return _to_order_response(
+            order, _require_patient_identity(provider_id, order.patient_reference_id)
+        )
 
     @router.get("/organizations/{provider_id}/orders/{order_id}", response_model=LabOrderResponse)
     def get_lab_order(
@@ -2703,7 +2763,9 @@ def build_exchange_router(
         order = orders.get_for_organization(order_id, provider_id)
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
-        return _to_order_response(order)
+        return _to_order_response(
+            order, _require_patient_identity(provider_id, order.patient_reference_id)
+        )
 
     @router.post(
         "/organizations/{provider_id}/order-intents",
@@ -2909,7 +2971,9 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
-        return _to_order_response(result.order)
+        return _to_order_response(
+            result.order, _require_patient_identity(provider_id, result.order.patient_reference_id)
+        )
 
     @router.get(
         "/organizations/{provider_id}/patient-references/{patient_reference_id}/orders",
@@ -2928,8 +2992,11 @@ def build_exchange_router(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="patient reference not found"
             )
+        # Every order returned belongs to this exact patient_reference_id -- one resolution, not a
+        # batched one, is correct and sufficient here.
+        patient_identity = _require_patient_identity(provider_id, patient_reference_id)
         return [
-            _to_order_response(order)
+            _to_order_response(order, patient_identity)
             for order in orders.list_for_patient(provider_id, patient_reference_id, limit=limit)
         ]
 
@@ -3000,6 +3067,41 @@ def build_exchange_router(
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
         return order
+
+    def _require_patient_identity(
+        provider_id: uuid.UUID, patient_reference_id: uuid.UUID
+    ) -> PatientIdentitySummaryResponse:
+        """DH-CLINIC-005 §36: resolves one order's authoritative human identity through
+        ``patient_reference_id -> Patient``, tenant-scoped to ``provider_id``. A ``None`` result is
+        never treated as "no patient" -- it raises, becoming an unhandled 500, exactly the "fail
+        closed, never render UUID-only identity" behavior §36 requires."""
+        record = patient_directory.get_identity_summary_for_reference(
+            provider_id, patient_reference_id
+        )
+        if record is None:
+            raise PatientIdentityIntegrityError(
+                f"PatientReference {patient_reference_id} under provider organization "
+                f"{provider_id} has no resolvable linked Patient -- refusing to render an "
+                f"order/result with missing human identity"
+            )
+        return _to_identity_summary_response(record)
+
+    def _require_patient_identities(
+        provider_id: uuid.UUID, patient_reference_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, PatientIdentitySummaryResponse]:
+        """Batched sibling of ``_require_patient_identity`` for order-list endpoints -- one query
+        for the whole page (§35), identical fail-closed discipline for any reference id that comes
+        back unresolved."""
+        unique_ids = list(dict.fromkeys(patient_reference_ids))
+        records = patient_directory.get_identity_summaries_for_references(provider_id, unique_ids)
+        missing = [ref_id for ref_id in unique_ids if ref_id not in records]
+        if missing:
+            raise PatientIdentityIntegrityError(
+                f"{len(missing)} PatientReference row(s) under provider organization "
+                f"{provider_id} have no resolvable linked Patient -- refusing to render an "
+                f"order list with missing human identity"
+            )
+        return {ref_id: _to_identity_summary_response(record) for ref_id, record in records.items()}
 
     @router.post(
         "/organizations/{provider_id}/orders/{order_id}/patient-access",
@@ -4266,6 +4368,7 @@ def build_exchange_router(
             release_version_id=version.id,
             release_version_number=version.version_number,
             is_amendment=version.version_number > 1,
+            patient=_require_patient_identity(provider_id, order.patient_reference_id),
             review_status=review.status,
             reviewed_at=review.reviewed_at,
             reviewed_by_practitioner_reference_id=review.reviewed_by_practitioner_reference_id,
@@ -4293,6 +4396,9 @@ def build_exchange_router(
                 f"not 'COMPLETED'",
             )
         item_by_id = {item.id: item for item in order.items}
+        # DH-CLINIC-005 §9: resolved once, before either branch below -- the authoritative human
+        # identity for this order, never guessed from a previously-selected list row.
+        patient_identity = _require_patient_identity(provider_id, order.patient_reference_id)
 
         # DH-EX-014A/ADR-048: an order with a release version reads its exact, immutable manifest
         # -- never live "current effective" state (that live-read behavior is exactly the naive
@@ -4305,6 +4411,7 @@ def build_exchange_router(
             return ProviderOrderResultsResponse(
                 order_id=order.id,
                 order_status=order.status,
+                patient=patient_identity,
                 release_version_id=manifest.version.id,
                 release_version_number=manifest.version.version_number,
                 is_amendment=manifest.version.version_number > 1,
@@ -4343,6 +4450,7 @@ def build_exchange_router(
         return ProviderOrderResultsResponse(
             order_id=order.id,
             order_status=order.status,
+            patient=patient_identity,
             release_version_id=None,
             release_version_number=None,
             is_amendment=None,
@@ -4592,12 +4700,15 @@ def _to_listing_response(listing: LabDirectoryListing) -> LabDirectoryListingRes
     )
 
 
-def _to_order_response(order: LabOrderRecord) -> LabOrderResponse:
+def _to_order_response(
+    order: LabOrderRecord, patient: PatientIdentitySummaryResponse
+) -> LabOrderResponse:
     return LabOrderResponse(
         id=order.id,
         provider_organization_id=order.provider_organization_id,
         patient_reference_id=order.patient_reference_id,
         practitioner_reference_id=order.practitioner_reference_id,
+        patient=patient,
         status=order.status,
         created_at=order.created_at,
         items=[
@@ -4611,12 +4722,15 @@ def _to_order_response(order: LabOrderRecord) -> LabOrderResponse:
     )
 
 
-def _to_order_summary_response(order: LabOrderRecord) -> LabOrderSummaryResponse:
+def _to_order_summary_response(
+    order: LabOrderRecord, patient: PatientIdentitySummaryResponse
+) -> LabOrderSummaryResponse:
     return LabOrderSummaryResponse(
         id=order.id,
         provider_organization_id=order.provider_organization_id,
         patient_reference_id=order.patient_reference_id,
         practitioner_reference_id=order.practitioner_reference_id,
+        patient=patient,
         status=order.status,
         created_at=order.created_at,
         item_count=len(order.items),

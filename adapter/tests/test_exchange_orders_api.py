@@ -33,10 +33,13 @@ from daher_adapter.exchange.models import (
     LabOrderIntent,
     LabOrderItem,
     LabSelection,
+    Patient,
+    PatientReference,
     PractitionerReference,
     ResultDelivery,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
+from daher_adapter.exchange.patients import PatientIdentityIntegrityError
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 
 
@@ -1822,3 +1825,307 @@ def test_legacy_mismatched_retry_of_a_historical_intentless_order_returns_409_un
             )
         ).all()
         assert len(intents) == 0
+
+
+# -- DH-CLINIC-005: human patient-identity projection on order read APIs (OI1-OI8) -----------------
+
+
+def test_oi1_order_list_includes_patient_identity(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI1")
+    reference = patients.get_or_create(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="OI1-1",
+        display_name="Marie Directory",
+        contact_channel_type="PHONE",
+        contact_value="+25377000001",
+    )
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(reference.id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["patient"]["display_name"] == "Marie Directory"
+
+    listing = client.get(f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token))
+    assert listing.status_code == 200
+    body = listing.json()
+    assert len(body) == 1
+    patient = body[0]["patient"]
+    assert patient["display_name"] == "Marie Directory"
+    assert patient["contact_channel_type"] == "PHONE"
+    assert patient["contact_value"] == "+25377000001"
+    uuid.UUID(patient["patient_id"])  # a real UUID, not echoed from the reference id
+
+
+def test_oi2_patient_identity_source_is_directory_not_reference_snapshot(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    """DH-CLINIC-005 §4/OI2: the human-facing identity source is ``Patient``, never
+    ``PatientReference.display_name`` (source/provenance snapshot). ``PatientReferenceRepository
+    .get_or_create`` always keeps the two in sync, so the only way to prove which one the API
+    actually reads is to construct mismatched rows directly at the ORM layer, exactly mirroring
+    ``test_patient_list_uses_uuid_tie_break_for_equal_created_at``'s own established technique for
+    bypassing the repository."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI2")
+    with sessions() as session:
+        patient = Patient(
+            provider_organization_id=provider.id,
+            display_name="Directory Name",
+            date_of_birth=None,
+            contact_channel_type=None,
+            contact_value=None,
+        )
+        session.add(patient)
+        session.flush()
+        reference = PatientReference(
+            source_organization_id=provider.id,
+            patient_id=patient.id,
+            source_system="legacy",
+            source_identity_system="urn:oi2:legacy",
+            source_identity_value="OI2-MISMATCH",
+            display_name="Snapshot Name",
+        )
+        session.add(reference)
+        session.commit()
+        reference_id = reference.id
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(reference_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["patient"]["display_name"] == "Directory Name"
+
+
+def test_oi3_order_still_carries_original_patient_reference_id(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """§6/§37: ``patient_reference_id`` stays present and unchanged, additive compatibility --
+    never replaced by ``patient.patient_id``, which is a genuinely different identifier."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI3")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OI3")
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["patient_reference_id"] == str(patient_id)
+    assert body["patient"]["patient_id"] != str(patient_id)
+
+
+def test_oi4_patient_id_matches_patient_reference_patient_id(
+    client: TestClient, keypair, organizations, catalog, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI4")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OI4")
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    assert created.status_code == 201, created.text
+
+    with sessions() as session:
+        reference = session.get(PatientReference, patient_id)
+        assert created.json()["patient"]["patient_id"] == str(reference.patient_id)
+
+
+def test_oi5_provider_a_cannot_obtain_provider_b_patient_identity(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider_a, token_a, _ = _setup_clinician(client, private_key, organizations, "OI5A")
+    provider_b, token_b, _ = _setup_clinician(client, private_key, organizations, "OI5B")
+    patient_a = _create_patient(client, private_key, patients, provider_a.id, "OI5A")
+    test_ids = _make_tests(catalog, 1)
+
+    created = client.post(
+        f"/exchange/v1/organizations/{provider_a.id}/orders",
+        headers={**_auth(token_a), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_a), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = created.json()["id"]
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/{order_id}", headers=_auth(token_b)
+    )
+    assert response.status_code == 404
+    assert "patient" not in response.json()
+    assert "display_name" not in response.text
+
+
+def test_oi6_lab_membership_cannot_read_provider_order_patient_data(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, _ = _setup_clinician(client, private_key, organizations, "OI6")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OI6")
+    test_ids = _make_tests(catalog, 1)
+    created = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(clinician_token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    order_id = created.json()["id"]
+
+    lab = make_lab(organizations, name="OI6Lab")
+    lab_identity_id = _bootstrap_identity(client, private_key, "oi6-lab-tech")
+    _grant_roles(client, private_key, lab.id, lab_identity_id, "oi6-lab-tech", ["LAB_TECH"])
+    lab_token = make_token(private_key, subject="oi6-lab-tech")
+
+    response = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}", headers=_auth(lab_token)
+    )
+    assert response.status_code in (403, 404)
+    assert "display_name" not in response.text
+
+    listing = client.get(
+        f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(lab_token)
+    )
+    assert listing.status_code in (403, 404)
+    assert "display_name" not in listing.text
+
+
+def test_oi7_multiple_orders_same_patient_resolve_same_identity(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI7")
+    patient_id = _create_patient(client, private_key, patients, provider.id, "OI7")
+    test_ids = _make_tests(catalog, 2)
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[0])]},
+    )
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(test_ids[1])]},
+    )
+    assert first.status_code == 201 and second.status_code == 201
+
+    listing = client.get(f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token))
+    body = listing.json()
+    assert len(body) == 2
+    assert body[0]["patient"]["patient_id"] == body[1]["patient"]["patient_id"]
+    assert body[0]["patient"]["patient_id"] == first.json()["patient"]["patient_id"]
+
+
+def test_oi8_identical_demographics_remain_distinct_by_patient_id(
+    client: TestClient, keypair, organizations, catalog, patients
+) -> None:
+    """§21/AC12/OI8: two Patients created with byte-identical name/contact never collapse into one
+    identity -- ADR-051's no-fuzzy-matching law, re-proven at the order-read layer."""
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "OI8")
+    reference_1 = patients.get_or_create(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="OI8-1",
+        display_name="Mohamed Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377000001",
+    )
+    reference_2 = patients.get_or_create(
+        source_organization_id=provider.id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="OI8-2",
+        display_name="Mohamed Ali",
+        contact_channel_type="PHONE",
+        contact_value="+25377000001",
+    )
+    test_ids = _make_tests(catalog, 2)
+
+    first = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(reference_1.id),
+            "catalog_entry_ids": [str(test_ids[0])],
+        },
+    )
+    second = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders",
+        headers={**_auth(token), "Idempotency-Key": _new_key()},
+        json={
+            "patient_reference_id": str(reference_2.id),
+            "catalog_entry_ids": [str(test_ids[1])],
+        },
+    )
+    assert first.status_code == 201 and second.status_code == 201
+    patient_1 = first.json()["patient"]
+    patient_2 = second.json()["patient"]
+    assert patient_1["display_name"] == patient_2["display_name"] == "Mohamed Ali"
+    assert patient_1["patient_id"] != patient_2["patient_id"]
+
+
+def test_dhclinic005_36_missing_patient_relationship_fails_closed(
+    client: TestClient, keypair, organizations, catalog, sessions
+) -> None:
+    """§36: a ``PatientReference`` whose linked ``Patient`` cannot be resolved -- never producible
+    through this repository's own ``get_or_create``/``create`` (both atomically create the linked
+    Patient in the same transaction), and never producible against real PostgreSQL (DH-IDENTITY-001
+    §8's composite tenant foreign key would reject the insert outright) -- must never silently
+    render as ``patient=None``/UUID-only identity if it were ever true. This is why the check exists
+    at the read layer too, not only at the database's own constraint: it is treated as a server
+    integrity failure (an unhandled exception, not an ordinary UI state)."""
+    from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
+
+    private_key, _ = keypair
+    provider, token, _ = _setup_clinician(client, private_key, organizations, "S36")
+    test_ids = _make_tests(catalog, 1)
+
+    # SQLite does not enforce foreign keys by default in this test harness (unlike real
+    # PostgreSQL), which is exactly what makes this adversarial construction possible here at all.
+    with sessions() as session:
+        reference = PatientReference(
+            source_organization_id=provider.id,
+            patient_id=uuid.uuid4(),  # dangling -- no matching Patient row exists
+            source_system="legacy",
+            source_identity_system="urn:s36:legacy",
+            source_identity_value="S36-DANGLING",
+            display_name="Dangling Reference",
+        )
+        session.add(reference)
+        session.commit()
+        reference_id = reference.id
+
+    orders_repo = LabOrderRepository(sessions, organizations, catalog)
+    result = orders_repo.create(
+        idempotency_key=_new_key(),
+        provider_organization_id=provider.id,
+        patient_reference_id=reference_id,
+        practitioner_reference_id=uuid.uuid4(),
+        items=[OrderItemInput(catalog_entry_id=test_ids[0])],
+    )
+
+    with pytest.raises(PatientIdentityIntegrityError):
+        client.get(f"/exchange/v1/organizations/{provider.id}/orders", headers=_auth(token))
+    with pytest.raises(PatientIdentityIntegrityError):
+        client.get(
+            f"/exchange/v1/organizations/{provider.id}/orders/{result.order.id}",
+            headers=_auth(token),
+        )
