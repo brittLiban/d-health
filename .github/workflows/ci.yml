@@ -118,7 +118,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0022_exchange_patient_directory
+          EXPECTED_HEAD: 0023_exchange_provider_lab_routes
         working-directory: adapter
         run: |
           alembic upgrade head
@@ -156,6 +156,20 @@ jobs:
           DHIDENTITY001_PG_DATABASE: adapter
         working-directory: adapter
         run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhidentity001_postgres_qualification.py
+      - name: DH-CLINIC-006 real PostgreSQL provider-lab-assignment concurrency qualification
+        # Same disposable postgres:16-alpine service. Proves, against real row locking (SQLite does
+        # not enforce SELECT ... FOR UPDATE the same way): concurrent same-lab assignment converges
+        # to exactly one LabSelection, concurrent different-lab assignment has exactly one winner
+        # and one clean conflict, and a route deactivation racing an assignment resolves
+        # serializably -- never a torn state, never two selections.
+        env:
+          DHCLINIC006_PG_HOST: localhost
+          DHCLINIC006_PG_PORT: 5432
+          DHCLINIC006_PG_USER: adapter
+          DHCLINIC006_PG_PASSWORD: adapter
+          DHCLINIC006_PG_DATABASE: adapter
+        working-directory: adapter
+        run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhclinic006_postgres_qualification.py
 
   provisioning:
     name: provisioning — ruff + pytest

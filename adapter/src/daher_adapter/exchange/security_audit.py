@@ -102,6 +102,11 @@ SecurityEventType = Literal[
     "lab_result_amendment_released",
     # DH-IDENTITY-001: native provider-scoped Patient directory registration.
     "patient_created",
+    # DH-CLINIC-006: platform-admin configuration of a provider's DHealth lab routing. Separate
+    # from `lab_order_assigned` above -- that records a clinician's order-level lab assignment;
+    # these record the platform-level relationship that makes such an assignment possible at all.
+    "provider_lab_route_created",
+    "provider_lab_route_updated",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
@@ -113,6 +118,7 @@ SecurityResourceType = Literal[
     "patient_access_grant",
     "patient_reference",
     "patient",
+    "provider_lab_route",
 ]
 
 

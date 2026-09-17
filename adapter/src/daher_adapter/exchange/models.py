@@ -1419,6 +1419,53 @@ class LabDirectoryProfile(Base):
     )
 
 
+class ProviderLabRoute(Base):
+    """DH-CLINIC-006: an explicit DHealth routing configuration answering only "may this provider
+    route orders to this DHealth lab organization?" -- never "how does the order physically enter
+    that lab's production system?" (deferred to a future pilot-topology ticket). Deliberately
+    orthogonal to both existing marketplace concepts: independent of ``LabDirectoryProfile.listed``
+    (marketplace visibility) and ``LabDirectoryProfile.accepting_orders`` (current operational
+    capacity) -- a route can be active for a lab that is unlisted, and neither flag is ever
+    auto-toggled from the other. Also independent of ``LabOffering``, which remains the sole
+    capability-matrix source; no test/catalog identifiers are ever copied onto this table.
+
+    Organization-type validity (``provider_organization_id`` must reference a ``PROVIDER``,
+    ``lab_organization_id`` must reference a ``LAB``) is enforced by the repository layer, not a
+    cross-table DB constraint -- the same "repository is the enforcement point" rule already used
+    for ``LabOffering`` and ``LabDirectoryProfile``.
+
+    Launch-1 route configuration is platform-admin-only (see ``exchange/api.py``'s route-management
+    endpoint); no provider self-service network onboarding or bilateral invitation/acceptance flow
+    exists yet. Deactivation (``active=False``) never deletes, modifies, or hides any already-made
+    ``LabSelection`` -- it only prevents *new* provider assignments to that lab; see
+    ``LabSelectionRepository.assign_by_provider``'s own fresh re-check at commit time."""
+
+    __tablename__ = "exchange_provider_lab_routes"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_organization_id",
+            "lab_organization_id",
+            name="uq_exchange_provider_lab_routes_provider_lab",
+        ),
+        Index("ix_exchange_provider_lab_routes_lab_organization_id", "lab_organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class ExchangeSecurityAuditEvent(Base):
     """DH-EX-002R: the authoritative, transactional audit record for Exchange security mutations.
     Inserted in the **same database transaction** as the mutation it records (see
@@ -1468,7 +1515,12 @@ class ExchangeSecurityAuditEvent(Base):
             # internally (see `PatientReference`'s own docstring) but does not separately audit as
             # its own event, matching how e.g. a new `LabResultRelease` row does not get its own
             # audit event distinct from `lab_results_released`.
-            "'patient_created'"
+            "'patient_created', "
+            # DH-CLINIC-006: platform-admin configuration of a provider's DHealth lab routing.
+            # Separate from `lab_order_assigned` above -- that event records a clinician's
+            # order-level lab assignment; these record the platform-level relationship that makes
+            # such an assignment possible at all.
+            "'provider_lab_route_created', 'provider_lab_route_updated'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1483,7 +1535,7 @@ class ExchangeSecurityAuditEvent(Base):
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
-            "'patient_access_grant', 'patient_reference', 'patient')",
+            "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
