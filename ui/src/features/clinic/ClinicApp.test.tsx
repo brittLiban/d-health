@@ -42,6 +42,7 @@ describe('ClinicApp', () => {
       status: 'IN_PROGRESS' as const,
       created_at: '2026-09-15T07:00:00Z',
       item_count: 2,
+      lab_assignment: null,
     },
     {
       id: 'ord-5555-6666',
@@ -58,6 +59,7 @@ describe('ClinicApp', () => {
       status: 'COMPLETED' as const,
       created_at: '2026-09-15T08:00:00Z',
       item_count: 1,
+      lab_assignment: null,
     },
   ]
 

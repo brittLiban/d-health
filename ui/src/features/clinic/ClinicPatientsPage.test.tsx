@@ -195,10 +195,26 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       }),
     )
 
+  // DH-CLINIC-006: a harmless default so ordinary 003C/patient-workflow scenarios that pass
+  // through the new post-commit routing step don't need their own eligible-labs wiring just to
+  // reach it -- tests that specifically exercise routing/`getOrder`-after-assign override these.
+  const defaultEligibleLab = {
+    lab_organization_id: 'lab-default-eligible',
+    lab_organization_name: 'Laboratoire Test',
+    public_address: 'Adresse de test',
+    public_phone: null,
+  }
+
   const client = {
     getMe: vi.fn().mockResolvedValue(me),
     listOrders: vi.fn().mockResolvedValue([]),
     getOrder: vi.fn(),
+    getEligibleLabs: vi.fn().mockResolvedValue([defaultEligibleLab]),
+    assignLab: vi.fn().mockResolvedValue({
+      lab_order_id: 'unused',
+      lab_organization_id: defaultEligibleLab.lab_organization_id,
+      selected_at: new Date().toISOString(),
+    }),
     getOrderResults: vi.fn(),
     getReleaseVersions: vi.fn(),
     createPatientWithOutcome: vi.fn(),
@@ -253,8 +269,38 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       if (!legacyOutcome) throw new Error('intent must be registered before commit')
       return legacyOutcome
     })
+    // DH-CLINIC-006: LabRoutingStep re-reads the order via getOrder() after a successful assign
+    // (§30 -- the assign response itself carries no lab name). Tests that don't specifically
+    // exercise routing/recovery and don't provide their own getOrder override get this generic,
+    // harmless one: whichever order this session actually committed, now SELECTED with the same
+    // default lab getEligibleLabs/assignLab already agree on.
+    if (!overrides.getOrder) {
+      client.getOrder = vi.fn(async (_providerId: string, orderId: string): Promise<LabOrder> => {
+        if (legacyOutcome && legacyOutcome.order.id === orderId) {
+          return {
+            ...legacyOutcome.order,
+            status: 'SELECTED' as const,
+            lab_assignment: {
+              lab_organization_id: 'lab-default-eligible',
+              lab_organization_name: 'Laboratoire Test',
+              selected_at: new Date().toISOString(),
+            },
+          }
+        }
+        throw new Error(`no committed order matches getOrder(${orderId}) in this test`)
+      })
+    }
   }
   return client
+}
+
+// DH-CLINIC-006: after a successful commit, the wizard now stops at the new 'routing' step
+// (§27-29) before 'confirmation' -- shared helper for tests that don't care about routing
+// specifically and just need to reach the confirmation banner.
+async function completeRoutingStep(userEventObj: ReturnType<typeof userEvent.setup>) {
+  await screen.findByText(/n.a pas encore été envoyé à un laboratoire/)
+  await userEventObj.click(await screen.findByRole('radio'))
+  await userEventObj.click(screen.getByRole('button', { name: "Confirmer l'envoi au laboratoire" }))
 }
 
 describe('Clinic native patient workflow', () => {
@@ -1087,6 +1133,7 @@ describe('Clinic native patient workflow', () => {
         catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
       },
     ],
+    lab_assignment: null,
   }
 
   it('fetches and displays patient order history with truthful status and lab state in patient workspace', async () => {
@@ -1109,7 +1156,9 @@ describe('Clinic native patient workflow', () => {
 
     expect(await screen.findByText('Historique des ordres de laboratoire')).toBeInTheDocument()
     expect(screen.getByText('En attente de choix labo')).toBeInTheDocument()
-    expect(screen.getByText(/Pas encore sélectionné/)).toBeInTheDocument()
+    // DH-CLINIC-006 §36: the real destination-lab projection, never a status-derived fabrication
+    // -- this order has no LabSelection, so it truthfully shows "Non attribué".
+    expect(screen.getByText('Non attribué')).toBeInTheDocument()
     expect(screen.getByText('SYNTH-CBC')).toBeInTheDocument()
     expect(screen.getByText(/Numération Formule Sanguine/)).toBeInTheDocument()
   })
@@ -1135,6 +1184,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Glycémie à jeun',
         },
       ],
+      lab_assignment: null,
     }
 
     const listCatalog = vi.fn().mockResolvedValue(mockCatalogTests)
@@ -1149,6 +1199,15 @@ describe('Clinic native patient workflow', () => {
       listCatalogTests: listCatalog,
       createOrderWithOutcome: createOrder,
       listPatientOrders: listOrders,
+      getOrder: vi.fn().mockResolvedValue({
+        ...createdOrder,
+        status: 'SELECTED',
+        lab_assignment: {
+          lab_organization_id: 'lab-default-eligible',
+          lab_organization_name: 'Laboratoire Test',
+          selected_at: new Date().toISOString(),
+        },
+      }),
     })
 
     const userEventObj = userEvent.setup()
@@ -1210,6 +1269,10 @@ describe('Clinic native patient workflow', () => {
       catalog_entry_ids: [mockCatalogTests[0].id, mockCatalogTests[1].id],
     })
 
+    // DH-CLINIC-006: the order already exists here -- the wizard's next step is routing it to a
+    // lab, never a second POST of the original intent.
+    await completeRoutingStep(userEventObj)
+
     // Confirmation step
     expect(
       await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' }),
@@ -1240,6 +1303,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      lab_assignment: null,
     }
 
     const client = makeClient({
@@ -1263,6 +1327,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(checkboxes[0])
     await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
     await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+    await completeRoutingStep(userEventObj)
 
     expect(
       await screen.findByRole('heading', {
@@ -1288,6 +1353,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      lab_assignment: null,
     }
 
     const createOrder = vi.fn().mockImplementation(() => {
@@ -1331,6 +1397,7 @@ describe('Clinic native patient workflow', () => {
     const firstKey = createOrder.mock.calls[0][1]
     const secondKey = createOrder.mock.calls[1][1]
     expect(firstKey).toBe(secondKey)
+    await completeRoutingStep(userEventObj)
     expect(
       await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' }),
     ).toBeInTheDocument()
@@ -1476,6 +1543,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      lab_assignment: null,
     }
 
     const createOrder = vi.fn().mockImplementation(() => {
@@ -1529,6 +1597,7 @@ describe('Clinic native patient workflow', () => {
     expect(createOrder).toHaveBeenCalledTimes(2)
     const secondKey = createOrder.mock.calls[1][1]
     expect(secondKey).toBe(firstKey)
+    await completeRoutingStep(userEventObj)
     expect(
       await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' }),
     ).toBeInTheDocument()
@@ -1613,6 +1682,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      lab_assignment: null,
     }
 
     const createOrder = vi.fn().mockResolvedValue({ order: createdOrder, created: true })
@@ -1640,6 +1710,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(checkboxes[0])
     await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
     await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+    await completeRoutingStep(userEventObj)
 
     // Order confirmation MUST succeed despite auxiliary history failure
     expect(
@@ -1739,6 +1810,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      lab_assignment: null,
     }
 
     // Set stored technical metadata in localStorage
@@ -1753,6 +1825,15 @@ describe('Clinic native patient workflow', () => {
       listCatalogTests: vi.fn().mockResolvedValue(mockCatalogTests),
       getOrderByIdempotencyKey,
       listPatientOrders: vi.fn().mockResolvedValue([]),
+      getOrder: vi.fn().mockResolvedValue({
+        ...existingOrder,
+        status: 'SELECTED',
+        lab_assignment: {
+          lab_organization_id: 'lab-default-eligible',
+          lab_organization_name: 'Laboratoire Test',
+          selected_at: new Date().toISOString(),
+        },
+      }),
     })
 
     const userEventObj = userEvent.setup()
@@ -1764,6 +1845,11 @@ describe('Clinic native patient workflow', () => {
     // Server was queried by idempotency key
     expect(getOrderByIdempotencyKey).toHaveBeenCalledWith('provider-a', 'stored-idemp-key-1234')
 
+    // DH-CLINIC-006 §30: the recovered order is genuinely still AWAITING_LAB_SELECTION -- the
+    // wizard must show the routing step, never fabricate "confirmed" for an order that was never
+    // actually routed.
+    await completeRoutingStep(userEventObj)
+
     // Automatically confirmed and cleaned up from storage
     expect(
       await screen.findByRole('heading', {
@@ -1773,7 +1859,12 @@ describe('Clinic native patient workflow', () => {
     expect(getStoredPendingOrder('identity-1', 'provider-a', patientWithName.patient_reference_id)).toBeNull()
   })
 
-  it('displays truthful lab text in order history for awaiting, cancelled, rejected, and routed orders', async () => {
+  it('DH-CLINIC-006 §23/§36/§37: displays the real destination lab (or a truthful "Non attribué"), never a status-derived fabrication, and gates the routing action to AWAITING_LAB_SELECTION only', async () => {
+    const routedTo = (labName: string) => ({
+      lab_organization_id: `lab-${labName}`,
+      lab_organization_name: labName,
+      selected_at: '2026-09-16T07:10:00Z',
+    })
     const orders: LabOrder[] = [
       {
         id: 'ord-awaiting',
@@ -1784,6 +1875,7 @@ describe('Clinic native patient workflow', () => {
         status: 'AWAITING_LAB_SELECTION',
         created_at: '2026-09-16T07:00:00Z',
         items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
+        lab_assignment: null,
       },
       {
         id: 'ord-cancelled',
@@ -1794,6 +1886,8 @@ describe('Clinic native patient workflow', () => {
         status: 'CANCELLED',
         created_at: '2026-09-16T07:01:00Z',
         items: [{ catalog_entry_id: 'c2', catalog_code_snapshot: 'C2', catalog_display_name_snapshot: 'D2' }],
+        // Never routed before cancellation -- truthfully has no destination.
+        lab_assignment: null,
       },
       {
         id: 'ord-rejected',
@@ -1804,6 +1898,8 @@ describe('Clinic native patient workflow', () => {
         status: 'REJECTED',
         created_at: '2026-09-16T07:02:00Z',
         items: [{ catalog_entry_id: 'c3', catalog_code_snapshot: 'C3', catalog_display_name_snapshot: 'D3' }],
+        // §23: SELECTED -> REJECTED -- the lab that rejected it must still show, never hidden.
+        lab_assignment: routedTo('Laboratoire Rejetant'),
       },
       {
         id: 'ord-selected',
@@ -1814,6 +1910,7 @@ describe('Clinic native patient workflow', () => {
         status: 'SELECTED',
         created_at: '2026-09-16T07:03:00Z',
         items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
+        lab_assignment: routedTo('Laboratoire Sélectionné'),
       },
       {
         id: 'ord-completed',
@@ -1824,6 +1921,7 @@ describe('Clinic native patient workflow', () => {
         status: 'COMPLETED',
         created_at: '2026-09-16T07:04:00Z',
         items: [{ catalog_entry_id: 'c5', catalog_code_snapshot: 'C5', catalog_display_name_snapshot: 'D5' }],
+        lab_assignment: routedTo('Laboratoire Terminé'),
       },
     ]
 
@@ -1840,12 +1938,19 @@ describe('Clinic native patient workflow', () => {
 
     expect(await screen.findByText('Historique des ordres de laboratoire')).toBeInTheDocument()
 
-    // Truthful lab labels (DH-CLINIC-003B)
-    expect(screen.getByText('Pas encore sélectionné')).toBeInTheDocument()
-    // Both CANCELLED and REJECTED map to indeterminate
-    expect(screen.getAllByText('Indéterminé pour cet ordre clôturé').length).toBe(2)
-    // Routed orders (SELECTED, COMPLETED) map to Sélectionné
-    expect(screen.getAllByText('Sélectionné').length).toBe(2)
+    // Unrouted orders (never assigned) show the truthful "Non attribué" -- once for AWAITING, once
+    // for CANCELLED-before-ever-routed.
+    expect(screen.getAllByText('Non attribué').length).toBe(2)
+    // Real destination-lab names render, including for the REJECTED order that WAS routed first.
+    expect(screen.getByText('Laboratoire Rejetant')).toBeInTheDocument()
+    expect(screen.getByText('Laboratoire Sélectionné')).toBeInTheDocument()
+    expect(screen.getByText('Laboratoire Terminé')).toBeInTheDocument()
+
+    // Only the AWAITING_LAB_SELECTION order gets a routing action -- never a rejected/cancelled/
+    // already-routed/completed one.
+    expect(
+      screen.getByRole('button', { name: `Choisir un laboratoire pour ${patientIdentityForOrders.display_name}` }),
+    ).toBeInTheDocument()
   })
 
   it('enforces persist-before-POST: storage contains key during in-flight POST and cleans up on success', async () => {
@@ -1859,6 +1964,7 @@ describe('Clinic native patient workflow', () => {
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:00:00Z',
       items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
+      lab_assignment: null,
     }
 
     const createOrder = vi.fn().mockImplementation((_providerId, _key) => {
@@ -1885,6 +1991,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(checkboxes[0])
     await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
     await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+    await completeRoutingStep(userEventObj)
 
     expect(await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' })).toBeInTheDocument()
 
@@ -2098,6 +2205,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(checkboxes[0])
     await userEventObj.click(screen.getByRole('button', { name: 'Suivant : Réviser l’ordre' }))
     await userEventObj.click(screen.getByRole('button', { name: 'Confirmer et prescrire' }))
+    await completeRoutingStep(userEventObj)
 
     expect(await screen.findByRole('heading', { name: 'Ordre de laboratoire créé avec succès' })).toBeInTheDocument()
 

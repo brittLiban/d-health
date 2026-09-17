@@ -43,6 +43,7 @@ describe('Clinic Accessibility', () => {
       status: 'IN_PROGRESS' as const,
       created_at: '2026-09-15T07:00:00Z',
       item_count: 2,
+      lab_assignment: null,
     },
   ]
 

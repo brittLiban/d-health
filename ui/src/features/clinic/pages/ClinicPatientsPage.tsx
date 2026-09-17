@@ -6,6 +6,7 @@ import {
 } from '../../../api/exchangeClient'
 import type {
   CatalogEntry,
+  LabAssignmentSummary,
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderIntent,
@@ -25,6 +26,7 @@ import {
   type StatusTone,
   TextInput,
 } from '../../../design-system'
+import { LabRoutingStep } from '../components/LabRoutingStep'
 import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
 import type { PendingOrderMutation, PendingPatientCreation } from '../ClinicApp'
@@ -64,12 +66,22 @@ function safeErrorCode(error: unknown): ErrorCode {
   return error instanceof ExchangeApiError ? mapExchangeErrorToCode(error.code) : 'SERVER_ERROR'
 }
 
+// DH-CLINIC-006 §27-30: after a commit (fresh or recovered), the wizard's next step depends on
+// the order's *actual* current status, never an assumption -- a freshly-created order is always
+// AWAITING_LAB_SELECTION and needs routing; a recovered order may already have been routed in an
+// earlier session (the response was merely lost), and must be shown as confirmed, not re-routed.
+function stepForCommittedOrder(order: { status: string }): 'routing' | 'confirmation' {
+  return order.status === 'AWAITING_LAB_SELECTION' ? 'routing' : 'confirmation'
+}
+
 function formatOrderStatus(status: string): { label: string; tone: StatusTone } {
   switch (status) {
     case 'AWAITING_LAB_SELECTION':
       return { label: 'En attente de choix labo', tone: 'neutral' }
     case 'SELECTED':
-      return { label: 'Labo sélectionné', tone: 'neutral' }
+      // DH-CLINIC-006 §35: unified with ClinicOrdersPage.tsx's own label -- distinct from
+      // ACCEPTED's own meaning (the lab explicitly accepting), never implies acceptance/collection.
+      return { label: 'Laboratoire destinataire sélectionné', tone: 'neutral' }
     case 'ACCEPTED':
       return { label: 'Accepté', tone: 'neutral' }
     case 'IN_PROGRESS':
@@ -83,16 +95,6 @@ function formatOrderStatus(status: string): { label: string; tone: StatusTone } 
     default:
       return { label: status, tone: 'neutral' }
   }
-}
-
-function formatOrderLabText(status: string): string {
-  if (status === 'AWAITING_LAB_SELECTION') {
-    return 'Pas encore sélectionné'
-  }
-  if (status === 'CANCELLED' || status === 'REJECTED') {
-    return 'Indéterminé pour cet ordre clôturé'
-  }
-  return 'Sélectionné'
 }
 
 export function ClinicPatientsPage({
@@ -134,10 +136,19 @@ export function ClinicPatientsPage({
   const [patientOrders, setPatientOrders] = useState<LabOrder[] | null>(null)
   const [ordersLoadState, setOrdersLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [ordersErrorCode, setOrdersErrorCode] = useState<ErrorCode>('SERVER_ERROR')
+  // DH-CLINIC-006 §37: which history-list order (if any) currently has its routing panel open --
+  // the full LabOrder (items included) already lives in `patientOrders`, so no extra fetch is
+  // needed here, unlike ClinicOrdersPage.tsx's own list-summary-only shape.
+  const [historyRoutingOrderId, setHistoryRoutingOrderId] = useState<string | null>(null)
 
   // -- DH-CLINIC-003: Order creation wizard state --
   const [showOrderWizard, setShowOrderWizard] = useState(false)
-  const [orderStep, setOrderStep] = useState<'catalog' | 'review' | 'confirmation'>('catalog')
+  // DH-CLINIC-006 §27-29: 'routing' sits strictly after a successful durable commit, never before
+  // -- the order already exists once this step is reached, so its own action can only be
+  // retry-routing/re-read, never a second POST of the original intent.
+  const [orderStep, setOrderStep] = useState<'catalog' | 'review' | 'routing' | 'confirmation'>(
+    'catalog',
+  )
   const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[] | null>(null)
   const [catalogLoadState, setCatalogLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [catalogErrorCode, setCatalogErrorCode] = useState<ErrorCode>('SERVER_ERROR')
@@ -425,7 +436,7 @@ export function ClinicPatientsPage({
                 if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
                 setUnresolvedStoredOrder(null)
                 setOrderOutcome({ order: foundOrder, created: false })
-                setOrderStep('confirmation')
+                setOrderStep(stepForCommittedOrder(foundOrder))
                 setShowOrderWizard(true)
                 setPatientOrders((curr) => {
                   if (!curr) return [foundOrder]
@@ -494,7 +505,7 @@ export function ClinicPatientsPage({
                         if (orderScopeKey) onPendingOrderChange?.(orderScopeKey, null)
                         setUnresolvedStoredOrder(null)
                         setOrderOutcome({ order: committedOrder, created: false })
-                        setOrderStep('confirmation')
+                        setOrderStep(stepForCommittedOrder(committedOrder))
                         setShowOrderWizard(true)
                         setPatientOrders((curr) => {
                           if (!curr) return [committedOrder]
@@ -729,7 +740,7 @@ export function ClinicPatientsPage({
       }
 
       setOrderOutcome(outcome)
-      setOrderStep('confirmation')
+      setOrderStep(stepForCommittedOrder(outcome.order))
       setOrderSubmitState('idle')
       setHadPriorAmbiguousAttempt(false)
       setUnresolvedStoredOrder(null)
@@ -800,6 +811,15 @@ export function ClinicPatientsPage({
         setHadPriorAmbiguousAttempt(true)
       }
     }
+  }
+
+  const handleHistoryOrderAssigned = (orderId: string, assignment: LabAssignmentSummary) => {
+    setPatientOrders((curr) =>
+      curr
+        ? curr.map((o) => (o.id === orderId ? { ...o, lab_assignment: assignment, status: 'SELECTED' } : o))
+        : curr,
+    )
+    setHistoryRoutingOrderId(null)
   }
 
   const handleCloseOrderWizard = () => {
@@ -1274,6 +1294,45 @@ export function ClinicPatientsPage({
                     </Button>
                   </div>
                 </>
+              ) : orderStep === 'routing' && orderOutcome && providerId ? (
+                <div>
+                  {/* DH-CLINIC-006 §27-29: the order already exists at this point (durable commit
+                      succeeded) -- this truthful line, never "La prescription n'a pas été créée.",
+                      is why this step's only actions are retry-routing / re-read, never a second
+                      POST of the original order intent. */}
+                  <p className={styles.orderCardMeta} role="status">
+                    L'ordre a été créé mais n'a pas encore été envoyé à un laboratoire.
+                  </p>
+                  <LabRoutingStep
+                    key={orderOutcome.order.id}
+                    client={client}
+                    providerId={providerId}
+                    orderId={orderOutcome.order.id}
+                    patient={selectedPatient}
+                    items={orderOutcome.order.items}
+                    onAssigned={(assignment) => {
+                      const assignedOrderId = orderOutcome.order.id
+                      setOrderOutcome((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              order: { ...prev.order, lab_assignment: assignment, status: 'SELECTED' },
+                            }
+                          : prev,
+                      )
+                      setPatientOrders((curr) =>
+                        curr
+                          ? curr.map((o) =>
+                              o.id === assignedOrderId
+                                ? { ...o, lab_assignment: assignment, status: 'SELECTED' }
+                                : o,
+                            )
+                          : curr,
+                      )
+                      setOrderStep('confirmation')
+                    }}
+                  />
+                </div>
               ) : orderStep === 'confirmation' && orderOutcome ? (
                 <div className={styles.confirmationBanner} role="status">
                   <h2 className={styles.confirmationTitle}>
@@ -1294,7 +1353,8 @@ export function ClinicPatientsPage({
                     <StatusBadge {...formatOrderStatus(orderOutcome.order.status)} />
                   </p>
                   <p>
-                    <strong>Laboratoire :</strong> {formatOrderLabText(orderOutcome.order.status)}
+                    <strong>Laboratoire :</strong>{' '}
+                    {orderOutcome.order.lab_assignment?.lab_organization_name ?? 'Non attribué'}
                   </p>
                   <p>
                     <strong>Date de prescription :</strong>{' '}
@@ -1361,7 +1421,8 @@ export function ClinicPatientsPage({
                         <strong>Ordre :</strong> <code>{order.id}</code>
                       </p>
                       <p className={styles.orderCardMeta}>
-                        <strong>Laboratoire :</strong> {formatOrderLabText(order.status)}
+                        <strong>Laboratoire :</strong>{' '}
+                        {order.lab_assignment?.lab_organization_name ?? 'Non attribué'}
                       </p>
                       <div>
                         <strong>Services demandés ({order.items.length}) :</strong>
@@ -1374,6 +1435,46 @@ export function ClinicPatientsPage({
                           ))}
                         </ul>
                       </div>
+                      {/* DH-CLINIC-006 §37: closes the recovery path for an interrupted wizard/
+                          reload/failed assignment/navigation-away, without forcing the clinician
+                          back through the whole new-order flow. */}
+                      {order.status === 'AWAITING_LAB_SELECTION' ? (
+                        historyRoutingOrderId === order.id ? (
+                          <div style={{ marginTop: 'var(--space-2)' }}>
+                            <div style={{ marginBottom: 'var(--space-2)' }}>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() => setHistoryRoutingOrderId(null)}
+                              >
+                                Fermer
+                              </Button>
+                            </div>
+                            {providerId ? (
+                              <LabRoutingStep
+                                key={order.id}
+                                client={client}
+                                providerId={providerId}
+                                orderId={order.id}
+                                patient={order.patient}
+                                items={order.items}
+                                onAssigned={(assignment) => handleHistoryOrderAssigned(order.id, assignment)}
+                              />
+                            ) : null}
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: 'var(--space-2)' }}>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => setHistoryRoutingOrderId(order.id)}
+                              aria-label={`Choisir un laboratoire pour ${order.patient.display_name?.trim() || 'Nom non renseigné'}`}
+                            >
+                              Choisir un laboratoire
+                            </Button>
+                          </div>
+                        )
+                      ) : null}
                     </li>
                   )
                 })}

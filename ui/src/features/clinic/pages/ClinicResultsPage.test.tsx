@@ -59,6 +59,7 @@ function makeOrder(overrides: Partial<LabOrderSummary> = {}): LabOrderSummary {
     status: 'COMPLETED',
     created_at: '2026-09-17T08:00:00Z',
     item_count: 1,
+    lab_assignment: null,
     ...overrides,
   }
 }
