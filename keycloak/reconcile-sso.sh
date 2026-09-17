@@ -30,9 +30,28 @@ done
 
 trap 'rm -f "$config"' EXIT
 
-"$kcadm" config credentials --config "$config" --server "$server" \
+# DH-CLINIC-004B: found blocking its own qualification run, fixed under this
+# repo's "unrelated bugs found should be documented, not fixed, unless
+# blocking" rule -- `depends_on: keycloak: condition: service_healthy`
+# (docker-compose.yml) is not sufficient on its own. Observed directly in CI:
+# Keycloak's healthcheck can flip to healthy a few seconds before its admin
+# REST API finishes its own bootstrap, answering "503 Service Unavailable,
+# Request received during bootstrapping" in that window -- this service and
+# the sibling keycloak-exchange-config both start the instant that condition
+# is met, and both raced straight into it. Retries the login only, never
+# anything destructive, and still fails loudly if genuinely stuck.
+login_attempt=0
+until "$kcadm" config credentials --config "$config" --server "$server" \
     --realm master --user "$KEYCLOAK_ADMIN_USER" \
-    --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+    --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>/tmp/reconcile-sso-login.err; do
+    login_attempt=$((login_attempt + 1))
+    if [[ "$login_attempt" -ge 10 ]]; then
+        echo "Could not authenticate to Keycloak's admin API after $login_attempt attempts:" >&2
+        cat /tmp/reconcile-sso-login.err >&2
+        exit 1
+    fi
+    sleep 3
+done
 
 client_uuid() {
     local client_id=$1

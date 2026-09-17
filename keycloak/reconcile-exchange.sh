@@ -34,9 +34,25 @@ fi
 
 trap 'rm -f "$config"' EXIT
 
-"$kcadm" config credentials --config "$config" --server "$server" \
+# DH-CLINIC-004B: `depends_on: keycloak: condition: service_healthy`
+# (docker-compose.yml) is not sufficient on its own -- observed directly in
+# CI: Keycloak's healthcheck can flip to "healthy" while the admin REST API
+# is still finishing its bootstrap and answers "503 Service Unavailable,
+# Request received during bootstrapping" for a few more seconds. Retries the
+# login only (never anything destructive) with a short fixed backoff rather
+# than failing on the very first attempt.
+login_attempt=0
+until "$kcadm" config credentials --config "$config" --server "$server" \
     --realm master --user "$KEYCLOAK_ADMIN_USER" \
-    --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+    --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>/tmp/reconcile-exchange-login.err; do
+    login_attempt=$((login_attempt + 1))
+    if [[ "$login_attempt" -ge 10 ]]; then
+        echo "Could not authenticate to Keycloak's admin API after $login_attempt attempts:" >&2
+        cat /tmp/reconcile-exchange-login.err >&2
+        exit 1
+    fi
+    sleep 3
+done
 
 client_id_count() {
     local client_id=$1

@@ -131,6 +131,27 @@ ENVEOF
 
 compose() { docker compose --env-file "$ENV_FILE" "$@"; }
 
+# DH-CLINIC-004B: observed directly in CI -- `depends_on: condition:
+# service_healthy` can flip to healthy a few seconds before Keycloak's admin
+# REST API finishes its own bootstrap (it answers 503 "Request received
+# during bootstrapping" in that window). Retries the login only.
+kcadm_login() {
+  local attempt=0
+  local admin_password
+  admin_password=$(grep ^KEYCLOAK_ADMIN_PASSWORD= "$ENV_FILE" | cut -d= -f2-)
+  until compose exec -T keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+    --config /tmp/qualify-kcadm.config --server http://localhost:8080 --realm master \
+    --user admin --password "$admin_password" >/dev/null 2>/tmp/qualify-kcadm-login.err; do
+    attempt=$((attempt + 1))
+    if [[ "$attempt" -ge 10 ]]; then
+      echo "Could not authenticate to Keycloak's admin API after $attempt attempts:" >&2
+      cat /tmp/qualify-kcadm-login.err >&2 || true
+      return 1
+    fi
+    sleep 3
+  done
+}
+
 if [[ "$MODE" == "upgrade" ]]; then
   echo "--- Case B setup: booting Keycloak against a realm file with dhealth-native-ui removed ---"
   python3 - "$REALM_FILE" <<'PY'
@@ -142,9 +163,7 @@ open(path, "w").write(json.dumps(realm, indent=2) + "\n")
 PY
   compose up -d --wait keycloak
   echo "--- confirming dhealth-native-ui is genuinely absent from the freshly-imported (pre-004A-shaped) realm ---"
-  compose exec -T keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-    --config /tmp/qualify-kcadm.config --server http://localhost:8080 --realm master \
-    --user admin --password "$(grep ^KEYCLOAK_ADMIN_PASSWORD= "$ENV_FILE" | cut -d= -f2-)" >/dev/null
+  kcadm_login
   count=$(compose exec -T keycloak /opt/keycloak/bin/kcadm.sh get clients \
     --config /tmp/qualify-kcadm.config -r dhealth-exchange \
     -q clientId=dhealth-native-ui -F id --format csv --noquotes | grep -c . || true)
@@ -166,9 +185,7 @@ PY
   compose stop keycloak
   cp "$REALM_FILE_BACKUP" "$REALM_FILE"
   compose up -d --wait keycloak
-  compose exec -T keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-    --config /tmp/qualify-kcadm.config --server http://localhost:8080 --realm master \
-    --user admin --password "$(grep ^KEYCLOAK_ADMIN_PASSWORD= "$ENV_FILE" | cut -d= -f2-)" >/dev/null
+  kcadm_login
   count=$(compose exec -T keycloak /opt/keycloak/bin/kcadm.sh get clients \
     --config /tmp/qualify-kcadm.config -r dhealth-exchange \
     -q clientId=dhealth-native-ui -F id --format csv --noquotes | grep -c . || true)
@@ -194,9 +211,7 @@ for i in 1 2 3; do
 done
 
 echo "--- confirming the confidential dhealth-exchange-api client secret is unchanged ---"
-compose exec -T keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-  --config /tmp/qualify-kcadm.config --server http://localhost:8080 --realm master \
-  --user admin --password "$(grep ^KEYCLOAK_ADMIN_PASSWORD= "$ENV_FILE" | cut -d= -f2-)" >/dev/null
+kcadm_login
 api_public=$(compose exec -T keycloak /opt/keycloak/bin/kcadm.sh get clients \
   --config /tmp/qualify-kcadm.config -r dhealth-exchange \
   -q clientId=dhealth-exchange-api -F publicClient --format csv --noquotes)
