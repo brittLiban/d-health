@@ -14918,3 +14918,134 @@ as a limitation, not decided around.
 pilot-ready — see `STATUS.md` §C/§D for the precise claim boundary.
 
 **NEXT: DH-CLINIC-004B — Real Keycloak + browser E2E qualification.** Not started in this ticket.
+
+## DH-CLINIC-004B (2026-09-17) — real Keycloak + browser E2E qualification
+
+**Starting master SHA:** `2cf0350ae168df6cb3596324550ed858f028d141` (DH-CLINIC-004A, confirmed
+merged fast-forward per Liban's explicit `--ff-only` instructions). **No branch, no PR** — per this
+ticket's own explicit instruction ("Liban has explicitly decided not to use pull requests for this
+development workflow"), all work landed as focused commits directly on `master`.
+
+**Objective and scope.** Close DH-CLINIC-004A/ADR-050's two named gaps: (1) reconcile
+`dhealth-native-ui` onto an already-imported `dhealth-exchange` realm, since `--import-realm` never
+overwrites an existing realm; (2) actually observe a real browser complete the Authorization Code +
+PKCE round trip against a real Keycloak/Caddy/adapter stack, using synthetic identities through real
+admin-API paths, with zero mocking of the OIDC flow.
+
+**Status: PARTIALLY QUALIFIED — INCOMPLETE.** Gap (1) is done and real-Keycloak-runtime-qualified.
+Gap (2) is built (code, typecheck, lint all pass) but has never executed against a live browser. Do
+not read this entry as ticket closure.
+
+### What was built and is real-Keycloak-runtime-qualified
+
+- **`keycloak/reconcile-exchange.sh`**, mirroring the existing `keycloak/reconcile-sso.sh` pattern
+  for the `daher` realm: creates `dhealth-native-ui` if absent, unconditionally converges every
+  security field (`publicClient=true`, PKCE S256, disabled implicit/direct-grant/service-account
+  flows, redirect/web-origin scoping, the `exchange-api-audience` mapper) via `kcadm update`, using
+  list-and-filter lookups throughout (never a name-in-path lookup). Explicitly checks
+  `dhealth-exchange-api` is present and still `publicClient=false` but never creates or modifies it.
+  Wired into `docker-compose.yml` as a new one-shot `keycloak-exchange-config` service, same shape as
+  the existing `keycloak-sso-config` service it sits beside.
+- **Real-run evidence** (run `35210377720`, commit `7752bf9`, `workflow_dispatch`, Case A/fresh
+  realm, against the real pinned `quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e...c01c6` image):
+  Keycloak's own log — `Realm 'dhealth-exchange' imported`; `keycloak-sso-config` and
+  `keycloak-exchange-config` both `Exited (0)`; the new reconciler's own success log —
+  `Keycloak Exchange clients reconciled: dhealth-native-ui public PKCE browser client`. `git diff
+  --check` clean; `.github/workflows/ci.yml`'s extended DH-EX-008 static checks (verifying the
+  compose wiring and that the script never touches `dhealth-exchange-api`) re-extracted and re-run
+  locally before every push, all green; fast CI green on every pushed commit (`origin/master`, 9/9
+  jobs, most recently run `35210369738` at this ticket's final commit).
+- **A genuine deployment-breaking defect found and fixed** (the highest-value finding of this
+  ticket): `dhealth-exchange-realm.json`'s `dhealth-platform-admin` role description (327 chars) and
+  `dhealth-native-ui` client description (320 chars) both exceeded Keycloak's `VARCHAR(255)` column
+  limit. Against a real database this doesn't just refuse the field — it crashes the entire realm
+  import (`ERROR: value too long for type character varying(255)`) and takes the Keycloak process
+  down with it, which in turn produced a secondary, initially-misleading symptom (both one-shot
+  reconciler services hitting `503 Service Unavailable` as Keycloak crash-looped under them). Neither
+  DH-CLINIC-004A's own review nor this ticket's own DH-EX-008 static-check extension could have
+  caught this — only a real import against a real database enforces the column limit. Fixed
+  (commit `7752bf9`), meaning preserved, every string field in every committed realm-config JSON
+  re-scanned for length afterward.
+- Also fixed, found genuinely blocking this ticket's own qualification run (not merely documented,
+  per the "unrelated bugs... unless blocking" rule): a real Keycloak admin-API bootstrap race —
+  Keycloak's Docker healthcheck can report healthy several seconds before its own admin REST API
+  finishes bootstrapping, during which it returns 503. A 10-attempt/3s-backoff login retry was added
+  to `reconcile-exchange.sh`, this ticket's own orchestrator, **and** the pre-existing
+  `reconcile-sso.sh` (which races the identical window in the identical `docker compose up`).
+
+### What was built but has never run against a real browser
+
+- **`ui/e2e/`** — a `@playwright/test`-only (no Cypress), Chromium-only real-browser E2E suite:
+  12 scenarios (E2E-1 through E2E-12: full PKCE login with `code_challenge_method=S256` assertion,
+  real token issuer/audience/azp/subject decoding without ever logging the raw token, real
+  JWKS-based adapter validation, same-origin `/exchange/v1/*` routing with a negative control that
+  unrelated adapter endpoints aren't exposed through the app vhost, real token refresh, real
+  session-revocation-then-fail-closed, logout scoped to Exchange only with an explicit assertion that
+  no navigation ever touches OpenMRS/OpenELIS paths, app-switch-is-not-logout via SSO reuse, and a
+  truthful "not assigned to any organization" empty state for an authenticated-but-unassigned
+  identity) plus 4 negative controls (no token, structurally invalid token, wrong-audience token,
+  cross-provider-organization 404 anti-enumeration). All synthetic test identities use
+  `@example.invalid` addresses, created through real, already-supported Exchange admin API paths —
+  never a database bypass. `tsc -p e2e/tsconfig.json` and lint both pass.
+- Two non-discriminating assertions (E2E-6, E2E-7) were found and fixed on the author's own review,
+  before any live run reached them — both were written in a way that would pass regardless of
+  whether the actual property being tested held (see `STATUS.md`'s edit history / commit `38c0f82`
+  for detail).
+- **`scripts/qualify-native-auth.sh`** — the one-command qualification orchestrator (`--mode=fresh`
+  or `--mode=upgrade`), and **`.github/workflows/qualify-native-auth.yml`** — a separate,
+  `workflow_dispatch`-only CI workflow (`mode: fresh|upgrade|both`), per this ticket's explicit
+  instruction to never force the real E2E suite into fast/PR-gating CI. Case B (`--mode=upgrade`)
+  strips `dhealth-native-ui` from the realm file, boots only Keycloak, confirms the client is absent
+  (proving `--import-realm`'s non-overwrite behavior empirically, not just by reading the flag's
+  docs), creates a representative pre-existing synthetic user and realm role, restores the real realm
+  file, reboots, and (after the full stack + reconciler) asserts both the pre-existing user/role
+  survived and `dhealth-native-ui` was added.
+- **None of this has executed against a live browser.** The one workflow dispatch that ran
+  (`35210377720`, `mode=both`) got through Case A's Keycloak/reconciliation phase (above) but then
+  stalled: `openmrs-backend` and `openelis-webapp` — pre-existing, unmodified reference-connector
+  services — never reached Docker `healthy` within the run's 3600s `--wait` window. Caddy's own
+  `depends_on` (`openmrs-gateway`/`openelis-frontend: condition: service_started`, both transitively
+  gated on those two backends) meant Caddy itself never started, so `app.localhost`/`id.localhost`
+  were never reachable and Playwright never launched. Case B was `skipped` once Case A failed (same
+  workflow, sequential steps). This is consistent with `.github/workflows/ci.yml`'s own header
+  comment — already on record before this ticket — that full-stack boot is a documented
+  ~50-minute-plus manual/fresh-VM procedure, not something asserted to complete on a shared runner.
+  No code defect was found in the boot path during this investigation; the constraint appears to be
+  real compute/time capacity on the GitHub-hosted runner, not a logic bug in either the reference
+  connector or this ticket's own code.
+
+### Deliberately not attempted
+
+- No workaround (e.g., a qualification-only Caddy override that skips the OpenMRS/OpenELIS
+  dependency chain) was built. Rejected: it would test a topology that diverges from the real
+  deployment's `depends_on`/healthcheck contract in two places, undermining the exact thing real
+  qualification is for. The dependency chain Caddy requiring the full clinical stack to boot is a
+  real, accurate fact about this repository's architecture, not an artificial obstacle to route
+  around.
+- No retry beyond the one full run was attempted in this session, given each cycle costs 30-70+
+  minutes of CI wall-clock time and the blocker is a capacity constraint a retry with the same runner
+  would not resolve.
+
+### Qualification actually run and passing, local + CI
+
+- UI: lint, typecheck, build, full test suite (unchanged from DH-CLINIC-004A's own numbers — no UI
+  production code changed by this ticket, only `ui/e2e/**` and `vite.config.ts`'s test-exclude glob).
+- Adapter: full suite unchanged from DH-CLINIC-004A (855 passed, 98 skipped) — no adapter code
+  touched by this ticket.
+- `git diff --check` clean at the final commit. Fast CI (`origin/master`) green at every pushed
+  commit, 9/9 jobs, most recently at commit `7752bf9` (run `35210369738`).
+- Real-Keycloak reconciliation: qualified (above). Real-browser E2E: **not** qualified — built,
+  typechecked, reviewed, never executed against a live browser.
+
+**Human Decision Required: NO** for everything built. The one fact worth flagging for Liban's
+attention is not a clinical/scope decision but a resourcing one: closing this ticket's remaining gap
+needs a CI runner with materially more capacity than the shared GitHub-hosted default (self-hosted,
+or a larger hosted runner) — not a different test design, not a workaround in this repo's own
+compose/Caddy contract.
+
+**NEXT: DH-IDENTITY-001 — Native patient identity/directory contract**, offered as forward context
+only, not started here. **DH-CLINIC-004B itself remains open** — the browser-E2E half is unexecuted,
+not merely unqualified, and should not be treated as done until a run with adequate boot capacity
+actually completes Case A and Case B end to end. No pull request was created or used for this
+ticket's work, per its own explicit instruction; every change landed as a focused commit directly on
+`master`.

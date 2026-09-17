@@ -6357,3 +6357,43 @@ real Keycloak import of this realm file, a real browser OIDC round trip (redirec
 exchange, token acceptance), real-Keycloak session refresh/expiry behavior, and the
 realm-reconciliation gap noted
 above. No pilot-readiness or production-deployment claim follows from this ADR.
+
+### 2026-09-17 dated overlay (DH-CLINIC-004B) — realm reconciliation is now real-Keycloak-qualified; browser E2E is not
+
+DH-CLINIC-004B built `keycloak/reconcile-exchange.sh` (the reconciliation script this ADR's Evidence
+section named as unbuilt) and ran it against the **real, pinned Keycloak image**
+(`quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e...c01c6`) in CI, not a mock or static-config
+check. Two things follow, at different evidence levels — do not conflate them.
+
+**Runtime-qualified.** Run `35210377720` (commit `7752bf9`, `workflow_dispatch`, Case A/fresh
+realm): Keycloak imported both realms cleanly (`Realm 'dhealth-exchange' imported`, Keycloak's own
+log), `keycloak-sso-config` and `keycloak-exchange-config` both `Exited (0)`, with the new
+reconciler's own log line confirming it: `Keycloak Exchange clients reconciled: dhealth-native-ui
+public PKCE browser client`. The realm-reconciliation gap this ADR flagged as unbuilt is now closed
+and runtime-proven for the fresh-realm case. The upgrade case (adding the client to an
+*already-imported* realm — this gap's actual scenario) is written and was scheduled in the same run
+but never executed; see below.
+
+**The real run also surfaced a genuine defect in this ADR's own artifact**, never caught by CI's
+structural checks or the unit test cited above because neither validates against a real Keycloak
+column-length constraint: `roles.realm[0].description` and `clients[1].description` in
+`dhealth-exchange-realm.json` (this ADR's own file) were 327 and 320 characters — over Keycloak's
+`VARCHAR(255)` limit on those columns. Against a real database this crashes the entire realm import
+(`ERROR: value too long for type character varying(255)`), not just that one field, taking the
+Keycloak process down with it. Fixed in commit `7752bf9`, meaning preserved, length re-scanned
+across every committed realm-config JSON file. This is the clearest illustration yet of why this
+ADR's Evidence section called itself CONFIG-QUALIFIED rather than qualified: config-level review had
+already looked at both these fields twice (authoring, then the DH-EX-008 static-check extension) and
+neither review could have caught this — only a real import could.
+
+**Still not qualified — the actual browser round trip.** The same run's Case A stalled after
+Keycloak/reconciliation succeeded: `openmrs-backend` and `openelis-webapp` (pre-existing
+reference-connector services, unmodified by either ADR) never reached Docker `healthy` within the
+run's 3600s wait window, which blocks Caddy from starting (`depends_on: openmrs-gateway`/
+`openelis-frontend`), which blocks every `app.${BASE_DOMAIN}` vhost the Playwright suite needs. Case
+B (upgrade path) was configured to run in the same workflow dispatch but was `skipped` once Case A
+failed. This is consistent with, not a new instance contradicting, `.github/workflows/ci.yml`'s own
+header note that full-stack boot is a documented ~50-minute-plus manual/fresh-VM procedure, not
+something a shared CI runner is expected to complete quickly. No real browser has completed the
+Authorization Code + PKCE round trip against this stack. See `PROJECT_STATE.md`'s DH-CLINIC-004B
+entry for the full evidence and the honest completion status.

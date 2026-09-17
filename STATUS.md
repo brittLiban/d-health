@@ -6,9 +6,10 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-17, DH-CLINIC-004A, branch `dh-clinic-004a-browser-auth`.** Starting point was `master`
-at `357bd3578ec86024e6ff787bbd39b2327b47245e` (DH-STATE-001, merged). All facts below were
-re-verified directly against the current repository and fresh local test runs on this branch — none
+**2026-09-17, DH-CLINIC-004B, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `2cf0350ae168df6cb3596324550ed858f028d141`
+(DH-CLINIC-004A, merged fast-forward). All facts below were re-verified directly against the current
+repository, fresh local test runs, and a real qualification-workflow run's actual CI evidence — none
 are carried forward from an earlier session's report without re-checking.
 
 ## B. Product direction
@@ -62,10 +63,20 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   `exchange.${BASE_DOMAIN}` vhost. A shared, Clinic-independent auth layer
   (`ui/src/features/auth/exchange/`) drives `keycloak-js` with `check-sso` (never a redirect as an
   init side effect), holds tokens in memory only, single-flights and fails closed on refresh, and
-  gates Clinic's data layer so `/me` cannot fire before real authentication exists. **CONFIG-QUALIFIED,
-  not runtime-qualified**: no live Keycloak/Caddy stack was booted, so no real redirect/login/token-
-  acceptance round trip has been observed. See `DECISIONS.md` ADR-050 and `PROJECT_STATE.md`'s
-  DH-CLINIC-004A entry.
+  gates Clinic's data layer so `/me` cannot fire before real authentication exists.
+  **CONFIG-QUALIFIED for the auth layer itself; the realm-reconciliation gap this ADR originally
+  flagged as unbuilt is now closed and real-Keycloak-runtime-qualified (DH-CLINIC-004B,
+  `keycloak/reconcile-exchange.sh`, run `35210377720`, commit `7752bf9` — real pinned Keycloak
+  26.7.1, `Exited (0)`, reconciler's own success log observed).** That same real run also found and
+  fixed a genuine defect this ADR's config-level review had missed twice: two realm-JSON description
+  fields exceeded Keycloak's `VARCHAR(255)` column limit and crashed the entire realm import against
+  a real database. **Still not observed: a real browser completing the redirect/login/PKCE round
+  trip.** The qualification run's full-stack boot stalled on the pre-existing, unmodified
+  `openmrs-backend`/`openelis-webapp` services never reaching healthy within CI's wait window, which
+  blocks Caddy and therefore every `app.${BASE_DOMAIN}` vhost the browser suite needs — consistent
+  with this repo's own documented ~50-minute-plus full-stack cold boot (`.github/workflows/ci.yml`
+  header), not a defect in this ADR's own code. See `DECISIONS.md` ADR-050's 2026-09-17 overlay and
+  `PROJECT_STATE.md`'s DH-CLINIC-004B entry.
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
@@ -73,12 +84,11 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   `PatientReference` bindings, diagnostic order creation against the Exchange catalog, durable
   order-intent recovery across reload/restart, order status, results/release-version history, and
   (as of DH-CLINIC-004A, §C) a complete, config-qualified authentication path. Built and
-  component/UI-tested. **Still cannot be called deployed** — every piece needed to authenticate now
-  exists and is wired together (public Keycloak client, same-origin routing, in-memory token
-  lifecycle, an auth gate that blocks anonymous `/me`), but nobody has booted the real stack: no
-  Keycloak realm import of the two-client file has been observed, no browser has actually completed
-  a redirect/login/PKCE round trip, and no live Caddy routing has been exercised end to end. That
-  gap is DH-CLINIC-004B's explicit job (§I).
+  component/UI-tested. **Still cannot be called deployed.** DH-CLINIC-004B has since observed a real
+  Keycloak import of the two-client file and real reconciliation against it (§C) — but no browser has
+  actually completed a redirect/login/PKCE round trip, and no live Caddy routing has been exercised
+  end to end, because the full stack (Caddy included) never finished booting in the one qualification
+  run attempted. That gap is DH-CLINIC-004B's own open item (§I), not closed by this entry.
 - Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: no real-Keycloak
   qualification, no manual live/browser demonstration, no production deployment, for any Exchange
   ticket.
@@ -88,12 +98,21 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 - **WhatsApp/SMS/email result delivery**: `ResultDelivery` is created `PENDING` at order creation
   and no code path advances it past `PENDING`. Stays `BLOCKED`, not `DONE`, until a real transport
   runs the flow against real credentials — a mock is never done, per this repo's pinned P0 rule.
-- **Real Keycloak qualification**: not run for any Exchange ticket; every authorization boundary is
-  proven only against a locally generated RSA keypair (`StaticKeySource`), never a live identity
-  provider.
+- **Real Keycloak qualification of authorization boundaries**: still not run for token
+  validation/audience/authorization decisions — every such boundary is proven only against a locally
+  generated RSA keypair (`StaticKeySource`), never a live identity provider. (Narrower than before:
+  DH-CLINIC-004B did runtime-qualify realm/client *reconciliation* against a real Keycloak — §C — but
+  that is a deployment-provisioning proof, not a token-validation one.)
 - **Real-browser qualification of native Clinic authentication**: the config-level pieces exist
-  (§C), but a real OIDC round trip against a live Keycloak/Caddy stack has never been observed. See
-  §D. This is DH-CLINIC-004B's job (§I).
+  (§C), and realm reconciliation is now real-Keycloak-qualified (§C), but a real OIDC round trip
+  against a live browser/Caddy stack has never been observed — the one qualification run attempted
+  stalled before Caddy ever started (§D). This is DH-CLINIC-004B's open item (§I).
+- **Full-stack (Caddy-included) boot on a shared GitHub-hosted CI runner**: `openmrs-backend` and
+  `openelis-webapp` did not reach Docker `healthy` within a 3600s wait window in the one attempt made
+  (DH-CLINIC-004B, run `35210377720`). Consistent with this repo's own documented ~50-minute-plus
+  cold boot being a manual/fresh-VM procedure, not a shared-runner one — see `.github/workflows/ci.yml`'s
+  header. Not a code defect found in this attempt; next step is a runner with more capacity
+  (self-hosted or a larger GitHub runner), not a different test design.
 - **Full patient lookup/search/registration by name or demographic**: does not exist at the API or
   frontend level. What exists is narrower — provider-scoped `PatientReference` *binding* to an
   already-known exact source identity (DH-EX-009). This is a real, current gap, not a stale claim —
@@ -127,10 +146,12 @@ authentication (§C), has never been runtime/browser-qualified (§D).
 Gates that must all clear before any real-patient pilot on the Exchange track, none of which have
 cleared yet:
 
-1. Real Keycloak qualification (currently: not run, §E).
+1. Real Keycloak qualification of token validation/authorization (currently: not run, §E). Realm/
+   client reconciliation is now real-Keycloak-qualified (§C) — narrower than this gate.
 2. DHealth Clinic native browser authentication + same-origin Exchange routing — config-qualified
-   as of DH-CLINIC-004A (§C), but real Keycloak/browser E2E qualification is not run (§D — this is
-   DH-CLINIC-004B, §I).
+   as of DH-CLINIC-004A, reconciliation real-Keycloak-qualified as of DH-CLINIC-004B (§C), but a real
+   browser round trip is still not observed (§D/§E — DH-CLINIC-004B, blocked on full-stack boot
+   capacity, §I).
 3. Manual live/browser demonstration of the golden path (currently: not run).
 4. A performed backup **restore drill**, not merely a script that exists (pinned P0; see
    `PROJECT_STATE.md` for current backup status).
@@ -143,11 +164,18 @@ No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
 
-**DH-CLINIC-004B — Real Keycloak + browser E2E qualification.**
+**DH-CLINIC-004B remains open — incomplete, not closed.** Realm/client reconciliation is now
+real-Keycloak-runtime-qualified (§C), and a genuine deployment-breaking defect (VARCHAR(255) realm
+import crash) was found and fixed along the way. The browser E2E suite (12 scenarios + 4 negative
+controls) is written, typechecked, and reviewed, but has never executed against a live browser: the
+one qualification run attempted stalled because `openmrs-backend`/`openelis-webapp` never reached
+healthy within CI's wait window, blocking Caddy. Needed to close this ticket: a CI runner with more
+capacity (self-hosted or a larger GitHub-hosted runner) — not a different test design — then a
+successful Case A run through the full Playwright suite, then Case B (upgrade path), then the
+idempotent-repeat check. See `PROJECT_STATE.md`'s DH-CLINIC-004B entry for full evidence.
 
-DH-CLINIC-004A (this entry's own ticket) built and config-qualified native browser authentication;
-it did not, and was not scoped to, boot a real stack or observe a real browser round trip. That is
-DH-CLINIC-004B's job, not started here.
+**Forward context only, not started:** DH-IDENTITY-001 — Native patient identity/directory
+contract.
 
 ## J. Documentation precedence
 
