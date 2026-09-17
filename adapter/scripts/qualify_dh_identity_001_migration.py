@@ -149,7 +149,9 @@ def main() -> int:
     legacy_count = len(legacy_refs)
     print(f"Seeded {legacy_count} legacy exchange_patient_references rows across 2 providers")
 
-    print("== upgrading to head (runs 0022_exchange_patient_directory) ==")
+    # "head" runs 0022_exchange_patient_directory plus whatever purely-additive migrations later
+    # tickets (e.g. DH-CLINIC-006's 0023_provider_lab_routes) have since stacked on top of it.
+    print("== upgrading to head (runs 0022_exchange_patient_directory and later) ==")
     command.upgrade(cfg, "head")
 
     legacy_ids = [r["id"] for r in legacy_refs]
@@ -256,6 +258,25 @@ def main() -> int:
         contact_channel_type=None,
         contact_value=None,
         created_by_identity_id=guard_identity.id,
+    )
+
+    # DH-CLINIC-006 added 0023_provider_lab_routes on top of 0022 -- "head" no longer *is* 0022, so
+    # the single-step downgrade this qualification actually cares about (0022 -> 0021, refused)
+    # must be isolated from 0023's own downgrade first. 0023 -> 0022 is expected to succeed
+    # cleanly here (this script never creates a ProviderLabRoute row), and Alembic runs a multi-
+    # revision downgrade as one enclosing transaction -- if this step were skipped and 0022 ->
+    # 0021's refusal raised inside the same `command.downgrade(cfg, "0021_...")` call as 0023 ->
+    # 0022, the whole batch would roll back together, leaving the schema at 0023 instead of the
+    # 0022 this test asserts.
+    command.downgrade(cfg, "0022_exchange_patient_directory")
+    with engine.connect() as conn:
+        current_before_guard = conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+    _require(
+        current_before_guard == "0022_exchange_patient_directory",
+        f"expected schema at 0022 before exercising its own downgrade guard, got "
+        f"{current_before_guard!r}",
     )
 
     try:
