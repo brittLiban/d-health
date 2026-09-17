@@ -814,6 +814,34 @@ services:
     cap_drop: [ALL]
     networks: [internal]
 
+  # DH-CLINIC-004B: the same "--import-realm never overwrites an existing realm" gap as
+  # keycloak-sso-config above, for the dhealth-exchange realm's dhealth-native-ui browser client
+  # (ADR-050). A separate one-shot, not folded into keycloak-sso-config -- the daher realm's
+  # OpenMRS/OpenELIS clients and the dhealth-exchange realm's Exchange client have independent
+  # lifecycles and independent tickets; this keeps that boundary at the compose-service level too.
+  keycloak-exchange-config:
+    image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
+    restart: "no"
+    read_only: true
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/daher/reconcile-exchange.sh"]
+    environment:
+      <<: *common-env
+      KEYCLOAK_INTERNAL_URL: http://keycloak.openelis.org:8080
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      DAHER_APP_PUBLIC_URL: ${DAHER_APP_PUBLIC_URL:-https://app.${BASE_DOMAIN:-localhost}}
+    volumes:
+      - ./keycloak/reconcile-exchange.sh:/opt/daher/reconcile-exchange.sh:ro
+      - ./keycloak/mappers:/opt/daher/mappers:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: [ALL]
+    networks: [internal]
+
   # ===========================================================================
   # ADAPTER SAFETY SKELETON (DH-010)
   #

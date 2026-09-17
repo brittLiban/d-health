@@ -688,6 +688,43 @@ jobs:
           if realm_path.is_file() and daher_realm.get("realm") == realm.get("realm"):
               bad.append("dhealth-exchange and daher realm files name the same realm — they must never merge")
 
+          # --- DH-CLINIC-004B: the dhealth-native-ui reconciler exists and is wired the same way
+          # keycloak-sso-config already is — --import-realm never updates an existing realm, so an
+          # upgraded dhealth-exchange realm needs this one-shot or it never gets the browser client. ---
+          exchange_config_match = re.search(r"\n  keycloak-exchange-config:\n(.*?)(?=\n  [a-z0-9_-]+:\n)", compose, re.S)
+          if not exchange_config_match:
+              bad.append("docker-compose.yml: keycloak-exchange-config service not found")
+          else:
+              exchange_config_block = exchange_config_match.group(1)
+              if "reconcile-exchange.sh" not in exchange_config_block:
+                  bad.append("keycloak-exchange-config does not mount/run reconcile-exchange.sh")
+              depends_match = re.search(r"depends_on:\n(.*?)(?=\n    [a-z]+:)", exchange_config_block, re.S)
+              if not depends_match or "service_healthy" not in depends_match.group(1):
+                  bad.append("keycloak-exchange-config must depend_on keycloak: condition: service_healthy")
+
+          reconcile_script_path = Path("keycloak/reconcile-exchange.sh")
+          if not reconcile_script_path.is_file():
+              bad.append("keycloak/reconcile-exchange.sh is missing")
+          else:
+              reconcile_script = reconcile_script_path.read_text()
+              # The script may mention dhealth-exchange-api only in a read-only existence check —
+              # never on a line that also issues a kcadm update/create call.
+              mentions = [
+                  line for line in reconcile_script.splitlines() if "dhealth-exchange-api" in line
+              ]
+              if any('"$kcadm" update' in m or '"$kcadm" create' in m for m in mentions):
+                  bad.append("reconcile-exchange.sh must never create/update the dhealth-exchange-api client")
+              for required_field in (
+                  "-s publicClient=true",
+                  "-s standardFlowEnabled=true",
+                  "-s implicitFlowEnabled=false",
+                  "-s directAccessGrantsEnabled=false",
+                  "-s serviceAccountsEnabled=false",
+                  'pkce.code.challenge.method"=S256',
+              ):
+                  if required_field not in reconcile_script:
+                      bad.append(f"reconcile-exchange.sh does not converge {required_field!r} — matches dhealth-exchange-realm.json?")
+
           # --- Adapter app: exchange-ready is a sibling of ready, never a change to its body ---
           if '"/health/exchange-ready"' not in app_py:
               bad.append("app.py: /health/exchange-ready endpoint not found")
