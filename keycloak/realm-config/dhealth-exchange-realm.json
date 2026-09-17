@@ -28,7 +28,7 @@
     "realm": [
       {
         "name": "dhealth-platform-admin",
-        "description": "DHealth Exchange platform administrator. Authenticates identities and creates organizations only -- never implies membership in, or a role within, any specific organization. Organization membership and role are authorized separately, from the Exchange database, not from a Keycloak role (see adapter exchange/authorization.py)."
+        "description": "DHealth Exchange platform administrator. Authenticates identities and creates organizations only -- never implies org membership or role. Those are authorized separately from the Exchange database (see adapter exchange/authorization.py)."
       }
     ]
   },
@@ -71,7 +71,7 @@
     {
       "clientId": "dhealth-native-ui",
       "name": "DHealth Native UI (browser)",
-      "description": "Public Authorization Code + PKCE S256 client for native DHealth browser applications (DHealth Clinic today; DHealth Lab later). Never holds a secret -- see DECISIONS.md ADR-050. Its access tokens carry the dhealth-exchange-api audience via the mapper below, so the backend's existing audience validation needs no change.",
+      "description": "Public PKCE S256 client for native DHealth browser apps (Clinic today, Lab later). Never holds a secret -- see ADR-050. Tokens carry the dhealth-exchange-api audience via the mapper below; backend validation is unchanged.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
