@@ -21,13 +21,11 @@ import {
 export interface ClinicProviderProps {
   children: ReactNode
   client?: ExchangeClient
-  authToken?: string | null
 }
 
 export function ClinicProvider({
   children,
   client = defaultExchangeClient,
-  authToken = null,
 }: ClinicProviderProps) {
   const [status, setStatus] = useState<ClinicAuthStatus>('loading')
   const [user, setUser] = useState<ExchangeIdentity | null>(null)
@@ -40,7 +38,7 @@ export function ClinicProvider({
     setError(null)
 
     try {
-      const meResponse = await client.getMe(authToken ?? undefined)
+      const meResponse = await client.getMe()
       setUser({
         identity_id: meResponse.identity_id,
         issuer: meResponse.issuer,
@@ -91,13 +89,13 @@ export function ClinicProvider({
         setStatus('error')
       }
     }
-  }, [client, authToken])
+  }, [client])
 
   useEffect(() => {
     let isMounted = true
 
     client
-      .getMe(authToken ?? undefined)
+      .getMe()
       .then((meResponse) => {
         if (!isMounted) return
         setUser({
@@ -155,7 +153,7 @@ export function ClinicProvider({
     return () => {
       isMounted = false
     }
-  }, [client, authToken])
+  }, [client])
 
   const activeProvider =
     availableClinics.find((c) => c.organization_id === activeProviderId) ?? null
@@ -174,7 +172,6 @@ export function ClinicProvider({
         activeProvider,
         availableClinics,
         error,
-        authToken,
         client,
         setActiveProviderId: handleSelectProviderId,
         reload,

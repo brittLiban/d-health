@@ -27,7 +27,7 @@ function formatReviewStatusLabel(status: string | null | undefined): string {
 }
 
 export function ClinicResultsPage() {
-  const { status: authStatus, activeProvider, client, authToken, reload } = useClinic()
+  const { status: authStatus, activeProvider, client, reload } = useClinic()
   const [completedOrdersState, setCompletedOrdersState] = useState<{
     completedOrders: LabOrderSummary[]
     loading: boolean
@@ -60,7 +60,7 @@ export function ClinicResultsPage() {
     let isMounted = true
 
     client
-      .listOrders(activeProvider.organization_id, { limit: 50, token: authToken ?? undefined })
+      .listOrders(activeProvider.organization_id, { limit: 50 })
       .then((data) => {
         if (isMounted) {
           const completed = data.filter((o) => o.status === 'COMPLETED')
@@ -84,7 +84,7 @@ export function ClinicResultsPage() {
     return () => {
       isMounted = false
     }
-  }, [client, activeProvider, authStatus, authToken])
+  }, [client, activeProvider, authStatus])
 
   const { completedOrders, loading, error } = completedOrdersState
 
@@ -95,8 +95,8 @@ export function ClinicResultsPage() {
     setDetailsError(null)
 
     Promise.all([
-      client.getOrderResults(activeProvider.organization_id, orderId, authToken ?? undefined),
-      client.getReleaseVersions(activeProvider.organization_id, orderId, authToken ?? undefined),
+      client.getOrderResults(activeProvider.organization_id, orderId),
+      client.getReleaseVersions(activeProvider.organization_id, orderId),
     ])
       .then(([res, history]) => {
         setOrderDetails(res)

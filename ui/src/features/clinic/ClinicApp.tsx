@@ -25,7 +25,6 @@ export interface PendingOrderMutation {
 
 export interface ClinicAppProps {
   client?: ExchangeClient
-  authToken?: string | null
   initialTab?: ClinicTabId
   onLogout?: () => void
   onSwitchApp?: () => void
@@ -124,13 +123,12 @@ function ClinicContent({
 
 export function ClinicApp({
   client,
-  authToken,
   initialTab = 'home',
   onLogout,
   onSwitchApp,
 }: ClinicAppProps) {
   return (
-    <ClinicProvider client={client} authToken={authToken}>
+    <ClinicProvider client={client}>
       <ClinicContent
         initialTab={initialTab}
         onLogout={onLogout}

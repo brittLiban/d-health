@@ -217,18 +217,22 @@ describe('App', () => {
     render(<App initialApp="clinic" />)
     await screen.findByText('DHEALTH CLINIQUE')
 
-    const fetchMock = vi.mocked(global.fetch)
+    const fetchMock = vi.mocked(fetch)
     fetchMock.mockClear()
 
     await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
 
     expect(getLatestKeycloakInstance()?.logout).toHaveBeenCalledTimes(1)
     expect(
-      fetchMock.mock.calls.some(([url]) => typeof url === 'string' && url.includes('/openmrs/')),
+      fetchMock.mock.calls.some(
+        (call: Parameters<typeof fetch>) =>
+          typeof call[0] === 'string' && call[0].includes('/openmrs/'),
+      ),
     ).toBe(false)
     expect(
       fetchMock.mock.calls.some(
-        ([url]) => typeof url === 'string' && url.includes('/OpenELIS-Global/'),
+        (call: Parameters<typeof fetch>) =>
+          typeof call[0] === 'string' && call[0].includes('/OpenELIS-Global/'),
       ),
     ).toBe(false)
   })
@@ -251,7 +255,7 @@ describe('App', () => {
     render(<App />)
     expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
 
-    const fetchMock = vi.mocked(global.fetch)
+    const fetchMock = vi.mocked(fetch)
     fetchMock.mockClear()
 
     await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
@@ -259,7 +263,8 @@ describe('App', () => {
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(
-          ([url]) => typeof url === 'string' && url.includes('/openmrs/ws/rest/v1/session'),
+          (call: Parameters<typeof fetch>) =>
+            typeof call[0] === 'string' && call[0].includes('/openmrs/ws/rest/v1/session'),
         ),
       ).toBe(true)
     })

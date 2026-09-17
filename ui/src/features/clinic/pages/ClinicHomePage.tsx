@@ -16,7 +16,7 @@ interface ClinicHomePageProps {
 }
 
 export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
-  const { status, activeProvider, client, authToken, error, reload } = useClinic()
+  const { status, activeProvider, client, error, reload } = useClinic()
   const [ordersState, setOrdersState] = useState<{
     orders: LabOrderSummary[]
     loading: boolean
@@ -35,7 +35,7 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
     let isMounted = true
 
     client
-      .listOrders(activeProvider.organization_id, { limit: 50, token: authToken ?? undefined })
+      .listOrders(activeProvider.organization_id, { limit: 50 })
       .then((data) => {
         if (isMounted) {
           setOrdersState({ orders: data, loading: false, error: null })
@@ -54,7 +54,7 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
     return () => {
       isMounted = false
     }
-  }, [client, activeProvider, status, authToken])
+  }, [client, activeProvider, status])
 
   const { orders, loading: ordersLoading, error: ordersError } = ordersState
 
@@ -122,7 +122,7 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
             if (activeProvider) {
               setOrdersState({ orders: [], loading: true, error: null })
               client
-                .listOrders(activeProvider.organization_id, { limit: 50, token: authToken ?? undefined })
+                .listOrders(activeProvider.organization_id, { limit: 50 })
                 .then((data) => setOrdersState({ orders: data, loading: false, error: null }))
                 .catch((e) =>
                   setOrdersState({

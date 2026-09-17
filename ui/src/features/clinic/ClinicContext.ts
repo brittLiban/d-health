@@ -18,7 +18,6 @@ export interface ClinicContextValue {
   activeProvider: ExchangeMembershipSummary | null
   availableClinics: ExchangeMembershipSummary[]
   error: ExchangeApiError | null
-  authToken: string | null
   client: ExchangeClient
   setActiveProviderId: (id: string) => void
   reload: () => Promise<void>

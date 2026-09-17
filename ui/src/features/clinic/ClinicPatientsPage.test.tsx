@@ -280,11 +280,7 @@ describe('Clinic native patient workflow', () => {
     expect(submitted.source_identity_value).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     )
-    expect(get).toHaveBeenCalledWith(
-      'provider-a',
-      patientWithName.patient_reference_id,
-      undefined,
-    )
+    expect(get).toHaveBeenCalledWith('provider-a', patientWithName.patient_reference_id)
   })
 
   it('submits provider-local search text and renders the returned result', async () => {
@@ -738,7 +734,7 @@ describe('Clinic native patient workflow', () => {
     await user.selectOptions(providerSelect, 'provider-a')
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
     expect(client.getPatientReference).toHaveBeenCalledWith(
-      'provider-a', patientWithName.patient_reference_id, undefined,
+      'provider-a', patientWithName.patient_reference_id,
     )
   })
 
@@ -1739,11 +1735,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(openButtons[0])
 
     // Server was queried by idempotency key
-    expect(getOrderByIdempotencyKey).toHaveBeenCalledWith(
-      'provider-a',
-      'stored-idemp-key-1234',
-      expect.anything(),
-    )
+    expect(getOrderByIdempotencyKey).toHaveBeenCalledWith('provider-a', 'stored-idemp-key-1234')
 
     // Automatically confirmed and cleaned up from storage
     expect(
@@ -1974,7 +1966,7 @@ describe('Clinic native patient workflow', () => {
     await userEventObj.click(openButtons[0])
 
     // Wait for reconciliation attempt
-    expect(getOrderByIdempotencyKey).toHaveBeenCalledWith('provider-a', 'stored-idemp-404-test', expect.anything())
+    expect(getOrderByIdempotencyKey).toHaveBeenCalledWith('provider-a', 'stored-idemp-404-test')
 
     // Banner indicates unresolved attempt
     expect(await screen.findByText(/Tentative d’ordre non confirmée/)).toBeInTheDocument()
@@ -2147,11 +2139,7 @@ describe('Clinic native patient workflow', () => {
       // Reachability gate: prove the intent lookup actually fired -- without this assertion a
       // test that silently takes the null-foundIntent path would pass for the wrong reason.
       await waitFor(() =>
-        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
-          'provider-a',
-          key,
-          expect.anything(),
-        ),
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-a', key),
       )
       expect(getOrderIntent).not.toHaveBeenCalled()
 
@@ -2306,11 +2294,7 @@ describe('Clinic native patient workflow', () => {
       await userEventObj.click(openButtons[0])
 
       await waitFor(() =>
-        expect(getOrderIntent).toHaveBeenCalledWith(
-          'provider-a',
-          'intent-expected-by-storage',
-          expect.anything(),
-        ),
+        expect(getOrderIntent).toHaveBeenCalledWith('provider-a', 'intent-expected-by-storage'),
       )
 
       await assertFailedClosed(commitOrderIntentWithOutcome, createOrderIntentWithOutcome, key)
@@ -2365,11 +2349,7 @@ describe('Clinic native patient workflow', () => {
 
       // Commit was attempted using the existing intent -- never a new registration/key.
       await waitFor(() => expect(commitOrderIntentWithOutcome).toHaveBeenCalledTimes(1))
-      expect(commitOrderIntentWithOutcome).toHaveBeenCalledWith(
-        'provider-a',
-        intent.id,
-        expect.anything(),
-      )
+      expect(commitOrderIntentWithOutcome).toHaveBeenCalledWith('provider-a', intent.id)
       expect(createOrderIntentWithOutcome).not.toHaveBeenCalled()
 
       // After a definitive commit failure, recovery identity must remain -- not discarded as if
@@ -2507,22 +2487,16 @@ describe('Clinic native patient workflow', () => {
       // Open Patient A -- her reconciliation begins.
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
-      await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
-        'provider-a',
-        keyA,
-        expect.anything(),
-      ))
+      await waitFor(() =>
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-a', keyA),
+      )
 
       // Switch to Patient B, who has her OWN pending reconciliation.
       await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
       const openButtons2 = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons2[1])
       await waitFor(() =>
-        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
-          'provider-a',
-          keyB,
-          expect.anything(),
-        ),
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-a', keyB),
       )
 
       // B's own reconciliation is genuinely in flight -- new-order creation stays blocked.
@@ -2666,11 +2640,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
       await waitFor(() =>
-        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
-          'provider-a',
-          keyA,
-          expect.anything(),
-        ),
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-a', keyA),
       )
 
       const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
@@ -2678,11 +2648,7 @@ describe('Clinic native patient workflow', () => {
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtonsB[0])
       await waitFor(() =>
-        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith(
-          'provider-b',
-          keyB,
-          expect.anything(),
-        ),
+        expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-b', keyB),
       )
 
       // B's own reconciliation is genuinely in flight -- new-order creation stays blocked.

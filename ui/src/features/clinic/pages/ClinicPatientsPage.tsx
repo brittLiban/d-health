@@ -100,7 +100,7 @@ export function ClinicPatientsPage({
   pendingOrders = {},
   onPendingOrderChange = () => {},
 }: ClinicPatientsPageProps) {
-  const { activeProvider, user, client, authToken } = useClinic()
+  const { activeProvider, user, client } = useClinic()
   const providerId = activeProvider?.organization_id ?? null
   const scopeKey = providerId && user ? `${user.identity_id}:${providerId}` : null
   const currentProviderRef = useRef(providerId)
@@ -169,7 +169,6 @@ export function ClinicPatientsPage({
       const values = await client.listPatientReferences(targetProviderId, {
         query,
         limit: 50,
-        token: authToken ?? undefined,
       })
       if (
         mountedRef.current &&
@@ -190,7 +189,7 @@ export function ClinicPatientsPage({
         setLoadState('error')
       }
     }
-  }, [authToken, client])
+  }, [client])
 
   useEffect(() => {
     requestGenerationRef.current += 1
@@ -249,7 +248,6 @@ export function ClinicPatientsPage({
               found = await client.getPatientReference(
                 providerId,
                 stored.confirmed_patient_reference_id,
-                authToken ?? undefined,
               )
             }
           } catch {
@@ -300,7 +298,6 @@ export function ClinicPatientsPage({
       try {
         const orders = await client.listPatientOrders(targetProviderId, targetPatientRefId, {
           limit: 50,
-          token: authToken ?? undefined,
         })
         if (
           mountedRef.current &&
@@ -323,7 +320,7 @@ export function ClinicPatientsPage({
         }
       }
     },
-    [client, authToken],
+    [client],
   )
 
   useEffect(() => {
@@ -393,7 +390,6 @@ export function ClinicPatientsPage({
               foundOrder = await client.getOrderByIdempotencyKey(
                 providerId,
                 storedOrder.idempotency_key,
-                { token: authToken ?? undefined },
               )
             } catch {
               // Read failure during reconciliation
@@ -431,16 +427,11 @@ export function ClinicPatientsPage({
                 let foundIntent: LabOrderIntent | null = null
                 try {
                   if (storedOrder.intent_id) {
-                    foundIntent = await client.getOrderIntent(
-                      providerId,
-                      storedOrder.intent_id,
-                      { token: authToken ?? undefined },
-                    )
+                    foundIntent = await client.getOrderIntent(providerId, storedOrder.intent_id)
                   } else {
                     foundIntent = await client.getOrderIntentByIdempotencyKey(
                       providerId,
                       storedOrder.idempotency_key,
-                      { token: authToken ?? undefined },
                     )
                   }
                 } catch {
@@ -474,7 +465,6 @@ export function ClinicPatientsPage({
                         committedOrder = await client.getOrder(
                           providerId,
                           foundIntent.committed_lab_order_id,
-                          authToken ?? undefined,
                         )
                       } catch {
                         // ignore
@@ -559,7 +549,7 @@ export function ClinicPatientsPage({
   const loadCatalog = useCallback(async () => {
     setCatalogLoadState('loading')
     try {
-      const entries = await client.listCatalogTests({ token: authToken ?? undefined })
+      const entries = await client.listCatalogTests()
       if (mountedRef.current) {
         setCatalogEntries(entries)
         setCatalogLoadState('success')
@@ -570,7 +560,7 @@ export function ClinicPatientsPage({
         setCatalogLoadState('error')
       }
     }
-  }, [client, authToken])
+  }, [client])
 
   const handleOpenOrderWizard = () => {
     if (!orderDraftIdempotencyKey) {
@@ -668,15 +658,10 @@ export function ClinicPatientsPage({
       // Step 1: Ensure backend intent exists (DH-CLINIC-003C Option A)
       let intentId = unresolvedStoredOrder?.intent_id
       if (!intentId) {
-        const intentOutcome = await client.createOrderIntentWithOutcome(
-          targetProviderId,
-          key,
-          {
-            patient_reference_id: targetPatientRefId,
-            catalog_entry_ids: selectedCatalogEntryIds,
-          },
-          { token: authToken ?? undefined },
-        )
+        const intentOutcome = await client.createOrderIntentWithOutcome(targetProviderId, key, {
+          patient_reference_id: targetPatientRefId,
+          catalog_entry_ids: selectedCatalogEntryIds,
+        })
         intentId = intentOutcome.intent.id
 
         if (
@@ -723,9 +708,7 @@ export function ClinicPatientsPage({
       }
 
       // Step 2: Commit the backend intent
-      const outcome = await client.commitOrderIntentWithOutcome(targetProviderId, intentId, {
-        token: authToken ?? undefined,
-      })
+      const outcome = await client.commitOrderIntentWithOutcome(targetProviderId, intentId)
 
       if (
         !mountedRef.current ||
@@ -895,11 +878,7 @@ export function ClinicPatientsPage({
     setCreateState('submitting')
     let outcome
     try {
-      outcome = await client.bindPatientReferenceWithOutcome(
-        targetProviderId,
-        body,
-        authToken ?? undefined,
-      )
+      outcome = await client.bindPatientReferenceWithOutcome(targetProviderId, body)
     } catch (error) {
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
 
@@ -948,11 +927,7 @@ export function ClinicPatientsPage({
     setConfirmedReadAttempt({ ...confirmed, created_at: Date.now() })
     setShowCreate(false)
     try {
-      const authoritative = await client.getPatientReference(
-        targetProviderId,
-        outcome.reference.id,
-        authToken ?? undefined,
-      )
+      const authoritative = await client.getPatientReference(targetProviderId, outcome.reference.id)
       if (!mountedRef.current || currentProviderRef.current !== targetProviderId) return
       clearStoredPendingPatient(user.identity_id, targetProviderId)
       setUnresolvedStoredAttempt(null)
@@ -981,7 +956,6 @@ export function ClinicPatientsPage({
       const authoritative = await client.getPatientReference(
         providerId,
         confirmedReadAttempt.confirmed_patient_reference_id,
-        authToken ?? undefined,
       )
       if (!mountedRef.current || currentProviderRef.current !== providerId) return
       clearStoredPendingPatient(user.identity_id, providerId)

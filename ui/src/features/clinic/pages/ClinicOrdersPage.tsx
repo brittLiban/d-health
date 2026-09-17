@@ -50,7 +50,7 @@ function formatOrderStatusLabel(status: LabOrderStatus): string {
 }
 
 export function ClinicOrdersPage() {
-  const { status: authStatus, activeProvider, client, authToken, reload } = useClinic()
+  const { status: authStatus, activeProvider, client, reload } = useClinic()
   const [ordersState, setOrdersState] = useState<{
     orders: LabOrderSummary[]
     loading: boolean
@@ -69,7 +69,7 @@ export function ClinicOrdersPage() {
     let isMounted = true
 
     client
-      .listOrders(activeProvider.organization_id, { limit: 50, token: authToken ?? undefined })
+      .listOrders(activeProvider.organization_id, { limit: 50 })
       .then((data) => {
         if (isMounted) {
           setOrdersState({ orders: data, loading: false, error: null })
@@ -88,7 +88,7 @@ export function ClinicOrdersPage() {
     return () => {
       isMounted = false
     }
-  }, [client, activeProvider, authStatus, authToken])
+  }, [client, activeProvider, authStatus])
 
   const { orders, loading, error } = ordersState
 
