@@ -1013,6 +1013,35 @@ generation/`currentLabRef`/`AbortController` discipline `LabOrdersPage` already 
 DH-LAB-001 disclosed but left open. Result entry, result release, and LIS/Connect integration remain
 explicitly out of scope, deferred to DH-LAB-003 onward.
 
+**2026-09-18 dated note (DH-LAB-003, ADR-053):** a controlled, immutable, `LabOffering`-scoped
+result-structure template layer now exists (`LabResultTemplate`/`LabResultTemplateObservation`,
+migration `0024_result_templates` -- the first new schema since DH-LAB-001). Scoped to
+`LabOffering`, deliberately never to `TestCatalogEntry`: two labs offering the identical catalog
+test may report a different observation structure without that being a second ordered-service
+identity. Activation (`LabResultTemplateRepository.activate_template`) is a `FOR UPDATE`-locked
+compare-and-swap mirroring `CatalogRepository.set_price`'s own discover-and-swap-in-one-statement
+discipline -- the owning offering is locked first, then the current active row (if any) is
+discovered and deactivated in one `UPDATE ... RETURNING` before the target is activated; an
+already-active-target reactivation is always a safe replay, identical to `set_price`'s own
+already-correct-value exception. No reference-range or clinical-interpretation field exists on this
+model at all (this product has no approved applicability model for a static range yet). The
+existing low-level `LabObservation`/`record_observation` API (DH-EX-012C/ADR-047) is completely
+untouched -- templates are additive Native Lab configuration DH-LAB-004's own future human-entry
+mutation will require, never a new constraint retroactively imposed on the interoperability
+primitive a future Connect-reported observation still needs to use freely. A new batched, read-only
+`GET .../lab-orders/{order_id}/result-entry-plan` resolves each `IN_PROGRESS` item's currently
+active template for the frontend (never one query per item: one batched offering lookup, one
+batched catalog-entry lookup for `is_synthetic`, and `get_active_templates_for_offerings`'s own two
+batched queries). A currently-assigned order's item with no `LabOffering` row at the selected lab
+at all is a structural-integrity failure, not a normal missing-config state -- `assign_by_provider`/
+`select` both require one at assignment time, and offering rows are never deleted. Frontend-side,
+`LabOrdersPage`'s `IN_PROGRESS` branch now renders a read-only structure preview, loaded as a third
+request in the panel's own lifecycle sharing `panelGenerationRef` rather than a dedicated ref of its
+own -- any event that already invalidates the panel (a different order, closing it, a lab switch)
+invalidates the plan identically. No result-entry, no result value, no LIS/Connect code exists in
+this ticket -- DH-LAB-004 is next, and must pin/validate the exact template version at write time
+(ADR-053 Decision 11).
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |

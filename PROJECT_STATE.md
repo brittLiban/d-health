@@ -16490,3 +16490,289 @@ not list it), so this could not be a ticket-caused failure by construction. `gh 
 clean, all 9 jobs green. **Current master (`e38a2fe`) is fully green.**
 
 `NEXT: DH-LAB-003 — Controlled Result Definitions / Templates`
+
+## DH-LAB-003 (2026-09-18) — Controlled, LabOffering-scoped result templates + read-only entry plan
+
+**Starting master SHA:** `095f7f53b295b854e3430c121de226d037c8b9d0` (DH-LAB-002's own final
+documentation commit) — confirmed exact match at session start (`git status` clean, `git pull
+--ff-only` no-op). Alembic head confirmed `0023_provider_lab_routes` before any code change.
+
+**Ending master SHA:** `7f2962b` (frontend commit), with this documentation commit following it.
+Backend commit `3815e91` and a small CI-config fix `d1bfa12` immediately precede it (see below).
+
+**Commits, in order:**
+1. `3815e91` — `feat(DH-LAB-003): controlled, LabOffering-scoped Native Lab result templates + entry plan`
+2. `d1bfa12` — `fix(DH-LAB-003): bump CI's EXPECTED_HEAD to 0024_result_templates`
+3. `7f2962b` — `feat(DH-LAB-003): read-only result-structure preview in Native Lab`
+4. (this commit) — `docs(DH-LAB-003): record templates/entry-plan evidence`
+
+**Direct master, no PR — confirmed.** No branch was created; every commit landed directly on
+`master` per this ticket's own explicit instruction.
+
+### Backend — new schema, first migration since DH-LAB-001 (§9-§34, AC1-AC15, AC23)
+
+**New tables** (`adapter/migrations/versions/0024_result_templates.py`):
+- `exchange_lab_result_templates` — `id`, `lab_offering_id` (FK, RESTRICT), `version` (CHECK `>=
+  1`), `active`, `created_at`. `UNIQUE(lab_offering_id, version)`, plus a partial unique index
+  (`postgresql_where`/`sqlite_where` `active = true`/`active = 1`, mirroring `LabPrice`'s own
+  current-row pattern) enforcing at most one active row per offering at the database level.
+- `exchange_lab_result_template_observations` — `id`, `result_template_id` (FK, RESTRICT),
+  `source_code` (String(64)), `display_label` (String(256)), `result_type` (String(16), CHECK
+  `NUMERIC`/`TEXT`), `numeric_unit` (String(32), nullable), `required`, `sort_order` (CHECK `>=
+  0`). `UNIQUE(result_template_id, source_code)` and `UNIQUE(result_template_id, sort_order)`. All
+  four `source_code`/`display_label`/`result_type`/`numeric_unit` column shapes deliberately match
+  `LabObservation`'s own exactly, so a template value can never be too long to copy into the
+  observation a future LAB-004 will derive from it.
+- `exchange_security_audit_events`'s `event_type`/`resource_type` CHECK constraints widened for
+  `lab_result_template_created`/`lab_result_template_activated`/`lab_result_template` — the same
+  drop/recreate delta pattern `0006` through `0023` already established, applied both in the
+  migration and directly in `models.py`'s own CHECK strings (the latter is what SQLite's
+  `Base.metadata.create_all()`-based test schema actually uses — found and fixed locally before
+  ever pushing, when the first local test run hit a CHECK-constraint IntegrityError on the new
+  audit event types; see "bugs found" below).
+
+**Why `LabOffering`, not `TestCatalogEntry`.** `TestCatalogEntry` is the provider-facing ordered
+*service* identity; `LabOffering` is one particular lab's own implementation of that service. Two
+labs offering the identical catalog test may legitimately report a different observation structure
+(methodology, local reporting format, observation count) without that being a second
+ordered-service identity. Recorded as ADR-053 Decision 1, not merely an implementation choice.
+
+**Repository** (`adapter/src/daher_adapter/exchange/lab_result_templates.py`,
+`LabResultTemplateRepository`):
+- `create_template`: validates (version ≥ 1; ≥ 1 observation definition; ≥ 1 required; non-empty
+  `source_code`/`display_label`; `result_type` in `{NUMERIC, TEXT}`; TEXT never carries
+  `numeric_unit`; `sort_order ≥ 0`; no duplicate `source_code`/`sort_order` within the request) all
+  in Python *before* any row is inserted, so a rejected create is never partially committed.
+  Insert-first-wins on `(lab_offering_id, version)` (the `create_entry`/`create_offering`
+  IntegrityError-then-compare pattern this codebase already uses); an exact-content replay
+  (normalized as a sorted tuple of `(sort_order, source_code, display_label, result_type,
+  numeric_unit, required)` per definition, both sides) returns the existing row unchanged; a
+  same-version request with different normalized content raises `TemplateConflict` (409) — never
+  silently overwrites version N.
+- `activate_template`: locks the owning `LabOffering` `FOR UPDATE` first, then discovers-and-
+  deactivates the current active row (if any) in one `UPDATE ... RETURNING`, mirroring
+  `CatalogRepository.set_price`'s own established discover-and-swap-in-one-statement discipline
+  (see that method's own docstring for why a separate prior `SELECT` is unsafe under PostgreSQL's
+  READ COMMITTED isolation). If the deactivated row *is* the target, it is reverted to active
+  within the same transaction and reported `"unchanged"` — a safe replay regardless of what
+  `expected_current_template_id` claimed, identical to `set_price`'s own already-correct-value
+  exception. Otherwise `expected_current_template_id` is compared against what was actually
+  deactivated (`None` means "I expect nothing active yet"); a mismatch raises
+  `TemplateActivationConflict` (409).
+- `get_active_templates_for_offerings`: batched — exactly two queries (active templates, then
+  their observation definitions) regardless of how many offering ids are passed. Used by the
+  entry-plan read below.
+- No edit or delete method exists anywhere on this repository (AC10) — a structural change is
+  always a new version, never a mutation of an existing one.
+
+**API** (`adapter/src/daher_adapter/exchange/api.py`): `GET`/`POST
+.../organizations/{lab_id}/offerings/{offering_id}/result-templates`, `POST
+.../result-templates/{template_id}/activate` — all three gated by `_require_org_admin`, the same
+authority offerings/prices already use (never `LAB_TECH`; the staff entering Patient results are
+not automatically the authority who defines the structure they enter results into). Cross-offering
+anti-enumeration (`_existing_template_for_offering_or_404`) mirrors
+`_existing_offering_for_lab_or_404`'s own convention exactly.
+
+**Audit:** `lab_result_template_created` fires once per genuine new version (never on an
+exact-content replay); `lab_result_template_activated` fires once per real active-template switch
+(never on an already-active-target replay) — both verified by a dedicated no-duplicate-event test
+(`test_a2_same_target_activation_replay_unchanged`).
+
+### Backend — read-only result-entry plan (§34-§39, AC16-AC18)
+
+New `GET .../organizations/{lab_id}/lab-orders/{order_id}/result-entry-plan`, gated by
+`_require_lab_tech` (same tenant as the rest of the lab-workflow surface), exposed only while
+`order.status == IN_PROGRESS` (409 otherwise — result entry is not yet operationally meaningful in
+any other status). For each order item: `LabOffering` for `(lab_id, catalog_entry_id)` is looked
+up (`CatalogRepository.get_offerings_for_lab_and_entries`, one batched query for the whole order);
+the currently active template for that offering (if any) is resolved via
+`get_active_templates_for_offerings` (two more batched queries); `is_synthetic` is derived from the
+item's own `TestCatalogEntry` (`CatalogRepository.get_entries_by_ids`, one more batched query) —
+never stored as a second, potentially divergent flag on the template itself. Total: five queries
+for the whole read, flat regardless of item count — proven by
+`test_result_entry_plan_query_count_is_flat_regardless_of_item_count` (1-item vs. 5-item order,
+delta ≤ 1).
+
+**Missing template is a valid, honest read state** (`template: null`), never fabricated, never a
+free-form fallback. **An item whose catalog entry has literally no `LabOffering` row at this lab at
+all** is treated differently — `ResultEntryPlanIntegrityError`, raised unhandled (mapped to a 500,
+matching `LabAssignmentIntegrityError`/`PatientIdentityIntegrityError`'s own established fail-closed
+convention) — because a *currently assigned* order's every item is guaranteed to have had an active
+offering at assignment time (`LabSelectionRepository.assign_by_provider`/`select` both require it),
+and offering rows are never deleted, only deactivated. Reaching that branch would mean a genuine
+data-integrity violation, never an honestly-absent configuration.
+
+### Frontend (§40-§50, AC19-AC21)
+
+`ExchangeClient.getResultEntryPlan`; `ResultEntryPlan`/`ResultEntryPlanItem`/
+`ResultEntryPlanTemplate`/`ResultEntryPlanObservation` types, matching the backend response shape
+field-for-field. `LabOrdersPage`'s `IN_PROGRESS` branch now renders "Structure des résultats": each
+item's own card shows its configured observations (label, NUMERIC/TEXT, unit if present,
+requis/facultatif) in the server-given sort order; a missing template shows "Aucune structure de
+résultat n'est configurée pour cette analyse."; a synthetic template shows "Configuration de
+démonstration — ne pas utiliser pour des soins réels."; no value input, no complete-entry button,
+no release button exists anywhere in this branch. Patient identity/ordering facility/requested
+tests stay above the preview, unchanged hierarchy (§46).
+
+The plan load is deliberately a **third request sharing `panelGenerationRef`**, not a dedicated
+ref/counter — this plan only ever makes sense for the order currently occupying the panel, so any
+event that already invalidates the panel (a different order, closing it, a lab switch) must
+invalidate it identically, with no separate bookkeeping to drift out of sync. The generation is
+*read*, never incremented, by `loadPlan` — incrementing would wrongly invalidate whatever
+`loadPanel` call is concurrently in flight for the very order the plan belongs to. Triggered by a
+`useEffect` watching `panel?.order?.status`/`panel?.orderId`, so it also fires correctly after a
+start-processing success moves an order into `IN_PROGRESS` via its own recheck, with no separate
+wiring needed.
+
+### Direct-API / structural-integrity evidence (AC16-AC18)
+
+`PS2` (wrong lab, anti-enumerating 404), `PS3` (provider clinician denied), `PS4`
+(`LAB_RESULT_RELEASER`-only denied 403), `PS5` (order not `IN_PROGRESS` → 409) — all backend HTTP
+tests in `test_exchange_result_entry_plan.py`. The structural-integrity fail-closed path
+(§38, `ResultEntryPlanIntegrityError`) is reasoned from `assign_by_provider`/`select`'s own
+pre-existing, unchanged invariants rather than freshly re-proven by a new test that would need to
+first corrupt the database to exercise it — the existing invariant tests for those two methods
+(DH-EX-006/DH-EX-010's own suites, unchanged) already establish the precondition this ticket's
+fail-closed branch depends on.
+
+### Concurrent activation PG evidence (§60, AC-adjacent)
+
+**Not executed this session.** `adapter/tests/integration/test_dhlab003_postgres_qualification.py`
+contains PG-A1 (two concurrent activations of different targets from the same expected-current
+state — exactly one must win, the other `TemplateActivationConflict`, never two active rows) and
+PG-A2 (ten concurrent identical-target activations converge to one active row, no conflict is a
+permitted outcome for reactivating your own expected target), written to the identical standard as
+every other PG qualification file in this repository (`DHLAB003_PG_*` env-var-gated, skipped by
+default). **Docker itself was reachable this session** (`sudo docker ps` works in this session's
+WSL2 distribution), but pulling `postgres:16-alpine` failed twice with a DNS/TLS timeout reaching
+Docker Hub's CDN (`registry-1.docker.io` / `production.cloudfront.docker.com`) — the identical,
+now-recurring sandbox limitation DH-LAB-002 already disclosed (see that entry and this session's
+own memory note). **What real-PostgreSQL evidence does exist:** the migration itself
+(`0024_result_templates`) applied cleanly against a real, disposable PostgreSQL 16 instance in
+push-triggered CI (`alembic upgrade head` succeeded 0022→0023→0024, `current == heads ==
+0024_result_templates`) — genuine schema-level real-Postgres evidence, just not the concurrency
+tests specifically.
+
+### Migration qualification (AC23, §73)
+
+Local: SQLite-based `Base.metadata.create_all()` test schema exercises both new tables via the full
+`1029 passed` adapter suite (models.py's own CHECK-constraint strings, not the migration file
+itself, since local `alembic upgrade head` also requires the same unreachable PostgreSQL). CI:
+`alembic heads` resolves to a single head (`0024_result_templates`), `alembic history` shows the
+correct `0023 -> 0024` chain, and push-triggered CI's own "Migration history reaches head on a
+fresh database" step ran `alembic upgrade head` against a real disposable `postgres:16-alpine`
+service and confirmed `current == heads == EXPECTED_HEAD`. Downgrade refusal
+(`DowngradeBlockedByResultTemplates`, refuses `0024 -> 0023` while any
+`exchange_lab_result_templates` row exists, mirroring `0023`'s own `DowngradeBlockedByProviderLabRoutes`
+pattern exactly) is written but not independently re-qualified against real Postgres this session,
+for the same Docker/CDN reason as the concurrency tests above.
+
+### Adapter test totals (§73, CI-authoritative)
+
+**1029 passed, 108 skipped, 0 failed** (+41 over DH-LAB-002's 988/106: 27 template create/
+idempotency/conflict/authorization/activation tests in `test_exchange_result_templates.py`, 14
+result-entry-plan functional/security/query-count tests in `test_exchange_result_entry_plan.py`;
++2 skipped: PG-A1/PG-A2, written, not run). `ruff check`/`ruff format --check` clean. Locally
+reproduced identically before pushing (WSL2 `.venv`, same counts) — full local run took ~226s.
+
+### UI test totals (§73)
+
+`LabOrdersPage.test.tsx` grew from 58 to 70 tests (+12: UI1/UI2 sort-order rendering, UI3-UI6
+type/unit/required truthfulness, UI7/UI10 no value-input/free-form field, UI8 no reference range,
+UI9 missing-template truthful message, UI11 synthetic warning, UI12 Patient identity visible,
+RR-PLAN1-5 race/stale-response/lab-switch/unmount/mismatch safety). `LabA11y.test.tsx` grew from 6
+to 7 (the preview itself). Full Lab suite: 86 tests, all passing (WSL2, two separate runs combined
+due to this session's own known worker-pool resource flakiness under load — see "bugs found"
+below).
+
+### Lint/typecheck/build (§73)
+
+`npm run lint`: 0 errors, 22 warnings (+1 over DH-LAB-002's 21 — the new `useEffect` triggering
+`loadPlan` matches the identical pre-existing `react(set-state-in-effect)` pattern already present
+at `LabOrdersPage.tsx`'s own queue-loading effect and in `ClinicResultsPage.tsx`; not a new lint
+regression class). `npm run typecheck`: clean. `npm run build`: clean, `postbuild`'s secret scan
+found none.
+
+### Race/discrimination proof (§65-equivalent)
+
+`RR-PLAN1`'s own generation guard (the line inside `loadPlan`'s success callback) was temporarily
+replaced with `if (false && ...)`, the test suite re-run, and the assertion was observed to
+genuinely fail (stale order-A plan content rendered under order-B's panel) before the guard was
+restored and re-verified green. `RR-PLAN3` (lab-switch) stayed green with only that same guard
+disabled — expected and disclosed in the test's own comment, not hidden: that scenario is
+independently guarded by the `currentLabRef` tenant check, which was not touched by this specific
+probe.
+
+### CI-found / local-found bugs and how they were fixed
+
+**Local, before first push:** the new `event_type`/`resource_type` CHECK constraint values were
+added to the migration file and to `security_audit.py`'s `SecurityEventType`/`SecurityResourceType`
+Literals, but *not* to `models.py`'s own `CheckConstraint` string on `ExchangeSecurityAuditEvent` —
+the actual source of truth SQLite's `Base.metadata.create_all()`-based test schema uses. The very
+first local test run hit `sqlite3.IntegrityError: CHECK constraint failed:
+ck_exchange_security_audit_events_event_type` on the audit insert. Fixed by adding the two new
+event-type/resource-type values to `models.py`'s own CHECK strings directly (matching the
+migration's final, widened state).
+
+**Local, in the new UI tests:** four `LabOrdersPage.test.tsx` tests initially mocked
+`getResultEntryPlan`/`getLabOrder` in a way that didn't distinguish "the panel's initial open" from
+"a later recheck", and one query used `screen.findAllByRole('listitem')` without scoping past the
+unrelated queue row's own `<li>` — both caught locally (5 failing assertions on first run) and
+fixed by making mocks return the correct state per call, and scoping/re-ordering the sort-order
+assertion to match how the real backend always returns pre-sorted data.
+
+**CI, real (not a flake):** the first backend push (`3815e91`) failed CI's "Migration history
+reaches head on a fresh database" step — not because the migration itself was wrong (it applied
+cleanly, `current == heads == 0024_result_templates`), but because `.github/workflows/ci.yml`'s own
+hardcoded `EXPECTED_HEAD` constant still read `0023_provider_lab_routes`. Fixed in a dedicated
+follow-up commit (`d1bfa12`) that bumped it to `0024_result_templates` — exactly the class of drift
+this check exists to catch, caught by the check itself working as designed, not a masked failure.
+
+**Local infra, non-CI, confirmed unrelated:** a `npx vitest run` across the *entire* UI suite hit
+the same cross-filesystem (Windows↔WSL2) worker-pool timeout this environment showed during
+DH-LAB-002 (several files failed to even start a worker process under load); every one, re-run
+individually or in a smaller batch immediately after, passed cleanly with zero code changes.
+
+### Known remaining gaps — not hidden
+
+- **PG-A1/PG-A2 concurrent-activation tests not executed this session** — Docker reachable, image
+  pull blocked by this sandbox's network egress to Docker Hub's CDN (see above). The migration
+  schema itself *was* proven against real Postgres via CI; only the two new concurrency tests
+  specific to `activate_template` were not independently re-run.
+- **Downgrade refusal (`DowngradeBlockedByResultTemplates`) not independently re-qualified against
+  real PostgreSQL this session** — same Docker/CDN reason; the SQLite-based unit test for it passes
+  locally, mirroring `0023`'s own precedent pattern exactly.
+- Result entry, result release, and LIS/Connect integration remain **not built** — explicitly out
+  of this ticket's own scope (§66-§68), not a gap discovered late. No demo seed data exists either
+  (deferred to DH-DEMO-001).
+- No real-Keycloak or real-browser qualification exists for any part of Native Lab, including this
+  ticket's own additions — same evidence-level boundary every other Native Lab/Clinic entry states.
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED.** This ticket touched no authentication/Keycloak/
+Caddy code and made no claim about DH-CLINIC-004B's own open item.
+
+### Confirmation no real patient data used
+
+All synthetic identifiers/labels in every new test (`DEMO_A`, `Demo Measure A`, `Item Only In
+A`/`B`, `Patient A`/`B`, `Fatouma Robleh` reused from the existing shared fixture) — no real
+clinical content, no real analyte, no real reference range invented anywhere in this ticket.
+
+### Final CI state
+
+Backend commit `3815e91`'s own push (run `35327430457`) failed on the `EXPECTED_HEAD` drift above —
+disclosed, not hidden, and fixed immediately in `d1bfa12`. That fix's own push (run `35330024505`)
+was green across all 9 jobs. The frontend commit `7f2962b`'s own push (run `35330056386`) hit the
+identical pre-existing flaky test DH-LAB-002 already documented twice
+(`test_final_result_vs_release_race_both_valid_orderings`, `tests/test_exchange_results.py`) —
+confirmed unrelated (`git diff 095f7f5..HEAD --name-only` does not list that file). `gh run rerun
+35330056386 --failed` with no code change re-ran only the `adapter — ruff + pytest` job — passed
+clean, all 9 jobs green. **Current master (`7f2962b`) is fully green.**
+
+### Confirmation no PR
+
+No pull request was created or used for this ticket's work, per its own explicit instruction; every
+change landed as a focused commit directly on `master`.
+
+`NEXT: DH-LAB-004 — Native Result Entry + Completion + Release`

@@ -124,7 +124,18 @@ milestone) and `Commencer l'analyse` (gated to `ACCEPTED` with a milestone prese
 the order-detail panel, each behind an explicit confirmation, against the pre-existing
 `record_collection`/`start_processing` backend (DH-EX-011) unchanged. Result entry and result
 validation/release remain `NOT BUILT` on the frontend, still deliberately deferred to DH-LAB-003/004
-for the same controlled-result-definition reason. The Exchange backend implements the work
+for the same controlled-result-definition reason.
+
+**2026-09-18 update (DH-LAB-003):** the controlled result-definition/template layer this file's own
+DH-LAB-001 note above said was a prerequisite now exists — `LabResultTemplate`/
+`LabResultTemplateObservation`, scoped to `LabOffering` (ADR-053), `WRITTEN, TESTED,
+CI-QUALIFIED, MIGRATION-APPLIED-AGAINST-REAL-POSTGRESQL-IN-CI`. Native Lab admins can create
+immutable, versioned templates and activate exactly one per offering; `LabOrdersPage` shows a
+read-only preview of the active template's observation definitions for `IN_PROGRESS` orders. Actual
+Patient result *entry* against those definitions is still `NOT BUILT` on the frontend — this ticket
+deliberately stops at the controlled-definition layer plus a read-only plan, per its own scope;
+DH-LAB-004 is the ticket that adds the value-entry mutation, pinned to an exact template version.
+The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
 *release* step (DH-EX-012/ADR-044) **[re-audited 2026-09-13 — was "specimen/sample workflow and

@@ -6679,3 +6679,105 @@ exactly one winner and one clean conflict; a route deactivation racing an assign
 one of two truthful outcomes only), and migration qualification (fresh-database upgrade to
 `0023_provider_lab_routes`, downgrade guard). UI lint/typecheck/test/build. See
 `PROJECT_STATE.md`'s DH-CLINIC-006 entry for exact commands, run evidence, and counts.
+
+## ADR-053 — ACCEPTED / IMPLEMENTED (2026-09-18, DH-LAB-003): Native Lab result templates are scoped to `LabOffering`, immutable per version, and additive to the existing source-flexible observation model
+
+**Date raised:** 2026-09-18, DH-LAB-003 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
+DH-LAB-003.
+
+**Why this needed a decision, not just an implementation.** The existing low-level Exchange
+observation API (`LabObservation`/`record_observation`, DH-EX-012C/ADR-047) is deliberately
+source-flexible: a caller supplies its own `source_code`/`display_label`/`result_type`/
+`numeric_unit`, because a future Connect-reported observation may have no DHealth-side definition
+at all. That flexibility is correct for an interoperability primitive; it is wrong as the Native
+DHealth Lab *human-entry* UX DH-LAB-004 will build next, which cannot let a lab technician type
+arbitrary observation codes/labels/types into a Patient result. This ADR records the controlled
+layer that closes that gap, and the boundary that keeps it from constraining Connect.
+
+### Decisions
+
+1. **Templates are scoped to `LabOffering`, never directly to `TestCatalogEntry`.**
+   `TestCatalogEntry` is the provider-facing ordered *service* identity; `LabOffering` is one
+   particular lab's own implementation of that service. Two labs offering the identical catalog
+   test may legitimately report a different observation structure (methodology, local reporting
+   format, observation count) without that being a second ordered-service identity. A
+   `LabResultTemplate` row (`exchange_lab_result_templates`) therefore carries `lab_offering_id`,
+   never `catalog_entry_id`.
+2. **A template version is immutable once created; no edit API exists at all.** A structural
+   change is always a new version (`version` N+1 for the same offering), never a mutation of
+   version N. `LabResultTemplateRepository` exposes no update/delete method for either a template
+   or its observation definitions.
+3. **Exactly one active template per offering, enforced by a database partial unique index and a
+   `FOR UPDATE`-locked compare-and-swap activation** (`activate_template`), mirroring
+   `CatalogRepository.set_price`'s own established discover-and-swap-in-one-statement discipline.
+   An offering may legitimately have **zero** active templates (before initial configuration) --
+   `null` is a valid, honestly represented state, never fabricated.
+4. **No standalone deactivation endpoint.** The only way to change what is active is to activate a
+   different version (or the same one, as a safe replay); "turn it off and leave the offering
+   template-less" is not exposed as its own action for an already-configured offering, keeping the
+   state machine to one mutation shape rather than two.
+5. **No reference-range field on the template model.** A static low/high pair depends on
+   age/sex/methodology/population/instrument facts this product has no approved applicability
+   model for yet. `LabResultTemplateObservation` carries no `reference_range_low`/`_high` column;
+   a future LAB-004 observation derived from a template definition will carry `null` there until a
+   richer, clinically-approved range model exists.
+6. **No clinical-interpretation field anywhere in this layer.** No normal/abnormal/critical value,
+   no enumerated TEXT choice set, no automatic comparison against a range. This is result
+   *structure* configuration, never decision support.
+7. **Configuration authority mirrors offerings/prices exactly: lab organization ORG_ADMIN, not
+   LAB_TECH.** The staff who enter Patient results are not automatically the authority who defines
+   the controlled structure they enter results into -- the same separation `LabOffering`/`LabPrice`
+   configuration already uses.
+8. **The existing low-level `LabObservation`/`record_observation` API is untouched and remains
+   fully source-flexible.** No new column, no new constraint, no new required-template check was
+   added to it. Templates are an *additive* safety layer this ticket introduces for Native Lab's
+   own future human-entry mutation (DH-LAB-004) to require -- they are never retroactively imposed
+   on the interoperability primitive itself, so a future Connect-reported observation with no
+   matching DHealth-side template remains fully valid at that layer.
+9. **Templates do not gate routing, eligibility, marketplace listing, or pricing.** Provider-lab
+   eligibility (`eligible-labs`), provider-assigned routing (`assign_by_provider`), and public
+   marketplace listing are unchanged by this ticket -- none of them queries
+   `exchange_lab_result_templates` at all. A lab with zero configured templates remains fully
+   assignable; the *result-entry-plan* read (below) is the only place a missing template becomes
+   visible, and even there it is reported honestly (`template: null`), never used to block
+   assignment or acceptance.
+10. **A new order-scoped, read-only `GET .../lab-orders/{order_id}/result-entry-plan` resolves
+    each `IN_PROGRESS` item's currently active template**, batched (never one query per item). A
+    currently-assigned order's item with literally no `LabOffering` row at the selected lab is
+    treated as a structural-integrity failure, not a normal missing-config state --
+    `LabSelectionRepository.assign_by_provider`/`select` both require an active offering for every
+    requested item at assignment time, and offering rows are never deleted (only deactivated), so
+    this can only mean a genuine data-integrity violation, never an honestly-absent configuration.
+11. **No result value, no result-entry mutation, and no LIS/Connect integration code exist in this
+    ticket.** DH-LAB-003 is templates-plus-read-only-plan only. LAB-004 (Native Result Entry +
+    Completion + Release) is the next ticket, and must pin/validate the exact template version at
+    write time -- the browser submits only a `template_observation_definition_id` and a value; the
+    server derives `source_code`/`display_label`/`result_type`/`numeric_unit` from the pinned
+    template, never trusting client-supplied structure for a Native Lab entry.
+
+### What this explicitly does not do
+
+- Does not build a global analyte ontology, LOINC catalog, or any OpenMRS/OpenELIS concept mapping
+  -- `source_code`/`source_system`/`display_label` stay exactly the hybrid-namespace shape
+  ADR-047 already established.
+- Does not add enumerated TEXT choice sets (e.g. positive/negative dropdowns) -- deferred, if ever
+  needed, to its own explicit design.
+- Does not add a template edit or delete API of any kind.
+- Does not add or require any reference range, clinical interpretation, or abnormality flag.
+- Does not change DH-CLINIC-004B's real-browser-Keycloak qualification status in any way -- that
+  ticket remains separately OPEN/PARTIALLY QUALIFIED, unrelated to this ADR.
+- Does not implement DH-LAB-004's own controlled result-entry mutation -- only documents the
+  version-pinning contract that ticket must honor.
+
+### Evidence
+
+Adapter: 1029 passed (+41 over DH-LAB-002's 988: 27 template create/idempotency/conflict/
+authorization/activation tests, 14 result-entry-plan functional/security/query-count tests), 108
+skipped (+2: PG-A1/PG-A2 concurrent-activation tests, written to the same standard as every other
+PG qualification file in this repository but **not executed this session** -- no Docker/PostgreSQL
+reachable in this sandbox, see `PROJECT_STATE.md`'s DH-LAB-003 entry for the exact disclosure).
+Migration `0024_result_templates` applied cleanly against a real disposable PostgreSQL instance in
+push-triggered CI (`alembic upgrade head` succeeded 0022→0023→0024, `current == heads ==
+0024_result_templates`) -- real-PostgreSQL evidence for the schema itself, even though the
+concurrency tests above were not run against it this session. UI lint/typecheck/test/build clean.
+See `PROJECT_STATE.md`'s DH-LAB-003 entry for exact commands, run evidence, and counts.
