@@ -16143,13 +16143,15 @@ documentation commit) — confirmed exact match at session start (`git status` c
 --ff-only` no-op). Alembic head confirmed `0023_provider_lab_routes` before any code change
 (`adapter/migrations/versions/0023_provider_lab_routes.py` present, no file after it).
 
-**Ending master SHA:** `124e147` (frontend commit; backend commit `6363e40` immediately precedes
-it; this docs commit follows).
+**Ending master SHA:** `e38a2fe` (the correction commit below), with this final documentation
+commit immediately following it.
 
 **Commits, in order:**
 1. `6363e40` — `fix(DH-LAB-002): close LabOrder.items N+1 in lab work queue, add LAB_RESULT_RELEASER negative controls`
 2. `124e147` — `feat(DH-LAB-002): collection + start-processing workflow in Native DHealth Lab`
-3. (this commit) — `docs(DH-LAB-002): record collection/processing workflow evidence`
+3. `228a873` — `docs(DH-LAB-002): record collection/processing workflow evidence`
+4. `e38a2fe` — `docs(DH-LAB-002): correct the PG-qualification disclosure's stated cause`
+5. (this commit) — final CI-state/flake documentation
 
 **Direct master, no PR — confirmed.** No branch was created; every commit landed directly on
 `master` per this ticket's own explicit instruction.
@@ -16473,5 +16475,18 @@ matching the existing suites' own convention (e.g. `Fatouma Robleh`, `Patient A`
 
 No pull request was created or used for this ticket's work, per its own explicit instruction; every
 change landed as a focused commit directly on `master`.
+
+### Final CI state
+
+**Push-triggered CI, run `35320857962` (backend + frontend commits) — all 9 jobs green.** The
+docs-only correction commit's own push, run `35322225155`, hit one confirmed-unrelated CI-runner
+flake: `test_final_result_vs_release_race_both_valid_orderings`
+(`adapter/tests/test_exchange_results.py`) — a pre-existing DH-EX-014A/CLINIC-007-era test asserting
+both thread-interleaving orderings occur across 20 repetitions on a shared runner, the identical
+test and identical failure mode DH-LAB-001's own entry above already documented once. This ticket
+never touched `tests/test_exchange_results.py` (confirmed: `git diff 318e2ca..HEAD --name-only` does
+not list it), so this could not be a ticket-caused failure by construction. `gh run rerun
+35322225155 --failed` with no code change re-ran only the `adapter — ruff + pytest` job — passed
+clean, all 9 jobs green. **Current master (`e38a2fe`) is fully green.**
 
 `NEXT: DH-LAB-003 — Controlled Result Definitions / Templates`
