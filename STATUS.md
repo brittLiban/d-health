@@ -74,12 +74,16 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   predecessor outright (fail closed, proven with genuine red→green discrimination on both), and no
   new `LabOrderStatus`/amendment status was added — an order stays `COMPLETED` after an amendment
   release; PREPARING/RELEASED remain the only two amendment states, with no "cancel" state of any
-  kind. All CI-qualified and CI-PostgreSQL-qualified where CI runs it (SQLite +
-  disposable `postgres:16-alpine`), migration head unchanged at `0025_native_result_binding`,
-  current == heads == CI's `EXPECTED_HEAD` (this ticket needed no schema change). DH-LAB-004's and
-  DH-LAB-005's own new concurrency logic is **additionally** qualified against a real,
-  natively-installed PostgreSQL instance found in the sandbox — see §A. **Not**
-  real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
+  kind. DH-LAB-002/003/004 are CI-qualified and CI-PostgreSQL-qualified where CI runs it (SQLite +
+  disposable `postgres:16-alpine`); **DH-LAB-005 is fully locally qualified** (adapter + UI suites,
+  real-PostgreSQL concurrency races) **but not yet CI-qualified** — this ticket's own
+  GitHub-Actions-budget-mode instruction targets one push for the whole ticket, so the push-and-CI
+  step happens after this documentation, not before; see `PROJECT_STATE.md`'s DH-LAB-005 entry and
+  the handoff for the actual CI run result. Migration head unchanged at
+  `0025_native_result_binding`, current == heads == CI's `EXPECTED_HEAD` (this ticket needed no
+  schema change). DH-LAB-004's and DH-LAB-005's own new concurrency logic is **additionally**
+  qualified against a real, natively-installed PostgreSQL instance found in the sandbox — see §A.
+  **Not** real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
   ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
 - **DH-IDENTITY-001 — provider-scoped native Patient directory (ADR-051)**: `Patient`
   (`exchange_patients`) now exists as the provider-scoped human-workflow identity record, separated

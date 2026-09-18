@@ -154,7 +154,10 @@ Native-template-bound result does not exist yet — the raw free-structure API n
 against a template-bound container rather than allow an unsafe workaround — deferred to DH-LAB-005.
 
 **2026-09-18 update (DH-LAB-005):** that correction/amendment UX now exists, `WRITTEN, TESTED,
-CI-QUALIFIED, CONCURRENCY-QUALIFIED-AGAINST-A-NATIVELY-INSTALLED-REAL-POSTGRESQL-INSTANCE`. A
+LOCALLY-QUALIFIED, CONCURRENCY-QUALIFIED-AGAINST-A-NATIVELY-INSTALLED-REAL-POSTGRESQL-INSTANCE`
+(full local adapter + UI suites, real-PostgreSQL races; the actual push-triggered CI run for this
+ticket is reported separately, per this ticket's own GitHub-Actions-budget-mode instruction not to
+spend a second push merely to record CI status in-repo). A
 Native controlled correction endpoint (browser submits only the new value; every structural field,
 including the pinned template context, is derived server-side from the predecessor's own template
 definition) closes the gap both pre-release and inside a post-release amendment. The full
