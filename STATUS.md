@@ -6,12 +6,12 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-18, DH-CLINIC-006, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `741af6423a9725d038e2ea5cc0025e44044e6379`
-(DH-CLINIC-005's own final documentation commit). All facts below were re-verified directly against
+**2026-09-18, DH-CLINIC-007, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `791d8c74c54e117513db8848884395e5cba262e6`
+(DH-CLINIC-006's own final documentation commit). All facts below were re-verified directly against
 the current repository and fresh local test runs on this exact commit — none are carried forward
 from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
-unchanged by this ticket** — provider-lab routing work does not prove authentication runtime, and is
+unchanged by this ticket** — result-review UX work does not prove authentication runtime, and is
 not represented as doing so anywhere below.
 
 ## B. Product direction
@@ -40,10 +40,13 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   same model (DH-EX-014B); a provider-scoped native Patient directory, separated from
   `PatientReference` source-identity provenance (ADR-051, DH-IDENTITY-001); explicit,
   platform-admin-configured provider-lab routing relationships, distinct from marketplace listing
-  (ADR-052, DH-CLINIC-006). All CI-qualified and real-PostgreSQL-qualified (SQLite + disposable
-  `postgres:16-alpine`), migration head `0023_provider_lab_routes` current == heads == CI's
-  `EXPECTED_HEAD`. **Not** real-Keycloak-qualified, not runtime/browser-demonstrated, not
-  production-deployed. Full ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
+  (ADR-052, DH-CLINIC-006); a provider-scoped, one-obligation-per-review result-review queue
+  (`GET .../result-reviews`, DH-CLINIC-007) exposing that same ADR-048 machinery operationally. All
+  CI-qualified and real-PostgreSQL-qualified (SQLite + disposable `postgres:16-alpine`), migration
+  head unchanged at `0023_provider_lab_routes` current == heads == CI's `EXPECTED_HEAD` (DH-CLINIC-007
+  added no migration — see its own entry below for why none was needed). **Not**
+  real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
+  ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
 - **DH-IDENTITY-001 — provider-scoped native Patient directory (ADR-051)**: `Patient`
   (`exchange_patients`) now exists as the provider-scoped human-workflow identity record, separated
   from `PatientReference`'s unchanged exact source-identity/provenance meaning. Native, idempotent
@@ -279,9 +282,26 @@ DH-CLINIC-004B's own open item; it also does not claim ADR-043 Law 2 ("no double
 — that remains DH-PILOT-TOPOLOGY-001's own future decision. See `DECISIONS.md` ADR-052 and
 `PROJECT_STATE.md`'s DH-CLINIC-006 entry for full evidence.
 
-**Forward context only, not started:** DH-CLINIC-007 — released-result review/follow-up UX;
-DH-PILOT-TOPOLOGY-001 and its successors (DH-LAB-001+/DH-CONNECT-001+, DH-SEC-001, DH-OPS-001,
-DH-RECOVERY-001, DH-E2E-001, DH-PILOT-READINESS-001).
+**DH-CLINIC-007 — released-result review + follow-up UX — is now implemented** (§C): a
+provider-scoped review queue (one entry per outstanding `DoctorReview` obligation, never one per
+order — an order with two independently-pending amendment versions surfaces as two entries),
+exact-version content loaded and validated before any review disposition, version-specific review
+mutations preferred over the legacy order-only route whenever a version exists, and a truthful
+follow-up-scope disclosure (`FOLLOW_UP_REQUIRED` records only that a clinician judged follow-up
+necessary — no scheduling, contact, or task engine). No clinical interpretation, urgency ranking, or
+new review status was added; the three existing `DoctorReview` statuses remain authoritative. No
+migration was needed — the version-specific review contract already existed from DH-EX-014A/014B;
+the only new backend surface is the read-only queue endpoint. Real-PostgreSQL-qualified for the one
+concurrency scenario not already covered by DH-EX-014A/014B's own PG suites (identical-disposition
+race provenance, PG-R2) plus reconfirmation of PG-R1/PG-R3 on the current schema. Same evidence-level
+boundary as above: this work does not touch, does not runtime-qualify, and does not change
+DH-CLINIC-004B's own open item; it also does not resolve `ResultDelivery`'s own separate, unrelated
+state machine, which remains untouched. See `DECISIONS.md` ADR-048's 2026-09-18 clarification and
+`PROJECT_STATE.md`'s DH-CLINIC-007 entry for full evidence.
+
+**Forward context only, not started:** DH-PILOT-TOPOLOGY-001 and its successors
+(DH-LAB-001+/DH-CONNECT-001+, DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-E2E-001,
+DH-PILOT-READINESS-001).
 
 ## J. Documentation precedence
 

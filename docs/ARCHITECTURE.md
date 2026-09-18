@@ -962,6 +962,21 @@ an active route remains a fully valid, fully assignable destination. `LabOrderRe
 resolved from the canonical `LabSelection`, batched. See `DECISIONS.md` ADR-052 for the full
 decision record, including why this is not a "no double entry" (ADR-043 Law 2) solution.
 
+**2026-09-18 dated note (DH-CLINIC-007/ADR-048):** a new provider-scoped read-only endpoint,
+`GET .../organizations/{provider_id}/result-reviews`, exposes the review-obligation queue ADR-048's
+own versioned `DoctorReview` model already implied but never surfaced operationally -- one entry per
+outstanding review obligation (never one per order; an order with two independently-pending amendment
+versions surfaces as two entries), ordered by workflow age (`released_at`/`order_created_at`
+ascending), never by clinical urgency. No new model, no migration, no new mutation: this is a single
+joined read (`DoctorReview` join `LabOrder`, outer-join `LabResultReleaseVersion`) reusing
+DH-CLINIC-005's batched patient-identity resolution, deliberately gated on `LabOrder.status ==
+COMPLETED` since a `DoctorReview` row is created `PENDING` at order-creation time, long before any
+result exists -- omitting that gate would wrongly surface every in-progress order as needing review.
+The Clinic frontend's results page was rewritten around this endpoint as its single source for both
+the pending-review and history sections, replacing a separate `listOrders`-based list. See
+`DECISIONS.md` ADR-048's 2026-09-18 dated clarification for the resulting UX operating rule (review
+actions always target the exact displayed version, never "latest").
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |

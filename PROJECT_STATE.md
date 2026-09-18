@@ -15636,3 +15636,181 @@ this ticket proves DHealth-side routing to a DHealth lab organization only.
 **NEXT: DH-CLINIC-007 — Released-result review and follow-up UX.** Not started in this ticket. No
 pull request was created or used for this ticket's work, per its own explicit instruction; every
 change landed as a focused commit directly on `master`.
+
+## DH-CLINIC-007 (2026-09-18) — Released-result review + follow-up UX
+
+**Starting master SHA:** `791d8c74c54e117513db8848884395e5cba262e6` (DH-CLINIC-006's own final
+documentation commit) — confirmed exact match at session start. **No branch, no PR** — this
+ticket's own explicit instruction. **Does not touch, does not runtime-qualify, and does not change
+DH-CLINIC-004B's own open item** — unchanged by this ticket. **Does not resolve `ResultDelivery`'s
+own separate, unrelated state machine** — that remains untouched and unresolved.
+
+**Objective and scope.** DHealth already had the exact-version review contract from
+DH-EX-014A/014B/ADR-048 (immutable release-version manifests, versioned `DoctorReview`, exact-version
+review mutations, explicit-version-required once an amendment exists) — but Native Clinic had no
+operational UI for it: no way to see which results were waiting for review, no way to load a
+specific historical version's exact content before reviewing it, and no review disposition control
+anywhere in the frontend. This ticket is **not** a new clinical state machine — the three existing
+`DoctorReview` statuses (`PENDING`/`NO_FOLLOW_UP_REQUIRED`/`FOLLOW_UP_REQUIRED`) remain the only
+ones; it exposes the existing state machine operationally.
+
+**What was built — backend, commit 1 `e62dc0e`:**
+
+- **`adapter/src/daher_adapter/exchange/results.py`**: new `ReviewQueueEntryRecord` dataclass and
+  `DoctorReviewRepository.list_queue_for_provider` — a single joined query (`DoctorReview` join
+  `LabOrder`, outer-join `LabResultReleaseVersion`), one row per outstanding review *obligation*,
+  never one per order (an order with two independently-pending amendment versions surfaces as two
+  entries). Deliberately gated on `LabOrder.status == COMPLETED`, not merely `DoctorReview.status`
+  — a `DoctorReview` row is created `PENDING` in the same transaction as `LabOrder` creation itself,
+  long before any result exists; omitting this gate would have wrongly surfaced every in-progress
+  order as needing review. Ordered by workflow age (`release_version.created_at` coalesced to
+  `order.created_at`, ascending) — explicitly never by clinical urgency/abnormality.
+- **`adapter/src/daher_adapter/exchange/api.py`**: new `GET
+  /organizations/{provider_id}/result-reviews` (CLINICIAN minimum, provider-scoped, `status`
+  query param defaulting to `PENDING`/`ALL`/either terminal value, `limit`), reusing
+  DH-CLINIC-005's own `_require_patient_identities` batched closure for N+1-safe patient
+  resolution. Response carries `legacy_unversioned: bool` explicitly for the one grandfathered
+  shape, rather than requiring the caller to infer it from three simultaneous `null`s. No new
+  Pydantic model reuses raw UUIDs as a primary reviewer identity anywhere.
+- **Tests**: `test_exchange_results.py` gained 8 repository-level tests (Q1/Q2/Q4/Q5/Q6/Q7/Q10/Q11/
+  §14 ordering); `test_exchange_results_api.py` gained 8 API-level tests (default-pending-shows,
+  in-progress-absent, status=ALL reveals finalized, two-pending-versions-are-two-entries,
+  provider/lab-role isolation, patient-identity-from-directory, and an N+1-count regression test
+  mirroring DH-CLINIC-005's own `before_cursor_execute` SQL-counting pattern). No migration —
+  `EXPECTED_HEAD` unchanged at `0023_provider_lab_routes`; the entire backend contract this queue
+  reads from already existed.
+
+**What was built — frontend, commits 2 `f06737d` (client/types) and 3 `a9069b9` (page rewrite):**
+
+- **`ui/src/api/exchangeTypes.ts`/`exchangeClient.ts`**: `DoctorReviewResponse`,
+  `ProviderResultReviewQueueEntry`/`Response`, `ReviewQueueStatusFilter`; client methods
+  `listResultReviews`, `getReleaseVersion`, `reviewReleaseVersionNoFollowUp`/`FollowUp`,
+  `reviewLegacyOrderNoFollowUp`/`FollowUp` — six distinct methods, never a single generic
+  `review(status: string)` that would blur the version-specific/legacy distinction. Unit tests
+  added to `exchangeClient.test.ts` for each.
+- **`ui/src/features/clinic/pages/ClinicResultsPage.tsx`** (full rewrite): sources both the
+  pending-review queue and the reviewed-history section from `listResultReviews(status='ALL')`,
+  split client-side by `review_status` — the legacy `listOrders`-based list this replaces had no
+  review-status field for legacy orders at all, so this redesign closes that gap for free rather
+  than adding a new backend field. Key behaviors:
+  - Prominent "Résultats à examiner (N)" count; a reviewed result stays discoverable in "Historique"
+    — the queue going to zero never means a record becomes inaccessible.
+  - A version-history strip per order, sourced from `getReleaseVersions`; amended versions are
+    labelled textually ("Version N — Amendée"), never by color/icon/position alone.
+  - Exact-version content (`getReleaseVersion`) is always fetched and identity-cross-validated
+    (order id, version id, patient id) before any review disposition control is offered — history
+    metadata alone never suffices. A genuinely legacy/unversioned order (empty version history)
+    falls back to the legacy read (`getOrderResults`) and legacy review routes, labelled "Résultat
+    historique — aucune version de libération enregistrée."
+  - **Panel state model**: `initializing` (first load only) vs. `contentLoading` (fetching one
+    version's content) are tracked separately from a persisted `patient`/`versions` pair, so a
+    version switch or a post-mutation recheck never makes the patient banner or version strip
+    disappear mid-operation — only the content area itself shows a transient
+    "Chargement de la version…"/"Vérification de l'état de la revue…" message. (This split was not
+    the first design — see "Errors found and fixed" below.)
+  - Exactly two review dispositions ("Aucun suivi requis"/"Suivi requis"), never a third; selecting
+    one discloses both the immutability of the decision and, for follow-up, the truthful scope
+    limit ("DHealth enregistre ici qu'un suivi est requis... ne planifie pas automatiquement un
+    rendez-vous ni un contact patient").
+  - Response validation before ever displaying success: `order_id`/`release_version_id`/`status`
+    must all match what was requested, else fail closed and re-read authoritative state.
+  - A 409 conflict or an ambiguous mutation failure never blindly retries — both re-read
+    authoritative state via the same version-aware `loadPanel` path and either show the terminal
+    disposition (with a truthful "already reviewed" notice) or an explicit
+    "La revue n'a pas pu être confirmée" retry prompt.
+  - Extends DH-CLINIC-005's generation-ref/mounted-ref/provider-ref stale-response discipline across
+    the new version-switching dimension.
+- **`ClinicApp.test.tsx`/`ClinicA11y.test.tsx`**: their mock `ExchangeClient`s predated
+  `listResultReviews`/`getReleaseVersion` and would otherwise throw `TypeError` on render — updated
+  to the new contract shape (a PENDING queue entry, matching `getReleaseVersion`/`getReleaseVersions`
+  responses), and the golden-flow test's click target changed from "Consulter" to "Examiner" to
+  match the new pending-entry action label.
+- **`ClinicResultsPage.test.tsx`**: fully rewritten (22 tests) against the new architecture —
+  UI-Q1-Q4 (queue count/history-split/two-pending-versions/legacy-labelling), UI-V1-V5 (exact-version
+  loading, version switching, response-mismatch fail-closed ×2, legacy fallback), UI-R1-R8 (two
+  choices only, confirm-gated-on-selection, disclosure copy, version-specific-not-legacy routing,
+  success/terminal display, 409-conflict-shows-authoritative-outcome, ambiguous-failure-rechecks,
+  status-mismatch-fails-closed), RR8-RR11 (independent version obligations, stale version-switch
+  response discarded, stale provider-switch response discarded, unmount safety), plus a patient-
+  identity-before-observation-value ordering check.
+
+**Errors found and fixed during this ticket (all before any commit landed):**
+
+1. **First implementation gated the entire detail panel (patient banner, version strip, content) on
+   a single `loading` boolean.** Switching versions or re-checking after an ambiguous mutation
+   re-fetched the full history and briefly set `loading: true`, which hid the version-strip tabs
+   entirely mid-switch — a direct violation of this ticket's own §16/§35 ("the version strip must
+   remain visible and interactive while switching"). Caught by the RR9 stale-version-switch test:
+   after opening Version 2, clicking Version 1 (stalled) then clicking back to Version 2, the test
+   could not find the Version 2 tab at all, because it had vanished. Fixed by splitting panel state
+   into `initializing` (whole-panel first load) and `contentLoading` (content-area-only), with a
+   persisted `patient`/`versions` pair carried across a version switch or recheck via a
+   `knownVersions` fast path that skips re-fetching the version list entirely for a switch.
+2. **The post-mutation recheck's own explanatory message ("déjà revue"/"n'a pas pu être confirmée")
+   was rendered only inside the same conditional tree it had just caused to disappear.** The
+   `.catch()` handler set `submitState.error` and immediately called `loadPanel` for the recheck,
+   which set `panel.loading: true` in the same render batch — hiding the very message meant to
+   explain what was happening. Caught by UI-R6/UI-R7 (`findByText` on the disclosure text timed
+   out). Fixed by hoisting the `submitState.error` alert outside the loading/content conditional
+   entirely, and by having `loadPanel` skip resetting `submitState`/`disposition` when called as a
+   recheck (`isRecheck: true`) rather than a fresh open.
+3. **Queue-list version-label text was split across sibling text nodes**, so
+   `getByText(/^Version 1$/)` (an exact match) could never find it once a released-date suffix was
+   appended in the same paragraph. Fixed by wrapping the version label in its own `<span>`.
+4. **The review-mutation response validation initially checked only `order_id`/`release_version_id`,
+   not `status`** — a response claiming success for the *wrong* disposition would have been
+   displayed as success. Added the `response.status !== disposition` check per this ticket's own
+   §43, with a test (UI-R8) proving the fail-closed path.
+5. **`ClinicApp.test.tsx`'s and `ClinicA11y.test.tsx`'s pre-existing mock clients had no
+   `listResultReviews`/`getReleaseVersion`**, since both predate this ticket — the rewritten page
+   threw `TypeError: client.listResultReviews is not a function` on mount. Caught by the full
+   clinic-suite regression run (not by the new page's own test file, which supplies a complete mock).
+   Fixed by extending both mocks to the new contract shape.
+
+None of the above reached a commit before being fixed — all caught during this session's own local
+qualification, before `git commit` was ever run for the affected file.
+
+**Evidence.**
+
+- Adapter: **976 passed, 106 skipped** (skipped = every opt-in real-PostgreSQL qualification test
+  across the whole suite, correctly gated off without their own env vars set — not a regression).
+  `ruff check`/`ruff format --check`: clean. Real-PostgreSQL: the new
+  `tests/integration/test_dhclinic007_postgres_qualification.py` (PG-R2: 2/2 passed) run against a
+  disposable local PostgreSQL 18 instance migrated fresh through `0023_provider_lab_routes`; the
+  pre-existing `test_dhex014a_postgres_qualification.py`/`test_dhex014b_postgres_qualification.py`
+  (PG-R1/PG-R3, 14/14 passed) re-run against the same database to reconfirm on the current schema. A
+  matching CI step was added mirroring the DH-CLINIC-006 precedent.
+- UI: the rewritten `ClinicResultsPage.test.tsx` — **22 passed**. Full clinic-feature suite plus
+  `exchangeClient.test.ts` together — **200 passed** across 11 files (0 failed), after fixing the two
+  pre-existing regression suites broken by the mock-client contract gap (see "Errors found" #5). Full
+  project suite (all files) — **403 passed** with 4 unrelated files dropped by this sandbox's own
+  known, pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner: Timeout
+  waiting for worker to respond`, not a test assertion failure); all 4 re-run individually and
+  passed cleanly (37/37) — none touch this ticket's files. `tsc -b --noEmit`: clean. `npm run build`
+  + bundle secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
+  previously-disclosed `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this
+  codebase already accepted for this exact file's own prior version and for `LabRoutingStep.tsx`'s
+  identical idiom (DH-CLINIC-006's own precedent), non-blocking.
+- `git diff --check`: clean. No secrets in the diff (grepped and manually reviewed). Migration head
+  unchanged: `0023_provider_lab_routes` — no migration was needed, confirmed by the fact that every
+  read/mutation this ticket relies on already existed from DH-EX-014A/014B.
+
+**Human Decision Required: NO.** The one genuine design judgment call this ticket made — sourcing
+both the pending-review and history sections of the rewritten results page from the single
+`listResultReviews(status='ALL')` endpoint, rather than maintaining a separate `listOrders`-based
+list alongside it — was a straightforward consequence of the pre-existing legacy read having no
+review-status field, not a product/scope decision; every other choice was already scoped by this
+ticket's own explicit, detailed instructions (exactly two dispositions, truthful follow-up-scope
+disclosure, exact-version-before-review, no-overwrite/no-last-write-wins concurrency semantics, no
+new `DoctorReview` status, no clinical interpretation or urgency ranking).
+
+**Status: IMPLEMENTED.** Backend and UI CI/real-PostgreSQL-qualified, same evidence level as the
+rest of DHealth Clinic — no real-browser demonstration exists or is claimed. **DH-CLINIC-004B's own
+open item is unchanged by this ticket.** **`ResultDelivery`'s own separate state machine remains
+untouched and unresolved** — reviewing a result never calls `mark_delivered`/`mark_failed`, and no
+patient notification of any kind was added.
+
+**NEXT: DH-PILOT-TOPOLOGY-001 — Choose the first laboratory delivery path.** Not started in this
+ticket — forward context only, per this ticket's own explicit instruction not to implement it here.
+No pull request was created or used for this ticket's work, per its own explicit instruction; every
+change landed as a focused commit directly on `master`.

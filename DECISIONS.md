@@ -6061,6 +6061,33 @@ Implements the post-release amendment preparation and release workflow designed 
 - **Migration `0019_exchange_amendments` downgrade safety:** downgrade fails closed if any `exchange_amendments` row exists (`DowngradeBlockedByAmendmentHistory`) or if any amendment audit event exists (`DowngradeBlockedByAmendmentAuditVocabulary`). Clean round-trip downgrade/re-upgrade verified against real PostgreSQL.
 - **All 12 negative controls verified:** NC 1 to NC 12 individually tested with red failure and restored green.
 
+### Dated clarification (2026-09-18, DH-CLINIC-007) — Native Clinic review UX targets the exact displayed version, never "latest"
+
+**Status:** clarification, not a revision — the RECOMMENDED/ACCEPTED packets above stand unchanged.
+DH-CLINIC-007 built no new backend review-mutation or amendment machinery; it exposed the
+version-specific review contract ADR-048/DH-EX-014A/DH-EX-014B already established through a
+provider-scoped operational UI (a review queue and version-aware detail screen) for the first time.
+This entry records the resulting UX-facing operating rule explicitly, since ADR-048 itself never
+had cause to state it in UI terms:
+
+**Native Clinic review actions target the exact immutable release version whose content was
+displayed; a new amendment creates a separate pending review obligation and never inherits the
+prior version's disposition.** Concretely: the Clinic frontend always loads a version's exact
+manifest (`GET .../release-versions/{release_version_id}`) before offering any review disposition
+control for it, and always calls the version-specific review route
+(`POST .../release-versions/{release_version_id}/review/...`) rather than the legacy order-only
+route whenever any release version exists for the order — the legacy route remains reachable only
+for a genuinely grandfathered `COMPLETED`-without-release-version order. Reviewing an older version
+after a newer amendment has already been released is permitted and affects only that older
+version's own review row; the newer version's review remains independently `PENDING` until
+someone reviews it too. No third review status, clinical-urgency ranking, or follow-up-task/
+scheduling/contact mechanism was added — `FOLLOW_UP_REQUIRED` continues to mean only that a
+clinician recorded follow-up as necessary, nothing about scheduling, contact, or completion.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-CLINIC-007 entry (the provider-scoped review
+queue endpoint, the rewritten `ClinicResultsPage.tsx`, real-PostgreSQL PG-R2 qualification, and full
+evidence).
+
 ## ADR-049 — ACCEPTED / IMPLEMENTED / CI-QUALIFIED (2026-09-16, DH-CLINIC-003C): Option A — a backend-owned durable `LabOrderIntent` is the sole cross-reload recovery mechanism for native Clinic lab ordering
 
 **Date raised:** 2026-09-15/16 (DH-CLINIC-003B's own "Human Decision Gate: Cross-Reload Exact
