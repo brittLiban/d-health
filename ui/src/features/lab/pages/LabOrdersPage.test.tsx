@@ -6,6 +6,7 @@ import type {
   ExchangeMeResponse,
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
+  ResultEntryPlan,
 } from '../../../api/exchangeTypes'
 import { LabApp } from '../LabApp'
 
@@ -81,8 +82,42 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     rejectLabOrder: vi.fn(),
     recordLabOrderCollection: vi.fn(),
     startProcessingLabOrder: vi.fn(),
+    getResultEntryPlan: vi.fn().mockResolvedValue(makeResultEntryPlan()),
     ...overrides,
   } as unknown as ExchangeClient
+}
+
+function makeResultEntryPlan(overrides: Partial<ResultEntryPlan> = {}): ResultEntryPlan {
+  return {
+    order_id: 'order-a',
+    order_status: 'IN_PROGRESS',
+    all_items_configured: true,
+    items: [
+      {
+        item_id: 'item-a',
+        catalog_entry_id: 'entry-a',
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        template: {
+          template_id: 'template-a',
+          version: 1,
+          is_synthetic: true,
+          observations: [
+            {
+              definition_id: 'def-a',
+              source_code: 'DEMO_A',
+              display_label: 'Demo Measure A',
+              result_type: 'NUMERIC',
+              numeric_unit: 'demo-unit',
+              required: true,
+              sort_order: 0,
+            },
+          ],
+        },
+      },
+    ],
+    ...overrides,
+  }
 }
 
 function makeCollectionResponse(overrides: { order_id?: string; recorded_at?: string } = {}) {
@@ -1240,6 +1275,369 @@ describe('LabOrdersPage', () => {
       collectStall.resolve(makeCollectionResponse())
       await Promise.resolve()
     })
+  })
+
+  // -- UI-group: read-only result-entry-plan preview (DH-LAB-003) ---------------------------
+
+  function inProgressOrder(overrides: Partial<LabWorkflowOrder> = {}): LabWorkflowOrder {
+    return makeOrder({
+      status: 'IN_PROGRESS',
+      collection_recorded_at: '2026-09-18T10:42:00Z',
+      ...overrides,
+    })
+  }
+
+  it('UI1/UI2: an IN_PROGRESS order loads the plan and renders observations in sort order', async () => {
+    const plan = makeResultEntryPlan({
+      items: [
+        {
+          item_id: 'item-a',
+          catalog_entry_id: 'entry-a',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+          template: {
+            template_id: 'template-a',
+            version: 1,
+            is_synthetic: false,
+            // The backend's own `_to_template_record` always sorts by `sort_order` before this
+            // response is ever built -- the array itself already arrives in sort order (0 then
+            // 1), matching what a real request would return. This test asserts the frontend
+            // preserves that order when rendering, never reorders or reverses it.
+            observations: [
+              {
+                definition_id: 'def-1',
+                source_code: 'DEMO_A',
+                display_label: 'First Measure',
+                result_type: 'TEXT',
+                numeric_unit: null,
+                required: true,
+                sort_order: 0,
+              },
+              {
+                definition_id: 'def-2',
+                source_code: 'DEMO_B',
+                display_label: 'Second Measure',
+                result_type: 'NUMERIC',
+                numeric_unit: null,
+                required: false,
+                sort_order: 1,
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Structure des résultats')
+
+    // Scope to the observation list items specifically -- `findAllByRole('listitem')` would
+    // otherwise also match the unrelated queue row's own `<li>`.
+    const observationItems = (await screen.findAllByRole('listitem')).filter((el) =>
+      el.textContent?.includes('Measure'),
+    )
+    expect(observationItems.map((el) => el.textContent)).toEqual([
+      expect.stringContaining('First Measure'),
+      expect.stringContaining('Second Measure'),
+    ])
+  })
+
+  it('UI3/UI4/UI5/UI6: result type, unit, and required/optional are shown truthfully', async () => {
+    const plan = makeResultEntryPlan({
+      items: [
+        {
+          item_id: 'item-a',
+          catalog_entry_id: 'entry-a',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+          template: {
+            template_id: 'template-a',
+            version: 1,
+            is_synthetic: false,
+            observations: [
+              {
+                definition_id: 'def-1',
+                source_code: 'DEMO_A',
+                display_label: 'Numeric Measure',
+                result_type: 'NUMERIC',
+                numeric_unit: 'mg/dL',
+                required: true,
+                sort_order: 0,
+              },
+              {
+                definition_id: 'def-2',
+                source_code: 'DEMO_B',
+                display_label: 'Text Measure',
+                result_type: 'TEXT',
+                numeric_unit: null,
+                required: false,
+                sort_order: 1,
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText(/Numeric Measure.*Numérique.*mg\/dL.*requis/)).toBeInTheDocument()
+    expect(await screen.findByText(/Text Measure.*Texte.*facultatif/)).toBeInTheDocument()
+  })
+
+  it('UI7/UI10: no value input or free-form field exists anywhere in the preview', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Structure des résultats')
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0)
+    expect(screen.queryAllByRole('spinbutton')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: /Entrer|Compléter|Valider|Libérer/i })).not.toBeInTheDocument()
+  })
+
+  it('UI8: no reference range is displayed anywhere in the preview', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Structure des résultats')
+    // ("Référence de l'ordre" is a pre-existing, unrelated label -- match the clinical-range
+    // terms specifically, not the substring "référence" alone.)
+    expect(
+      screen.queryByText(/plage de référence|valeur de référence|intervalle de référence/i),
+    ).not.toBeInTheDocument()
+  })
+
+  it('UI9: a missing template shows a truthful blocking message, never a fabricated structure', async () => {
+    const plan = makeResultEntryPlan({
+      all_items_configured: false,
+      items: [
+        {
+          item_id: 'item-a',
+          catalog_entry_id: 'entry-a',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+          template: null,
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(
+      await screen.findByText("Aucune structure de résultat n'est configurée pour cette analyse."),
+    ).toBeInTheDocument()
+  })
+
+  it('UI11: a synthetic template displays the demo warning', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(
+      await screen.findByText(/Configuration de démonstration — ne pas utiliser pour des soins réels\./),
+    ).toBeInTheDocument()
+  })
+
+  it('UI12: Patient identity remains visible alongside the result-structure preview', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Structure des résultats')
+    expect(screen.getAllByText('Fatouma Robleh').length).toBeGreaterThan(0)
+  })
+
+  // -- RR-group: result-entry-plan race/stale-response safety (DH-LAB-003) ------------------
+
+  function planWithItemName(orderId: string, itemName: string): ResultEntryPlan {
+    return makeResultEntryPlan({
+      order_id: orderId,
+      items: [
+        {
+          item_id: `item-${itemName}`,
+          catalog_entry_id: `entry-${itemName}`,
+          catalog_code_snapshot: itemName,
+          catalog_display_name_snapshot: itemName,
+          template: null,
+        },
+      ],
+    })
+  }
+
+  it('RR-PLAN1: a late plan response for order A never mutates the now-visible order B', async () => {
+    const planA = deferred<ResultEntryPlan>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        inProgressOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
+        inProgressOrder({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          inProgressOrder({
+            order_id: orderId,
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      getResultEntryPlan: vi.fn((_labId: string, orderId: string) =>
+        orderId === 'order-a'
+          ? planA.promise
+          : Promise.resolve(planWithItemName('order-b', 'Item Only In B')),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByText('Item Only In B')
+
+    await act(async () => {
+      planA.resolve(planWithItemName('order-a', 'Item Only In A'))
+    })
+
+    // order-a's late plan content must never render under order-b's now-visible panel. Verified
+    // discriminating: disabling `loadPlan`'s own generation check alone makes this fail (the
+    // stale content actually leaks) -- confirmed manually, then the check restored.
+    expect(screen.queryByText('Item Only In A')).not.toBeInTheDocument()
+    expect(screen.getByText('Item Only In B')).toBeInTheDocument()
+  })
+
+  it('RR-PLAN2: a late plan error for order A after order B succeeded is discarded', async () => {
+    const planA = deferred<ResultEntryPlan>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        inProgressOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
+        inProgressOrder({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          inProgressOrder({
+            order_id: orderId,
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      getResultEntryPlan: vi.fn((_labId: string, orderId: string) =>
+        orderId === 'order-a'
+          ? planA.promise
+          : Promise.resolve(planWithItemName('order-b', 'Item Only In B')),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByText('Item Only In B')
+
+    await act(async () => {
+      planA.reject(new Error('network lost'))
+      await Promise.resolve()
+    })
+
+    expect(
+      screen.queryByText('Impossible de charger la structure des résultats pour cet ordre.'),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('Item Only In B')).toBeInTheDocument()
+  })
+
+  it('RR-PLAN3: switching labs invalidates an outstanding plan request', async () => {
+    const planStall = deferred<ResultEntryPlan>()
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue(meWithTwoLabs),
+      listLabOrders: vi.fn((labId: string) =>
+        Promise.resolve([
+          inProgressOrder({
+            order_id: labId === 'lab-a' ? 'order-a' : 'order-b',
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ]),
+      ),
+      getLabOrder: vi.fn((labId: string, orderId: string) =>
+        Promise.resolve(
+          inProgressOrder({
+            order_id: orderId,
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ),
+      ),
+      getResultEntryPlan: vi.fn((labId: string) =>
+        labId === 'lab-a'
+          ? planStall.promise
+          : Promise.resolve(planWithItemName('order-b', 'Item Only Lab B')),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    await user.selectOptions(select, 'lab-b')
+    // Switching labs closes the panel entirely (LAB-001 §12) -- reopen lab B's own order.
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Item Only Lab B')
+
+    await act(async () => {
+      planStall.resolve(planWithItemName('order-a', 'Item Only Lab A'))
+    })
+
+    expect(screen.queryByText('Item Only Lab A')).not.toBeInTheDocument()
+    expect(screen.getByText('Item Only Lab B')).toBeInTheDocument()
+  })
+
+  it('RR-PLAN4: a plan response arriving after unmount produces no error and no state update', async () => {
+    const planStall = deferred<ResultEntryPlan>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryPlan: vi.fn(() => planStall.promise),
+    })
+    const { unmount } = render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    unmount()
+    await act(async () => {
+      planStall.resolve(makeResultEntryPlan())
+      await Promise.resolve()
+    })
+  })
+
+  it('RR-PLAN5: a plan response whose order_id disagrees with the request fails closed', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryPlan: vi.fn().mockResolvedValue(makeResultEntryPlan({ order_id: 'order-WRONG' })),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(
+      await screen.findByText('Impossible de vérifier de manière sûre cet ordre.'),
+    ).toBeInTheDocument()
   })
 
   // -- Capability model / negative controls --------------------------------------------------

@@ -430,6 +430,53 @@ export interface LabCollectionResponse {
   recorded_at: string
 }
 
+/**
+ * DH-LAB-003 §36: one controlled observation definition within the currently active
+ * `LabResultTemplate` for an ordered item's offering -- pure structure, never a Patient value.
+ * Mirrors the backend's own `ResultEntryPlanObservationResponse` exactly.
+ */
+export interface ResultEntryPlanObservation {
+  definition_id: string
+  source_code: string
+  display_label: string
+  result_type: 'NUMERIC' | 'TEXT'
+  numeric_unit: string | null
+  required: boolean
+  sort_order: number
+}
+
+export interface ResultEntryPlanTemplate {
+  template_id: string
+  version: number
+  is_synthetic: boolean
+  observations: ResultEntryPlanObservation[]
+}
+
+/**
+ * DH-LAB-003 §37: `template: null` is a valid, honestly represented read state -- no active
+ * `LabResultTemplate` exists yet for this item's offering. Never fabricated, never a fallback to
+ * free-form structure.
+ */
+export interface ResultEntryPlanItem {
+  item_id: string
+  catalog_entry_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  template: ResultEntryPlanTemplate | null
+}
+
+/**
+ * DH-LAB-003 §34-§36: the order-scoped, read-only result-entry-plan -- never a mutation, never a
+ * Patient-result write. Exposed only while the order is `IN_PROGRESS` (the backend returns 409
+ * otherwise).
+ */
+export interface ResultEntryPlan {
+  order_id: string
+  order_status: LabOrderStatus
+  all_items_configured: boolean
+  items: ResultEntryPlanItem[]
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

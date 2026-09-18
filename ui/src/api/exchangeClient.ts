@@ -44,6 +44,7 @@ import type {
   ProviderReleaseVersionContent,
   ProviderReleaseVersionHistory,
   ProviderResultReviewQueueResponse,
+  ResultEntryPlan,
   ReviewQueueStatusFilter,
 } from './exchangeTypes'
 
@@ -957,6 +958,24 @@ export class ExchangeClient {
     return this.request<LabWorkflowOrder>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/start-processing`,
       { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/result-entry-plan
+   * DH-LAB-003 §34-§36: a safe, read-only answer to "what result structure would Native DHealth
+   * Lab use for this order right now" -- never a mutation. The backend returns 409 unless the
+   * order is currently IN_PROGRESS.
+   */
+  async getResultEntryPlan(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ResultEntryPlan> {
+    return this.request<ResultEntryPlan>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/result-entry-plan`,
+      { method: 'GET', signal: options.signal },
       options.token,
     )
   }
