@@ -1,9 +1,12 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { ExchangeClient } from '../../../api/exchangeClient'
+import { ExchangeApiError, type ExchangeClient } from '../../../api/exchangeClient'
 import type {
+  Amendment,
+  AmendmentInspection,
   ExchangeMeResponse,
+  LabObservationHistory,
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
   ResultEntryWorkspace,
@@ -85,8 +88,73 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getResultEntryWorkspace: vi.fn().mockResolvedValue(makeResultEntryWorkspace()),
     recordNativeResultValues: vi.fn(),
     completeResultEntry: vi.fn(),
+    correctNativeObservation: vi.fn(),
+    getLabObservationHistory: vi.fn().mockResolvedValue(makeHistory()),
+    listLabOrderAmendments: vi.fn().mockResolvedValue({ order_id: 'order-a', amendments: [] }),
+    startLabOrderAmendment: vi.fn(),
+    getLabOrderAmendment: vi.fn(),
+    correctAmendmentNativeObservation: vi.fn(),
     ...overrides,
   } as unknown as ExchangeClient
+}
+
+function makeAmendment(overrides: Partial<Amendment> = {}): Amendment {
+  return {
+    amendment_id: 'amendment-a',
+    lab_order_id: 'order-a',
+    amendment_number: 1,
+    base_release_version_id: 'version-1',
+    status: 'PREPARING',
+    started_by_identity_id: 'identity-1',
+    started_at: '2026-09-18T12:00:00Z',
+    released_by_identity_id: null,
+    released_at: null,
+    ...overrides,
+  }
+}
+
+function makeAmendmentInspection(overrides: Partial<AmendmentInspection> = {}): AmendmentInspection {
+  return {
+    amendment: makeAmendment(),
+    ready_to_release: false,
+    result_fingerprint: 'amend-fingerprint-1',
+    items: [
+      {
+        item_id: 'item-a',
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        entry_completed_at: '2026-09-18T10:40:00Z',
+        changed_in_this_amendment: false,
+        observations: [
+          {
+            observation_id: 'obs-a',
+            source_code: 'DEMO_A',
+            source_system: 'dhealth-exchange',
+            display_label_snapshot: 'Demo Measure A',
+            result_type: 'NUMERIC',
+            numeric_value: '10.0',
+            numeric_unit: 'demo-unit',
+            reference_range_low: null,
+            reference_range_high: null,
+            text_value: null,
+            recorded_at: '2026-09-18T10:40:00Z',
+            amendment_id: null,
+            template_observation_definition_id: 'def-a',
+          },
+        ],
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function makeHistory(overrides: Partial<LabObservationHistory> = {}): LabObservationHistory {
+  return {
+    order_id: 'order-a',
+    item_id: 'item-a',
+    observations: [],
+    ...overrides,
+  }
 }
 
 function makeResultEntryWorkspace(overrides: Partial<ResultEntryWorkspace> = {}): ResultEntryWorkspace {
@@ -1828,5 +1896,346 @@ describe('LabOrdersPage', () => {
     expect(
       await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
     ).toBeInTheDocument()
+  })
+
+  // -- DH-LAB-005 PC-group: pre-release Native controlled correction ------------------------
+
+  it('PC-UI1: an entered Native value offers Corriger, and the dialog carries the exact §20 wording', async () => {
+    const client = makeClient({
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'IN_PROGRESS' })),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(
+        makeResultEntryWorkspace({
+          items: [
+            {
+              ...makeResultEntryWorkspace().items[0],
+              entered_values: [
+                {
+                  definition_id: 'def-a',
+                  observation_id: 'obs-a',
+                  numeric_value: '10.0',
+                  text_value: null,
+                  recorded_at: '2026-09-18T10:00:00Z',
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('Valeur actuelle')).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    expect(
+      await screen.findByText("Cette correction conservera l'ancienne valeur dans l'historique."),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Confirmer la correction' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Annuler' })).toBeInTheDocument()
+  })
+
+  it('PC-UI2: confirming a correction submits only the new value, never structural fields', async () => {
+    const correctNativeObservation = vi.fn().mockResolvedValue({})
+    const client = makeClient({
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'IN_PROGRESS' })),
+      correctNativeObservation,
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(
+        makeResultEntryWorkspace({
+          items: [
+            {
+              ...makeResultEntryWorkspace().items[0],
+              entered_values: [
+                {
+                  definition_id: 'def-a',
+                  observation_id: 'obs-a',
+                  numeric_value: '10.0',
+                  text_value: null,
+                  recorded_at: '2026-09-18T10:00:00Z',
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    await user.type(screen.getByLabelText('Nouvelle valeur'), '12.5')
+    await user.click(screen.getByRole('button', { name: 'Confirmer la correction' }))
+
+    await waitFor(() => expect(correctNativeObservation).toHaveBeenCalledTimes(1))
+    expect(correctNativeObservation).toHaveBeenCalledWith(
+      'lab-a',
+      'order-a',
+      'item-a',
+      'obs-a',
+      { numeric_value: '12.5' },
+    )
+  })
+
+  it('PC-UI3: history distinguishes the current value from a superseded one, never as equally current', async () => {
+    const client = makeClient({
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'IN_PROGRESS' })),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(
+        makeResultEntryWorkspace({
+          items: [
+            {
+              ...makeResultEntryWorkspace().items[0],
+              entered_values: [
+                {
+                  definition_id: 'def-a',
+                  observation_id: 'obs-b',
+                  numeric_value: '12.5',
+                  text_value: null,
+                  recorded_at: '2026-09-18T10:05:00Z',
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+      getLabObservationHistory: vi.fn().mockResolvedValue(
+        makeHistory({
+          observations: [
+            {
+              order_id: 'order-a',
+              item_id: 'item-a',
+              result_id: 'result-a',
+              observation_id: 'obs-a',
+              source_code: 'DEMO_A',
+              source_system: 'dhealth-exchange',
+              display_label_snapshot: 'Demo Measure A',
+              result_type: 'NUMERIC',
+              numeric_value: '10.0',
+              numeric_unit: 'demo-unit',
+              reference_range_low: null,
+              reference_range_high: null,
+              text_value: null,
+              recorded_at: '2026-09-18T10:00:00Z',
+              recorded_by_identity_id: 'identity-1',
+              supersedes_observation_id: null,
+              superseded_at: '2026-09-18T10:05:00Z',
+              template_observation_definition_id: 'def-a',
+            },
+            {
+              order_id: 'order-a',
+              item_id: 'item-a',
+              result_id: 'result-a',
+              observation_id: 'obs-b',
+              source_code: 'DEMO_A',
+              source_system: 'dhealth-exchange',
+              display_label_snapshot: 'Demo Measure A',
+              result_type: 'NUMERIC',
+              numeric_value: '12.5',
+              numeric_unit: 'demo-unit',
+              reference_range_low: null,
+              reference_range_high: null,
+              text_value: null,
+              recorded_at: '2026-09-18T10:05:00Z',
+              recorded_by_identity_id: 'identity-1',
+              supersedes_observation_id: 'obs-a',
+              superseded_at: null,
+              template_observation_definition_id: 'def-a',
+            },
+          ],
+        }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Voir l'historique" }))
+    // The label ("Historique"/"Valeur actuelle") is bolded via a nested <strong>, so a plain
+    // string/regex matcher (which only checks each element's own direct text nodes) can't see
+    // the combined phrase -- a function matcher checking the full list item's textContent is the
+    // correct tool here, exactly as Testing Library's own docs recommend for this shape.
+    const historyItem = await screen.findByText(
+      (_content, node) => node?.tagName === 'LI' && /Historique — Demo Measure A : 10\.0/.test(node.textContent ?? ''),
+    )
+    const currentItem = screen.getByText(
+      (_content, node) => node?.tagName === 'LI' && /Valeur actuelle — Demo Measure A : 12\.5/.test(node.textContent ?? ''),
+    )
+    expect(historyItem).toBeInTheDocument()
+    expect(currentItem).toBeInTheDocument()
+  })
+
+  // -- DH-LAB-005 AD/AC-group: amendment discovery, start/resume, and controlled correction -
+
+  it('AD-UI1: a COMPLETED order with no amendment offers "Commencer un amendement", never "Reprendre"', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByRole('button', { name: 'Commencer un amendement' })).toBeInTheDocument()
+    expect(screen.queryByText(/Reprendre l'amendement/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Annuler l'amendement/)).not.toBeInTheDocument()
+  })
+
+  it('AD-UI2: a COMPLETED order with a PREPARING amendment resumes it directly, never offering to start a second one', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('Amendement en cours (n°1)')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Commencer un amendement' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Annuler l'amendement/)).not.toBeInTheDocument()
+  })
+
+  it('confirming "Commencer un amendement" calls startLabOrderAmendment and then resumes the new amendment', async () => {
+    const startLabOrderAmendment = vi.fn().mockResolvedValue(makeAmendment())
+    const listLabOrderAmendments = vi
+      .fn()
+      .mockResolvedValueOnce({ order_id: 'order-a', amendments: [] })
+      .mockResolvedValueOnce({ order_id: 'order-a', amendments: [makeAmendment()] })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      startLabOrderAmendment,
+      listLabOrderAmendments,
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer un amendement' }))
+    expect(
+      await screen.findByText(/Commencer un amendement pour cet ordre \?/),
+    ).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: "Commencer l'amendement" }))
+
+    await waitFor(() => expect(startLabOrderAmendment).toHaveBeenCalledWith('lab-a', 'order-a'))
+    expect(await screen.findByText('Amendement en cours (n°1)')).toBeInTheDocument()
+  })
+
+  it('AC-UI1: a template-bound amendment observation shows "Modifié dans cet amendement" and offers Corriger', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment: vi.fn().mockResolvedValue(
+        makeAmendmentInspection({
+          items: [{ ...makeAmendmentInspection().items[0], changed_in_this_amendment: true }],
+        }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('Modifié dans cet amendement')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Corriger' })).toBeInTheDocument()
+  })
+
+  it('§58: the durable-revision warning carries the exact wording before this amendment\'s first correction', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: false })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    expect(
+      await screen.findByText(
+        "Cette correction sera conservée dans l'historique de l'amendement. Il n'existe pas d'annulation de l'amendement dans cette version de DHealth.",
+        { exact: false },
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('a subsequent correction in the same amendment no longer repeats the durable-revision warning', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: true })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    expect(
+      await screen.findByText("Cette correction conservera l'ancienne valeur dans l'historique."),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(/Il n'existe pas d'annulation de l'amendement/),
+    ).not.toBeInTheDocument()
+  })
+
+  it('correctAmendmentNativeObservation submits only the new value', async () => {
+    const correctAmendmentNativeObservation = vi.fn().mockResolvedValue({})
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
+      correctAmendmentNativeObservation,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    await user.type(screen.getByLabelText('Nouvelle valeur'), '99.9')
+    await user.click(screen.getByRole('button', { name: 'Confirmer la correction' }))
+
+    await waitFor(() => expect(correctAmendmentNativeObservation).toHaveBeenCalledTimes(1))
+    expect(correctAmendmentNativeObservation).toHaveBeenCalledWith(
+      'lab-a',
+      'order-a',
+      'amendment-a',
+      'item-a',
+      'obs-a',
+      { numeric_value: '99.9' },
+    )
+  })
+
+  it('a stale amendment correction conflict re-reads authoritative state, never a blind retry', async () => {
+    const correctAmendmentNativeObservation = vi
+      .fn()
+      .mockRejectedValue(new ExchangeApiError(409, 'CONFLICT', 'stale predecessor'))
+    const getLabOrderAmendment = vi.fn().mockResolvedValue(makeAmendmentInspection())
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'COMPLETED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
+      listLabOrderAmendments: vi
+        .fn()
+        .mockResolvedValue({ order_id: 'order-a', amendments: [makeAmendment()] }),
+      getLabOrderAmendment,
+      correctAmendmentNativeObservation,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Corriger' }))
+    await user.type(screen.getByLabelText('Nouvelle valeur'), '99.9')
+    await user.click(screen.getByRole('button', { name: 'Confirmer la correction' }))
+
+    expect(
+      await screen.findByText(
+        'Cette valeur a déjà été modifiée depuis votre dernière consultation. La valeur actuelle est affichée ci-dessous.',
+      ),
+    ).toBeInTheDocument()
+    await waitFor(() => expect(getLabOrderAmendment).toHaveBeenCalledTimes(2))
   })
 })

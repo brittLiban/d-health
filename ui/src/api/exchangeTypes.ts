@@ -610,6 +610,175 @@ export interface LabResultReleaseOutcome {
   released_at: string
 }
 
+// -- DH-LAB-005: template-aware pre-release correction, and the amendment lifecycle -----------
+
+/**
+ * DH-LAB-005 §8-16: one observation as returned by either the pre-release or amendment Native
+ * controlled correction endpoint. `template_observation_definition_id` non-null is the frontend's
+ * own signal that the Native controlled correction control applies to this observation (never the
+ * raw free-structure one, which now refuses a template-bound predecessor outright).
+ * `supersedes_observation_id` set + `superseded_at: null` marks a correction's own successor.
+ */
+export interface LabObservation {
+  order_id: string
+  item_id: string
+  result_id: string
+  observation_id: string
+  source_code: string
+  source_system: string
+  display_label_snapshot: string
+  result_type: 'NUMERIC' | 'TEXT'
+  numeric_value: string | null
+  numeric_unit: string | null
+  reference_range_low: string | null
+  reference_range_high: string | null
+  text_value: string | null
+  recorded_at: string
+  recorded_by_identity_id: string | null
+  supersedes_observation_id: string | null
+  superseded_at: string | null
+  template_observation_definition_id: string | null
+}
+
+export interface NativeCorrectionRequest {
+  numeric_value?: string
+  text_value?: string
+}
+
+/**
+ * DH-EX-013: every observation that has ever existed under this item's container, superseded and
+ * effective alike, ordered oldest to newest -- `superseded_at !== null` must always be rendered
+ * as historical/replaced, never as equally current alongside the one effective (`superseded_at
+ * === null`) entry.
+ */
+export interface LabObservationHistory {
+  order_id: string
+  item_id: string
+  observations: LabObservation[]
+}
+
+export type AmendmentStatus = 'PREPARING' | 'RELEASED'
+
+/**
+ * DH-EX-014B/ADR-048: one amendment episode. `PREPARING`/`RELEASED` are the only two statuses
+ * that exist in this version of DHealth -- there is no CANCELLED/DISCARDED state, and no UI may
+ * imply one exists.
+ */
+export interface Amendment {
+  amendment_id: string
+  lab_order_id: string
+  amendment_number: number
+  base_release_version_id: string
+  status: AmendmentStatus
+  started_by_identity_id: string
+  started_at: string
+  released_by_identity_id: string | null
+  released_at: string | null
+}
+
+export interface AmendmentListResponse {
+  order_id: string
+  amendments: Amendment[]
+}
+
+export interface AmendmentInspectionObservation extends LabResultInspectionObservation {
+  amendment_id: string | null
+  template_observation_definition_id: string | null
+}
+
+/**
+ * DH-EX-014B: `changed_in_this_amendment` is a DB-grounded fact (at least one of this item's
+ * current observations carries this exact amendment's id) -- the frontend's own signal for
+ * "Modifié dans cet amendement", never re-derived client-side.
+ */
+export interface AmendmentInspectionItem {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  entry_completed_at: string
+  observations: AmendmentInspectionObservation[]
+  changed_in_this_amendment: boolean
+}
+
+/**
+ * DH-LAB-005 §37-40: `result_fingerprint` is the exact digest of this amendment's proposed
+ * (PREPARING) or released (historical) effective observation set -- the value a release request
+ * must echo back as `expected_result_fingerprint`. `ready_to_release` is a DB-grounded fact (at
+ * least one revision exists) -- no-empty-amendment-release is enforced server-side, and the
+ * release queue never lists an amendment with none.
+ */
+export interface AmendmentInspection {
+  amendment: Amendment
+  items: AmendmentInspectionItem[]
+  ready_to_release: boolean
+  result_fingerprint: string
+}
+
+export interface AmendmentReleaseRequest {
+  expected_result_fingerprint: string
+}
+
+/**
+ * DH-LAB-005 §46-47: one PREPARING amendment ready for this lab's own LAB_RESULT_RELEASER to
+ * inspect and release -- mirrors `ReleaseQueueEntry`'s own least-privilege, never-the-work-queue-
+ * broadened convention. An amendment with zero revisions never appears here.
+ */
+export interface AmendmentQueueEntry {
+  order_id: string
+  amendment_id: string
+  amendment_number: number
+  patient: LabWorkflowPatientIdentity
+  ordering_provider_name: string
+  requested_tests: LabWorkflowOrderItem[]
+  started_at: string
+}
+
+export interface AmendmentQueue {
+  lab_organization_id: string
+  amendments: AmendmentQueueEntry[]
+}
+
+/**
+ * DH-EX-014B/ADR-048: lab-side Version 1 / Version 2 / Version 3+ history metadata --
+ * `version_number` (not `release_version_number`, unlike the provider-facing equivalent).
+ */
+export interface LabReleaseVersionSummary {
+  release_version_id: string
+  version_number: number
+  lab_result_release_id: string | null
+  amendment_id: string | null
+  created_at: string
+  is_amendment: boolean
+}
+
+export interface LabReleaseVersionHistory {
+  order_id: string
+  versions: LabReleaseVersionSummary[]
+}
+
+/**
+ * DH-LAB-005 §52-54: the lab-side sibling of the provider-facing exact-version-content read --
+ * reconstructed from the immutable manifest only, never from live current-effective state.
+ * Version 1's content here must stay byte-for-byte identical after Version 2/3 exist.
+ */
+export interface LabReleaseVersionItem {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  entry_completed_at: string
+  observations: LabResultInspectionObservation[]
+}
+
+export interface LabReleaseVersionContent {
+  order_id: string
+  release_version_id: string
+  release_version_number: number
+  is_amendment: boolean
+  patient: LabWorkflowPatientIdentity
+  ordering_provider_name: string
+  results: LabReleaseVersionItem[]
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

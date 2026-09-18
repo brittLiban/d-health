@@ -15,6 +15,11 @@
 
 import type { ErrorCode } from './types'
 import type {
+  Amendment,
+  AmendmentInspection,
+  AmendmentListResponse,
+  AmendmentQueue,
+  AmendmentReleaseRequest,
   AssignLabRequest,
   BindPatientReferenceOutcome,
   CatalogEntry,
@@ -25,6 +30,8 @@ import type {
   ExchangeMeResponse,
   LabAssignmentResponse,
   LabCollectionResponse,
+  LabObservation,
+  LabObservationHistory,
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderCreateRequest,
@@ -33,9 +40,13 @@ import type {
   LabOrderIntentCreateRequest,
   LabOrderStatus,
   LabOrderSummary,
+  LabReleaseVersionContent,
+  LabReleaseVersionHistory,
+  LabReleaseVersionSummary,
   LabResultInspection,
   LabResultReleaseOutcome,
   LabWorkflowOrder,
+  NativeCorrectionRequest,
   NativeResultValueBatchResponse,
   PatientCreateOutcome,
   PatientCreateRequest,
@@ -1107,6 +1118,212 @@ export class ExchangeClient {
         body: JSON.stringify(body),
         signal: options.signal,
       },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../lab-orders/{order_id}/items/{item_id}/observations/{observation_id}/native-correct
+   * DH-LAB-005 §8-16: the Native controlled pre-release correction -- submits only the new value.
+   * Every structural field (source_code/display_label/result_type/numeric_unit/reference ranges/
+   * source_system/template definition identity) is derived server-side from the predecessor's own
+   * pinned template definition, never sent by the browser.
+   */
+  async correctNativeObservation(
+    labId: string,
+    orderId: string,
+    itemId: string,
+    observationId: string,
+    body: NativeCorrectionRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabObservation> {
+    return this.request<LabObservation>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/observations/${encodeURIComponent(observationId)}/native-correct`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/items/{item_id}/observations/history
+   * DH-EX-013: every observation that has ever existed under this item's container, superseded
+   * and effective alike -- the one supported way to reconstruct a correction chain.
+   */
+  async getLabObservationHistory(
+    labId: string,
+    orderId: string,
+    itemId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabObservationHistory> {
+    return this.request<LabObservationHistory>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/observations/history`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../lab-orders/{order_id}/amendments
+   * DH-EX-014B/ADR-048: starts a new amendment against a COMPLETED order's latest release
+   * version. LAB_TECH only. No request body -- actor/order/lab all come from the URL/auth.
+   */
+  async startLabOrderAmendment(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Amendment> {
+    return this.request<Amendment>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/amendments`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/amendments
+   * DH-LAB-005 §27-28: lets the UI rediscover a PREPARING amendment (or see the full amendment
+   * history) after a page refresh/browser close -- never dependent on browser memory.
+   */
+  async listLabOrderAmendments(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<AmendmentListResponse> {
+    return this.request<AmendmentListResponse>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/amendments`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/amendments/{amendment_id}
+   * DH-EX-014B: either LAB_TECH or LAB_RESULT_RELEASER may inspect -- "a releaser must not be
+   * forced to release an amendment they cannot inspect." Carries `result_fingerprint`, the exact
+   * value an amendment release request must echo back.
+   */
+  async getLabOrderAmendment(
+    labId: string,
+    orderId: string,
+    amendmentId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<AmendmentInspection> {
+    return this.request<AmendmentInspection>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/amendments/${encodeURIComponent(amendmentId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../amendments/{amendment_id}/items/{item_id}/observations/{observation_id}/native-correct
+   * DH-LAB-005 §30-35: the Native controlled counterpart of `correctNativeObservation` for an
+   * amendment in progress -- browser submits only the new value.
+   */
+  async correctAmendmentNativeObservation(
+    labId: string,
+    orderId: string,
+    amendmentId: string,
+    itemId: string,
+    observationId: string,
+    body: NativeCorrectionRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabObservation> {
+    return this.request<LabObservation>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/amendments/${encodeURIComponent(amendmentId)}/items/${encodeURIComponent(itemId)}/observations/${encodeURIComponent(observationId)}/native-correct`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../amendments/{amendment_id}/release
+   * DH-LAB-005 §37-43: releases a PREPARING amendment, gated on `expected_result_fingerprint`
+   * exactly like the original release -- a stale fingerprint (an intervening correction) is
+   * refused as a controlled conflict, never releasing a result set the releaser did not actually
+   * see. A replay of an already-RELEASED amendment is idempotent regardless of the fingerprint
+   * given (mirrors the original release's own replay discipline).
+   */
+  async releaseLabOrderAmendment(
+    labId: string,
+    orderId: string,
+    amendmentId: string,
+    body: AmendmentReleaseRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabReleaseVersionSummary> {
+    return this.request<LabReleaseVersionSummary>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/amendments/${encodeURIComponent(amendmentId)}/release`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/amendment-release-queue
+   * DH-LAB-005 §46-47: this lab's own dedicated, least-privilege amendment release queue --
+   * LAB_RESULT_RELEASER only, never the LAB_TECH work queue broadened. Never lists an amendment
+   * with zero revisions.
+   */
+  async getAmendmentReleaseQueue(
+    labId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<AmendmentQueue> {
+    return this.request<AmendmentQueue>(
+      `/organizations/${encodeURIComponent(labId)}/amendment-release-queue`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/release-versions
+   * DH-EX-014B/ADR-048: lab-side Version 1 / Version 2 / Version 3+ history metadata -- either
+   * LAB_TECH or LAB_RESULT_RELEASER, exactly mirroring the pre-release inspection read's own
+   * authorization.
+   */
+  async getLabOrderReleaseVersions(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabReleaseVersionHistory> {
+    return this.request<LabReleaseVersionHistory>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-versions`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/release-versions/{release_version_id}
+   * DH-LAB-005 §52-54: the exact, immutable content of one specific released version -- lab-side
+   * sibling of `getReleaseVersion` (provider-facing). Reconstructed from the immutable manifest
+   * only, never from live current-effective state; Version 1's content stays byte-for-byte
+   * identical after Version 2/3 exist.
+   */
+  async getLabOrderReleaseVersionContent(
+    labId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabReleaseVersionContent> {
+    return this.request<LabReleaseVersionContent>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}`,
+      { method: 'GET', signal: options.signal },
       options.token,
     )
   }

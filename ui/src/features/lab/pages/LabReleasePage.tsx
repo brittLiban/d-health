@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ExchangeApiError } from '../../../api/exchangeClient'
-import type { LabResultInspection, ReleaseQueueEntry } from '../../../api/exchangeTypes'
+import type {
+  AmendmentInspection,
+  AmendmentQueueEntry,
+  LabResultInspection,
+  ReleaseQueueEntry,
+} from '../../../api/exchangeTypes'
 import { Button, Card, EmptyState, ErrorState, LoadingSkeleton, StatusBadge } from '../../../design-system'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { useLab } from '../LabContext'
@@ -10,6 +15,14 @@ const ORDER_MISMATCH_ERROR = 'Impossible de vérifier de manière sûre cet ordr
 const RELEASE_UNCONFIRMED_ERROR = "La libération n'a pas pu être confirmée. Vous pouvez réessayer."
 const RELEASE_STALE_ERROR =
   'Les résultats ont changé depuis votre vérification. Veuillez les examiner à nouveau avant de les libérer.'
+
+const AMENDMENT_INSPECTION_LOAD_ERROR = 'Impossible de charger cet amendement.'
+const AMENDMENT_RELEASE_UNCONFIRMED_ERROR =
+  "La libération de l'amendement n'a pas pu être confirmée. Vous pouvez réessayer."
+// DH-LAB-005 §42: exact wording -- distinct from the original release's own stale-fingerprint
+// message above so a releaser always knows which flow (Version 1 vs. an amendment) refused them.
+const AMENDMENT_RELEASE_STALE_ERROR =
+  'Les résultats de cet amendement ont changé depuis votre vérification. Veuillez les examiner à nouveau avant de les libérer.'
 
 function formatDateTime(value: string): string {
   return new Date(value).toLocaleDateString('fr-FR', {
@@ -36,8 +49,24 @@ interface PanelState {
  * currently on screen -- a stale fingerprint (an intervening correction) is refused server-side
  * and this page forces a fresh re-inspection rather than silently retrying.
  */
+type ReleaseTab = 'results' | 'amendments'
+
+interface AmendmentPanelState {
+  orderId: string
+  amendmentId: string
+  loading: boolean
+  error: string | null
+  inspection: AmendmentInspection | null
+}
+
 export function LabReleasePage() {
   const { status: authStatus, activeLab, capabilities, client } = useLab()
+
+  // DH-LAB-005 §44-47: extends the existing "Libération" tab with an "Amendements" section --
+  // never a disconnected second app/page. Every piece of Version-1 release state below stays
+  // completely untouched; the amendment-scoped state that follows is deliberately separate,
+  // mirroring the backend's own deliberate non-sharing between the two lock preambles.
+  const [tab, setTab] = useState<ReleaseTab>('results')
 
   const [queueState, setQueueState] = useState<{
     entries: ReleaseQueueEntry[]
@@ -52,8 +81,23 @@ export function LabReleasePage() {
   })
   const [releasedAt, setReleasedAt] = useState<string | null>(null)
 
+  const [amendmentQueueState, setAmendmentQueueState] = useState<{
+    entries: AmendmentQueueEntry[]
+    loading: boolean
+    error: string | null
+  }>({ entries: [], loading: true, error: null })
+  const [amendmentPanel, setAmendmentPanel] = useState<AmendmentPanelState | null>(null)
+  const [confirmingAmendmentRelease, setConfirmingAmendmentRelease] = useState(false)
+  const [amendmentReleaseState, setAmendmentReleaseState] = useState<{
+    submitting: boolean
+    error: string | null
+  }>({ submitting: false, error: null })
+  const [amendmentReleasedVersion, setAmendmentReleasedVersion] = useState<number | null>(null)
+
   const queueGenerationRef = useRef(0)
   const panelGenerationRef = useRef(0)
+  const amendmentQueueGenerationRef = useRef(0)
+  const amendmentPanelGenerationRef = useRef(0)
   const mountedRef = useRef(true)
   const currentLabRef = useRef<string | null>(activeLab?.organization_id ?? null)
   currentLabRef.current = activeLab?.organization_id ?? null
@@ -77,6 +121,13 @@ export function LabReleasePage() {
     setQueueState({ entries: [], loading: true, error: null })
     queueGenerationRef.current += 1
     panelGenerationRef.current += 1
+    setAmendmentPanel(null)
+    setConfirmingAmendmentRelease(false)
+    setAmendmentReleaseState({ submitting: false, error: null })
+    setAmendmentReleasedVersion(null)
+    setAmendmentQueueState({ entries: [], loading: true, error: null })
+    amendmentQueueGenerationRef.current += 1
+    amendmentPanelGenerationRef.current += 1
   }
 
   const loadQueue = useCallback(() => {
@@ -231,6 +282,158 @@ export function LabReleasePage() {
     }
   }, [activeLab, panel, client, loadQueue, loadInspection])
 
+  // -- DH-LAB-005 §44-47: the "Amendements" section --------------------------------------------
+
+  const loadAmendmentQueue = useCallback(() => {
+    if (authStatus !== 'ready' || !activeLab || !capabilities.canReleaseResults) return
+    const generation = ++amendmentQueueGenerationRef.current
+    const targetLab = activeLab.organization_id
+    const controller = new AbortController()
+
+    setAmendmentQueueState((prev) => ({ entries: prev.entries, loading: true, error: null }))
+    client
+      .getAmendmentReleaseQueue(targetLab, { signal: controller.signal })
+      .then((response) => {
+        if (!mountedRef.current) return
+        if (amendmentQueueGenerationRef.current !== generation) return
+        if (currentLabRef.current !== targetLab) return
+        if (response.lab_organization_id !== targetLab) {
+          setAmendmentQueueState({ entries: [], loading: false, error: 'Impossible de charger la file.' })
+          return
+        }
+        setAmendmentQueueState({ entries: response.amendments, loading: false, error: null })
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return
+        if (!mountedRef.current) return
+        if (amendmentQueueGenerationRef.current !== generation) return
+        if (currentLabRef.current !== targetLab) return
+        setAmendmentQueueState({ entries: [], loading: false, error: 'Erreur lors du chargement de la file.' })
+      })
+    return () => controller.abort()
+  }, [client, activeLab, authStatus, capabilities.canReleaseResults])
+
+  useEffect(() => {
+    if (tab === 'amendments') return loadAmendmentQueue()
+  }, [loadAmendmentQueue, tab])
+
+  const loadAmendmentInspection = useCallback(
+    (orderId: string, amendmentId: string) => {
+      if (!activeLab) return
+      const generation = ++amendmentPanelGenerationRef.current
+      const targetLab = activeLab.organization_id
+      const controller = new AbortController()
+
+      setAmendmentPanel({ orderId, amendmentId, loading: true, error: null, inspection: null })
+      setConfirmingAmendmentRelease(false)
+      setAmendmentReleaseState({ submitting: false, error: null })
+      setAmendmentReleasedVersion(null)
+      client
+        .getLabOrderAmendment(targetLab, orderId, amendmentId, { signal: controller.signal })
+        .then((inspection) => {
+          if (!mountedRef.current) return
+          if (amendmentPanelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          if (inspection.amendment.amendment_id !== amendmentId) {
+            setAmendmentPanel({
+              orderId,
+              amendmentId,
+              loading: false,
+              error: ORDER_MISMATCH_ERROR,
+              inspection: null,
+            })
+            return
+          }
+          setAmendmentPanel({ orderId, amendmentId, loading: false, error: null, inspection })
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          if (!mountedRef.current) return
+          if (amendmentPanelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setAmendmentPanel({
+            orderId,
+            amendmentId,
+            loading: false,
+            error: AMENDMENT_INSPECTION_LOAD_ERROR,
+            inspection: null,
+          })
+        })
+      return () => controller.abort()
+    },
+    [client, activeLab],
+  )
+
+  const handleOpenAmendment = (orderId: string, amendmentId: string) => {
+    if (amendmentPanel?.amendmentId === amendmentId) return
+    loadAmendmentInspection(orderId, amendmentId)
+  }
+
+  const handleCloseAmendmentPanel = () => {
+    amendmentPanelGenerationRef.current += 1
+    setAmendmentPanel(null)
+    setConfirmingAmendmentRelease(false)
+    setAmendmentReleaseState({ submitting: false, error: null })
+    setAmendmentReleasedVersion(null)
+  }
+
+  const runAmendmentRelease = useCallback(async () => {
+    if (!activeLab || !amendmentPanel?.inspection) return
+    const { orderId, amendmentId } = amendmentPanel
+    const targetLab = activeLab.organization_id
+    const expectedFingerprint = amendmentPanel.inspection.result_fingerprint
+    const mutationGeneration = amendmentPanelGenerationRef.current
+    setAmendmentReleaseState({ submitting: true, error: null })
+    try {
+      const response = await client.releaseLabOrderAmendment(targetLab, orderId, amendmentId, {
+        expected_result_fingerprint: expectedFingerprint,
+      })
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      if (amendmentPanelGenerationRef.current !== mutationGeneration) {
+        loadAmendmentQueue()
+        return
+      }
+      setConfirmingAmendmentRelease(false)
+      setAmendmentReleaseState({ submitting: false, error: null })
+      setAmendmentReleasedVersion(response.version_number)
+      loadAmendmentQueue()
+    } catch (error: unknown) {
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      if (amendmentPanelGenerationRef.current !== mutationGeneration) {
+        loadAmendmentQueue()
+        return
+      }
+      setConfirmingAmendmentRelease(false)
+      const isConflict = error instanceof ExchangeApiError && error.status === 409
+      if (isConflict) {
+        // DH-LAB-005 §42: no automatic retry -- force a fresh re-inspection, exactly mirroring
+        // the original release's own stale-fingerprint discipline above.
+        loadAmendmentInspection(orderId, amendmentId)
+        setAmendmentReleaseState({ submitting: false, error: AMENDMENT_RELEASE_STALE_ERROR })
+        return
+      }
+      try {
+        const authoritative = await client.getLabOrderAmendment(targetLab, orderId, amendmentId)
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (amendmentPanelGenerationRef.current !== mutationGeneration) {
+          loadAmendmentQueue()
+          return
+        }
+        if (authoritative.amendment.status === 'RELEASED') {
+          setAmendmentReleaseState({ submitting: false, error: null })
+        } else {
+          setAmendmentReleaseState({ submitting: false, error: AMENDMENT_RELEASE_UNCONFIRMED_ERROR })
+        }
+        setAmendmentPanel({ orderId, amendmentId, loading: false, error: null, inspection: authoritative })
+        loadAmendmentQueue()
+      } catch {
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (amendmentPanelGenerationRef.current !== mutationGeneration) return
+        setAmendmentReleaseState({ submitting: false, error: AMENDMENT_RELEASE_UNCONFIRMED_ERROR })
+      }
+    }
+  }, [activeLab, amendmentPanel, client, loadAmendmentQueue, loadAmendmentInspection])
+
   if (authStatus === 'loading') {
     return <LoadingSkeleton />
   }
@@ -263,6 +466,44 @@ export function LabReleasePage() {
         </h1>
       </header>
 
+      <div
+        role="tablist"
+        aria-label="Section de libération"
+        style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'results'}
+          onClick={() => setTab('results')}
+          style={{
+            padding: 'var(--space-2) var(--space-3)',
+            borderRadius: 'var(--radius-md, 6px)',
+            border: '1px solid var(--color-neutral-300)',
+            background: tab === 'results' ? 'var(--color-surface-alt, #ecfdf5)' : 'transparent',
+            cursor: 'pointer',
+          }}
+        >
+          Résultats
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'amendments'}
+          onClick={() => setTab('amendments')}
+          style={{
+            padding: 'var(--space-2) var(--space-3)',
+            borderRadius: 'var(--radius-md, 6px)',
+            border: '1px solid var(--color-neutral-300)',
+            background: tab === 'amendments' ? 'var(--color-surface-alt, #ecfdf5)' : 'transparent',
+            cursor: 'pointer',
+          }}
+        >
+          Amendements
+        </button>
+      </div>
+
+      {tab === 'results' ? (
       <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: panel ? '1fr 1fr' : '1fr' }}>
         <Card>
           <div style={{ padding: 'var(--space-4)' }}>
@@ -419,6 +660,174 @@ export function LabReleasePage() {
           </div>
         ) : null}
       </div>
+      ) : (
+      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: amendmentPanel ? '1fr 1fr' : '1fr' }}>
+        <Card>
+          <div style={{ padding: 'var(--space-4)' }}>
+            {amendmentQueueState.loading && amendmentQueueState.entries.length === 0 ? (
+              <LoadingSkeleton />
+            ) : amendmentQueueState.error && amendmentQueueState.entries.length === 0 ? (
+              <ErrorState code="NETWORK_ERROR" onRetry={loadAmendmentQueue} />
+            ) : amendmentQueueState.entries.length === 0 ? (
+              <EmptyState title="Aucun amendement prêt">
+                Aucun amendement n'est actuellement prêt pour la libération.
+              </EmptyState>
+            ) : (
+              <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-3)' }}>
+                {amendmentQueueState.entries.map((entry) => (
+                  <li
+                    key={entry.amendment_id}
+                    style={{
+                      border: '1px solid var(--color-neutral-200)',
+                      borderRadius: 'var(--radius-md, 6px)',
+                      padding: 'var(--space-3)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <LabPatientIdentity patient={entry.patient} />
+                        <p style={{ margin: '4px 0 0', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                          {entry.ordering_provider_name}
+                        </p>
+                        <p style={{ margin: '2px 0 0', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                          {entry.requested_tests.map((t) => t.catalog_display_name_snapshot).join(', ')}
+                        </p>
+                        <p style={{ margin: '4px 0 0', fontSize: 'var(--font-size-xs)', color: 'var(--color-neutral-500)' }}>
+                          Amendement n°{entry.amendment_number}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => handleOpenAmendment(entry.order_id, entry.amendment_id)}
+                        aria-label={`Examiner l'amendement de ${entry.patient.display_name?.trim() || 'Nom non renseigné'}`}
+                      >
+                        Examiner
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </Card>
+
+        {amendmentPanel ? (
+          <div>
+            <div style={{ marginBottom: 'var(--space-3)' }}>
+              <Button variant="secondary" onClick={handleCloseAmendmentPanel} disabled={amendmentReleaseState.submitting}>
+                Fermer le détail
+              </Button>
+            </div>
+
+            {amendmentReleaseState.error ? (
+              <p role="alert" style={{ color: 'var(--color-danger, #b91c1c)', marginBottom: 'var(--space-3)' }}>
+                {amendmentReleaseState.error}
+              </p>
+            ) : null}
+
+            {amendmentPanel.loading ? (
+              <LoadingSkeleton />
+            ) : amendmentPanel.error ? (
+              <p role="alert" style={{ color: 'var(--color-danger, #b91c1c)' }}>
+                {amendmentPanel.error}
+              </p>
+            ) : amendmentPanel.inspection ? (
+              <Card>
+                <div style={{ padding: 'var(--space-4)' }}>
+                  <p style={{ margin: '0 0 var(--space-3)', fontSize: 'var(--font-size-sm)' }}>
+                    <strong>Amendement</strong> n°{amendmentPanel.inspection.amendment.amendment_number} —{' '}
+                    <StatusBadge
+                      tone={amendmentPanel.inspection.amendment.status === 'RELEASED' ? 'success' : 'warning'}
+                      label={
+                        amendmentPanel.inspection.amendment.status === 'RELEASED'
+                          ? 'Libéré'
+                          : 'En préparation'
+                      }
+                    />
+                  </p>
+
+                  <div style={{ display: 'grid', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
+                    {amendmentPanel.inspection.items.map((item) => (
+                      <div
+                        key={item.item_id}
+                        style={{
+                          border: '1px solid var(--color-neutral-200)',
+                          borderRadius: 'var(--radius-md, 6px)',
+                          padding: 'var(--space-3)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
+                          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>
+                            {item.catalog_display_name_snapshot}
+                          </p>
+                          {item.changed_in_this_amendment ? (
+                            <StatusBadge tone="warning" label="Modifié dans cet amendement" />
+                          ) : null}
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
+                          {item.observations.map((observation) => (
+                            <li key={observation.observation_id} style={{ fontSize: 'var(--font-size-sm)' }}>
+                              {observation.display_label_snapshot} : {observation.numeric_value ?? observation.text_value}
+                              {observation.numeric_value && observation.numeric_unit
+                                ? ` ${observation.numeric_unit}`
+                                : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+
+                  {amendmentPanel.inspection.amendment.status === 'RELEASED' || amendmentReleasedVersion ? (
+                    <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-success, #15803d)' }}>
+                      Amendement libéré
+                      {amendmentPanel.inspection.amendment.released_at
+                        ? ` — ${formatDateTime(amendmentPanel.inspection.amendment.released_at)}`
+                        : ''}
+                      {amendmentReleasedVersion ? ` (version ${amendmentReleasedVersion})` : ''}.
+                    </p>
+                  ) : !amendmentPanel.inspection.ready_to_release ? (
+                    <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                      Cet amendement n'a encore aucune modification -- la libération n'est pas
+                      encore possible.
+                    </p>
+                  ) : confirmingAmendmentRelease ? (
+                    <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                      <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                        Libérer cet amendement ? Une nouvelle version des résultats sera créée et
+                        deviendra disponible pour l'établissement prescripteur.
+                      </p>
+                      <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                        <Button
+                          type="button"
+                          onClick={() => void runAmendmentRelease()}
+                          disabled={amendmentReleaseState.submitting}
+                        >
+                          {amendmentReleaseState.submitting ? 'Enregistrement…' : 'Confirmer la libération'}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => setConfirmingAmendmentRelease(false)}
+                          disabled={amendmentReleaseState.submitting}
+                        >
+                          Annuler
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button type="button" onClick={() => setConfirmingAmendmentRelease(true)}>
+                      Libérer l'amendement
+                    </Button>
+                  )}
+                </div>
+              </Card>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      )}
     </div>
   )
 }

@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { ExchangeApiError, type ExchangeClient } from '../../../api/exchangeClient'
-import type { ResultEntryWorkspaceItem } from '../../../api/exchangeTypes'
+import type { LabObservation, ResultEntryWorkspaceItem } from '../../../api/exchangeTypes'
 import { Button, TextInput } from '../../../design-system'
 
 const SAVE_ERROR = "Impossible d'enregistrer ces valeurs. Vous pouvez réessayer."
 const COMPLETE_ERROR = "Impossible de confirmer la fin de la saisie. Vous pouvez réessayer."
 const COMPLETE_CONFLICT_ERROR =
   'Cette analyse ne peut pas encore être marquée terminée -- une valeur requise manque toujours.'
+const CORRECTION_ERROR = "Impossible d'enregistrer cette correction. Vous pouvez réessayer."
+const CORRECTION_STALE_ERROR =
+  'Cette valeur a déjà été modifiée depuis votre dernière consultation. La valeur actuelle est affichée ci-dessous.'
+const HISTORY_LOAD_ERROR = "Impossible de charger l'historique de cette analyse."
+
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleString('fr-FR')
+}
 
 export interface NativeResultEntryFormProps {
   client: ExchangeClient
@@ -24,11 +32,21 @@ export interface NativeResultEntryFormProps {
  * DH-LAB-004: turns LAB-003's read-only structure preview into a controlled Native entry form.
  * Renders exactly the definitions the pinned/active template actually configures -- never a
  * hardcoded example field. A definition that already has an effective value (per the workspace's
- * own authoritative `entered_values`) is shown read-only, never as an editable input: this ticket
- * builds no correction UI (DH-LAB-005's own scope). No autosave anywhere -- values are only ever
- * sent on an explicit "Enregistrer les valeurs" click, and unsaved draft state lives in this
- * component's own memory only (never localStorage/sessionStorage), so a refresh may discard an
- * in-progress, not-yet-saved draft.
+ * own authoritative `entered_values`) is shown read-only, never as an editable input.
+ *
+ * DH-LAB-005 §8-16/§20: a `NATIVE_TEMPLATE` item's already-entered value offers "Corriger" --
+ * the browser submits only the new value; every structural field is derived server-side from the
+ * predecessor's own pinned template definition. Correction is available regardless of whether
+ * entry is already marked complete (entry completion is not release -- correction stays a
+ * pre-release action all the way up to the moment this order's results are actually released).
+ * §H1-6: "Voir l'historique" exposes the full correction chain via the existing history read,
+ * with the superseded predecessor and the effective successor always labeled unambiguously,
+ * never shown as equally current. No correction-reason field of any kind exists anywhere here
+ * (ADR-045's MVP decision, unchanged by this ticket).
+ *
+ * No autosave anywhere -- values are only ever sent on an explicit "Enregistrer les valeurs"
+ * click, and unsaved draft state lives in this component's own memory only (never localStorage/
+ * sessionStorage), so a refresh may discard an in-progress, not-yet-saved draft.
  */
 export function NativeResultEntryForm({ client, labId, orderId, item, onChanged }: NativeResultEntryFormProps) {
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -41,6 +59,18 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
     submitting: false,
     error: null,
   })
+  const [correctionState, setCorrectionState] = useState<{
+    observationId: string | null
+    draft: string
+    submitting: boolean
+    error: string | null
+  }>({ observationId: null, draft: '', submitting: false, error: null })
+  const [historyState, setHistoryState] = useState<{
+    open: boolean
+    loading: boolean
+    error: string | null
+    observations: LabObservation[] | null
+  }>({ open: false, loading: false, error: null, observations: null })
   const mountedRef = useRef(true)
   useEffect(() => {
     mountedRef.current = true
@@ -49,9 +79,9 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
     }
   }, [])
 
-  // A fresh authoritative `item` (after a save/completion re-fetch, or a lab/order switch)
-  // clears any leftover draft for a definition that is now saved, and clears mutation errors --
-  // never carries stale error/draft state across an authoritative refresh.
+  // A fresh authoritative `item` (after a save/completion/correction re-fetch, or a lab/order
+  // switch) clears any leftover draft for a definition that is now saved, and clears mutation
+  // errors -- never carries stale error/draft state across an authoritative refresh.
   useEffect(() => {
     setDrafts((prev) => {
       const next: Record<string, string> = {}
@@ -64,6 +94,8 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
     setSaveState({ submitting: false, error: null })
     setConfirmingComplete(false)
     setCompleteState({ submitting: false, error: null })
+    setCorrectionState({ observationId: null, draft: '', submitting: false, error: null })
+    setHistoryState({ open: false, loading: false, error: null, observations: null })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.item_id, item.entered_values.length, item.entry_completed])
 
@@ -144,6 +176,64 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
     }
   }
 
+  function startCorrection(observationId: string) {
+    setCorrectionState({ observationId, draft: '', submitting: false, error: null })
+  }
+
+  function cancelCorrection() {
+    setCorrectionState({ observationId: null, draft: '', submitting: false, error: null })
+  }
+
+  async function handleSubmitCorrection(definitionId: string) {
+    if (!correctionState.observationId || !template) return
+    const definition = template.observations.find((o) => o.definition_id === definitionId)
+    if (!definition) return
+    const value = correctionState.draft.trim()
+    if (!value) return
+    setCorrectionState((prev) => ({ ...prev, submitting: true, error: null }))
+    try {
+      await client.correctNativeObservation(
+        labId,
+        orderId,
+        item.item_id,
+        correctionState.observationId,
+        definition.result_type === 'NUMERIC' ? { numeric_value: value } : { text_value: value },
+      )
+      if (!mountedRef.current) return
+      setCorrectionState({ observationId: null, draft: '', submitting: false, error: null })
+      onChanged()
+    } catch (error: unknown) {
+      if (!mountedRef.current) return
+      // DH-LAB-005 §11: a stale predecessor (already corrected elsewhere in the meantime) is a
+      // real, expected conflict, not a generic failure -- re-read authoritative state either way,
+      // never a blind retry.
+      const isConflict = error instanceof ExchangeApiError && error.status === 409
+      setCorrectionState({
+        observationId: null,
+        draft: '',
+        submitting: false,
+        error: isConflict ? CORRECTION_STALE_ERROR : CORRECTION_ERROR,
+      })
+      onChanged()
+    }
+  }
+
+  async function handleToggleHistory() {
+    if (historyState.open) {
+      setHistoryState({ open: false, loading: false, error: null, observations: null })
+      return
+    }
+    setHistoryState({ open: true, loading: true, error: null, observations: null })
+    try {
+      const history = await client.getLabObservationHistory(labId, orderId, item.item_id)
+      if (!mountedRef.current) return
+      setHistoryState({ open: true, loading: false, error: null, observations: history.observations })
+    } catch {
+      if (!mountedRef.current) return
+      setHistoryState({ open: true, loading: false, error: HISTORY_LOAD_ERROR, observations: null })
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
       {template.is_synthetic ? (
@@ -163,6 +253,11 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
         {template.observations.map((definition) => {
           const entered = enteredByDefinition.get(definition.definition_id)
           if (entered) {
+            // DH-LAB-005: a NATIVE_TEMPLATE item's entered value always came through the Native
+            // batch write, so it always answers a controlled template definition -- the Native
+            // controlled correction control always applies here (never the raw, now-hardened
+            // free-structure endpoint).
+            const isCorrectingThis = correctionState.observationId === entered.observation_id
             return (
               <div
                 key={definition.definition_id}
@@ -175,10 +270,58 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
                 <p style={{ margin: 0, fontSize: 'var(--font-size-xs)', color: 'var(--color-neutral-600)' }}>
                   {definition.display_label} ({definition.required ? 'Requis' : 'Facultatif'})
                 </p>
+                <p style={{ margin: '2px 0 0', fontSize: 'var(--font-size-xs)', color: 'var(--color-neutral-600)' }}>
+                  Valeur actuelle
+                </p>
                 <p style={{ margin: '2px 0 0', fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>
                   {entered.numeric_value ?? entered.text_value}
                   {entered.numeric_value && definition.numeric_unit ? ` ${definition.numeric_unit}` : ''}
                 </p>
+
+                {isCorrectingThis ? (
+                  <div style={{ display: 'grid', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+                    <TextInput
+                      label="Nouvelle valeur"
+                      inputMode={definition.result_type === 'NUMERIC' ? 'decimal' : 'text'}
+                      disabled={correctionState.submitting}
+                      value={correctionState.draft}
+                      onChange={(e) =>
+                        setCorrectionState((prev) => ({ ...prev, draft: e.target.value }))
+                      }
+                    />
+                    <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                      Cette correction conservera l'ancienne valeur dans l'historique.
+                    </p>
+                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                      <Button
+                        type="button"
+                        onClick={() => void handleSubmitCorrection(definition.definition_id)}
+                        disabled={correctionState.submitting || correctionState.draft.trim() === ''}
+                      >
+                        {correctionState.submitting ? 'Enregistrement…' : 'Confirmer la correction'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={cancelCorrection}
+                        disabled={correctionState.submitting}
+                      >
+                        Annuler
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 'var(--space-2)' }}>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => startCorrection(entered.observation_id)}
+                      disabled={correctionState.submitting}
+                    >
+                      Corriger
+                    </Button>
+                  </div>
+                )}
               </div>
             )
           }
@@ -209,6 +352,55 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
         </p>
       ) : null}
 
+      {correctionState.error ? (
+        <p role="alert" style={{ margin: 0, color: 'var(--color-danger, #b91c1c)', fontSize: 'var(--font-size-sm)' }}>
+          {correctionState.error}
+        </p>
+      ) : null}
+
+      {enteredByDefinition.size > 0 ? (
+        <div>
+          <Button type="button" variant="secondary" onClick={() => void handleToggleHistory()}>
+            {historyState.open ? "Masquer l'historique" : "Voir l'historique"}
+          </Button>
+          {historyState.open ? (
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              {historyState.loading ? (
+                <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                  Chargement de l'historique…
+                </p>
+              ) : historyState.error ? (
+                <p role="alert" style={{ margin: 0, color: 'var(--color-danger, #b91c1c)', fontSize: 'var(--font-size-sm)' }}>
+                  {historyState.error}
+                </p>
+              ) : historyState.observations ? (
+                <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
+                  {historyState.observations.map((observation) => (
+                    <li
+                      key={observation.observation_id}
+                      style={{
+                        fontSize: 'var(--font-size-sm)',
+                        color: observation.superseded_at
+                          ? 'var(--color-neutral-500)'
+                          : 'var(--color-neutral-900)',
+                      }}
+                    >
+                      <strong>{observation.superseded_at ? 'Historique' : 'Valeur actuelle'}</strong>
+                      {' — '}
+                      {observation.display_label_snapshot} :{' '}
+                      {observation.numeric_value ?? observation.text_value}
+                      {observation.superseded_at
+                        ? ` (remplacée le ${formatDateTime(observation.superseded_at)})`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {!item.entry_completed ? (
         <Button
           type="button"
@@ -233,8 +425,7 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
       ) : confirmingComplete ? (
         <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
           <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
-            Terminer la saisie pour cette analyse ? Vérifiez que toutes les valeurs sont exactes --
-            aucune correction n'est disponible pour le moment.
+            Terminer la saisie pour cette analyse ? Vérifiez que toutes les valeurs sont exactes.
           </p>
           <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
             <Button type="button" onClick={() => void handleComplete()} disabled={completeState.submitting}>

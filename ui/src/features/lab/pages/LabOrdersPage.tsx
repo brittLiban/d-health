@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LabOrderStatus, LabWorkflowOrder, ResultEntryWorkspace } from '../../../api/exchangeTypes'
+import type { Amendment, LabOrderStatus, LabWorkflowOrder, ResultEntryWorkspace } from '../../../api/exchangeTypes'
 import {
   Button,
   Card,
@@ -9,6 +9,7 @@ import {
   StatusBadge,
   type StatusTone,
 } from '../../../design-system'
+import { AmendmentWorkspace } from '../components/AmendmentWorkspace'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { NativeResultEntryForm } from '../components/NativeResultEntryForm'
 import { useLab } from '../LabContext'
@@ -103,6 +104,15 @@ interface WorkspaceState {
   workspace: ResultEntryWorkspace | null
 }
 
+interface AmendmentDiscoveryState {
+  orderId: string
+  loading: boolean
+  error: string | null
+  amendments: Amendment[] | null
+}
+
+const AMENDMENT_DISCOVERY_ERROR = 'Impossible de vérifier si un amendement est en cours pour cet ordre.'
+
 export function LabOrdersPage() {
   const { status: authStatus, activeLab, capabilities, client } = useLab()
 
@@ -114,15 +124,21 @@ export function LabOrdersPage() {
   }>({ entries: [], loading: true, error: null })
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null)
+  const [amendmentDiscovery, setAmendmentDiscovery] = useState<AmendmentDiscoveryState | null>(null)
+  const [startAmendmentState, setStartAmendmentState] = useState<{ submitting: boolean }>({
+    submitting: false,
+  })
   const [mutationState, setMutationState] = useState<{
     action: 'accept' | 'reject' | 'collect' | 'start' | null
     submitting: boolean
     error: string | null
   }>({ action: null, submitting: false, error: null })
-  // DH-LAB-002 §15/§19/§44: one confirmation slot for whichever deliberate action is pending --
-  // reject, collection, or start-processing are mutually exclusive, and the panel (with its
-  // Patient/order context, §44) stays the single confirmation surface for all three.
-  const [confirming, setConfirming] = useState<'reject' | 'collect' | 'start' | null>(null)
+  // DH-LAB-002 §15/§19/§44, extended by DH-LAB-005 §25: one confirmation slot for whichever
+  // deliberate action is pending -- reject, collection, start-processing, and starting an
+  // amendment are all mutually exclusive, and the panel stays the single confirmation surface.
+  const [confirming, setConfirming] = useState<'reject' | 'collect' | 'start' | 'start-amendment' | null>(
+    null,
+  )
 
   // DH-LAB-001 §39-42: same generation-ref/mounted-ref/tenant-ref stale-response discipline
   // DH-CLINIC-005/007 already established, extended here across the lab-switch dimension.
@@ -149,6 +165,8 @@ export function LabOrdersPage() {
     setPrevLabId(activeLab.organization_id)
     setPanel(null)
     setWorkspaceState(null)
+    setAmendmentDiscovery(null)
+    setStartAmendmentState({ submitting: false })
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
     setQueueState({ entries: [], loading: true, error: null })
@@ -284,11 +302,56 @@ export function LabOrdersPage() {
     setWorkspaceState(null)
   }, [panel?.order?.status, panel?.orderId, loadWorkspace])
 
+  // DH-LAB-005 §27-28: amendment discovery is meaningful only while the panel's own order is
+  // COMPLETED -- a PREPARING amendment must survive a page refresh/browser close, so this is a
+  // GET against the server on every panel open, never dependent on local/browser memory of
+  // having started one. Shares `panelGenerationRef` for the identical reason `loadWorkspace` does.
+  const loadAmendmentDiscovery = useCallback(
+    (orderId: string) => {
+      if (!activeLab) return
+      const generation = panelGenerationRef.current
+      const targetLab = activeLab.organization_id
+      const controller = new AbortController()
+
+      setAmendmentDiscovery({ orderId, loading: true, error: null, amendments: null })
+      client
+        .listLabOrderAmendments(targetLab, orderId, { signal: controller.signal })
+        .then((response) => {
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          if (response.order_id !== orderId) {
+            setAmendmentDiscovery({ orderId, loading: false, error: ORDER_MISMATCH_ERROR, amendments: null })
+            return
+          }
+          setAmendmentDiscovery({ orderId, loading: false, error: null, amendments: response.amendments })
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setAmendmentDiscovery({ orderId, loading: false, error: AMENDMENT_DISCOVERY_ERROR, amendments: null })
+        })
+      return () => controller.abort()
+    },
+    [client, activeLab],
+  )
+
+  useEffect(() => {
+    if (panel?.order?.status === 'COMPLETED' && panel.orderId) {
+      return loadAmendmentDiscovery(panel.orderId)
+    }
+    setAmendmentDiscovery(null)
+  }, [panel?.order?.status, panel?.orderId, loadAmendmentDiscovery])
+
   const handleOpenOrder = (orderId: string) => {
     if (panel?.orderId === orderId) return
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
     setWorkspaceState(null)
+    setAmendmentDiscovery(null)
+    setStartAmendmentState({ submitting: false })
     loadPanel(orderId)
   }
 
@@ -299,9 +362,42 @@ export function LabOrdersPage() {
     panelGenerationRef.current += 1
     setPanel(null)
     setWorkspaceState(null)
+    setAmendmentDiscovery(null)
+    setStartAmendmentState({ submitting: false })
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
   }
+
+  // DH-LAB-005 §25: no `targetStatus` recovery predicate here (unlike accept/reject/processing) --
+  // starting an amendment never changes `LabOrder.status` at all (it stays COMPLETED). Success is
+  // judged the same way collection's own milestone-based recovery is: by re-reading the
+  // authoritative amendment discovery list and finding a PREPARING entry, never by inferring it
+  // from any response shape.
+  const runStartAmendment = useCallback(async () => {
+    if (!activeLab || !panel?.order) return
+    const orderId = panel.order.order_id
+    const targetLab = activeLab.organization_id
+    const mutationGeneration = panelGenerationRef.current
+    setStartAmendmentState({ submitting: true })
+    try {
+      await client.startLabOrderAmendment(targetLab, orderId)
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      setConfirming(null)
+      setStartAmendmentState({ submitting: false })
+      if (panelGenerationRef.current === mutationGeneration) {
+        loadAmendmentDiscovery(orderId)
+      }
+    } catch {
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      setConfirming(null)
+      // Ambiguous (network/5xx) or an `AmendmentAlreadyInProgress` conflict (a concurrent tech
+      // already started one) -- re-read authoritative discovery either way, never a blind retry.
+      if (panelGenerationRef.current === mutationGeneration) {
+        loadAmendmentDiscovery(orderId)
+      }
+      setStartAmendmentState({ submitting: false })
+    }
+  }, [activeLab, panel, client, loadAmendmentDiscovery])
 
   // DH-LAB-001 §36/§37/§41: an ambiguous mutation response (network failure, 5xx -- "network
   // failure is not proof of failure") never gets blindly retried. It re-reads authoritative
@@ -851,6 +947,83 @@ export function LabOrdersPage() {
                           ))}
                         </div>
                       ) : null}
+                    </div>
+                  ) : panel.order.status === 'COMPLETED' ? (
+                    // DH-LAB-005 §25-28/§58: amendment discovery/start/resume -- never dependent
+                    // on browser memory. "Commencer un amendement" and "Reprendre l'amendement"
+                    // are mutually exclusive and driven entirely by this GET, never by local
+                    // component state alone. There is no "Annuler l'amendement" control anywhere
+                    // in this branch: PREPARING/RELEASED are the only two amendment states that
+                    // exist in this version of DHealth.
+                    <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
+                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                        Résultats libérés.
+                      </p>
+                      {amendmentDiscovery?.loading ? (
+                        <LoadingSkeleton />
+                      ) : amendmentDiscovery?.error ? (
+                        <p role="alert" style={{ margin: 0, color: 'var(--color-danger, #b91c1c)' }}>
+                          {amendmentDiscovery.error}
+                        </p>
+                      ) : (() => {
+                          const preparing = amendmentDiscovery?.amendments?.find(
+                            (a) => a.status === 'PREPARING',
+                          )
+                          if (preparing) {
+                            return (
+                              <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
+                                <h2 style={{ margin: 0, fontSize: 'var(--font-size-md)', color: 'var(--color-neutral-900)' }}>
+                                  Amendement en cours (n°{preparing.amendment_number})
+                                </h2>
+                                <AmendmentWorkspace
+                                  client={client}
+                                  labId={activeLab!.organization_id}
+                                  orderId={panel.order!.order_id}
+                                  amendmentId={preparing.amendment_id}
+                                />
+                              </div>
+                            )
+                          }
+                          if (confirming === 'start-amendment') {
+                            return (
+                              <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                                <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                                  Commencer un amendement pour cet ordre ? Les résultats déjà
+                                  libérés restent inchangés jusqu'à la libération de cet
+                                  amendement.
+                                </p>
+                                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                                  <Button
+                                    type="button"
+                                    onClick={() => void runStartAmendment()}
+                                    disabled={startAmendmentState.submitting}
+                                  >
+                                    {startAmendmentState.submitting
+                                      ? 'Enregistrement…'
+                                      : "Commencer l'amendement"}
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    onClick={() => setConfirming(null)}
+                                    disabled={startAmendmentState.submitting}
+                                  >
+                                    Annuler
+                                  </Button>
+                                </div>
+                              </div>
+                            )
+                          }
+                          return (
+                            <Button
+                              type="button"
+                              onClick={() => setConfirming('start-amendment')}
+                              disabled={startAmendmentState.submitting}
+                            >
+                              Commencer un amendement
+                            </Button>
+                          )
+                        })()}
                     </div>
                   ) : (
                     <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>

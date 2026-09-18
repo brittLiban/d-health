@@ -3,6 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ExchangeApiError, type ExchangeClient } from '../../../api/exchangeClient'
 import type {
+  AmendmentInspection,
+  AmendmentQueue,
   ExchangeMeResponse,
   LabResultInspection,
   LabWorkflowPatientIdentity,
@@ -113,6 +115,76 @@ function makeInspection(overrides: Partial<LabResultInspection> = {}): LabResult
   }
 }
 
+function makeAmendmentQueue(overrides: Partial<AmendmentQueue> = {}): AmendmentQueue {
+  return {
+    lab_organization_id: 'lab-a',
+    amendments: [
+      {
+        order_id: 'order-a',
+        amendment_id: 'amendment-a',
+        amendment_number: 1,
+        patient: makePatient(),
+        ordering_provider_name: 'Amendment Queue Provider',
+        requested_tests: [
+          {
+            catalog_code_snapshot: 'GLU',
+            catalog_display_name_snapshot: 'Glycémie à jeun',
+            selected_price_amount: null,
+            selected_price_currency: null,
+          },
+        ],
+        started_at: '2026-09-18T12:00:00Z',
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function makeAmendmentInspection(overrides: Partial<AmendmentInspection> = {}): AmendmentInspection {
+  return {
+    amendment: {
+      amendment_id: 'amendment-a',
+      lab_order_id: 'order-a',
+      amendment_number: 1,
+      base_release_version_id: 'version-1',
+      status: 'PREPARING',
+      started_by_identity_id: 'identity-1',
+      started_at: '2026-09-18T12:00:00Z',
+      released_by_identity_id: null,
+      released_at: null,
+    },
+    ready_to_release: true,
+    result_fingerprint: 'amend-fingerprint-1',
+    items: [
+      {
+        item_id: 'item-a',
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        entry_completed_at: '2026-09-18T10:40:00Z',
+        changed_in_this_amendment: true,
+        observations: [
+          {
+            observation_id: 'obs-2',
+            source_code: 'GLU',
+            source_system: 'dhealth-exchange',
+            display_label_snapshot: 'Glycémie',
+            result_type: 'NUMERIC',
+            numeric_value: '6.0000',
+            numeric_unit: 'mmol/L',
+            reference_range_low: null,
+            reference_range_high: null,
+            text_value: null,
+            recorded_at: '2026-09-18T11:50:00Z',
+            amendment_id: 'amendment-a',
+            template_observation_definition_id: 'def-a',
+          },
+        ],
+      },
+    ],
+    ...overrides,
+  }
+}
+
 function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
   return {
     getMe: vi.fn().mockResolvedValue(meDualRole),
@@ -123,6 +195,16 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       order_id: 'order-a',
       released_by_identity_id: 'identity-1',
       released_at: '2026-09-18T11:00:00Z',
+    }),
+    getAmendmentReleaseQueue: vi.fn().mockResolvedValue(makeAmendmentQueue()),
+    getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
+    releaseLabOrderAmendment: vi.fn().mockResolvedValue({
+      release_version_id: 'version-2',
+      version_number: 2,
+      lab_result_release_id: null,
+      amendment_id: 'amendment-a',
+      created_at: '2026-09-18T12:05:00Z',
+      is_amendment: true,
     }),
     ...overrides,
   } as unknown as ExchangeClient
@@ -377,5 +459,117 @@ describe('LabReleasePage', () => {
       ),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Libérer les résultats' })).not.toBeInTheDocument()
+  })
+
+  // -- DH-LAB-005 §44-47: the "Amendements" section --------------------------------------------
+
+  it('RQ-A1: the Amendements tab loads the amendment release queue', async () => {
+    const client = makeClient()
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    expect(await screen.findByText('Amendment Queue Provider')).toBeInTheDocument()
+    expect(screen.getByText(/Amendement n°1/)).toBeInTheDocument()
+  })
+
+  it('AF-UI1: opening an amendment shows its items, "Modifié dans cet amendement", and status textually', async () => {
+    const client = makeClient()
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('Modifié dans cet amendement')).toBeInTheDocument()
+    expect(screen.getByText('En préparation')).toBeInTheDocument()
+  })
+
+  it('AR-UI1: releasing an amendment calls the API with the exact inspected fingerprint', async () => {
+    const releaseLabOrderAmendment = vi.fn().mockResolvedValue({
+      release_version_id: 'version-2',
+      version_number: 2,
+      lab_result_release_id: null,
+      amendment_id: 'amendment-a',
+      created_at: '2026-09-18T12:05:00Z',
+      is_amendment: true,
+    })
+    const client = makeClient({ releaseLabOrderAmendment })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Libérer l'amendement" }))
+    expect(
+      await screen.findByText(/Libérer cet amendement \?/),
+    ).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
+
+    await waitFor(() => expect(releaseLabOrderAmendment).toHaveBeenCalledTimes(1))
+    expect(releaseLabOrderAmendment).toHaveBeenCalledWith('lab-a', 'order-a', 'amendment-a', {
+      expected_result_fingerprint: 'amend-fingerprint-1',
+    })
+    expect(await screen.findByText(/Amendement libéré/)).toBeInTheDocument()
+  })
+
+  it('§42: a stale amendment fingerprint conflict shows the exact required wording and re-inspects, never a silent retry', async () => {
+    const releaseLabOrderAmendment = vi
+      .fn()
+      .mockRejectedValue(new ExchangeApiError(409, 'CONFLICT', 'stale amendment fingerprint'))
+    const getLabOrderAmendment = vi
+      .fn()
+      .mockResolvedValueOnce(makeAmendmentInspection({ result_fingerprint: 'amend-fingerprint-1' }))
+      .mockResolvedValueOnce(makeAmendmentInspection({ result_fingerprint: 'amend-fingerprint-2' }))
+    const client = makeClient({ releaseLabOrderAmendment, getLabOrderAmendment })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Libérer l'amendement" }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
+
+    expect(
+      await screen.findByText(
+        'Les résultats de cet amendement ont changé depuis votre vérification. Veuillez les examiner à nouveau avant de les libérer.',
+      ),
+    ).toBeInTheDocument()
+    await waitFor(() => expect(getLabOrderAmendment).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('button', { name: "Libérer l'amendement" })).toBeInTheDocument()
+    expect(releaseLabOrderAmendment).toHaveBeenCalledTimes(1)
+  })
+
+  it('an amendment with no revisions shows a truthful blocking message, never a release button', async () => {
+    const client = makeClient({
+      getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: false })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(
+      await screen.findByText("Cet amendement n'a encore aucune modification -- la libération n'est pas encore possible."),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "Libérer l'amendement" })).not.toBeInTheDocument()
+  })
+
+  it('no "Annuler l\'amendement" control exists anywhere in the Amendements section', async () => {
+    const client = makeClient()
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Modifié dans cet amendement')
+    expect(screen.queryByText(/Annuler l'amendement/)).not.toBeInTheDocument()
+  })
+
+  it('switching to Amendements never calls the original release queue/inspection endpoints, and vice versa', async () => {
+    const getReleaseQueue = vi.fn().mockResolvedValue(makeQueue())
+    const getAmendmentReleaseQueue = vi.fn().mockResolvedValue(makeAmendmentQueue())
+    const client = makeClient({ getReleaseQueue, getAmendmentReleaseQueue })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await screen.findByText('Fatouma Robleh')
+    expect(getAmendmentReleaseQueue).not.toHaveBeenCalled()
+
+    await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
+    await screen.findByText('Amendment Queue Provider')
+    expect(getReleaseQueue).toHaveBeenCalledTimes(1)
   })
 })
