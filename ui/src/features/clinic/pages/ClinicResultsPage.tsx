@@ -153,6 +153,15 @@ export function ClinicResultsPage() {
     panelGenerationRef.current += 1
   }
 
+  // DH-CLINIC-007 §32: the pending count/queue must never silently undercount. A single
+  // `status=ALL` fetch orders oldest-first across *every* status, so once a provider has more than
+  // the API's own page size of total obligations, newer PENDING entries could fall off the page
+  // while older reviewed ones fill it. Fetching PENDING on its own (its own page of up to 100) is
+  // therefore authoritative for the queue/count; a separate ALL fetch (same cap) supplies history.
+  // History beyond 100 combined obligations is not yet shown -- an accepted, disclosed limit, not a
+  // silent one.
+  const QUEUE_PAGE_LIMIT = 100
+
   const loadQueue = useCallback(() => {
     if (authStatus !== 'ready' || !activeProvider) return
     const generation = ++queueGenerationRef.current
@@ -160,13 +169,28 @@ export function ClinicResultsPage() {
     const controller = new AbortController()
 
     setQueueState((prev) => ({ entries: prev.entries, loading: true, error: null }))
-    client
-      .listResultReviews(targetProvider, { status: 'ALL', signal: controller.signal })
-      .then((response) => {
+    Promise.all([
+      client.listResultReviews(targetProvider, {
+        status: 'PENDING',
+        limit: QUEUE_PAGE_LIMIT,
+        signal: controller.signal,
+      }),
+      client.listResultReviews(targetProvider, {
+        status: 'ALL',
+        limit: QUEUE_PAGE_LIMIT,
+        signal: controller.signal,
+      }),
+    ])
+      .then(([pendingResponse, allResponse]) => {
         if (!mountedRef.current) return
         if (queueGenerationRef.current !== generation) return
         if (currentProviderRef.current !== targetProvider) return
-        setQueueState({ entries: response.entries, loading: false, error: null })
+        const reviewed = allResponse.entries.filter((entry) => entry.review_status !== 'PENDING')
+        setQueueState({
+          entries: [...pendingResponse.entries, ...reviewed],
+          loading: false,
+          error: null,
+        })
       })
       .catch(() => {
         if (controller.signal.aborted) return
@@ -193,26 +217,34 @@ export function ClinicResultsPage() {
     (
       target: ReviewTarget,
       expectedPatientId: string | null,
-      options: { isRecheck?: boolean; knownVersions?: ProviderReleaseVersionSummary[] | null } = {},
+      options: {
+        isRecheck?: boolean
+        // Fast path: switching between already-known versions (§35-37) never needs to re-fetch
+        // the version history itself, so the strip never flickers away mid-switch. Never passed
+        // for a recheck -- a recheck always re-derives history fresh (see below) so its labels
+        // (e.g. a version's own review-status badge) reflect what the mutation actually recorded.
+        knownVersions?: ProviderReleaseVersionSummary[] | null
+        // Keep the patient banner and version strip mounted (as a placeholder, pending the fresh
+        // fetch) instead of falling back to the whole-panel skeleton -- true for a version switch
+        // (implied by `knownVersions`) and explicitly for a post-mutation recheck (§70/§71).
+        preserveContext?: boolean
+      } = {},
     ) => {
       if (!activeProvider) return
       const targetProvider = activeProvider.organization_id
       const generation = ++panelGenerationRef.current
       const isRecheck = options.isRecheck ?? false
-      // A version switch or a post-mutation recheck already knows this order's version topology
-      // (or that it's legacy, via an empty array) -- both keep the patient banner and version
-      // strip on screen and never re-derive legacy-ness from scratch (§16/§35).
       const knownVersions = options.knownVersions ?? null
-      const isSoftReload = knownVersions !== null
+      const preserveContext = options.preserveContext ?? knownVersions !== null
 
       setPanel((prev) => ({
         target,
-        initializing: !isSoftReload,
+        initializing: !preserveContext,
         contentLoading: true,
         checking: isRecheck,
         error: null,
-        patient: isSoftReload ? prev?.patient ?? null : null,
-        versions: isSoftReload ? knownVersions : null,
+        patient: preserveContext ? (prev?.patient ?? null) : null,
+        versions: knownVersions ?? (preserveContext ? (prev?.versions ?? null) : null),
         content: null,
         legacyContent: null,
       }))
@@ -316,7 +348,7 @@ export function ClinicResultsPage() {
           })
       }
 
-      if (isSoftReload) {
+      if (knownVersions !== null) {
         if (knownVersions.length > 0) {
           fetchVersionContent(knownVersions)
         } else {
@@ -341,8 +373,29 @@ export function ClinicResultsPage() {
           }
 
           if (history.versions.length === 0) {
-            // Genuinely legacy/unversioned (§7/§51) -- fall back to the live/legacy read.
-            fetchLegacyContent()
+            if (target.kind === 'legacy') {
+              // Genuinely legacy/unversioned (§7/§51) -- fall back to the live/legacy read.
+              fetchLegacyContent()
+            } else {
+              // A versioned target whose freshly-read history now shows no versions at all is a
+              // genuine consistency failure -- never silently reinterpreted as legacy.
+              setPanel((prev) =>
+                prev && targetsEqual(prev.target, target)
+                  ? { ...prev, initializing: false, contentLoading: false, error: RESULT_CONSISTENCY_ERROR }
+                  : prev,
+              )
+            }
+            return
+          }
+
+          if (target.kind === 'legacy') {
+            // The caller believed this order was legacy/unversioned, but fresh history disagrees
+            // -- fail closed (§5) rather than silently rendering whichever version is "latest".
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? { ...prev, initializing: false, contentLoading: false, error: RESULT_CONSISTENCY_ERROR }
+                : prev,
+            )
             return
           }
 
@@ -373,7 +426,7 @@ export function ClinicResultsPage() {
     if (!panel || !panel.versions) return
     loadPanel(
       { kind: 'version', orderId: panel.target.orderId, versionId },
-      null,
+      panel.patient?.patient_id ?? null,
       { knownVersions: panel.versions },
     )
   }
@@ -388,9 +441,10 @@ export function ClinicResultsPage() {
   const reReadPanelAfterAmbiguousMutation = (target: ReviewTarget) => {
     // DH-CLINIC-007 §70/§71: never assume success or blindly re-POST -- re-read the authoritative
     // state and let it speak for itself, whether that turns out to be terminal or still PENDING.
-    // Reuses the already-known version topology so the patient banner and version strip stay on
-    // screen throughout the re-check, rather than flickering away.
-    loadPanel(target, null, { isRecheck: true, knownVersions: panel?.versions ?? null })
+    // Always re-derives the version history fresh (never the `knownVersions` fast path) so a
+    // version's own review-status label reflects what the mutation actually recorded; the patient
+    // banner and version strip still stay mounted throughout via `preserveContext`.
+    loadPanel(target, panel?.patient?.patient_id ?? null, { isRecheck: true, preserveContext: true })
   }
 
   const handleSubmitReview = () => {
@@ -517,9 +571,9 @@ export function ClinicResultsPage() {
         ) : null}
       </header>
 
-      {queueState.loading ? (
+      {queueState.loading && queueState.entries.length === 0 ? (
         <LoadingSkeleton />
-      ) : queueState.error ? (
+      ) : queueState.error && queueState.entries.length === 0 ? (
         <ErrorState code="NETWORK_ERROR" onRetry={() => void reload()} />
       ) : queueState.entries.length === 0 ? (
         <EmptyState title="Aucun résultat disponible">
@@ -566,6 +620,9 @@ export function ClinicResultsPage() {
                               : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
                           </span>
                           {entry.released_at ? <> · Libéré le {formatDateTime(entry.released_at)}</> : null}
+                        </p>
+                        <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--font-size-xs, 0.75rem)', color: 'var(--color-neutral-500)' }}>
+                          Référence de l'ordre : <code>{entry.order_id}</code>
                         </p>
                       </div>
                       <Button
@@ -614,6 +671,9 @@ export function ClinicResultsPage() {
                               : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
                           </span>
                           {entry.reviewed_at ? <> · Revu le {formatDateTime(entry.reviewed_at)}</> : null}
+                        </p>
+                        <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--font-size-xs, 0.75rem)', color: 'var(--color-neutral-500)' }}>
+                          Référence de l'ordre : <code>{entry.order_id}</code>
                         </p>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>

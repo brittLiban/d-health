@@ -172,11 +172,19 @@ jobs:
         run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhclinic006_postgres_qualification.py
       - name: DH-CLINIC-007 real PostgreSQL result-review concurrency qualification
         # Same disposable postgres:16-alpine service. The version-specific review row-locking
-        # behavior itself (PG-R1, PG-R3) is already qualified by the DH-EX-014A/014B steps above --
-        # DH-CLINIC-007 added no new locking or mutation code, only a read-only provider review
-        # queue. This proves the one net-new scenario those don't isolate (PG-R2: identical
-        # dispositions racing the same version never let a later caller silently overwrite the
-        # winning reviewer's provenance) plus a queue-consistency sanity check after the race.
+        # behavior itself (PG-R1: opposite dispositions racing the same version; PG-R3: review vs.
+        # amendment-release races never migrating a review between versions) is the exact same
+        # DoctorReviewRepository._mark/_mark_in_session and LabResultAmendmentRepository
+        # machinery DH-CLINIC-007 added no new code to -- it was qualified against real PostgreSQL
+        # locally this ticket (test_dhex014a_postgres_qualification.py's
+        # test_two_clinicians_racing_the_same_version_review_preserve_one_terminal_disposition and
+        # test_dhex014b_postgres_qualification.py's own PG-R1/PG-R3 tests, 14/14 passed against a
+        # disposable PostgreSQL 18 instance migrated through 0023_provider_lab_routes), not CI-wired
+        # here -- those two suites remain opt-in/manual, unchanged by this ticket. This step proves
+        # the one net-new scenario neither of those suites isolates (PG-R2: identical dispositions
+        # racing the same version never let a later caller silently overwrite the winning reviewer's
+        # provenance) plus a queue-consistency sanity check after the race, and is the only
+        # DH-CLINIC-007 PG evidence this CI run itself produces.
         env:
           DHCLINIC007_PG_HOST: localhost
           DHCLINIC007_PG_PORT: 5432

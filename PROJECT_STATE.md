@@ -15767,8 +15767,52 @@ ones; it exposes the existing state machine operationally.
    clinic-suite regression run (not by the new page's own test file, which supplies a complete mock).
    Fixed by extending both mocks to the new contract shape.
 
-None of the above reached a commit before being fixed — all caught during this session's own local
-qualification, before `git commit` was ever run for the affected file.
+None of the above (1-5) reached a commit before being fixed — all caught during this session's own
+local qualification, before `git commit` was ever run for the affected file.
+
+**Six more findings surfaced by an independent review after the first four commits had already
+landed and been pushed — fixed in a same-session follow-up commit, honestly recorded here rather
+than folded silently into the numbering above:**
+
+6. **`reReadPanelAfterAmbiguousMutation` reused the *pre-mutation* `knownVersions` snapshot,** so a
+   version's own review-status label in the tab strip stayed stale after that exact version was
+   just reviewed (e.g. the tab kept saying "À examiner" while the content area correctly said "Revu
+   — aucun suivi requis"). Fixed by decoupling "keep the patient banner/strip mounted during the
+   fetch" (`preserveContext`) from "skip re-fetching the version list" (`knownVersions`, now used
+   only by a genuine version *switch*) — a recheck always re-derives history fresh. Strengthened
+   UI-R5 to assert the tab's own label updates.
+7. **`GET .../result-reviews?status=ALL` alone can silently undercount the pending queue.** The
+   endpoint orders oldest-first across every status and applies its `limit` after that ordering;
+   with more than one page of total obligations, newer PENDING entries could fall off the page
+   before older reviewed ones did. Fixed by fetching `status=PENDING` (authoritative for the
+   count/queue) and `status=ALL` (for history) as two separate calls, each at the endpoint's own
+   100-item cap — an accepted, disclosed limit on combined history depth, not a silent one.
+8. **Switching versions or rechecking after a mutation passed `expectedPatientId: null`,**
+   skipping the patient-identity cross-check §42 requires on every content load. Fixed to pass the
+   already-known `panel.patient.patient_id`.
+9. **A queue/history disagreement (entry says `legacy_unversioned`, but fresh version history is
+   non-empty) silently rendered whichever version was "latest".** This is exactly the §5 behavior
+   the whole ticket exists to forbid. Fixed to fail closed with the same generic consistency error
+   used everywhere else, rather than picking a version nothing asked for.
+10. **The whole-panel skeleton was gated on `queueState.loading` alone,** so every background queue
+    refresh (including the one this page itself triggers right after a review mutation) briefly
+    unmounted the detail panel — hiding the very "Vérification de l'état de la revue…"/"already
+    reviewed" messages §71 exists to show. Fixed to show the skeleton only on a genuine first load
+    (`loading && entries.length === 0`); once entries exist, a background reload never nukes the
+    already-rendered panel.
+11. **DH-CLINIC-005's own RS6 regression:** the rewritten queue rows dropped the secondary order-
+    reference line the old list carried, leaving two orders for the same patient visually
+    indistinguishable before opening either. Restored as a small monospace "Référence de l'ordre"
+    line per row.
+12. **`.github/workflows/ci.yml`'s new step comment overclaimed** that PG-R1/PG-R3 were "already
+    qualified by the DH-EX-014A/014B steps above" — no such CI steps exist; those two suites are
+    opt-in/manual and were qualified locally this ticket, not in CI. Corrected the comment to state
+    exactly what this CI run itself does and does not prove.
+
+Also added two test gaps an independent review flagged: a legacy order's confirmed review targets
+`reviewLegacyOrderNoFollowUp`, never a version-specific route (UI-V6); and a stale review-mutation
+response for a since-switched-away version never touches the newly-opened version's own controls
+(RR12).
 
 **Evidence.**
 
@@ -15780,14 +15824,15 @@ qualification, before `git commit` was ever run for the affected file.
   pre-existing `test_dhex014a_postgres_qualification.py`/`test_dhex014b_postgres_qualification.py`
   (PG-R1/PG-R3, 14/14 passed) re-run against the same database to reconfirm on the current schema. A
   matching CI step was added mirroring the DH-CLINIC-006 precedent.
-- UI: the rewritten `ClinicResultsPage.test.tsx` — **22 passed**. Full clinic-feature suite plus
-  `exchangeClient.test.ts` together — **200 passed** across 11 files (0 failed), after fixing the two
-  pre-existing regression suites broken by the mock-client contract gap (see "Errors found" #5). Full
-  project suite (all files) — **403 passed** with 4 unrelated files dropped by this sandbox's own
-  known, pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner: Timeout
-  waiting for worker to respond`, not a test assertion failure); all 4 re-run individually and
-  passed cleanly (37/37) — none touch this ticket's files. `tsc -b --noEmit`: clean. `npm run build`
-  + bundle secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
+- UI: the rewritten `ClinicResultsPage.test.tsx`, after the post-push fix commit (items 6-12 above,
+  plus the two new test-gap cases) — **24 passed** (was 22 before that commit). Full clinic-feature
+  suite plus `exchangeClient.test.ts` together — **202 passed** across 11 files (0 failed), after
+  fixing the two pre-existing regression suites broken by the mock-client contract gap (see "Errors
+  found" #5). Full project suite (all files) — **403 passed** with 4 unrelated files dropped by this
+  sandbox's own known, pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner:
+  Timeout waiting for worker to respond`, not a test assertion failure); all 4 re-run individually
+  and passed cleanly (37/37) — none touch this ticket's files. `tsc -b --noEmit`: clean. `npm run
+  build` + bundle secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
   previously-disclosed `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this
   codebase already accepted for this exact file's own prior version and for `LabRoutingStep.tsx`'s
   identical idiom (DH-CLINIC-006's own precedent), non-blocking.

@@ -163,6 +163,28 @@ function makeReviewResponse(overrides: Partial<DoctorReviewResponse> = {}): Doct
   }
 }
 
+/**
+ * A `listResultReviews` mock that actually filters by `status`, mirroring the real backend and
+ * this page's own two-call (`PENDING` + `ALL`) `loadQueue` shape -- a plain
+ * `vi.fn().mockResolvedValue(...)` would return the *same* unfiltered response to both calls,
+ * which only matters (causes duplicate/miscounted entries) once a non-PENDING entry is present.
+ * `.setEntries` lets a test mutate the underlying data mid-flow (e.g. after a mocked mutation)
+ * without juggling `mockResolvedValueOnce` call-order against this page's two parallel requests.
+ */
+function mockListResultReviews(initialEntries: ProviderResultReviewQueueEntry[]) {
+  let entries = initialEntries
+  const fn = vi.fn((_providerId: string, options: { status?: string } = {}) => {
+    const status = options.status ?? 'PENDING'
+    const filtered = status === 'ALL' ? entries : entries.filter((e) => e.review_status === status)
+    return Promise.resolve(makeQueueResponse(filtered))
+  })
+  return Object.assign(fn, {
+    setEntries: (next: ProviderResultReviewQueueEntry[]) => {
+      entries = next
+    },
+  })
+}
+
 function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
   return {
     getMe: vi.fn().mockResolvedValue(me),
@@ -206,11 +228,9 @@ describe('ClinicResultsPage', () => {
 
   it('UI-Q2: a completed review remains discoverable in the history section, never disappearing', async () => {
     const client = makeClient({
-      listResultReviews: vi.fn().mockResolvedValue(
-        makeQueueResponse([
-          makeQueueEntry({ review_id: 'r1', review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
-        ]),
-      ),
+      listResultReviews: mockListResultReviews([
+        makeQueueEntry({ review_id: 'r1', review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
+      ]),
     })
     render(<ClinicApp client={client} initialTab="results" />)
 
@@ -392,6 +412,40 @@ describe('ClinicResultsPage', () => {
     expect(client.getReleaseVersion).not.toHaveBeenCalled()
   })
 
+  it('UI-V6: confirming a legacy order review targets the legacy mutation route, never the version-specific one', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            order_id: 'order-legacy',
+            release_version_id: null,
+            release_version_number: null,
+            legacy_unversioned: true,
+            released_at: null,
+          }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-legacy', { versions: [] })),
+      getOrderResults: vi.fn().mockResolvedValue(makeLegacyResults()),
+      reviewLegacyOrderNoFollowUp: vi.fn().mockResolvedValue(
+        makeReviewResponse({ order_id: 'order-legacy', release_version_id: null }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    await waitFor(() =>
+      expect(client.reviewLegacyOrderNoFollowUp).toHaveBeenCalledWith('provider-a', 'order-legacy'),
+    )
+    expect(client.reviewReleaseVersionNoFollowUp).not.toHaveBeenCalled()
+    expect(client.reviewReleaseVersionFollowUp).not.toHaveBeenCalled()
+  })
+
   it('UI-R1: exactly two disposition choices are offered for a pending review, never a third', async () => {
     const client = makeClient({
       listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
@@ -469,15 +523,21 @@ describe('ClinicResultsPage', () => {
     expect(client.reviewLegacyOrderNoFollowUp).not.toHaveBeenCalled()
   })
 
-  it('UI-R5: a successful review is shown as terminal and the queue count drops', async () => {
-    const listResultReviews = vi
-      .fn()
-      .mockResolvedValueOnce(makeQueueResponse([makeQueueEntry()]))
-      .mockResolvedValueOnce(
-        makeQueueResponse([
-          makeQueueEntry({ review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
-        ]),
-      )
+  it('UI-R5: a successful review is shown as terminal, the queue count drops, and the version tab label refreshes', async () => {
+    const listResultReviews = mockListResultReviews([makeQueueEntry()])
+    const reviewedHistory = makeHistory('order-a', {
+      versions: [
+        {
+          release_version_id: 'rel-v1',
+          release_version_number: 1,
+          is_amendment: false,
+          released_at: '2026-09-17T09:30:00Z',
+          review_status: 'NO_FOLLOW_UP_REQUIRED',
+          reviewed_at: '2026-09-17T10:00:00Z',
+          reviewed_by_practitioner_reference_id: 'prac-2',
+        },
+      ],
+    })
     const client = makeClient({
       listResultReviews,
       getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
@@ -485,7 +545,13 @@ describe('ClinicResultsPage', () => {
         .fn()
         .mockResolvedValueOnce(makeVersionContent())
         .mockResolvedValueOnce(makeVersionContent({ review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' })),
-      reviewReleaseVersionNoFollowUp: vi.fn().mockResolvedValue(makeReviewResponse()),
+      reviewReleaseVersionNoFollowUp: vi.fn().mockImplementation(async () => {
+        listResultReviews.setEntries([
+          makeQueueEntry({ review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
+        ])
+        vi.mocked(client.getReleaseVersions).mockResolvedValueOnce(reviewedHistory)
+        return makeReviewResponse()
+      }),
     })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
@@ -497,6 +563,9 @@ describe('ClinicResultsPage', () => {
 
     await waitFor(() => expect(screen.getByText('Résultats à examiner (0)')).toBeInTheDocument())
     expect(screen.getByText(/Revue enregistrée/)).toBeInTheDocument()
+    // The recheck re-derives the version history fresh (never the stale switch-time snapshot), so
+    // the tab's own status label reflects what the mutation actually recorded.
+    expect(screen.getByRole('tab', { name: /Version 1 — Revu — aucun suivi requis/ })).toBeInTheDocument()
   })
 
   it('UI-R6: a 409 conflict from a concurrent reviewer never overwrites -- shows the authoritative outcome', async () => {
@@ -693,6 +762,71 @@ describe('ClinicResultsPage', () => {
     })
     // No assertion beyond "this did not throw" -- React would warn/throw on a state update
     // against an unmounted component if the generation/mounted guard were missing.
+  })
+
+  it("RR12: a stale review-mutation response for a since-switched-away version must not touch the newly opened version's controls", async () => {
+    const mutationV1 = deferred<DoctorReviewResponse>()
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ release_version_id: 'rel-v1', release_version_number: 1 }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v1',
+              release_version_number: 1,
+              is_amendment: false,
+              released_at: '2026-09-17T09:00:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-17T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi.fn((_providerId: string, _orderId: string, versionId: string) =>
+        Promise.resolve(
+          versionId === 'rel-v1'
+            ? makeVersionContent({ release_version_id: 'rel-v1', results: [] })
+            : makeVersionContent({ release_version_id: 'rel-v2', is_amendment: true, results: [] }),
+        ),
+      ),
+      reviewReleaseVersionNoFollowUp: vi.fn().mockReturnValue(mutationV1.promise),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' })) // stalls
+
+    await user.click(screen.getByRole('tab', { name: /^Version 2/ })) // switch away before it resolves
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true'),
+    )
+
+    await act(async () => {
+      mutationV1.resolve(makeReviewResponse({ release_version_id: 'rel-v1' }))
+      await Promise.resolve()
+    })
+
+    // Version 2's own controls remain untouched by Version 1's late-arriving mutation response.
+    expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByRole('radiogroup', { name: 'Décision de revue' })).toBeInTheDocument()
+    expect(screen.queryByText(/Revue enregistrée/)).not.toBeInTheDocument()
   })
 
   it('patient identity is shown before any observation value in the detail panel', async () => {
