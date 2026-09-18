@@ -344,7 +344,8 @@ jobs:
           # control that actually matters, and it is checked above.
           if git grep -nIE '(PASSWORD|PASSPHRASE|SECRET|TOKEN|PRIVATE_KEY)[A-Z_]*[=:][[:space:]]*['"'"'"]?[A-Za-z0-9/+._-]{12,}' \
                -- . ':(exclude).env.example' ':(exclude)*.md' \
-                    ':(exclude)*/tests/*' ':(exclude)provisioning/demo/*' > /tmp/hits; then
+                    ':(exclude)*/tests/*' ':(exclude)provisioning/demo/*' \
+                    ':(exclude)demo/native/*' > /tmp/hits; then
             echo "::error::possible tracked secret:"; cat /tmp/hits; exit 1
           fi
           echo "ok — no secret-shaped assignments found"
@@ -2426,7 +2427,86 @@ jobs:
         run: COMPOSE_PROFILES=backup docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
       - name: Demo compose parses
         run: docker compose -f provisioning/demo/docker-compose.demo.yml config -q
+      - name: Native demo compose parses (DH-DEMO-001)
+        run: docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env config -q
       - name: A real .env must never have appeared in the checkout
         run: |
           test ! -f .env || { echo "::error::a .env exists in the checkout"; exit 1; }
           rm -f "$RUNNER_TEMP/ci.env"; echo ok
+
+  native-demo-boot:
+    name: native demo — real boot (DH-DEMO-001)
+    runs-on: ubuntu-latest
+    # Deliberately its own job, not folded into `compose` (config-parsing only) or any other job
+    # above: this is the one place in this whole workflow that actually runs
+    # `docker compose ... up` against real images, proving DH-DEMO-001's own central claim --
+    # a native-only DHealth Clinic -> Exchange -> DHealth Lab environment reaches a genuinely
+    # healthy, browser-reachable state without ever starting `openmrs-*`/`openelis-*` at all.
+    # `docker-compose.native-demo.yml` never appears as a step here for anyone but `scripts/
+    # demo/*.sh` -- this job exercises the exact same developer-facing commands, not a shortcut
+    # around them, so a regression in those scripts is caught here too.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start the DHealth Native Demo
+        run: ./scripts/demo/up.sh
+
+      - name: Status
+        run: ./scripts/demo/status.sh
+
+      - name: Smoke test — Keycloak realm is reachable through Caddy
+        run: |
+          curl -fsk https://id.localhost/realms/dhealth-exchange/.well-known/openid-configuration \
+            | grep -q '"issuer"'
+
+      - name: Smoke test — Exchange API is reachable through Caddy and enforces auth
+        run: |
+          # 401 (not a connection failure, not 502/404) is exactly the expected, correct answer
+          # for an unauthenticated request -- proof Caddy → adapter routing and the adapter's own
+          # FastAPI process are both genuinely up, not merely that a container is running.
+          code=$(curl -sk -o /dev/null -w '%{http_code}' https://exchange.localhost/exchange/v1/me)
+          test "$code" = "401" || { echo "::error::expected 401, got $code"; exit 1; }
+
+      - name: Smoke test — DHealth UI is served through Caddy
+        run: |
+          curl -fsk https://app.localhost/ | grep -qi '<html'
+
+      - name: Reset is repeatable (D2) and survives workflow mutation (D3)
+        run: |
+          ./scripts/demo/reset.sh
+          ./scripts/demo/reset.sh
+
+      - name: Reset safety refuses a non-demo target (D4, mandatory negative control)
+        run: |
+          COMPOSE="docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env"
+
+          # Fact 1 (database name): `_require_demo_environment` checks `settings.db_name` --  a
+          # pure string compare -- before it ever opens a connection, so this exercises exactly
+          # that check, not a "database does not exist" connection failure. Asserted on stderr
+          # content, not just exit code, so a future regression that makes this fail for some
+          # unrelated reason is still caught as a failure of THIS test.
+          set +e
+          output=$($COMPOSE exec -T -e ADAPTER_DB_NAME=not_the_demo_database adapter \
+            python -m daher_adapter.exchange.demo_seed reset 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" -ne 0 || { echo "::error::demo_seed did not refuse a wrong database name"; exit 1; }
+          echo "$output" | grep -q "REFUSED" || { echo "::error::refusal did not print REFUSED"; exit 1; }
+          echo "$output" | grep -q "not_the_demo_database" || { echo "::error::refusal did not name the offending database"; exit 1; }
+
+          # Fact 2 (ADAPTER_DEMO_ENVIRONMENT): the real demo database name, but the marker env var
+          # this process's own environment must carry is blanked out -- a distinct, independent
+          # check from fact 1 above.
+          set +e
+          output=$($COMPOSE exec -T -e ADAPTER_DEMO_ENVIRONMENT= adapter \
+            python -m daher_adapter.exchange.demo_seed reset 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" -ne 0 || { echo "::error::demo_seed did not refuse a blank ADAPTER_DEMO_ENVIRONMENT"; exit 1; }
+          echo "$output" | grep -q "ADAPTER_DEMO_ENVIRONMENT" || { echo "::error::refusal did not name ADAPTER_DEMO_ENVIRONMENT"; exit 1; }
+
+      - name: Tear down (including volumes -- disposable CI runner only)
+        if: always()
+        run: ./scripts/demo/down.sh -v
