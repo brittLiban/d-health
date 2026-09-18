@@ -17024,7 +17024,8 @@ qualified locally.
 2. `66d2346` — `test(DH-LAB-005): real PostgreSQL qualification for the four new concurrency races`
 3. `d47fab5` — `feat(DH-LAB-005): frontend -- Native controlled correction, amendment lifecycle, version history`
 4. `2ce9c79` — `feat(DH-LAB-005): frontend -- expose lab-facing exact release-version history/content`
-5. (this commit) — `docs(DH-LAB-005): record evidence, ADR-045/ADR-048 addenda`
+5. `ac68e56` — `docs(DH-LAB-005): record evidence, ADR-045/ADR-048/ADR-053 addenda`
+6. (this commit) — `fix(DH-LAB-005): ruff line-length in test_exchange_results_api.py amendment-fingerprint helpers`
 
 **Direct master, no PR — confirmed.** No branch was created.
 

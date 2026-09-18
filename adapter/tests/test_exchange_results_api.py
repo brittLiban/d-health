@@ -2869,7 +2869,9 @@ def _amendment_releaser_token(client, private_key, lab_id, name: str) -> str:
     return make_token(private_key, subject=f"amend-releaser-{name}")
 
 
-def _current_amendment_fingerprint(client: TestClient, token: str, lab_id, order_id, amendment_id) -> str:
+def _current_amendment_fingerprint(
+    client: TestClient, token: str, lab_id, order_id, amendment_id
+) -> str:
     """DH-LAB-005 §37-42: fetches the exact ``result_fingerprint`` an amendment release request
     must echo back -- the inspection step every releaser is now required to actually perform."""
     response = client.get(_amendment_url(lab_id, order_id, amendment_id), headers=_auth(token))
@@ -2879,7 +2881,9 @@ def _current_amendment_fingerprint(client: TestClient, token: str, lab_id, order
 
 def _release_amendment(client, private_key, lab_id, order_id, amendment_id, name: str) -> dict:
     releaser_token = _amendment_releaser_token(client, private_key, lab_id, name)
-    fingerprint = _current_amendment_fingerprint(client, releaser_token, lab_id, order_id, amendment_id)
+    fingerprint = _current_amendment_fingerprint(
+        client, releaser_token, lab_id, order_id, amendment_id
+    )
     response = client.post(
         f"{_amendment_url(lab_id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
@@ -2944,7 +2948,9 @@ def test_amendment_golden_flow_provider_history_and_explicit_review(
     assert corrected.json()["supersedes_observation_id"] == original.json()["observation_id"]
 
     releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendGolden-v2")
-    fingerprint = _current_amendment_fingerprint(client, releaser_token, lab.id, order_id, amendment_id)
+    fingerprint = _current_amendment_fingerprint(
+        client, releaser_token, lab.id, order_id, amendment_id
+    )
     released = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
