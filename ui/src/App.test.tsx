@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import App from './App'
@@ -114,7 +114,12 @@ describe('App', () => {
   it('shows an honest "not yet available" screen for an unbuilt nav item, not a broken one', async () => {
     const user = userEvent.setup()
     render(<App />)
-    await user.click(screen.getByRole('button', { name: /Laboratoire/ }))
+    // Scoped to the sidebar nav landmark specifically -- DH-LAB-001 added a second, unrelated
+    // "DHealth Laboratoire (Natif)" header button that also matches a loose /Laboratoire/
+    // name search; this placeholder sidebar item (still unbuilt in the reference-connector
+    // Maternity nav, distinct from the new native app) is the one this test means to click.
+    const nav = screen.getByRole('navigation', { name: 'Navigation principale' })
+    await user.click(within(nav).getByRole('button', { name: /Laboratoire/ }))
     expect(screen.getByText("Cet écran n'est pas encore disponible")).toBeInTheDocument()
   })
 

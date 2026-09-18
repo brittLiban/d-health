@@ -4,6 +4,7 @@ import { AppShell, EmptyState, Navigation, type NavItem } from './design-system'
 import { logoutLocalSessions, navigateToKeycloakEndSession } from './features/auth/logout'
 import { ExchangeAuthGate, ExchangeAuthProvider, useExchangeAuth } from './features/auth/exchange'
 import { ClinicApp } from './features/clinic/ClinicApp'
+import { LabApp } from './features/lab/LabApp'
 import { MaternityBoardPage } from './features/maternity/MaternityBoardPage'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
 import { PatientWorkspace } from './features/patients/PatientWorkspace'
@@ -24,7 +25,7 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 export interface AppProps {
-  initialApp?: 'maternity' | 'clinic'
+  initialApp?: 'maternity' | 'clinic' | 'lab'
 }
 
 /**
@@ -44,11 +45,30 @@ function NativeClinic({ onSwitchApp }: { onSwitchApp: () => void }) {
   )
 }
 
+/**
+ * Native DHealth Lab surface (DH-LAB-001). Same shared native-auth layer as NativeClinic above --
+ * a fresh `ExchangeAuthProvider` instance, wrapped exactly as ADR-050 Decision 6 anticipated
+ * ("wrap it in its own ExchangeAuthProvider and ExchangeAuthGate, exactly as App.tsx does for
+ * Clinic"). Native Lab owns no OAuth/OIDC code of its own.
+ */
+function NativeLab({ onSwitchApp }: { onSwitchApp: () => void }) {
+  const auth = useExchangeAuth()
+  return (
+    <ExchangeAuthGate auth={auth} appLabel="DHealth Laboratoire">
+      {auth.client ? (
+        <LabApp client={auth.client} onLogout={auth.logout} onSwitchApp={onSwitchApp} />
+      ) : null}
+    </ExchangeAuthGate>
+  )
+}
+
 function App({ initialApp = 'maternity' }: AppProps = {}) {
-  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic'>(() => {
+  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic' | 'lab'>(() => {
     if (typeof window !== 'undefined' && window.location?.search) {
       const params = new URLSearchParams(window.location.search)
-      if (params.get('app') === 'clinic') return 'clinic'
+      const requested = params.get('app')
+      if (requested === 'clinic') return 'clinic'
+      if (requested === 'lab') return 'lab'
     }
     return initialApp
   })
@@ -79,6 +99,16 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
     return (
       <ExchangeAuthProvider>
         <NativeClinic onSwitchApp={() => setActiveApp('maternity')} />
+      </ExchangeAuthProvider>
+    )
+  }
+
+  // Native DHealth Lab surface (DH-LAB-001) -- same §7 SSO-session-survives-app-switch law as
+  // Clinic above: unmounting this ExchangeAuthProvider drops only its in-memory token state.
+  if (activeApp === 'lab') {
+    return (
+      <ExchangeAuthProvider>
+        <NativeLab onSwitchApp={() => setActiveApp('clinic')} />
       </ExchangeAuthProvider>
     )
   }
@@ -120,22 +150,40 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
       navigation={<Navigation items={NAV_ITEMS} activeId={activeNavId} onSelect={handleSelectNav} />}
       onLogout={handleLogout}
       headerActions={
-        <button
-          type="button"
-          onClick={() => setActiveApp('clinic')}
-          aria-label="Basculer vers DHealth Clinique"
-          style={{
-            background: 'transparent',
-            border: '1px solid var(--color-primary-contrast)',
-            color: 'var(--color-primary-contrast)',
-            borderRadius: '4px',
-            padding: 'var(--space-1) var(--space-3)',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-          }}
-        >
-          DHealth Clinique (Natif)
-        </button>
+        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <button
+            type="button"
+            onClick={() => setActiveApp('clinic')}
+            aria-label="Basculer vers DHealth Clinique"
+            style={{
+              background: 'transparent',
+              border: '1px solid var(--color-primary-contrast)',
+              color: 'var(--color-primary-contrast)',
+              borderRadius: '4px',
+              padding: 'var(--space-1) var(--space-3)',
+              cursor: 'pointer',
+              fontSize: '0.9rem',
+            }}
+          >
+            DHealth Clinique (Natif)
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveApp('lab')}
+            aria-label="Basculer vers DHealth Laboratoire"
+            style={{
+              background: 'transparent',
+              border: '1px solid var(--color-primary-contrast)',
+              color: 'var(--color-primary-contrast)',
+              borderRadius: '4px',
+              padding: 'var(--space-1) var(--space-3)',
+              cursor: 'pointer',
+              fontSize: '0.9rem',
+            }}
+          >
+            DHealth Laboratoire (Natif)
+          </button>
+        </div>
       }
     >
       {content}

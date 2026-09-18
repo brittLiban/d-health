@@ -381,6 +381,44 @@ export interface PatientCreateOutcome {
   created: boolean
 }
 
+/**
+ * DH-LAB-001 §16/§17: the minimal, lab-safe human-identity projection -- name and exact date of
+ * birth only, deliberately never `PatientIdentitySummary`'s own `contact_channel_type`/
+ * `contact_value` fields. Native Lab staff need enough identity to safely distinguish one patient
+ * from another, not the provider's full directory entry.
+ */
+export interface LabWorkflowPatientIdentity {
+  patient_id: string
+  display_name: string | null
+  date_of_birth: string | null
+}
+
+export interface LabWorkflowOrderItem {
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  selected_price_amount: string | null
+  selected_price_currency: string | null
+}
+
+/**
+ * DH-LAB-001 §22: the selected lab's own narrow clinical-work view of an assigned order.
+ * `patient_display_name` is the legacy `PatientReference` snapshot, kept only for API
+ * compatibility -- `patient` (§16/§17) is the authoritative field Native Lab actually renders
+ * identity from. `collection_recorded_at: null` means "not recorded in DHealth," never a claim
+ * that collection did not happen (a legacy order may predate DH-EX-011).
+ */
+export interface LabWorkflowOrder {
+  order_id: string
+  status: LabOrderStatus
+  selected_at: string
+  updated_at: string
+  patient_display_name: string | null
+  patient: LabWorkflowPatientIdentity
+  ordering_provider_name: string
+  requested_tests: LabWorkflowOrderItem[]
+  collection_recorded_at: string | null
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

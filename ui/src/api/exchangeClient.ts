@@ -29,7 +29,9 @@ import type {
   LabOrderIntent,
   LabOrderIntentCreateOutcome,
   LabOrderIntentCreateRequest,
+  LabOrderStatus,
   LabOrderSummary,
+  LabWorkflowOrder,
   PatientCreateOutcome,
   PatientCreateRequest,
   PatientDirectoryEntry,
@@ -838,6 +840,87 @@ export class ExchangeClient {
       options.token,
     )
     return { order: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders
+   * DH-LAB-001 §14: the selected lab's own bounded, deterministically-ordered assigned-order
+   * work queue. `status` filters by the existing `LabOrderStatus` workflow status; omit for the
+   * unfiltered queue.
+   */
+  async listLabOrders(
+    labId: string,
+    options: {
+      status?: LabOrderStatus
+      limit?: number
+      token?: string
+      signal?: AbortSignal
+    } = {},
+  ): Promise<LabWorkflowOrder[]> {
+    const params = new URLSearchParams()
+    if (options.status !== undefined) {
+      params.set('status', options.status)
+    }
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit))
+    }
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return this.request<LabWorkflowOrder[]>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}
+   * DH-LAB-001 §31: the lab's own narrow clinical-work detail view of one assigned order.
+   */
+  async getLabOrder(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/accept
+   * DH-LAB-001 §32/§36: SELECTED -> ACCEPTED. Idempotent replay-safe on the server; §36's own
+   * lost-response recovery (re-read via getLabOrder, never blind retry) is a UI-level pattern
+   * built on top of this call, not something this method itself implements.
+   */
+  async acceptLabOrder(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/accept`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/reject
+   * DH-LAB-001 §33/§37: SELECTED -> REJECTED, terminal. No reason/free-text is accepted by this
+   * route -- the backend contract carries no such field (§33's own explicit constraint).
+   */
+  async rejectLabOrder(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/reject`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
   }
 }
 
