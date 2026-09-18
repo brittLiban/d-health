@@ -275,6 +275,53 @@ export type ProviderReleaseVersionSummary = ProviderReleaseVersionSummaryRespons
 export type ProviderReleaseVersionHistory = ProviderReleaseVersionHistoryResponse
 export type ProviderReleaseVersionContent = ProviderReleaseVersionContentResponse
 
+// -- DH-CLINIC-007: released-result review + follow-up UX -------------------------------------
+
+/**
+ * The response to a review disposition mutation (version-specific or legacy order-only) --
+ * deliberately no result/observation value, matching `LabAssignmentResponse`'s own convention:
+ * confirms only that the workflow decision was recorded, never renders it as clinical content.
+ */
+export interface DoctorReviewResponse {
+  order_id: string
+  release_version_id: string | null
+  status: DoctorReviewStatus | string
+  reviewed_at: string | null
+  reviewed_by_practitioner_reference_id: string | null
+}
+
+/**
+ * DH-CLINIC-007 §10/§12/§27: one review *obligation* -- never one row per order. An order with
+ * two independently-pending amendment releases surfaces as two separate entries. Deliberately
+ * carries no result/observation value of any kind -- metadata only, enough to decide what to
+ * open next. `legacy_unversioned=true` marks the one grandfathered shape explicitly, rather than
+ * requiring the UI to infer that meaning from three simultaneous `null`s.
+ */
+export interface ProviderResultReviewQueueEntry {
+  review_id: string
+  order_id: string
+  release_version_id: string | null
+  release_version_number: number | null
+  is_amendment: boolean
+  released_at: string | null
+  legacy_unversioned: boolean
+  review_status: DoctorReviewStatus | string
+  reviewed_at: string | null
+  patient: PatientIdentitySummary
+  order_created_at: string
+}
+
+export interface ProviderResultReviewQueueResponse {
+  provider_organization_id: string
+  entries: ProviderResultReviewQueueEntry[]
+}
+
+export type ReviewQueueStatusFilter =
+  | 'PENDING'
+  | 'NO_FOLLOW_UP_REQUIRED'
+  | 'FOLLOW_UP_REQUIRED'
+  | 'ALL'
+
 export interface PatientReference {
   id: string
   source_organization_id: string

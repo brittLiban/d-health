@@ -221,6 +221,117 @@ describe('ExchangeClient', () => {
     expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1/release-versions')
   })
 
+  it('getReleaseVersion sends GET .../release-versions/{release_version_id}', async () => {
+    const mockContent = {
+      order_id: 'ord-1',
+      release_version_id: 'rel-v1',
+      release_version_number: 1,
+      is_amendment: false,
+      patient: {
+        patient_id: 'patient-1',
+        display_name: 'Patient Synthétique',
+        date_of_birth: null,
+        contact_channel_type: null,
+        contact_value: null,
+      },
+      review_status: 'PENDING',
+      reviewed_at: null,
+      reviewed_by_practitioner_reference_id: null,
+      results: [],
+    }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockContent), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.getReleaseVersion('prov-1', 'ord-1', 'rel-v1')
+
+    expect(result).toEqual(mockContent)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-1/release-versions/rel-v1')
+  })
+
+  it('listResultReviews sends GET .../result-reviews with status and limit query params', async () => {
+    const mockQueue = { provider_organization_id: 'prov-1', entries: [] }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockQueue), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    const result = await client.listResultReviews('prov-1', { status: 'ALL', limit: 25 })
+
+    expect(result).toEqual(mockQueue)
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/result-reviews?status=ALL&limit=25')
+  })
+
+  it('listResultReviews defaults to no query params when none are given', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ provider_organization_id: 'prov-1', entries: [] }), { status: 200 }),
+    )
+
+    const client = new ExchangeClient()
+    await client.listResultReviews('prov-1')
+
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/result-reviews')
+  })
+
+  it('reviewReleaseVersionNoFollowUp/FollowUp POST the version-specific review routes', async () => {
+    const mockReview = {
+      order_id: 'ord-1',
+      release_version_id: 'rel-v1',
+      status: 'NO_FOLLOW_UP_REQUIRED',
+      reviewed_at: '2026-09-17T10:00:00Z',
+      reviewed_by_practitioner_reference_id: 'prac-1',
+    }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockReview), { status: 200 }),
+    )
+    const client = new ExchangeClient()
+    const result = await client.reviewReleaseVersionNoFollowUp('prov-1', 'ord-1', 'rel-v1')
+
+    expect(result).toEqual(mockReview)
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe(
+      '/exchange/v1/organizations/prov-1/orders/ord-1/release-versions/rel-v1/review/no-follow-up-required',
+    )
+    expect(init?.method).toBe('POST')
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...mockReview, status: 'FOLLOW_UP_REQUIRED' }), { status: 200 }),
+    )
+    await client.reviewReleaseVersionFollowUp('prov-1', 'ord-1', 'rel-v1')
+    const [url2] = vi.mocked(globalThis.fetch).mock.calls[1]
+    expect(url2).toBe(
+      '/exchange/v1/organizations/prov-1/orders/ord-1/release-versions/rel-v1/review/follow-up-required',
+    )
+  })
+
+  it('reviewLegacyOrderNoFollowUp/FollowUp POST the legacy order-only review routes', async () => {
+    const mockReview = {
+      order_id: 'ord-legacy',
+      release_version_id: null,
+      status: 'NO_FOLLOW_UP_REQUIRED',
+      reviewed_at: '2026-09-17T10:00:00Z',
+      reviewed_by_practitioner_reference_id: 'prac-1',
+    }
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockReview), { status: 200 }),
+    )
+    const client = new ExchangeClient()
+    await client.reviewLegacyOrderNoFollowUp('prov-1', 'ord-legacy')
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/prov-1/orders/ord-legacy/review/no-follow-up-required')
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...mockReview, status: 'FOLLOW_UP_REQUIRED' }), { status: 200 }),
+    )
+    await client.reviewLegacyOrderFollowUp('prov-1', 'ord-legacy')
+    const [url2] = vi.mocked(globalThis.fetch).mock.calls[1]
+    expect(url2).toBe('/exchange/v1/organizations/prov-1/orders/ord-legacy/review/follow-up-required')
+  })
+
   it('bindPatientReference sends POST /organizations/{id}/patient-references', async () => {
     const mockRef = {
       id: 'pat-ref-1',

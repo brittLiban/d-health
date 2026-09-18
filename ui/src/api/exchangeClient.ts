@@ -19,6 +19,7 @@ import type {
   BindPatientReferenceOutcome,
   CatalogEntry,
   ClinicPatientSummary,
+  DoctorReviewResponse,
   ExchangeErrorCode,
   ExchangeMeResponse,
   LabAssignmentResponse,
@@ -37,7 +38,10 @@ import type {
   ProviderEligibleLab,
   ProviderLabRoute,
   ProviderOrderResults,
+  ProviderReleaseVersionContent,
   ProviderReleaseVersionHistory,
+  ProviderResultReviewQueueResponse,
+  ReviewQueueStatusFilter,
 } from './exchangeTypes'
 
 export function mapExchangeErrorToCode(code: ExchangeErrorCode): ErrorCode {
@@ -308,6 +312,127 @@ export class ExchangeClient {
       `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions`,
       { method: 'GET' },
       token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}
+   * DH-CLINIC-007 §19/§20: the exact, immutable content of one specific released version -- this
+   * is the content that must actually be displayed before any review mutation targets that exact
+   * version. Never derived from live/latest state.
+   */
+  async getReleaseVersion(
+    providerId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ProviderReleaseVersionContent> {
+    return this.request<ProviderReleaseVersionContent>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/result-reviews
+   * DH-CLINIC-007 §8/§9: the provider-scoped review queue -- one entry per outstanding review
+   * *obligation* (never one per order). `status` defaults to `'PENDING'`; pass `'ALL'` for
+   * history. No result/observation value of any kind is ever present on an entry.
+   */
+  async listResultReviews(
+    providerId: string,
+    options: {
+      status?: ReviewQueueStatusFilter
+      limit?: number
+      token?: string
+      signal?: AbortSignal
+    } = {},
+  ): Promise<ProviderResultReviewQueueResponse> {
+    const params = new URLSearchParams()
+    if (options.status !== undefined) {
+      params.set('status', options.status)
+    }
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit))
+    }
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return this.request<ProviderResultReviewQueueResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/result-reviews${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../release-versions/{release_version_id}/review/no-follow-up-required
+   * DH-CLINIC-007 §6/§31: the safe, version-specific review mutation -- always prefer this over
+   * the legacy order-only route whenever a release version exists, even if it is currently the
+   * only version.
+   */
+  async reviewReleaseVersionNoFollowUp(
+    providerId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<DoctorReviewResponse> {
+    return this.request<DoctorReviewResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}/review/no-follow-up-required`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../release-versions/{release_version_id}/review/follow-up-required
+   * DH-CLINIC-007 §6/§31: the safe, version-specific review mutation. §25: this records only
+   * that the clinician judged follow-up necessary -- it does not schedule, contact, or notify.
+   */
+  async reviewReleaseVersionFollowUp(
+    providerId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<DoctorReviewResponse> {
+    return this.request<DoctorReviewResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}/review/follow-up-required`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../orders/{order_id}/review/no-follow-up-required
+   * DH-CLINIC-007 §7/§31: the legacy order-only review mutation -- correct *only* for a
+   * grandfathered COMPLETED-without-release-version order (`legacy_unversioned: true`). Never
+   * used by versioned UI even when only one version currently exists.
+   */
+  async reviewLegacyOrderNoFollowUp(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<DoctorReviewResponse> {
+    return this.request<DoctorReviewResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/review/no-follow-up-required`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../orders/{order_id}/review/follow-up-required
+   * DH-CLINIC-007 §7/§31: the legacy order-only review mutation -- same scope restriction as
+   * `reviewLegacyOrderNoFollowUp`.
+   */
+  async reviewLegacyOrderFollowUp(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<DoctorReviewResponse> {
+    return this.request<DoctorReviewResponse>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/review/follow-up-required`,
+      { method: 'POST', signal: options.signal },
+      options.token,
     )
   }
 
