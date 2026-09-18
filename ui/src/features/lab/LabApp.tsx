@@ -4,6 +4,7 @@ import { LabProvider } from './LabContext'
 import { LabShell, type LabTabId } from './LabShell'
 import { LabHomePage } from './pages/LabHomePage'
 import { LabOrdersPage } from './pages/LabOrdersPage'
+import { LabReleasePage } from './pages/LabReleasePage'
 
 export interface LabAppProps {
   client?: ExchangeClient
@@ -30,6 +31,9 @@ function LabContent({
       break
     case 'orders':
       pageContent = <LabOrdersPage />
+      break
+    case 'release':
+      pageContent = <LabReleasePage />
       break
     default:
       pageContent = <LabHomePage />

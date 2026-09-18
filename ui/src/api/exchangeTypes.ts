@@ -477,6 +477,139 @@ export interface ResultEntryPlan {
   items: ResultEntryPlanItem[]
 }
 
+/**
+ * DH-LAB-004: the outcome of one submitted value within a Native batch write -- `created: false`
+ * means this exact value already existed and was returned as a safe idempotent replay, never a
+ * fabricated "created" outcome for a no-op.
+ */
+export interface NativeResultValue {
+  definition_id: string
+  observation_id: string
+  numeric_value: string | null
+  text_value: string | null
+  recorded_at: string
+  created: boolean
+}
+
+export interface NativeResultValueBatchResponse {
+  order_id: string
+  item_id: string
+  result_id: string
+  template_id: string
+  values: NativeResultValue[]
+}
+
+export interface ResultEntryWorkspaceEnteredValue {
+  definition_id: string | null
+  observation_id: string
+  numeric_value: string | null
+  text_value: string | null
+  recorded_at: string
+}
+
+/**
+ * DH-LAB-004 §46-48: one ordered item's Native result-entry state. `template: null` with
+ * `entry_mode: 'UNSTARTED_NO_TEMPLATE'` means Native entry is blocked -- no free-form fallback.
+ * `entry_mode: 'LEGACY_OR_EXTERNAL'` means a container already exists but was never
+ * Native-template-bound -- represented truthfully, never silently adopted. `template_pinned:
+ * true` means `template` is this container's own exact pinned version, which may no longer be
+ * the offering's currently active template.
+ */
+export interface ResultEntryWorkspaceItem {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  template: ResultEntryPlanTemplate | null
+  template_pinned: boolean
+  entry_mode: 'NATIVE_TEMPLATE' | 'LEGACY_OR_EXTERNAL' | 'UNSTARTED_NO_TEMPLATE'
+  entry_completed: boolean
+  entry_completed_at: string | null
+  entered_values: ResultEntryWorkspaceEnteredValue[]
+}
+
+export interface ResultEntryWorkspace {
+  order_id: string
+  order_status: LabOrderStatus
+  items: ResultEntryWorkspaceItem[]
+}
+
+/**
+ * DH-EX-012C: the response to marking (or idempotently replaying) an ordered item's result entry
+ * complete -- no result values, no clinical content.
+ */
+export interface EntryCompletionResponse {
+  order_id: string
+  item_id: string
+  entry_completed_at: string
+  entry_completed_by_identity_id: string | null
+}
+
+/**
+ * DH-LAB-004 §49-50: one order ready for this lab's own `LAB_RESULT_RELEASER` to inspect and
+ * release -- assigned to this lab, `IN_PROGRESS`, every item's entry complete, not already
+ * released. Deliberately least-privilege and never UUID-first.
+ */
+export interface ReleaseQueueEntry {
+  order_id: string
+  patient: LabWorkflowPatientIdentity
+  ordering_provider_name: string
+  requested_tests: LabWorkflowOrderItem[]
+  updated_at: string
+}
+
+export interface ReleaseQueue {
+  lab_organization_id: string
+  orders: ReleaseQueueEntry[]
+}
+
+export interface LabResultInspectionObservation {
+  observation_id: string
+  source_code: string
+  source_system: string
+  display_label_snapshot: string
+  result_type: 'NUMERIC' | 'TEXT'
+  numeric_value: string | null
+  numeric_unit: string | null
+  reference_range_low: string | null
+  reference_range_high: string | null
+  text_value: string | null
+  recorded_at: string
+}
+
+export interface LabResultInspectionItem {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  entry_completed: boolean
+  entry_completed_at: string | null
+  observations: LabResultInspectionObservation[]
+  has_correction_history: boolean
+}
+
+/**
+ * DH-LAB-004 §51-56: the selected lab's own pre-release read -- "a releaser must not be forced
+ * to release results they cannot inspect." `result_fingerprint` is the exact value a release
+ * request must echo back as `expected_result_fingerprint`; it changes the instant any effective
+ * observation in this order is added or corrected.
+ */
+export interface LabResultInspection {
+  order_id: string
+  order_status: LabOrderStatus
+  all_items_entry_complete: boolean
+  released: boolean
+  released_at: string | null
+  results: LabResultInspectionItem[]
+  patient: LabWorkflowPatientIdentity
+  ordering_provider_name: string
+  result_fingerprint: string
+}
+
+export interface LabResultReleaseOutcome {
+  order_id: string
+  released_by_identity_id: string
+  released_at: string
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

@@ -6,7 +6,7 @@ import type {
   ExchangeMeResponse,
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
-  ResultEntryPlan,
+  ResultEntryWorkspace,
 } from '../../../api/exchangeTypes'
 import { LabApp } from '../LabApp'
 
@@ -82,20 +82,20 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     rejectLabOrder: vi.fn(),
     recordLabOrderCollection: vi.fn(),
     startProcessingLabOrder: vi.fn(),
-    getResultEntryPlan: vi.fn().mockResolvedValue(makeResultEntryPlan()),
+    getResultEntryWorkspace: vi.fn().mockResolvedValue(makeResultEntryWorkspace()),
+    recordNativeResultValues: vi.fn(),
+    completeResultEntry: vi.fn(),
     ...overrides,
   } as unknown as ExchangeClient
 }
 
-function makeResultEntryPlan(overrides: Partial<ResultEntryPlan> = {}): ResultEntryPlan {
+function makeResultEntryWorkspace(overrides: Partial<ResultEntryWorkspace> = {}): ResultEntryWorkspace {
   return {
     order_id: 'order-a',
     order_status: 'IN_PROGRESS',
-    all_items_configured: true,
     items: [
       {
         item_id: 'item-a',
-        catalog_entry_id: 'entry-a',
         catalog_code_snapshot: 'GLU',
         catalog_display_name_snapshot: 'Glycémie à jeun',
         template: {
@@ -114,6 +114,11 @@ function makeResultEntryPlan(overrides: Partial<ResultEntryPlan> = {}): ResultEn
             },
           ],
         },
+        template_pinned: false,
+        entry_mode: 'NATIVE_TEMPLATE',
+        entry_completed: false,
+        entry_completed_at: null,
+        entered_values: [],
       },
     ],
     ...overrides,
@@ -1277,7 +1282,7 @@ describe('LabOrdersPage', () => {
     })
   })
 
-  // -- UI-group: read-only result-entry-plan preview (DH-LAB-003) ---------------------------
+  // -- UI-group: controlled Native result-entry form (DH-LAB-004) ---------------------------
 
   function inProgressOrder(overrides: Partial<LabWorkflowOrder> = {}): LabWorkflowOrder {
     return makeOrder({
@@ -1287,12 +1292,11 @@ describe('LabOrdersPage', () => {
     })
   }
 
-  it('UI1/UI2: an IN_PROGRESS order loads the plan and renders observations in sort order', async () => {
-    const plan = makeResultEntryPlan({
+  it('UI1/UI2: an IN_PROGRESS order loads the workspace and renders definitions in sort order', async () => {
+    const workspace = makeResultEntryWorkspace({
       items: [
         {
           item_id: 'item-a',
-          catalog_entry_id: 'entry-a',
           catalog_code_snapshot: 'GLU',
           catalog_display_name_snapshot: 'Glycémie à jeun',
           template: {
@@ -1324,35 +1328,39 @@ describe('LabOrdersPage', () => {
               },
             ],
           },
+          template_pinned: false,
+          entry_mode: 'NATIVE_TEMPLATE',
+          entry_completed: false,
+          entry_completed_at: null,
+          entered_values: [],
         },
       ],
     })
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
-      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    await screen.findByText('Structure des résultats')
+    await screen.findByText('Saisie des résultats')
 
-    // Scope to the observation list items specifically -- `findAllByRole('listitem')` would
-    // otherwise also match the unrelated queue row's own `<li>`.
-    const observationItems = (await screen.findAllByRole('listitem')).filter((el) =>
-      el.textContent?.includes('Measure'),
-    )
-    expect(observationItems.map((el) => el.textContent)).toEqual([
-      expect.stringContaining('First Measure'),
-      expect.stringContaining('Second Measure'),
-    ])
+    const fields = await screen.findAllByLabelText(/Measure/)
+    expect(fields).toHaveLength(2)
+    // Rendering order, not merely presence: "First Measure"'s own field must precede "Second
+    // Measure"'s in document order.
+    expect(
+      fields[0].compareDocumentPosition(fields[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(await screen.findByLabelText(/First Measure/)).toBeInTheDocument()
+    expect(await screen.findByLabelText(/Second Measure/)).toBeInTheDocument()
   })
 
   it('UI3/UI4/UI5/UI6: result type, unit, and required/optional are shown truthfully', async () => {
-    const plan = makeResultEntryPlan({
+    const workspace = makeResultEntryWorkspace({
       items: [
         {
           item_id: 'item-a',
-          catalog_entry_id: 'entry-a',
           catalog_code_snapshot: 'GLU',
           catalog_display_name_snapshot: 'Glycémie à jeun',
           template: {
@@ -1380,42 +1388,46 @@ describe('LabOrdersPage', () => {
               },
             ],
           },
+          template_pinned: false,
+          entry_mode: 'NATIVE_TEMPLATE',
+          entry_completed: false,
+          entry_completed_at: null,
+          entered_values: [],
         },
       ],
     })
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
-      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
 
-    expect(await screen.findByText(/Numeric Measure.*Numérique.*mg\/dL.*requis/)).toBeInTheDocument()
-    expect(await screen.findByText(/Text Measure.*Texte.*facultatif/)).toBeInTheDocument()
+    expect(await screen.findByLabelText(/Numeric Measure \(Requis\) — mg\/dL/)).toBeInTheDocument()
+    expect(await screen.findByLabelText(/Text Measure \(Facultatif\)/)).toBeInTheDocument()
   })
 
-  it('UI7/UI10: no value input or free-form field exists anywhere in the preview', async () => {
+  it('UI7: an unentered definition renders as a labeled, editable input -- never hardcoded', async () => {
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    await screen.findByText('Structure des résultats')
-    expect(screen.queryAllByRole('textbox')).toHaveLength(0)
-    expect(screen.queryAllByRole('spinbutton')).toHaveLength(0)
-    expect(screen.queryByRole('button', { name: /Entrer|Compléter|Valider|Libérer/i })).not.toBeInTheDocument()
+    const input = await screen.findByLabelText(/Demo Measure A \(Requis\) — demo-unit/)
+    expect(input).toBeInTheDocument()
+    expect(input.tagName).toBe('INPUT')
   })
 
-  it('UI8: no reference range is displayed anywhere in the preview', async () => {
+  it('UI8: no reference range is displayed anywhere in the entry form', async () => {
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    await screen.findByText('Structure des résultats')
+    await screen.findByText('Saisie des résultats')
     // ("Référence de l'ordre" is a pre-existing, unrelated label -- match the clinical-range
     // terms specifically, not the substring "référence" alone.)
     expect(
@@ -1423,29 +1435,84 @@ describe('LabOrdersPage', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('UI9: a missing template shows a truthful blocking message, never a fabricated structure', async () => {
-    const plan = makeResultEntryPlan({
-      all_items_configured: false,
+  it('UI9: an unstarted item with no active template shows a truthful blocking message', async () => {
+    const workspace = makeResultEntryWorkspace({
       items: [
         {
           item_id: 'item-a',
-          catalog_entry_id: 'entry-a',
           catalog_code_snapshot: 'GLU',
           catalog_display_name_snapshot: 'Glycémie à jeun',
           template: null,
+          template_pinned: false,
+          entry_mode: 'UNSTARTED_NO_TEMPLATE',
+          entry_completed: false,
+          entry_completed_at: null,
+          entered_values: [],
         },
       ],
     })
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
-      getResultEntryPlan: vi.fn().mockResolvedValue(plan),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
-      await screen.findByText("Aucune structure de résultat n'est configurée pour cette analyse."),
+      await screen.findByText(
+        "Aucune structure de résultat n'est configurée pour cette analyse -- la saisie native n'est pas disponible.",
+      ),
     ).toBeInTheDocument()
+  })
+
+  it('UI10: an already-entered value is shown read-only, never as an editable input', async () => {
+    const workspace = makeResultEntryWorkspace({
+      items: [
+        {
+          item_id: 'item-a',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+          template: {
+            template_id: 'template-a',
+            version: 1,
+            is_synthetic: true,
+            observations: [
+              {
+                definition_id: 'def-a',
+                source_code: 'DEMO_A',
+                display_label: 'Demo Measure A',
+                result_type: 'NUMERIC',
+                numeric_unit: 'demo-unit',
+                required: true,
+                sort_order: 0,
+              },
+            ],
+          },
+          template_pinned: true,
+          entry_mode: 'NATIVE_TEMPLATE',
+          entry_completed: false,
+          entry_completed_at: null,
+          entered_values: [
+            {
+              definition_id: 'def-a',
+              observation_id: 'obs-1',
+              numeric_value: '7.2000',
+              text_value: null,
+              recorded_at: '2026-09-18T10:50:00Z',
+            },
+          ],
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('7.2000 demo-unit')).toBeInTheDocument()
+    expect(screen.queryByLabelText(/Demo Measure A/)).not.toBeInTheDocument()
   })
 
   it('UI11: a synthetic template displays the demo warning', async () => {
@@ -1460,36 +1527,107 @@ describe('LabOrdersPage', () => {
     ).toBeInTheDocument()
   })
 
-  it('UI12: Patient identity remains visible alongside the result-structure preview', async () => {
+  it('UI12: Patient identity remains visible alongside the entry form', async () => {
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    await screen.findByText('Structure des résultats')
+    await screen.findByText('Saisie des résultats')
     expect(screen.getAllByText('Fatouma Robleh').length).toBeGreaterThan(0)
   })
 
-  // -- RR-group: result-entry-plan race/stale-response safety (DH-LAB-003) ------------------
+  it('UI13: "Enregistrer les valeurs" is disabled with no draft and enabled once a value is typed', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    const saveButton = await screen.findByRole('button', { name: 'Enregistrer les valeurs' })
+    expect(saveButton).toBeDisabled()
+    await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+    expect(saveButton).toBeEnabled()
+  })
 
-  function planWithItemName(orderId: string, itemName: string): ResultEntryPlan {
-    return makeResultEntryPlan({
+  it('UI14: saving posts only template identity, definition identity, and value -- never structure', async () => {
+    const recordNativeResultValues = vi.fn().mockResolvedValue({
+      order_id: 'order-a',
+      item_id: 'item-a',
+      result_id: 'result-1',
+      template_id: 'template-a',
+      values: [
+        {
+          definition_id: 'def-a',
+          observation_id: 'obs-1',
+          numeric_value: '7.2000',
+          text_value: null,
+          recorded_at: '2026-09-18T10:50:00Z',
+          created: true,
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      recordNativeResultValues,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer les valeurs' }))
+
+    await waitFor(() => expect(recordNativeResultValues).toHaveBeenCalledTimes(1))
+    expect(recordNativeResultValues).toHaveBeenCalledWith(
+      'lab-a',
+      'order-a',
+      'item-a',
+      { template_id: 'template-a', values: [{ definition_id: 'def-a', numeric_value: '7.2' }] },
+      expect.anything(),
+    )
+  })
+
+  it('UI15: completion is blocked until every required definition has a value, with its own confirmation', async () => {
+    const completeResultEntry = vi.fn()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      completeResultEntry,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    const completeButton = await screen.findByRole('button', { name: 'Terminer la saisie' })
+    expect(completeButton).toBeDisabled()
+    expect(completeResultEntry).not.toHaveBeenCalled()
+  })
+
+  // -- RR-group: result-entry-workspace race/stale-response safety (DH-LAB-004) -------------
+
+  function workspaceWithItemName(orderId: string, itemName: string): ResultEntryWorkspace {
+    return makeResultEntryWorkspace({
       order_id: orderId,
       items: [
         {
           item_id: `item-${itemName}`,
-          catalog_entry_id: `entry-${itemName}`,
           catalog_code_snapshot: itemName,
           catalog_display_name_snapshot: itemName,
           template: null,
+          template_pinned: false,
+          entry_mode: 'UNSTARTED_NO_TEMPLATE',
+          entry_completed: false,
+          entry_completed_at: null,
+          entered_values: [],
         },
       ],
     })
   }
 
-  it('RR-PLAN1: a late plan response for order A never mutates the now-visible order B', async () => {
-    const planA = deferred<ResultEntryPlan>()
+  it('RR-WORKSPACE1: a late workspace response for order A never mutates the now-visible order B', async () => {
+    const workspaceA = deferred<ResultEntryWorkspace>()
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([
         inProgressOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
@@ -1503,10 +1641,10 @@ describe('LabOrdersPage', () => {
           }),
         ),
       ),
-      getResultEntryPlan: vi.fn((_labId: string, orderId: string) =>
+      getResultEntryWorkspace: vi.fn((_labId: string, orderId: string) =>
         orderId === 'order-a'
-          ? planA.promise
-          : Promise.resolve(planWithItemName('order-b', 'Item Only In B')),
+          ? workspaceA.promise
+          : Promise.resolve(workspaceWithItemName('order-b', 'Item Only In B')),
       ),
     })
     const user = userEvent.setup()
@@ -1517,18 +1655,18 @@ describe('LabOrdersPage', () => {
     await screen.findByText('Item Only In B')
 
     await act(async () => {
-      planA.resolve(planWithItemName('order-a', 'Item Only In A'))
+      workspaceA.resolve(workspaceWithItemName('order-a', 'Item Only In A'))
     })
 
-    // order-a's late plan content must never render under order-b's now-visible panel. Verified
-    // discriminating: disabling `loadPlan`'s own generation check alone makes this fail (the
-    // stale content actually leaks) -- confirmed manually, then the check restored.
+    // order-a's late workspace content must never render under order-b's now-visible panel.
+    // Verified discriminating: disabling `loadWorkspace`'s own generation check alone makes this
+    // fail (the stale content actually leaks) -- confirmed manually, then the check restored.
     expect(screen.queryByText('Item Only In A')).not.toBeInTheDocument()
     expect(screen.getByText('Item Only In B')).toBeInTheDocument()
   })
 
-  it('RR-PLAN2: a late plan error for order A after order B succeeded is discarded', async () => {
-    const planA = deferred<ResultEntryPlan>()
+  it('RR-WORKSPACE2: a late workspace error for order A after order B succeeded is discarded', async () => {
+    const workspaceA = deferred<ResultEntryWorkspace>()
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([
         inProgressOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
@@ -1542,10 +1680,10 @@ describe('LabOrdersPage', () => {
           }),
         ),
       ),
-      getResultEntryPlan: vi.fn((_labId: string, orderId: string) =>
+      getResultEntryWorkspace: vi.fn((_labId: string, orderId: string) =>
         orderId === 'order-a'
-          ? planA.promise
-          : Promise.resolve(planWithItemName('order-b', 'Item Only In B')),
+          ? workspaceA.promise
+          : Promise.resolve(workspaceWithItemName('order-b', 'Item Only In B')),
       ),
     })
     const user = userEvent.setup()
@@ -1556,7 +1694,7 @@ describe('LabOrdersPage', () => {
     await screen.findByText('Item Only In B')
 
     await act(async () => {
-      planA.reject(new Error('network lost'))
+      workspaceA.reject(new Error('network lost'))
       await Promise.resolve()
     })
 
@@ -1566,8 +1704,8 @@ describe('LabOrdersPage', () => {
     expect(screen.getByText('Item Only In B')).toBeInTheDocument()
   })
 
-  it('RR-PLAN3: switching labs invalidates an outstanding plan request', async () => {
-    const planStall = deferred<ResultEntryPlan>()
+  it('RR-WORKSPACE3: switching labs invalidates an outstanding workspace request', async () => {
+    const workspaceStall = deferred<ResultEntryWorkspace>()
     const client = makeClient({
       getMe: vi.fn().mockResolvedValue(meWithTwoLabs),
       listLabOrders: vi.fn((labId: string) =>
@@ -1586,10 +1724,10 @@ describe('LabOrdersPage', () => {
           }),
         ),
       ),
-      getResultEntryPlan: vi.fn((labId: string) =>
+      getResultEntryWorkspace: vi.fn((labId: string) =>
         labId === 'lab-a'
-          ? planStall.promise
-          : Promise.resolve(planWithItemName('order-b', 'Item Only Lab B')),
+          ? workspaceStall.promise
+          : Promise.resolve(workspaceWithItemName('order-b', 'Item Only Lab B')),
       ),
     })
     const user = userEvent.setup()
@@ -1604,34 +1742,36 @@ describe('LabOrdersPage', () => {
     await screen.findByText('Item Only Lab B')
 
     await act(async () => {
-      planStall.resolve(planWithItemName('order-a', 'Item Only Lab A'))
+      workspaceStall.resolve(workspaceWithItemName('order-a', 'Item Only Lab A'))
     })
 
     expect(screen.queryByText('Item Only Lab A')).not.toBeInTheDocument()
     expect(screen.getByText('Item Only Lab B')).toBeInTheDocument()
   })
 
-  it('RR-PLAN4: a plan response arriving after unmount produces no error and no state update', async () => {
-    const planStall = deferred<ResultEntryPlan>()
+  it('RR-WORKSPACE4: a workspace response arriving after unmount produces no error and no state update', async () => {
+    const workspaceStall = deferred<ResultEntryWorkspace>()
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
-      getResultEntryPlan: vi.fn(() => planStall.promise),
+      getResultEntryWorkspace: vi.fn(() => workspaceStall.promise),
     })
     const { unmount } = render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     unmount()
     await act(async () => {
-      planStall.resolve(makeResultEntryPlan())
+      workspaceStall.resolve(makeResultEntryWorkspace())
       await Promise.resolve()
     })
   })
 
-  it('RR-PLAN5: a plan response whose order_id disagrees with the request fails closed', async () => {
+  it('RR-WORKSPACE5: a workspace response whose order_id disagrees with the request fails closed', async () => {
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
-      getResultEntryPlan: vi.fn().mockResolvedValue(makeResultEntryPlan({ order_id: 'order-WRONG' })),
+      getResultEntryWorkspace: vi
+        .fn()
+        .mockResolvedValue(makeResultEntryWorkspace({ order_id: 'order-WRONG' })),
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))

@@ -2,17 +2,12 @@ import type { ReactNode } from 'react'
 import { useLab } from './LabContext'
 import styles from './LabShell.module.css'
 
-export type LabTabId = 'home' | 'orders'
+export type LabTabId = 'home' | 'orders' | 'release'
 
 export interface LabNavItem {
   id: LabTabId
   label: string
 }
-
-const LAB_NAV_ITEMS: LabNavItem[] = [
-  { id: 'home', label: 'Accueil' },
-  { id: 'orders', label: 'Ordres' },
-]
 
 export interface LabShellProps {
   activeTab: LabTabId
@@ -23,7 +18,17 @@ export interface LabShellProps {
 }
 
 export function LabShell({ activeTab, onSelectTab, children, onLogout, onSwitchApp }: LabShellProps) {
-  const { activeLab, availableLabs, setActiveLabId } = useLab()
+  const { activeLab, availableLabs, setActiveLabId, capabilities } = useLab()
+
+  // DH-LAB-004 §29-31: navigation is derived from the active membership's own capabilities,
+  // never a fixed set -- a dual-role user sees Accueil/Ordres/Libération; a releaser-only user
+  // sees Accueil/Libération, with no route to the LAB_TECH work queue at all (not merely a
+  // disabled tab). "Accueil" is always offered.
+  const navItems: LabNavItem[] = [
+    { id: 'home', label: 'Accueil' },
+    ...(capabilities.canWorkOrders ? [{ id: 'orders' as const, label: 'Ordres' }] : []),
+    ...(capabilities.canReleaseResults ? [{ id: 'release' as const, label: 'Libération' }] : []),
+  ]
 
   return (
     <div className={styles.shell}>
@@ -78,7 +83,7 @@ export function LabShell({ activeTab, onSelectTab, children, onLogout, onSwitchA
       <div className={styles.body}>
         <nav className={styles.nav} aria-label="Navigation DHealth Laboratoire">
           <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'contents' }}>
-            {LAB_NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <li key={item.id} style={{ display: 'contents' }}>
                 <button
                   type="button"

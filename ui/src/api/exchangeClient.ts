@@ -20,6 +20,7 @@ import type {
   CatalogEntry,
   ClinicPatientSummary,
   DoctorReviewResponse,
+  EntryCompletionResponse,
   ExchangeErrorCode,
   ExchangeMeResponse,
   LabAssignmentResponse,
@@ -32,7 +33,10 @@ import type {
   LabOrderIntentCreateRequest,
   LabOrderStatus,
   LabOrderSummary,
+  LabResultInspection,
+  LabResultReleaseOutcome,
   LabWorkflowOrder,
+  NativeResultValueBatchResponse,
   PatientCreateOutcome,
   PatientCreateRequest,
   PatientDirectoryEntry,
@@ -44,7 +48,9 @@ import type {
   ProviderReleaseVersionContent,
   ProviderReleaseVersionHistory,
   ProviderResultReviewQueueResponse,
+  ReleaseQueue,
   ResultEntryPlan,
+  ResultEntryWorkspace,
   ReviewQueueStatusFilter,
 } from './exchangeTypes'
 
@@ -976,6 +982,131 @@ export class ExchangeClient {
     return this.request<ResultEntryPlan>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/result-entry-plan`,
       { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/result-entry-workspace
+   * DH-LAB-004 §46-48: what result structure governs entry right now for each item (pinned or
+   * currently active) plus what has already been entered. LAB_TECH only; the backend returns 409
+   * unless the order is currently IN_PROGRESS.
+   */
+  async getResultEntryWorkspace(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ResultEntryWorkspace> {
+    return this.request<ResultEntryWorkspace>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/result-entry-workspace`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/native-result-values
+   * DH-LAB-004 §7-19: the Native controlled batch value write -- template identity, definition
+   * identity, and value only. Never sends result_type/source_code/display_label/numeric_unit/
+   * reference ranges/source_system; the server derives every one of those from the pinned
+   * template's own controlled observation definition.
+   */
+  async recordNativeResultValues(
+    labId: string,
+    orderId: string,
+    itemId: string,
+    body: {
+      template_id: string
+      values: Array<{ definition_id: string; numeric_value?: string; text_value?: string }>
+    },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<NativeResultValueBatchResponse> {
+    return this.request<NativeResultValueBatchResponse>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/native-result-values`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/complete-result-entry
+   * DH-EX-012C: the single explicit signal that this item's result entry is finished -- never
+   * inferred from observation count. No request body. Idempotent replay-safe on the server.
+   */
+  async completeResultEntry(
+    labId: string,
+    orderId: string,
+    itemId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<EntryCompletionResponse> {
+    return this.request<EntryCompletionResponse>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/complete-result-entry`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/release-queue
+   * DH-LAB-004 §49-50: this lab's own dedicated, least-privilege release queue --
+   * LAB_RESULT_RELEASER only, never the LAB_TECH work queue broadened.
+   */
+  async getReleaseQueue(
+    labId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ReleaseQueue> {
+    return this.request<ReleaseQueue>(
+      `/organizations/${encodeURIComponent(labId)}/release-queue`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/results
+   * DH-EX-012, extended by DH-LAB-004: the selected lab's own pre-release inspection read --
+   * either LAB_TECH or LAB_RESULT_RELEASER may call this. Carries `result_fingerprint`, the exact
+   * value a release request must echo back.
+   */
+  async getLabOrderResults(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabResultInspection> {
+    return this.request<LabResultInspection>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/results`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/release-results
+   * DH-EX-012/ADR-044, extended by DH-LAB-004 §57-62: the sole supported production way to move a
+   * LabOrder from IN_PROGRESS to COMPLETED. `expected_result_fingerprint` is required -- the
+   * exact value from a `getLabOrderResults` call the caller must have actually just made; a
+   * mismatch (an intervening correction changed the effective set) is refused as a controlled
+   * conflict, never releasing a result set the releaser did not actually see.
+   */
+  async releaseLabOrderResults(
+    labId: string,
+    orderId: string,
+    body: { expected_result_fingerprint: string },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabResultReleaseOutcome> {
+    return this.request<LabResultReleaseOutcome>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-results`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
       options.token,
     )
   }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LabOrderStatus, LabWorkflowOrder, ResultEntryPlan } from '../../../api/exchangeTypes'
+import type { LabOrderStatus, LabWorkflowOrder, ResultEntryWorkspace } from '../../../api/exchangeTypes'
 import {
   Button,
   Card,
@@ -10,6 +10,7 @@ import {
   type StatusTone,
 } from '../../../design-system'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
+import { NativeResultEntryForm } from '../components/NativeResultEntryForm'
 import { useLab } from '../LabContext'
 
 // DH-LAB-001 §29: SELECTED does NOT mean accepted -- preserve that distinction textually, never
@@ -64,7 +65,7 @@ function formatDateTime(value: string): string {
 // disagreed (mirrors DH-CLINIC-007 §57's identical discipline).
 const ORDER_MISMATCH_ERROR = 'Impossible de vérifier de manière sûre cet ordre.'
 const ORDER_LOAD_ERROR = "Impossible de charger le détail de cet ordre."
-const PLAN_LOAD_ERROR = "Impossible de charger la structure des résultats pour cet ordre."
+const WORKSPACE_LOAD_ERROR = "Impossible de charger la structure des résultats pour cet ordre."
 const MUTATION_UNCONFIRMED_ERROR = "L'action n'a pas pu être confirmée. Vous pouvez réessayer."
 const MUTATION_CONFLICT_ERROR =
   "Cet ordre a déjà été traité différemment -- l'état actuel est affiché ci-dessous."
@@ -95,11 +96,11 @@ interface PanelState {
   order: LabWorkflowOrder | null
 }
 
-interface PlanState {
+interface WorkspaceState {
   orderId: string
   loading: boolean
   error: string | null
-  plan: ResultEntryPlan | null
+  workspace: ResultEntryWorkspace | null
 }
 
 export function LabOrdersPage() {
@@ -112,7 +113,7 @@ export function LabOrdersPage() {
     error: string | null
   }>({ entries: [], loading: true, error: null })
   const [panel, setPanel] = useState<PanelState | null>(null)
-  const [planState, setPlanState] = useState<PlanState | null>(null)
+  const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null)
   const [mutationState, setMutationState] = useState<{
     action: 'accept' | 'reject' | 'collect' | 'start' | null
     submitting: boolean
@@ -147,7 +148,7 @@ export function LabOrdersPage() {
   if (activeLab && activeLab.organization_id !== prevLabId) {
     setPrevLabId(activeLab.organization_id)
     setPanel(null)
-    setPlanState(null)
+    setWorkspaceState(null)
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
     setQueueState({ entries: [], loading: true, error: null })
@@ -230,61 +231,64 @@ export function LabOrdersPage() {
     [client, activeLab],
   )
 
-  // DH-LAB-003 §34/§47/§48: a third request in the panel's own lifecycle, deliberately sharing
-  // `panelGenerationRef` rather than a dedicated ref/counter of its own -- this plan is a read
-  // that only ever makes sense *for the order currently occupying the panel*, so any event that
-  // already invalidates the panel (opening a different order, closing it, switching labs) must
-  // invalidate this exactly the same way, with no separate bookkeeping that could drift out of
-  // sync. The generation is read here, never incremented -- incrementing would wrongly invalidate
-  // whatever `loadPanel` call is concurrently in flight for the very order this plan belongs to.
-  const loadPlan = useCallback(
+  // DH-LAB-003 §34/§47/§48, extended by DH-LAB-004: a third request in the panel's own
+  // lifecycle, deliberately sharing `panelGenerationRef` rather than a dedicated ref/counter of
+  // its own -- this workspace is a read that only ever makes sense *for the order currently
+  // occupying the panel*, so any event that already invalidates the panel (opening a different
+  // order, closing it, switching labs) must invalidate this exactly the same way, with no
+  // separate bookkeeping that could drift out of sync. The generation is read here, never
+  // incremented -- incrementing would wrongly invalidate whatever `loadPanel` call is
+  // concurrently in flight for the very order this workspace belongs to. Also re-run after every
+  // save/completion (§71 authoritative re-read discipline) via `NativeResultEntryForm`'s own
+  // `onChanged` callback below.
+  const loadWorkspace = useCallback(
     (orderId: string) => {
       if (!activeLab) return
       const generation = panelGenerationRef.current
       const targetLab = activeLab.organization_id
       const controller = new AbortController()
 
-      setPlanState({ orderId, loading: true, error: null, plan: null })
+      setWorkspaceState({ orderId, loading: true, error: null, workspace: null })
       client
-        .getResultEntryPlan(targetLab, orderId, { signal: controller.signal })
-        .then((plan) => {
+        .getResultEntryWorkspace(targetLab, orderId, { signal: controller.signal })
+        .then((workspace) => {
           if (!mountedRef.current) return
           if (panelGenerationRef.current !== generation) return
           if (currentLabRef.current !== targetLab) return
-          if (plan.order_id !== orderId) {
-            setPlanState({ orderId, loading: false, error: ORDER_MISMATCH_ERROR, plan: null })
+          if (workspace.order_id !== orderId) {
+            setWorkspaceState({ orderId, loading: false, error: ORDER_MISMATCH_ERROR, workspace: null })
             return
           }
-          setPlanState({ orderId, loading: false, error: null, plan })
+          setWorkspaceState({ orderId, loading: false, error: null, workspace })
         })
         .catch(() => {
           if (controller.signal.aborted) return
           if (!mountedRef.current) return
           if (panelGenerationRef.current !== generation) return
           if (currentLabRef.current !== targetLab) return
-          setPlanState({ orderId, loading: false, error: PLAN_LOAD_ERROR, plan: null })
+          setWorkspaceState({ orderId, loading: false, error: WORKSPACE_LOAD_ERROR, workspace: null })
         })
       return () => controller.abort()
     },
     [client, activeLab],
   )
 
-  // DH-LAB-003 §35: the plan is meaningful only while the panel's own order is IN_PROGRESS --
-  // loading it here (derived from the currently displayed order) rather than from any mutation
-  // handler means it also loads correctly after a start-processing success moves an order into
-  // IN_PROGRESS via its own recheck, with no separate wiring needed.
+  // DH-LAB-003 §35, extended by DH-LAB-004: the workspace is meaningful only while the panel's
+  // own order is IN_PROGRESS -- loading it here (derived from the currently displayed order)
+  // rather than from any mutation handler means it also loads correctly after a start-processing
+  // success moves an order into IN_PROGRESS via its own recheck, with no separate wiring needed.
   useEffect(() => {
     if (panel?.order?.status === 'IN_PROGRESS' && panel.orderId) {
-      return loadPlan(panel.orderId)
+      return loadWorkspace(panel.orderId)
     }
-    setPlanState(null)
-  }, [panel?.order?.status, panel?.orderId, loadPlan])
+    setWorkspaceState(null)
+  }, [panel?.order?.status, panel?.orderId, loadWorkspace])
 
   const handleOpenOrder = (orderId: string) => {
     if (panel?.orderId === orderId) return
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
-    setPlanState(null)
+    setWorkspaceState(null)
     loadPanel(orderId)
   }
 
@@ -294,7 +298,7 @@ export function LabOrdersPage() {
     // current and resurrect the just-closed panel once its response/recheck resolves.
     panelGenerationRef.current += 1
     setPanel(null)
-    setPlanState(null)
+    setWorkspaceState(null)
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
   }
@@ -809,22 +813,22 @@ export function LabOrdersPage() {
                       </Button>
                     )
                   ) : panel.order.status === 'IN_PROGRESS' ? (
-                    // DH-LAB-003 §43/§52: a read-only structure preview -- no value input, no
-                    // complete-entry action, no release action anywhere in this branch.
-                    // LAB-004 remains the ticket that adds actual result entry.
+                    // DH-LAB-004 §7-48: a controlled Native entry form per ordered item, built
+                    // from the actual configured template definitions -- never a hardcoded
+                    // example field, never a free-form fallback when no template is configured.
                     <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
                       <h2 style={{ margin: 0, fontSize: 'var(--font-size-md)', color: 'var(--color-neutral-900)' }}>
-                        Structure des résultats
+                        Saisie des résultats
                       </h2>
-                      {planState?.loading ? (
+                      {workspaceState?.loading ? (
                         <LoadingSkeleton />
-                      ) : planState?.error ? (
+                      ) : workspaceState?.error ? (
                         <p role="alert" style={{ margin: 0, color: 'var(--color-danger, #b91c1c)' }}>
-                          {planState.error}
+                          {workspaceState.error}
                         </p>
-                      ) : planState?.plan ? (
+                      ) : workspaceState?.workspace ? (
                         <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
-                          {planState.plan.items.map((item) => (
+                          {workspaceState.workspace.items.map((item) => (
                             <div
                               key={item.item_id}
                               style={{
@@ -836,36 +840,17 @@ export function LabOrdersPage() {
                               <p style={{ margin: '0 0 var(--space-2)', fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>
                                 {item.catalog_display_name_snapshot}
                               </p>
-                              {item.template ? (
-                                <>
-                                  {item.template.is_synthetic ? (
-                                    <p role="alert" style={{ margin: '0 0 var(--space-2)', fontSize: 'var(--font-size-xs)', color: 'var(--color-danger, #b91c1c)' }}>
-                                      Configuration de démonstration — ne pas utiliser pour des soins réels.
-                                    </p>
-                                  ) : null}
-                                  <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
-                                    {item.template.observations.map((observation) => (
-                                      <li key={observation.definition_id} style={{ fontSize: 'var(--font-size-sm)' }}>
-                                        {observation.display_label} —{' '}
-                                        {observation.result_type === 'NUMERIC' ? 'Numérique' : 'Texte'}
-                                        {observation.numeric_unit ? ` · ${observation.numeric_unit}` : ''} ·{' '}
-                                        {observation.required ? 'requis' : 'facultatif'}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </>
-                              ) : (
-                                <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
-                                  Aucune structure de résultat n'est configurée pour cette analyse.
-                                </p>
-                              )}
+                              <NativeResultEntryForm
+                                client={client}
+                                labId={activeLab!.organization_id}
+                                orderId={panel.order!.order_id}
+                                item={item}
+                                onChanged={() => loadWorkspace(panel.order!.order_id)}
+                              />
                             </div>
                           ))}
                         </div>
                       ) : null}
-                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
-                        La saisie des résultats sera disponible dans l'étape suivante.
-                      </p>
                     </div>
                   ) : (
                     <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
