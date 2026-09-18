@@ -83,6 +83,7 @@ never a fabricated one (see that migration's own docstring)."""
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -98,6 +99,7 @@ from daher_adapter.exchange.models import (
     DoctorReview,
     DoctorReviewStatus,
     LabObservation,
+    LabOffering,
     LabOrder,
     LabOrderItem,
     LabOrderStatus,
@@ -107,6 +109,8 @@ from daher_adapter.exchange.models import (
     LabResultRelease,
     LabResultReleaseManifestEntry,
     LabResultReleaseVersion,
+    LabResultTemplate,
+    LabResultTemplateObservation,
     LabResultType,
     LabSelection,
     ResultDelivery,
@@ -144,6 +148,13 @@ __all__ = [
     "LabResultReleaseRepository",
     "LabResultReleaseVersionRecord",
     "LabResultRepository",
+    "LegacyOrExternalResultContainer",
+    "NativeValueBatchRecord",
+    "NativeValueInput",
+    "NativeValueRecord",
+    "NativeValueTypeMismatch",
+    "NoActiveTemplateForOffering",
+    "ObservationValueConflict",
     "ReleaseManifestItemRecord",
     "ReleaseVersionManifestRecord",
     "LegacyCompletedOrderHasNoRelease",
@@ -152,8 +163,13 @@ __all__ = [
     "ObservationNotFound",
     "OrderItemNotFound",
     "OrderNotCompletedForAmendment",
+    "ReleaseQueueEntryRecord",
+    "ReleaseQueueItemRecord",
+    "RequiredDefinitionsMissing",
     "ResultDeliveryRecord",
     "ResultDeliveryRepository",
+    "ResultEntryWorkspaceItemRecord",
+    "ResultEntryWorkspaceRecord",
     "ResultsNotReadyForRelease",
     "ResultSubmissionOutcome",
     "ReviewAlreadyFinalized",
@@ -161,6 +177,11 @@ __all__ = [
     "ReviewNotFound",
     "ReviewQueueEntryRecord",
     "StaleObservationVersion",
+    "StaleResultFingerprint",
+    "TemplateBoundContainerRefusesUnstructuredWrite",
+    "TemplateNotPinnedToThisResult",
+    "UnknownTemplateObservationDefinition",
+    "compute_result_fingerprint",
 ]
 
 # DH-EX-012C: the self-asserted source-system value for every observation DHealth itself records
@@ -169,6 +190,29 @@ __all__ = [
 # ("DHealth itself is asserting this identity, not an external source system"), not a new sentinel
 # invented for this ticket alone.
 NATIVE_OBSERVATION_SOURCE_SYSTEM = "dhealth-exchange"
+
+
+def compute_result_fingerprint(pairs: Sequence[tuple[uuid.UUID, uuid.UUID]]) -> str:
+    """DH-LAB-004: a deterministic SHA-256 digest over the exact effective ``(lab_order_item_id,
+    lab_observation_id)`` set a release inspection saw, or a release is about to release --
+    identical algorithm, one function, both callers (``LabResultRepository.get_for_lab`` and
+    ``LabResultReleaseRepository._release_in_session``), so the two can never independently drift.
+
+    Deliberately over **immutable observation identities**, never raw patient values: two
+    observations could coincidentally share a value with entirely different provenance, and a
+    correction always creates a brand-new observation id (see ``LabObservation``'s own supersession
+    docstring) -- so any correction between inspection and release necessarily changes this digest,
+    which is the entire safety property this function exists to provide.
+
+    Canonicalization is deliberately explicit and stable, never left to incidental ordering: each
+    pair becomes the string ``f"{item_id}:{observation_id}"`` (UUIDs render in fixed canonical
+    hyphenated lowercase form), the resulting strings are sorted lexicographically (never DB row
+    order, ``recorded_at``, or Python set/dict iteration order -- none of those are a stable
+    identity), and joined with ``"\\n"`` before hashing. An empty effective set is a well-defined,
+    deterministic digest (the hash of an empty string), not a special case."""
+    tokens = (f"{item_id}:{observation_id}" for item_id, observation_id in pairs)
+    canonical = "\n".join(sorted(tokens))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class OrderItemNotFound(RuntimeError):
@@ -206,6 +250,89 @@ class EntryNotReadyForCompletion(RuntimeError):
     container exists yet, or -- structurally unreachable via any code path, but checked anyway --
     a container exists with no observations). Completion always requires at least one observation;
     DHealth never completes an item's entry on the caller's say-so alone."""
+
+
+class RequiredDefinitionsMissing(RuntimeError):
+    """DH-LAB-004: ``complete_entry`` was attempted for a Native-template-bound container
+    (``LabResult.result_template_id`` is set) that lacks an effective observation for at least one
+    of that pinned template's ``required=True`` observation definitions. Checked by
+    ``template_observation_definition_id`` identity, never by ``source_code`` string matching --
+    optional definitions may remain absent. Legacy (``result_template_id IS NULL``) containers are
+    entirely unaffected by this check; their completion semantics are exactly what they were
+    before this ticket."""
+
+
+class NoActiveTemplateForOffering(RuntimeError):
+    """DH-LAB-004 first-write pinning: a Native batch value write named a ``template_id`` that is
+    not, at this exact locked instant, the active template for this item's offering -- either it
+    never belonged to that offering, or an ``activate_template`` call won the ``LabOffering FOR
+    UPDATE`` lock first and deactivated it before this write's own lock was acquired. A controlled
+    conflict, never silently reinterpreted against whichever template happens to be active now --
+    the caller must re-fetch the result-entry workspace and retry against the current template."""
+
+
+class TemplateNotPinnedToThisResult(RuntimeError):
+    """DH-LAB-004: a Native batch value write named a ``template_id`` that does not match this
+    item's container's already-pinned ``result_template_id`` -- the container was pinned to a
+    specific template version on its first write and that pin is permanent (ADR-053 addendum),
+    even if a newer version has since activated. The caller's own local state is stale; it must
+    re-fetch the result-entry workspace, which reports the exact pinned template, and resubmit
+    against that."""
+
+
+class LegacyOrExternalResultContainer(RuntimeError):
+    """DH-LAB-004: a Native batch value write targeted an item whose ``LabResult`` container
+    already exists but was never Native-template-bound (``result_template_id IS NULL``) -- a
+    pre-LAB-004 row or a future Connect/LIS-reported container. Never silently adopted into
+    controlled Native entry; a container's free-structure history is not retroactively
+    reinterpreted as template-conformant."""
+
+
+class UnknownTemplateObservationDefinition(RuntimeError):
+    """DH-LAB-004: a Native batch value write named a ``definition_id`` that does not belong to
+    the exact pinned/target template -- never resolved against any other template version, active
+    or not."""
+
+
+class NativeValueTypeMismatch(RuntimeError):
+    """DH-LAB-004: a Native batch value's shape (``numeric_value`` vs. ``text_value`` set) does not
+    match its own template observation definition's ``result_type`` -- the server derives the
+    required shape from the controlled definition, never trusts a client-asserted type (there is
+    none to trust: the request carries no ``result_type`` field at all)."""
+
+
+class ObservationValueConflict(RuntimeError):
+    """DH-LAB-004: a Native batch value write replayed a definition that already has a different
+    effective value recorded for it. Never overwritten, never last-write-wins -- an intentional
+    correction is a separate, not-yet-built workflow (DH-LAB-005). An exact-value replay of the
+    identical definition is not this conflict; it is a safe no-op."""
+
+
+class TemplateBoundContainerRefusesUnstructuredWrite(RuntimeError):
+    """DH-LAB-004 §27: the raw, free-structure observation API
+    (``record_observation``/``correct_observation``) was used against a container (or, for
+    correction, a predecessor observation) that is already Native-template-bound. Once a
+    ``LabResult`` is template-bound, its structure is owned by the controlled definitions it was
+    pinned to -- the raw caller-structured path could otherwise silently attach an observation with
+    no ``template_observation_definition_id`` alongside controlled ones, or correct a controlled
+    value into an unbound, unstructured successor, destroying the exact provenance guarantee this
+    ticket exists to establish. Fails closed rather than allowing either: use the Native batch
+    value endpoint for a template-bound container's values, and correction remains a documented,
+    fail-closed gap here until DH-LAB-005 implements a template-aware correction workflow. A
+    non-template-bound (``result_template_id IS NULL``) container is entirely unaffected --
+    ADR-053's Connect/legacy free-structure path remains fully available."""
+
+
+class StaleResultFingerprint(RuntimeError):
+    """DH-LAB-004: a release was attempted with an ``expected_result_fingerprint`` that does not
+    match the exact effective observation set this transaction just recomputed, inside the same
+    ``LabOrder FOR UPDATE`` lock the release itself holds. This is the deterministic close of the
+    human race where a releaser inspects a result set, a technician then corrects one value, and
+    the releaser's now-stale "release" click would otherwise release a set they never actually saw
+    -- the fingerprint is computed over immutable observation identities (never raw values), so
+    any correction between inspection and release necessarily changes it. No automatic retry: the
+    caller must force the releaser to re-inspect the current result set and re-confirm
+    explicitly."""
 
 
 class MalformedZeroObservationEntry(RuntimeError):
@@ -378,6 +505,11 @@ class LabObservationRecord:
     """DH-EX-014B: ``None`` for an original entry or a pre-release (DH-EX-013) correction --
     unchanged meaning, no retroactive fabrication for any historical row. Non-``None`` names the
     exact ``LabResultAmendment`` episode that created this revision."""
+    template_observation_definition_id: uuid.UUID | None
+    """DH-LAB-004/ADR-053 addendum: which controlled definition, within the container's own pinned
+    template, this value answers -- ``None`` for every pre-LAB-004 observation and for any
+    observation recorded through the raw free-structure path under a non-template-bound container.
+    Never inferred from ``source_code``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +525,9 @@ class LabResultRecord:
     entry_completed_at: datetime | None
     entry_completed_by_identity_id: uuid.UUID | None
     observations: tuple[LabObservationRecord, ...]
+    result_template_id: uuid.UUID | None
+    """DH-LAB-004/ADR-053 addendum: the exact template this container was pinned to on its first
+    Native write. ``None`` for a pre-LAB-004 or non-Native (Connect/legacy) container."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +583,77 @@ class LabResultInspectionRecord:
     released: bool
     released_at: datetime | None
     items: tuple[LabResultInspectionItemRecord, ...]
+    patient_reference_id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    result_fingerprint: str
+    """DH-LAB-004: ``compute_result_fingerprint`` over every item's exact effective
+    ``(item_id, observation_id)`` pair right now -- the value a release caller must echo back as
+    ``expected_result_fingerprint`` for the release to proceed. See that function's own docstring
+    for the full canonicalization/safety-property reasoning."""
+
+
+@dataclass(frozen=True, slots=True)
+class NativeValueInput:
+    """DH-LAB-004: one caller-submitted value for the Native batch entry endpoint -- identity plus
+    value only, never structure. Exactly one of ``numeric_value``/``text_value`` is set; which one
+    is *required* is validated against the definition's own ``result_type`` server-side, never
+    trusted from which field the caller happened to populate."""
+
+    definition_id: uuid.UUID
+    numeric_value: Decimal | None
+    text_value: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NativeValueRecord:
+    """DH-LAB-004: the outcome of one submitted value within a Native batch write --
+    ``created=True`` for a genuinely new observation, ``created=False`` for an exact-value replay
+    that returned the pre-existing effective observation unchanged."""
+
+    definition_id: uuid.UUID
+    observation_id: uuid.UUID
+    numeric_value: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NativeValueBatchRecord:
+    """DH-LAB-004: the outcome of one Native batch value write -- ``values`` is returned in the
+    same order as the request's own ``values`` list, one entry per submitted definition, a mix of
+    freshly created and idempotently-replayed entries is expected and valid."""
+
+    result_id: uuid.UUID
+    template_id: uuid.UUID
+    values: tuple[NativeValueRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResultEntryWorkspaceItemRecord:
+    """DH-LAB-004 §46-48: one ordered item's Native result-entry state -- both what structure
+    applies (``result_template_id``, resolved by the caller against either the pinned template or,
+    for an unstarted item, the offering's current active template) and what has actually been
+    recorded so far (``entered_values``). ``legacy_or_external=True`` marks a container that
+    already exists but was never Native-template-bound -- truthfully represented, never silently
+    adopted into controlled entry."""
+
+    item_id: uuid.UUID
+    catalog_entry_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    result_template_id: uuid.UUID | None
+    legacy_or_external: bool
+    entry_completed_at: datetime | None
+    entry_completed_by_identity_id: uuid.UUID | None
+    entered_values: tuple[LabObservationRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResultEntryWorkspaceRecord:
+    order_id: uuid.UUID
+    order_status: str
+    items: tuple[ResultEntryWorkspaceItemRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +683,26 @@ class LabResultReleaseRecord:
     lab_organization_id: uuid.UUID
     released_by_identity_id: uuid.UUID
     released_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseQueueItemRecord:
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    selected_price_amount: Decimal | None
+    selected_price_currency: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseQueueEntryRecord:
+    """DH-LAB-004 §49-50: one order ready for this lab's own ``LAB_RESULT_RELEASER`` to inspect
+    and release -- see ``LabResultReleaseRepository.list_release_candidates``'s own docstring."""
+
+    order_id: uuid.UUID
+    patient_reference_id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    updated_at: datetime
+    items: tuple[ReleaseQueueItemRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,6 +926,16 @@ class LabResultRepository:
                 f"LabOrderItem {lab_order_item_id} already has a completed result entry -- no "
                 f"further observation may be added until ADR-045 implements correction/revision"
             )
+        if container is not None and container.result_template_id is not None:
+            # DH-LAB-004 §27: this container is Native-template-bound -- the raw, caller-
+            # structured path must never attach an observation with no
+            # `template_observation_definition_id` alongside controlled ones. Use the Native batch
+            # value endpoint instead.
+            raise TemplateBoundContainerRefusesUnstructuredWrite(
+                f"LabOrderItem {lab_order_item_id}'s result container is Native-template-bound -- "
+                f"refusing the raw free-structure observation write; use the Native batch value "
+                f"endpoint"
+            )
         if container is None:
             container = LabResult(
                 lab_order_item_id=item.id, lab_organization_id=lab_organization_id
@@ -799,6 +1035,36 @@ class LabResultRepository:
                 f"LabOrderItem {lab_order_item_id} has no recorded observation yet -- entry "
                 f"cannot be marked complete with zero observations"
             )
+
+        if container.result_template_id is not None:
+            # DH-LAB-004 §40: for a Native-template-bound container, completion additionally
+            # requires an effective observation for every `required=True` definition on the
+            # pinned template -- checked by definition identity, never `source_code` string
+            # matching. Optional definitions may remain absent. Legacy containers are unaffected.
+            required_ids = set(
+                session.scalars(
+                    select(LabResultTemplateObservation.id).where(
+                        LabResultTemplateObservation.result_template_id
+                        == container.result_template_id,
+                        LabResultTemplateObservation.required.is_(True),
+                    )
+                )
+            )
+            present_ids = set(
+                session.scalars(
+                    select(LabObservation.template_observation_definition_id).where(
+                        LabObservation.lab_result_id == container.id,
+                        LabObservation.superseded_at.is_(None),
+                        LabObservation.template_observation_definition_id.isnot(None),
+                    )
+                )
+            )
+            missing = required_ids - present_ids
+            if missing:
+                raise RequiredDefinitionsMissing(
+                    f"LabOrderItem {lab_order_item_id} is missing {len(missing)} required "
+                    f"template observation definition(s) -- entry cannot be completed"
+                )
 
         container.entry_completed_at = utc_now()
         container.entry_completed_by_identity_id = completed_by_identity_id
@@ -934,6 +1200,15 @@ class LabResultRepository:
             raise StaleObservationVersion(
                 f"LabObservation {observation_id} is no longer effective -- a correction must "
                 f"start from the currently effective observation"
+            )
+        if predecessor.template_observation_definition_id is not None:
+            # DH-LAB-004 §27: correcting a controlled value into an unbound, unstructured
+            # successor would destroy this observation's own template provenance. Fails closed
+            # until DH-LAB-005 implements a template-aware correction workflow.
+            raise TemplateBoundContainerRefusesUnstructuredWrite(
+                f"LabObservation {observation_id} answers a controlled template definition -- "
+                f"refusing the raw free-structure correction; a template-aware correction "
+                f"workflow is not yet implemented (DH-LAB-005)"
             )
 
         successor = LabObservation(
@@ -1284,6 +1559,15 @@ class LabResultRepository:
             release = session.scalar(
                 select(LabResultRelease).where(LabResultRelease.lab_order_id == order_id)
             )
+            # DH-LAB-004: computed from exactly the same `rows`/`observations_by_result` data
+            # already loaded above -- no additional query. See `compute_result_fingerprint`'s own
+            # docstring for the full canonicalization/safety-property reasoning.
+            fingerprint_pairs = [
+                (item.id, observation.id)
+                for item, container in rows
+                if container is not None
+                for observation in observations_by_result.get(container.id, [])
+            ]
             return LabResultInspectionRecord(
                 order_id=order.id,
                 order_status=order.status,
@@ -1299,7 +1583,307 @@ class LabResultRepository:
                     )
                     for item, container in rows
                 ),
+                patient_reference_id=order.patient_reference_id,
+                provider_organization_id=order.provider_organization_id,
+                result_fingerprint=compute_result_fingerprint(fingerprint_pairs),
             )
+
+    def get_entry_workspace(
+        self, order_id: uuid.UUID, lab_organization_id: uuid.UUID
+    ) -> ResultEntryWorkspaceRecord | None:
+        """DH-LAB-004 §46-48: the Native result-entry workspace read -- what structure applies to
+        each ordered item and what has actually been entered so far. Read-only, tenant-safe
+        (identical non-enumerating ``None`` convention as ``get_for_lab``), two batched queries
+        regardless of item count (mirrors ``get_for_lab``'s own discipline). Deliberately does
+        **not** resolve template *structure* (the controlled definitions, or which template is
+        currently active for an unstarted item's offering) -- that composition belongs to the
+        caller (``exchange/api.py``), which already owns the batched offering/template lookups
+        LAB-003's ``get_result_entry_plan`` established; this method supplies only the per-item
+        container/observation facts a repository query can answer."""
+        with self._sessions() as session:
+            order = session.get(LabOrder, order_id)
+            if order is None:
+                return None
+            selection = session.scalar(
+                select(LabSelection).where(LabSelection.lab_order_id == order_id)
+            )
+            if selection is None or selection.lab_organization_id != lab_organization_id:
+                return None
+            rows = session.execute(
+                select(LabOrderItem, LabResult)
+                .outerjoin(LabResult, LabResult.lab_order_item_id == LabOrderItem.id)
+                .where(LabOrderItem.lab_order_id == order_id)
+            ).all()
+            container_ids = [container.id for _item, container in rows if container is not None]
+            observations_by_result: dict[uuid.UUID, list[LabObservation]] = {}
+            if container_ids:
+                for observation in session.scalars(
+                    select(LabObservation)
+                    .where(
+                        LabObservation.lab_result_id.in_(container_ids),
+                        LabObservation.superseded_at.is_(None),
+                    )
+                    .order_by(LabObservation.recorded_at)
+                ):
+                    observations_by_result.setdefault(observation.lab_result_id, []).append(
+                        observation
+                    )
+            items = tuple(
+                ResultEntryWorkspaceItemRecord(
+                    item_id=item.id,
+                    catalog_entry_id=item.catalog_entry_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    result_template_id=container.result_template_id if container else None,
+                    legacy_or_external=(
+                        container is not None and container.result_template_id is None
+                    ),
+                    entry_completed_at=container.entry_completed_at if container else None,
+                    entry_completed_by_identity_id=(
+                        container.entry_completed_by_identity_id if container else None
+                    ),
+                    entered_values=tuple(
+                        _to_observation_record(o)
+                        for o in observations_by_result.get(container.id, [])
+                    )
+                    if container is not None
+                    else (),
+                )
+                for item, container in rows
+            )
+            return ResultEntryWorkspaceRecord(
+                order_id=order.id, order_status=order.status, items=items
+            )
+
+    # -- DH-LAB-004: Native controlled batch value entry ----------------------------------------
+
+    def record_native_values(
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        template_id: uuid.UUID,
+        values: list[NativeValueInput],
+        recorded_by_identity_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> NativeValueBatchRecord:
+        """DH-LAB-004 §7-19: the Native controlled batch value write. First call for an item
+        pins its container to the exact ``template_id`` given, atomically, only if it is the
+        offering's active template at this locked instant (``NoActiveTemplateForOffering``
+        otherwise); every subsequent call for the same item must name that identical pinned
+        template (``TemplateNotPinnedToThisResult`` otherwise) -- the pin survives any later
+        template activation change (ADR-053 addendum). Idempotent per definition: an exact-value
+        replay is a safe no-op, a different value for an already-recorded definition is
+        ``ObservationValueConflict`` (never overwritten -- correction is DH-LAB-005), and a batch
+        mixing both outcomes is valid as long as each individual outcome is truthful. Atomic: every
+        replay/conflict/type check for the whole batch is validated before any row is inserted, so
+        a batch that fails anywhere inserts nothing."""
+        if session is not None:
+            return self._record_native_values_in_session(
+                session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                template_id=template_id,
+                values=values,
+                recorded_by_identity_id=recorded_by_identity_id,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._record_native_values_in_session(
+                owned_session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                template_id=template_id,
+                values=values,
+                recorded_by_identity_id=recorded_by_identity_id,
+            )
+
+    def _record_native_values_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        template_id: uuid.UUID,
+        values: list[NativeValueInput],
+        recorded_by_identity_id: uuid.UUID,
+    ) -> NativeValueBatchRecord:
+        item, _order = _lock_order_and_item_for_entry(
+            session,
+            order_id=order_id,
+            lab_order_item_id=lab_order_item_id,
+            lab_organization_id=lab_organization_id,
+        )
+
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item.id))
+
+        if container is not None and container.result_template_id is None:
+            raise LegacyOrExternalResultContainer(
+                f"LabOrderItem {lab_order_item_id} already has a non-Native-template-bound result "
+                f"container -- refusing to adopt it into controlled Native entry"
+            )
+        if container is not None and container.result_template_id != template_id:
+            raise TemplateNotPinnedToThisResult(
+                f"LabOrderItem {lab_order_item_id}'s result container is already pinned to "
+                f"template {container.result_template_id}, not the requested {template_id}"
+            )
+
+        if container is None:
+            # DH-LAB-004 §8: first-write pinning procedure -- lock the owning LabOffering FOR
+            # UPDATE first (the identical lock `activate_template`'s own CAS acquires), so template
+            # activation and first-write pinning fully serialize against each other here. Whichever
+            # wins this lock is authoritative; the loser either pins to the version that was still
+            # active an instant ago (if pinning wins first) or observes it already inactive and
+            # raises a controlled conflict (if activation wins first) -- never a silent
+            # reinterpretation.
+            offering = session.scalar(
+                select(LabOffering)
+                .where(
+                    LabOffering.lab_organization_id == lab_organization_id,
+                    LabOffering.catalog_entry_id == item.catalog_entry_id,
+                )
+                .with_for_update()
+            )
+            template = session.get(LabResultTemplate, template_id)
+            if (
+                offering is None
+                or template is None
+                or template.lab_offering_id != offering.id
+                or not template.active
+            ):
+                raise NoActiveTemplateForOffering(
+                    f"template {template_id} is not the currently active template for "
+                    f"LabOrderItem {lab_order_item_id}'s offering -- refusing to pin"
+                )
+            container = LabResult(
+                lab_order_item_id=item.id,
+                lab_organization_id=lab_organization_id,
+                result_template_id=template.id,
+            )
+            try:
+                with session.begin_nested():
+                    session.add(container)
+                    session.flush()
+            except IntegrityError:
+                # Defensive last line only -- the LabOrder FOR UPDATE lock already serializes
+                # concurrent callers for this exact item down to one container-creation winner.
+                container = session.scalar(
+                    select(LabResult).where(LabResult.lab_order_item_id == item.id)
+                )
+                if container is None or container.result_template_id != template_id:
+                    raise TemplateNotPinnedToThisResult(
+                        f"LabOrderItem {lab_order_item_id}'s result container was concurrently "
+                        f"pinned to a different template than {template_id}"
+                    ) from None
+
+        definitions = {
+            d.id: d
+            for d in session.scalars(
+                select(LabResultTemplateObservation).where(
+                    LabResultTemplateObservation.result_template_id == container.result_template_id
+                )
+            )
+        }
+        for value in values:
+            definition = definitions.get(value.definition_id)
+            if definition is None:
+                raise UnknownTemplateObservationDefinition(
+                    f"definition {value.definition_id} does not belong to template "
+                    f"{container.result_template_id}"
+                )
+            if definition.result_type == "NUMERIC" and value.numeric_value is None:
+                raise NativeValueTypeMismatch(
+                    f"definition {value.definition_id} is NUMERIC -- numeric_value is required"
+                )
+            if definition.result_type == "TEXT" and value.text_value is None:
+                raise NativeValueTypeMismatch(
+                    f"definition {value.definition_id} is TEXT -- text_value is required"
+                )
+
+        submitted_definition_ids = [value.definition_id for value in values]
+        existing_by_definition = {
+            observation.template_observation_definition_id: observation
+            for observation in session.scalars(
+                select(LabObservation).where(
+                    LabObservation.lab_result_id == container.id,
+                    LabObservation.template_observation_definition_id.in_(submitted_definition_ids),
+                    LabObservation.superseded_at.is_(None),
+                )
+            )
+        }
+
+        # DH-LAB-004 §17: every replay/conflict/already-completed check for the whole batch is
+        # resolved here, before any `session.add` below -- a batch that fails anywhere inserts
+        # nothing.
+        to_create: list[tuple[NativeValueInput, LabResultTemplateObservation]] = []
+        replayed: list[NativeValueRecord] = []
+        for value in values:
+            existing = existing_by_definition.get(value.definition_id)
+            if existing is not None:
+                if existing.numeric_value != value.numeric_value or (
+                    existing.text_value != value.text_value
+                ):
+                    raise ObservationValueConflict(
+                        f"definition {value.definition_id} already has a different effective "
+                        f"value recorded -- correction is not implemented by this ticket"
+                    )
+                replayed.append(
+                    NativeValueRecord(
+                        definition_id=value.definition_id,
+                        observation_id=existing.id,
+                        numeric_value=existing.numeric_value,
+                        text_value=existing.text_value,
+                        recorded_at=existing.recorded_at,
+                        created=False,
+                    )
+                )
+            else:
+                if container.entry_completed_at is not None:
+                    raise EntryAlreadyCompleted(
+                        f"LabOrderItem {lab_order_item_id}'s result entry is already complete -- "
+                        f"a new (non-replayed) value may not be added"
+                    )
+                to_create.append((value, definitions[value.definition_id]))
+
+        created: list[NativeValueRecord] = []
+        for value, definition in to_create:
+            observation = LabObservation(
+                lab_result_id=container.id,
+                source_code=definition.source_code,
+                source_system=NATIVE_OBSERVATION_SOURCE_SYSTEM,
+                display_label_snapshot=definition.display_label,
+                result_type=definition.result_type,
+                numeric_value=value.numeric_value,
+                numeric_unit=definition.numeric_unit,
+                text_value=value.text_value,
+                recorded_by_identity_id=recorded_by_identity_id,
+                template_observation_definition_id=definition.id,
+            )
+            session.add(observation)
+            created.append((value.definition_id, observation))
+        session.flush()
+
+        results_by_definition: dict[uuid.UUID, NativeValueRecord] = {
+            record.definition_id: record for record in replayed
+        }
+        for definition_id, observation in created:
+            results_by_definition[definition_id] = NativeValueRecord(
+                definition_id=definition_id,
+                observation_id=observation.id,
+                numeric_value=observation.numeric_value,
+                text_value=observation.text_value,
+                recorded_at=observation.recorded_at,
+                created=True,
+            )
+
+        return NativeValueBatchRecord(
+            result_id=container.id,
+            template_id=template_id,
+            values=tuple(results_by_definition[value.definition_id] for value in values),
+        )
 
 
 class LabResultReleaseRepository:
@@ -1330,20 +1914,29 @@ class LabResultReleaseRepository:
         order_id: uuid.UUID,
         lab_organization_id: uuid.UUID,
         released_by_identity_id: uuid.UUID,
+        expected_result_fingerprint: str | None = None,
         session: Session | None = None,
     ) -> tuple[LabResultReleaseRecord, bool]:
         """Returns ``(record, created)``. ``created=False`` means an existing release was returned
-        as a safe idempotent replay -- unconditionally, regardless of who is retrying: a lost-
-        response retry by the same releaser and a later retry by a *different* authorized releaser
-        both return the identical provenance (same id, same ``released_at``, same
-        ``released_by_identity_id``) -- the fact is who actually committed the release first,
-        never rewritten by whoever asks most recently."""
+        as a safe idempotent replay -- unconditionally, regardless of who is retrying, and
+        regardless of what ``expected_result_fingerprint`` claims (a replay reports the historical
+        fact of a release that already happened; it does not re-evaluate whether the caller's own
+        inspection is current): a lost-response retry by the same releaser and a later retry by a
+        *different* authorized releaser both return the identical provenance (same id, same
+        ``released_at``, same ``released_by_identity_id``) -- the fact is who actually committed
+        the release first, never rewritten by whoever asks most recently.
+
+        DH-LAB-004 §57-62: when ``expected_result_fingerprint`` is given and does not match the
+        exact effective observation set this call just recomputed (inside the same ``LabOrder FOR
+        UPDATE`` lock release already holds), raises ``StaleResultFingerprint`` *before* any
+        release row is created -- see that exception's own docstring for the race it closes."""
         if session is not None:
             return self._release_in_session(
                 session,
                 order_id=order_id,
                 lab_organization_id=lab_organization_id,
                 released_by_identity_id=released_by_identity_id,
+                expected_result_fingerprint=expected_result_fingerprint,
             )
         with self._sessions.begin() as owned_session:
             return self._release_in_session(
@@ -1351,6 +1944,7 @@ class LabResultReleaseRepository:
                 order_id=order_id,
                 lab_organization_id=lab_organization_id,
                 released_by_identity_id=released_by_identity_id,
+                expected_result_fingerprint=expected_result_fingerprint,
             )
 
     def _release_in_session(
@@ -1360,6 +1954,7 @@ class LabResultReleaseRepository:
         order_id: uuid.UUID,
         lab_organization_id: uuid.UUID,
         released_by_identity_id: uuid.UUID,
+        expected_result_fingerprint: str | None = None,
     ) -> tuple[LabResultReleaseRecord, bool]:
         order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
         if order is None:
@@ -1402,6 +1997,21 @@ class LabResultReleaseRepository:
                 f"item(s) still lack a completed, observation-backed result entry"
             )
 
+        # DH-EX-014A: the exact effective set this release authorizes, computed inside the same
+        # LabOrder-locked transaction that already re-checked completeness above -- this is what
+        # makes the manifest structurally unable to diverge from what was actually released.
+        # DH-LAB-004: also the exact input to the fingerprint re-check below -- computed once,
+        # reused for both, never two independent reads that could disagree.
+        effective_rows = _effective_observation_rows(session, order_id)
+
+        if expected_result_fingerprint is not None:
+            actual_fingerprint = compute_result_fingerprint(effective_rows)
+            if actual_fingerprint != expected_result_fingerprint:
+                raise StaleResultFingerprint(
+                    f"cannot release results for LabOrder {order_id} -- the effective result set "
+                    f"has changed since it was last inspected"
+                )
+
         released_at = utc_now()
         release = LabResultRelease(
             lab_order_id=order_id,
@@ -1412,15 +2022,10 @@ class LabResultReleaseRepository:
         session.add(release)
         session.flush()
 
-        # DH-EX-014A: the exact effective set this release authorizes, computed inside the same
-        # LabOrder-locked transaction that already re-checked completeness above -- this is what
-        # makes the manifest structurally unable to diverge from what was actually released.
-        # DH-EX-014B: extracted to a shared module function, `_effective_observation_rows`, now
-        # reused identically by `LabResultAmendmentRepository`'s amendment-release path -- same
-        # query, same "no divergence possible" guarantee, not a second implementation to keep in
-        # sync.
-        effective_rows = _effective_observation_rows(session, order_id)
-
+        # DH-EX-014B: `effective_rows` (computed above, before the fingerprint re-check) is
+        # reused as-is here -- `_effective_observation_rows` is the identical shared module
+        # function `LabResultAmendmentRepository`'s amendment-release path also uses, so no two
+        # independently-maintained copies can silently drift apart.
         version = LabResultReleaseVersion(
             lab_order_id=order_id,
             version_number=1,
@@ -1455,6 +2060,70 @@ class LabResultReleaseRepository:
         order.status = LabOrderStatus.COMPLETED.value
         session.flush()
         return _to_release_record(release), True
+
+    def list_release_candidates(
+        self, lab_organization_id: uuid.UUID
+    ) -> list[ReleaseQueueEntryRecord]:
+        """DH-LAB-004 §49-50: this lab's own least-privilege release queue -- orders assigned to
+        it, ``IN_PROGRESS``, every item's entry complete, not already released. Deliberately a
+        dedicated read, never the ``LAB_TECH`` work queue broadened to releasers. Bounded to one
+        lab's own ``IN_PROGRESS`` orders (never unbounded across the whole Exchange); within that
+        bound, one ``_count_missing_or_malformed_results`` query per still-unreleased candidate
+        order is used to determine readiness -- disclosed here rather than hidden: acceptable for
+        a per-lab, `IN_PROGRESS`-only candidate set, not the O(1)-regardless-of-size discipline
+        the item-level reads in this module otherwise hold themselves to."""
+        with self._sessions() as session:
+            orders = session.scalars(
+                select(LabOrder)
+                .join(LabSelection, LabSelection.lab_order_id == LabOrder.id)
+                .where(
+                    LabSelection.lab_organization_id == lab_organization_id,
+                    LabOrder.status == LabOrderStatus.IN_PROGRESS.value,
+                )
+                .order_by(LabOrder.updated_at)
+            ).all()
+            if not orders:
+                return []
+            order_ids = [order.id for order in orders]
+            already_released = set(
+                session.scalars(
+                    select(LabResultRelease.lab_order_id).where(
+                        LabResultRelease.lab_order_id.in_(order_ids)
+                    )
+                )
+            )
+            candidates = [order for order in orders if order.id not in already_released]
+            if not candidates:
+                return []
+            items_by_order: dict[uuid.UUID, list[LabOrderItem]] = {}
+            for item in session.scalars(
+                select(LabOrderItem).where(
+                    LabOrderItem.lab_order_id.in_([order.id for order in candidates])
+                )
+            ):
+                items_by_order.setdefault(item.lab_order_id, []).append(item)
+            ready: list[ReleaseQueueEntryRecord] = []
+            for order in candidates:
+                if _count_missing_or_malformed_results(session, order.id):
+                    continue
+                ready.append(
+                    ReleaseQueueEntryRecord(
+                        order_id=order.id,
+                        patient_reference_id=order.patient_reference_id,
+                        provider_organization_id=order.provider_organization_id,
+                        updated_at=order.updated_at,
+                        items=tuple(
+                            ReleaseQueueItemRecord(
+                                catalog_code_snapshot=item.catalog_code_snapshot,
+                                catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                                selected_price_amount=item.selected_price_amount,
+                                selected_price_currency=item.selected_price_currency,
+                            )
+                            for item in items_by_order.get(order.id, [])
+                        ),
+                    )
+                )
+            return ready
 
     def get_for_order(self, order_id: uuid.UUID) -> LabResultReleaseRecord | None:
         with self._sessions() as session:
@@ -2638,6 +3307,7 @@ def _to_observation_record(observation: LabObservation) -> LabObservationRecord:
         supersedes_observation_id=observation.supersedes_observation_id,
         superseded_at=observation.superseded_at,
         amendment_id=observation.amendment_id,
+        template_observation_definition_id=observation.template_observation_definition_id,
     )
 
 
@@ -2649,6 +3319,7 @@ def _to_result_record(container: LabResult, observations: list[LabObservation]) 
         entry_completed_at=container.entry_completed_at,
         entry_completed_by_identity_id=container.entry_completed_by_identity_id,
         observations=tuple(_to_observation_record(o) for o in observations),
+        result_template_id=container.result_template_id,
     )
 
 

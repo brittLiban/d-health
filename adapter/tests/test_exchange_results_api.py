@@ -115,12 +115,25 @@ def _release_results(client, private_key, lab_id, order_id, name: str) -> dict:
         client, private_key, lab_id, releaser_id, f"releaser-{name}", ["LAB_RESULT_RELEASER"]
     )
     releaser_token = make_token(private_key, subject=f"releaser-{name}")
+    fingerprint = _current_result_fingerprint(client, releaser_token, lab_id, order_id)
     response = client.post(
         f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/release-results",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": fingerprint},
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def _current_result_fingerprint(client: TestClient, token: str, lab_id, order_id) -> str:
+    """DH-LAB-004 §57-62: fetches the exact ``result_fingerprint`` a release request must echo
+    back -- the inspection step every releaser is now required to actually perform."""
+    response = client.get(
+        f"/exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/results",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["result_fingerprint"]
 
 
 def _grant_roles(client, private_key, org_id, identity_id, subject: str, roles: list[str]) -> None:
@@ -1351,6 +1364,7 @@ def test_release_and_completion_audit_atomicity(
         ["LAB_RESULT_RELEASER"],
     )
     releaser_token = make_token(private_key, subject="releaser-ReleaseAuditFail")
+    fingerprint = _current_result_fingerprint(client, releaser_token, lab.id, order_id)
 
     def _raise(*_a, **_kw):
         raise RuntimeError("simulated audit failure")
@@ -1361,6 +1375,7 @@ def test_release_and_completion_audit_atomicity(
         client.post(
             f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
             headers=_auth(releaser_token),
+            json={"expected_result_fingerprint": fingerprint},
         )
 
     with sessions() as session:
@@ -1406,6 +1421,7 @@ def test_release_rollback_when_only_completion_audit_fails(
         ["LAB_RESULT_RELEASER"],
     )
     releaser_token = make_token(private_key, subject="releaser-PartialAuditFail")
+    fingerprint = _current_result_fingerprint(client, releaser_token, lab.id, order_id)
 
     real_record = ExchangeSecurityAuditRepository.record
     call_count = {"n": 0}
@@ -1422,6 +1438,7 @@ def test_release_rollback_when_only_completion_audit_fails(
         client.post(
             f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
             headers=_auth(releaser_token),
+            json={"expected_result_fingerprint": fingerprint},
         )
 
     with sessions() as session:
@@ -1452,6 +1469,7 @@ def test_lab_tech_alone_cannot_release_results(
     response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(lab_tech_token),
+        json={"expected_result_fingerprint": "irrelevant-role-check-fails-first"},
     )
     assert response.status_code == 403, response.text
     with sessions() as session:
@@ -1478,6 +1496,7 @@ def test_org_admin_alone_cannot_release_results(
     response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(org_admin_token),
+        json={"expected_result_fingerprint": "irrelevant-role-check-fails-first"},
     )
     assert response.status_code == 403, response.text
 
@@ -1508,6 +1527,7 @@ def test_platform_admin_alone_cannot_release_results(
     response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(admin_token),
+        json={"expected_result_fingerprint": "irrelevant-role-check-fails-first"},
     )
     assert response.status_code == 403, response.text
 
@@ -1529,6 +1549,7 @@ def test_clinician_cannot_release_results(
     response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(clinician_token),
+        json={"expected_result_fingerprint": "irrelevant-role-check-fails-first"},
     )
     assert response.status_code == 404, response.text  # clinician has zero relationship to lab.id
 
@@ -1563,10 +1584,12 @@ def test_cross_lab_releaser_cannot_release_results_and_is_non_enumerating(
     real_response = client.post(
         f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(impostor_releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-tenant-check-fails-first"},
     )
     fake_response = client.post(
         f"/exchange/v1/organizations/{impostor_lab.id}/lab-orders/{uuid.uuid4()}/release-results",
         headers=_auth(impostor_releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-tenant-check-fails-first"},
     )
     assert real_response.status_code == 404
     assert fake_response.status_code == 404
@@ -1741,9 +1764,11 @@ def test_dual_role_identity_may_enter_and_release_the_same_order(
     )
     assert submit.status_code == 201, submit.text
 
+    fingerprint = _current_result_fingerprint(client, dual_token, lab.id, order_id)
     release = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(dual_token),
+        json={"expected_result_fingerprint": fingerprint},
     )
     assert release.status_code == 201, release.text
     assert release.json()["released_by_identity_id"] == dual_identity_id
@@ -1792,6 +1817,7 @@ def test_release_refused_when_results_incomplete(
     response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-incompleteness-check-fails-first"},
     )
     assert response.status_code == 409, response.text
     with sessions() as session:
@@ -1832,6 +1858,7 @@ def test_release_on_legacy_completed_order_is_refused_not_fabricated(
     release_attempt = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-legacy-check-fails-first"},
     )
     assert release_attempt.status_code == 409, release_attempt.text
     with sessions() as session:
@@ -1885,15 +1912,18 @@ def test_release_replay_by_same_releaser_returns_identical_provenance(
         ["LAB_RESULT_RELEASER"],
     )
     releaser_token = make_token(private_key, subject="releaser-ReplaySameReleaser")
+    fingerprint = _current_result_fingerprint(client, releaser_token, lab.id, order_id)
 
     first = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": fingerprint},
     )
     assert first.status_code == 201, first.text
     second = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-replay-returns-first-committer-fact"},
     )
     assert second.status_code == 200, second.text
     assert second.json()["released_at"].rstrip("Z") == first.json()["released_at"].rstrip("Z")
@@ -1937,6 +1967,7 @@ def test_release_replay_by_a_different_releaser_never_rewrites_provenance(
     second_response = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(second_releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-replay-returns-first-committer-fact"},
     )
     assert second_response.status_code == 200, second_response.text
     assert (
@@ -2038,6 +2069,7 @@ def test_multi_observation_golden_flow_release_and_provider_read(
     premature_release = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/release-results",
         headers=_auth(_bootstrap_and_grant_releaser(client, private_key, lab.id, "MultiObs")),
+        json={"expected_result_fingerprint": "irrelevant-incompleteness-check-fails-first"},
     )
     assert premature_release.status_code == 409, premature_release.text
 

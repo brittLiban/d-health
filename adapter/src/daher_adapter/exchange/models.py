@@ -890,6 +890,19 @@ class LabResult(Base):
     entry_completed_by_identity_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
     )
+    # DH-LAB-004/ADR-053 addendum: the exact ``LabResultTemplate`` version this container was
+    # pinned to on its first Native write -- set once, at container-creation time, and never
+    # changed afterward even if the offering later activates a newer template version (see
+    # ``LabResultRepository``'s first-write pinning procedure). ``NULL`` for every container that
+    # predates this ticket and for any container created by a non-Native (Connect/legacy)
+    # write path that never resolves a template at all -- both are honest absences, never
+    # backfilled. ``ON DELETE RESTRICT`` because a pinned historical entry must never be able to
+    # silently lose its own provenance by a template row being deleted out from under it (no code
+    # anywhere in this codebase deletes a ``LabResultTemplate`` -- this is defense-in-depth, not a
+    # response to a real deletion path).
+    result_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_result_templates.id", ondelete="RESTRICT"), nullable=True
+    )
     order_item: Mapped[LabOrderItem] = relationship(back_populates="result")
     # DH-EX-013: this relationship returns every observation ever recorded under this container,
     # superseded and effective alike -- no ordinary repository read in `exchange/results.py` uses
@@ -1006,6 +1019,25 @@ class LabObservation(Base):
             "supersedes_observation_id",
             name="uq_exchange_lab_observations_supersedes_observation_id",
         ),
+        # DH-LAB-004: at most one *effective* observation per controlled template definition, per
+        # container -- the database backstop for the native-value batch write's own replay/conflict
+        # discipline (the `LabOrder FOR UPDATE` lock is the actual serializing mechanism; this
+        # index is the defense-in-depth for anything that reaches this table any other way,
+        # mirroring `supersedes_observation_id`'s own UNIQUE-constraint-as-backstop precedent).
+        # Partial: rows with no template definition (legacy/Connect-style free structure) and
+        # superseded rows are both excluded on purpose -- neither participates in this rule.
+        Index(
+            "uq_exchange_lab_observations_one_effective_per_definition",
+            "lab_result_id",
+            "template_observation_definition_id",
+            unique=True,
+            postgresql_where=text(
+                "template_observation_definition_id IS NOT NULL AND superseded_at IS NULL"
+            ),
+            sqlite_where=text(
+                "template_observation_definition_id IS NOT NULL AND superseded_at IS NULL"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -1035,6 +1067,16 @@ class LabObservation(Base):
     # class's own docstring for the full eligibility-predicate reasoning.
     amendment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_amendments.id", ondelete="RESTRICT"), nullable=True
+    )
+    # DH-LAB-004/ADR-053 addendum: which controlled definition, within the container's own pinned
+    # ``result_template_id`` template, this value answers -- never inferred from `source_code`
+    # string matching. ``NULL`` for every pre-DH-LAB-004 observation and for any observation
+    # recorded through the raw, free-structure path (``record_observation``/correction) under a
+    # container that is not template-bound -- both honest absences, never backfilled. ``ON DELETE
+    # RESTRICT`` for the identical defense-in-depth reasoning as ``LabResult.result_template_id``.
+    template_observation_definition_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_result_template_observations.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     result: Mapped[LabResult] = relationship(back_populates="observations")
 

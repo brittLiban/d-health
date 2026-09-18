@@ -305,6 +305,36 @@ class LabResultTemplateRepository:
                 for t in templates
             }
 
+    def get_templates_by_ids(
+        self, template_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, TemplateRecord]:
+        """DH-LAB-004: batched sibling of ``get_active_templates_for_offerings`` for the
+        result-entry workspace read -- resolves a set of *already-pinned* template ids (which may
+        no longer be active) in exactly two queries regardless of how many ids are passed, never
+        one pair per item. Unlike ``get_active_templates_for_offerings``, this does not filter on
+        ``active`` at all -- a pinned template's own docstring explains why it must remain
+        resolvable after a later template version activates."""
+        if not template_ids:
+            return {}
+        with self._sessions() as session:
+            templates = session.scalars(
+                select(LabResultTemplate).where(LabResultTemplate.id.in_(template_ids))
+            ).all()
+            ids = [t.id for t in templates]
+            observations_by_template: dict[uuid.UUID, list[LabResultTemplateObservation]] = {}
+            if ids:
+                rows = session.scalars(
+                    select(LabResultTemplateObservation)
+                    .where(LabResultTemplateObservation.result_template_id.in_(ids))
+                    .order_by(LabResultTemplateObservation.sort_order)
+                ).all()
+                for row in rows:
+                    observations_by_template.setdefault(row.result_template_id, []).append(row)
+            return {
+                t.id: _to_template_record(t, observations=observations_by_template.get(t.id, []))
+                for t in templates
+            }
+
     # -- activation -----------------------------------------------------------------------------
 
     def activate_template(

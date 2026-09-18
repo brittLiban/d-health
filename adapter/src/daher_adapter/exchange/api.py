@@ -158,16 +158,28 @@ from daher_adapter.exchange.results import (
     LabResultReleaseVersionRecord,
     LabResultRepository,
     LegacyCompletedOrderHasNoRelease,
+    LegacyOrExternalResultContainer,
+    NativeValueInput,
+    NativeValueTypeMismatch,
+    NoActiveTemplateForOffering,
     ObservationNotEligibleForAmendment,
     ObservationNotFound,
+    ObservationValueConflict,
     OrderItemNotFound,
     OrderNotCompletedForAmendment,
+    ReleaseQueueEntryRecord,
+    RequiredDefinitionsMissing,
+    ResultEntryWorkspaceRecord,
     ResultsNotReadyForRelease,
     ResultSubmissionOutcome,
     ReviewAlreadyFinalized,
     ReviewNotAllowedYet,
     ReviewNotFound,
     StaleObservationVersion,
+    StaleResultFingerprint,
+    TemplateBoundContainerRefusesUnstructuredWrite,
+    TemplateNotPinnedToThisResult,
+    UnknownTemplateObservationDefinition,
 )
 from daher_adapter.exchange.security_audit import ExchangeSecurityAuditRepository
 from daher_adapter.exchange.selection import (
@@ -1174,6 +1186,118 @@ class ResultEntryPlanResponse(BaseModel):
     items: list[ResultEntryPlanItemResponse]
 
 
+# -- DH-LAB-004: Native controlled result entry, completion, and fingerprint-gated release --------
+
+
+class NativeResultValueInput(BaseModel):
+    """DH-LAB-004 §9-13: one submitted value for the Native controlled batch entry endpoint --
+    identity plus value only. **The browser never submits ``result_type``/``source_code``/
+    ``display_label``/``numeric_unit``/reference ranges/``source_system``** -- every one of those
+    is always derived server-side from the pinned template's own controlled observation
+    definition, never accepted from the caller. Which of ``numeric_value``/``text_value`` is
+    actually *required* is validated against that definition's own ``result_type`` inside the
+    repository, never trusted from which field the caller happened to populate here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: uuid.UUID
+    numeric_value: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    text_value: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _exactly_one_value(self) -> "NativeResultValueInput":
+        if (self.numeric_value is None) == (self.text_value is None):
+            raise ValueError("exactly one of numeric_value or text_value must be set")
+        if self.text_value is not None and not self.text_value.strip():
+            raise ValueError("text_value must not be blank")
+        return self
+
+
+class NativeResultValueBatchRequest(BaseModel):
+    """DH-LAB-004 §16-19: an item may have multiple values entered in one atomic batch, or one at
+    a time -- partial entry is allowed; completion is always a separate, explicit later action,
+    never inferred from "all required values present" (§40's own rule lives on ``complete_entry``,
+    not here)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: uuid.UUID
+    values: list[NativeResultValueInput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unique_definitions(self) -> "NativeResultValueBatchRequest":
+        ids = [v.definition_id for v in self.values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("values must not repeat the same definition_id")
+        return self
+
+
+class NativeResultValueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: uuid.UUID
+    observation_id: uuid.UUID
+    numeric_value: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+    created: bool
+    """``False`` means this exact value already existed and was returned as a safe idempotent
+    replay -- never a fabricated "created" outcome for a no-op."""
+
+
+class NativeResultValueBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    item_id: uuid.UUID
+    result_id: uuid.UUID
+    template_id: uuid.UUID
+    values: list[NativeResultValueResponse]
+
+
+class ResultEntryWorkspaceEnteredValueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: uuid.UUID | None
+    """``None`` only for a legacy/external (``entry_mode == 'LEGACY_OR_EXTERNAL'``) item's
+    observation, which never answers a controlled definition."""
+    observation_id: uuid.UUID
+    numeric_value: Decimal | None
+    text_value: str | None
+    recorded_at: datetime
+
+
+class ResultEntryWorkspaceItemResponse(BaseModel):
+    """DH-LAB-004 §46-48: one ordered item's Native result-entry state. ``template=None`` with
+    ``entry_mode='UNSTARTED_NO_TEMPLATE'`` means Native entry is blocked for this item -- no
+    free-form fallback exists or is offered. ``entry_mode='LEGACY_OR_EXTERNAL'`` means a container
+    already exists but was never Native-template-bound (pre-LAB-004 or a future Connect-reported
+    container) -- represented truthfully, never silently adopted into controlled entry.
+    ``template_pinned=True`` means ``template`` is this container's own exact pinned version,
+    which may no longer be the offering's currently active template -- still the correct one to
+    keep entering against."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    template: ResultEntryPlanTemplateResponse | None
+    template_pinned: bool
+    entry_mode: Literal["NATIVE_TEMPLATE", "LEGACY_OR_EXTERNAL", "UNSTARTED_NO_TEMPLATE"]
+    entry_completed: bool
+    entry_completed_at: datetime | None
+    entered_values: list[ResultEntryWorkspaceEnteredValueResponse]
+
+
+class ResultEntryWorkspaceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    order_status: str
+    items: list[ResultEntryWorkspaceItemResponse]
+
+
 # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review ----
 
 
@@ -1488,6 +1612,46 @@ class LabResultInspectionResponse(BaseModel):
     released: bool
     released_at: datetime | None
     results: list[LabResultInspectionItemResponse]
+    patient: LabPatientIdentityResponse
+    ordering_provider_name: str
+    result_fingerprint: str
+    """DH-LAB-004 §57-62: the exact value a release request must echo back as
+    ``expected_result_fingerprint`` -- see ``results.compute_result_fingerprint``'s own docstring
+    for the full canonicalization/safety-property reasoning. Changes the instant any effective
+    observation in this order is added or corrected."""
+
+
+class LabResultReleaseRequest(BaseModel):
+    """DH-LAB-004 §57-62: the releaser must name the exact result set they inspected --
+    deliberately required, no "release without inspecting" escape hatch. See
+    ``LabResultInspectionResponse.result_fingerprint``'s own docstring."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_result_fingerprint: str
+
+
+class ReleaseQueueEntryResponse(BaseModel):
+    """DH-LAB-004 §49-50: one order ready for this lab's ``LAB_RESULT_RELEASER`` to inspect and
+    release -- assigned to this lab, ``IN_PROGRESS``, every item's entry complete, not already
+    released. Deliberately least-privilege and never UUID-first: patient and tests are shown by
+    name, matching ``LabWorkflowOrderResponse``'s own established lab-safe identity projection,
+    never the provider's full directory entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    patient: LabPatientIdentityResponse
+    ordering_provider_name: str
+    requested_tests: list[LabWorkflowOrderItemResponse]
+    updated_at: datetime
+
+
+class ReleaseQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    orders: list[ReleaseQueueEntryResponse]
 
 
 class LabResultReleaseResponse(BaseModel):
@@ -4234,6 +4398,237 @@ def build_exchange_router(
             items=item_responses,
         )
 
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/result-entry-workspace",
+        response_model=ResultEntryWorkspaceResponse,
+    )
+    def get_result_entry_workspace(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ResultEntryWorkspaceResponse:
+        # DH-LAB-004 §46-48: the controlled Native result-entry workspace -- per item, resolves
+        # whichever template actually governs entry right now (the container's own pinned version
+        # if one exists, even if no longer active -- the pin survives later activation changes; the
+        # offering's currently active template for an unstarted item otherwise) and shows what has
+        # already been entered. LAB_TECH only -- entry, not release. Available only while
+        # IN_PROGRESS, mirroring `get_result_entry_plan`'s own established gate.
+        _require_lab_tech(principal, lab_id)
+        record: LabWorkflowOrderRecord | None = lab_workflow.get_for_lab(order_id, lab_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        if LabOrderStatus(record.status) != LabOrderStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="the result-entry workspace is only available while the order is "
+                "IN_PROGRESS",
+            )
+        workspace: ResultEntryWorkspaceRecord | None = results.get_entry_workspace(order_id, lab_id)
+        if workspace is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+
+        # DH-LAB-004: bounded, batched regardless of item count -- one offering lookup, one
+        # catalog-entry lookup, one active-template lookup, one pinned-template lookup. Mirrors
+        # `get_result_entry_plan`'s own established batching discipline.
+        catalog_entry_ids = [item.catalog_entry_id for item in record.items]
+        offerings_by_entry = catalog.get_offerings_for_lab_and_entries(lab_id, catalog_entry_ids)
+        entries_by_id = catalog.get_entries_by_ids(catalog_entry_ids)
+        offering_ids = [o.id for o in offerings_by_entry.values()]
+        active_templates_by_offering = result_templates.get_active_templates_for_offerings(
+            offering_ids
+        )
+        pinned_template_ids = [
+            item.result_template_id
+            for item in workspace.items
+            if item.result_template_id is not None
+        ]
+        pinned_templates_by_id = result_templates.get_templates_by_ids(pinned_template_ids)
+        workspace_items_by_id = {item.item_id: item for item in workspace.items}
+
+        item_responses: list[ResultEntryWorkspaceItemResponse] = []
+        for item in record.items:
+            workspace_item = workspace_items_by_id.get(item.id)
+            if workspace_item is None:
+                raise ResultEntryPlanIntegrityError(
+                    f"LabOrder {order_id} item {item.id} is missing from its own result-entry "
+                    f"workspace -- refusing to render"
+                )
+            template_record: TemplateRecord | None = None
+            template_pinned = False
+            entry_mode: Literal["NATIVE_TEMPLATE", "LEGACY_OR_EXTERNAL", "UNSTARTED_NO_TEMPLATE"]
+            if workspace_item.legacy_or_external:
+                entry_mode = "LEGACY_OR_EXTERNAL"
+            elif workspace_item.result_template_id is not None:
+                template_record = pinned_templates_by_id.get(workspace_item.result_template_id)
+                if template_record is None:
+                    raise ResultEntryPlanIntegrityError(
+                        f"LabOrderItem {item.id}'s result container is pinned to template "
+                        f"{workspace_item.result_template_id}, which does not exist -- refusing "
+                        f"to render"
+                    )
+                template_pinned = True
+                entry_mode = "NATIVE_TEMPLATE"
+            else:
+                offering = offerings_by_entry.get(item.catalog_entry_id)
+                if offering is None:
+                    raise ResultEntryPlanIntegrityError(
+                        f"LabOrder {order_id} item {item.id} references catalog entry "
+                        f"{item.catalog_entry_id}, which has no LabOffering at lab {lab_id} "
+                        f"despite being currently assigned there -- refusing to render this "
+                        f"workspace"
+                    )
+                template_record = active_templates_by_offering.get(offering.id)
+                entry_mode = (
+                    "NATIVE_TEMPLATE" if template_record is not None else "UNSTARTED_NO_TEMPLATE"
+                )
+
+            template_response: ResultEntryPlanTemplateResponse | None = None
+            if template_record is not None:
+                entry = entries_by_id.get(item.catalog_entry_id)
+                template_response = ResultEntryPlanTemplateResponse(
+                    template_id=template_record.id,
+                    version=template_record.version,
+                    is_synthetic=entry.is_synthetic if entry is not None else True,
+                    observations=[
+                        ResultEntryPlanObservationResponse(
+                            definition_id=o.id,
+                            source_code=o.source_code,
+                            display_label=o.display_label,
+                            result_type=o.result_type,
+                            numeric_unit=o.numeric_unit,
+                            required=o.required,
+                            sort_order=o.sort_order,
+                        )
+                        for o in template_record.observations
+                    ],
+                )
+
+            item_responses.append(
+                ResultEntryWorkspaceItemResponse(
+                    item_id=item.id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    template=template_response,
+                    template_pinned=template_pinned,
+                    entry_mode=entry_mode,
+                    entry_completed=workspace_item.entry_completed_at is not None,
+                    entry_completed_at=workspace_item.entry_completed_at,
+                    entered_values=[
+                        ResultEntryWorkspaceEnteredValueResponse(
+                            definition_id=value.template_observation_definition_id,
+                            observation_id=value.id,
+                            numeric_value=value.numeric_value,
+                            text_value=value.text_value,
+                            recorded_at=value.recorded_at,
+                        )
+                        for value in workspace_item.entered_values
+                    ],
+                )
+            )
+
+        return ResultEntryWorkspaceResponse(
+            order_id=workspace.order_id,
+            order_status=workspace.order_status,
+            items=item_responses,
+        )
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/native-result-values",
+        response_model=NativeResultValueBatchResponse,
+    )
+    def record_native_result_values(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        body: NativeResultValueBatchRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> NativeResultValueBatchResponse:
+        # DH-LAB-004 §7-19: the Native controlled batch value write -- template identity,
+        # definition identity, and value only. The browser never submits result_type/source_code/
+        # display_label/numeric_unit/reference ranges/source_system; the server derives every one
+        # of those from the pinned template's own controlled observation definition. LAB_TECH
+        # only.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                outcome = results.record_native_values(
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    template_id=body.template_id,
+                    values=[
+                        NativeValueInput(
+                            definition_id=value.definition_id,
+                            numeric_value=value.numeric_value,
+                            text_value=value.text_value,
+                        )
+                        for value in body.values
+                    ],
+                    recorded_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                created_count = sum(1 for value in outcome.values if value.created)
+                # `lab_observation_recorded` reused unchanged (DH-LAB-004 audit reuse instruction)
+                # -- recorded only for genuine creation, never for an idempotent replay batch.
+                if created_count:
+                    security_audit.record(
+                        session,
+                        event_type="lab_observation_recorded",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except EntryAlreadyCompleted as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except NoActiveTemplateForOffering as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except TemplateNotPinnedToThisResult as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LegacyOrExternalResultContainer as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except UnknownTemplateObservationDefinition as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
+        except NativeValueTypeMismatch as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
+        except ObservationValueConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        response.status_code = status.HTTP_201_CREATED if created_count else status.HTTP_200_OK
+        return NativeResultValueBatchResponse(
+            order_id=order_id,
+            item_id=item_id,
+            result_id=outcome.result_id,
+            template_id=outcome.template_id,
+            values=[
+                NativeResultValueResponse(
+                    definition_id=value.definition_id,
+                    observation_id=value.observation_id,
+                    numeric_value=value.numeric_value,
+                    text_value=value.text_value,
+                    recorded_at=value.recorded_at,
+                    created=value.created,
+                )
+                for value in outcome.values
+            ],
+        )
+
     # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review
 
     @router.post(
@@ -4406,6 +4801,8 @@ def build_exchange_router(
             ) from error
         except EntryAlreadyCompleted as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except TemplateBoundContainerRefusesUnstructuredWrite as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         return _observation_response(order_id, item_id, observation)
 
@@ -4458,6 +4855,8 @@ def build_exchange_router(
                 status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
             ) from error
         except EntryNotReadyForCompletion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except RequiredDefinitionsMissing as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return EntryCompletionResponse(
@@ -4533,6 +4932,8 @@ def build_exchange_router(
             ) from error
         except StaleObservationVersion as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except TemplateBoundContainerRefusesUnstructuredWrite as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
         return _observation_response(order_id, item_id, successor)
 
@@ -4570,6 +4971,59 @@ def build_exchange_router(
         )
 
     @router.get(
+        "/organizations/{lab_id}/release-queue",
+        response_model=ReleaseQueueResponse,
+    )
+    def get_release_queue(
+        lab_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ReleaseQueueResponse:
+        # DH-LAB-004 §49-50: this lab's own dedicated, least-privilege release queue --
+        # LAB_RESULT_RELEASER only. Deliberately never the LAB_TECH work queue broadened to
+        # releasers: a releaser-only user (no LAB_TECH) must never gain visibility into orders
+        # that are not yet ready for release through this route.
+        _require_lab_result_releaser(principal, lab_id)
+        candidates: list[ReleaseQueueEntryRecord] = releases.list_release_candidates(lab_id)
+        provider_ids = list(dict.fromkeys(c.provider_organization_id for c in candidates))
+        providers_by_id = {pid: organizations.get(pid) for pid in provider_ids}
+        PatientMap = dict[uuid.UUID, PatientIdentitySummaryResponse]
+        patient_identities_by_provider: dict[uuid.UUID, PatientMap] = {}
+        for provider_id in provider_ids:
+            reference_ids = [
+                c.patient_reference_id
+                for c in candidates
+                if c.provider_organization_id == provider_id
+            ]
+            patient_identities_by_provider[provider_id] = _require_patient_identities(
+                provider_id, reference_ids
+            )
+        return ReleaseQueueResponse(
+            lab_organization_id=lab_id,
+            orders=[
+                ReleaseQueueEntryResponse(
+                    order_id=candidate.order_id,
+                    patient=_to_lab_patient_identity(
+                        patient_identities_by_provider[candidate.provider_organization_id][
+                            candidate.patient_reference_id
+                        ]
+                    ),
+                    ordering_provider_name=providers_by_id[candidate.provider_organization_id].name,
+                    requested_tests=[
+                        LabWorkflowOrderItemResponse(
+                            catalog_code_snapshot=item.catalog_code_snapshot,
+                            catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                            selected_price_amount=item.selected_price_amount,
+                            selected_price_currency=item.selected_price_currency,
+                        )
+                        for item in candidate.items
+                    ],
+                    updated_at=candidate.updated_at,
+                )
+                for candidate in candidates
+            ],
+        )
+
+    @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/results",
         response_model=LabResultInspectionResponse,
     )
@@ -4586,12 +5040,19 @@ def build_exchange_router(
         record: LabResultInspectionRecord | None = results.get_for_lab(order_id, lab_id)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        provider = organizations.get(record.provider_organization_id)
+        patient_identity = _require_patient_identity(
+            record.provider_organization_id, record.patient_reference_id
+        )
         return LabResultInspectionResponse(
             order_id=record.order_id,
             order_status=record.order_status,
             all_items_entry_complete=record.all_items_entry_complete,
             released=record.released,
             released_at=record.released_at,
+            patient=_to_lab_patient_identity(patient_identity),
+            ordering_provider_name=provider.name,
+            result_fingerprint=record.result_fingerprint,
             results=[
                 LabResultInspectionItemResponse(
                     item_id=item.item_id,
@@ -4628,14 +5089,20 @@ def build_exchange_router(
     def release_lab_order_results(
         lab_id: uuid.UUID,
         order_id: uuid.UUID,
+        body: LabResultReleaseRequest,
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabResultReleaseResponse:
         # DH-EX-012/ADR-044: the sole supported production way to move a LabOrder from
-        # IN_PROGRESS to COMPLETED. No request body: actor from authentication, lab/order from the
-        # URL, time from the server clock. LAB_RESULT_RELEASER only -- LAB_TECH alone (without
-        # also holding LAB_RESULT_RELEASER) is refused, matching ADR-044's explicit "entry and
-        # release are separate authorities" binding decision.
+        # IN_PROGRESS to COMPLETED. Actor from authentication, lab/order from the URL, time from
+        # the server clock. LAB_RESULT_RELEASER only -- LAB_TECH alone (without also holding
+        # LAB_RESULT_RELEASER) is refused, matching ADR-044's explicit "entry and release are
+        # separate authorities" binding decision.
+        #
+        # DH-LAB-004 §57-62: `expected_result_fingerprint` is required (not optional/backward-
+        # compatible) -- this is the deliberate, justified breaking change to this not-yet-live
+        # endpoint's contract that closes the inspect-then-stale-release race; there is no
+        # "release without having inspected" escape hatch.
         _require_lab_result_releaser(principal, lab_id)
         try:
             with session_factory.begin() as session:
@@ -4643,6 +5110,7 @@ def build_exchange_router(
                     order_id=order_id,
                     lab_organization_id=lab_id,
                     released_by_identity_id=principal.identity_id,
+                    expected_result_fingerprint=body.expected_result_fingerprint,
                     session=session,
                 )
                 # `lab_results_released` and `lab_order_completed` commit or roll back together
@@ -4676,6 +5144,8 @@ def build_exchange_router(
         except LegacyCompletedOrderHasNoRelease as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ResultsNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except StaleResultFingerprint as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return LabResultReleaseResponse(
