@@ -400,6 +400,80 @@ describe('LabOrdersPage', () => {
     expect(screen.getAllByText('Patient B').length).toBe(2)
   })
 
+  it('RR5: a late accept response for order A never mutates the now-visible order B', async () => {
+    const acceptA = deferred<LabWorkflowOrder>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
+        makeOrder({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      acceptLabOrder: vi.fn(() => acceptA.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" })) // stalls on acceptA
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    // order-b's own detail is now open and still SELECTED -- its own accept action is available.
+    await screen.findByRole('button', { name: "Accepter l'ordre" })
+
+    await act(async () => {
+      acceptA.resolve(makeOrder({ order_id: 'order-a', status: 'ACCEPTED' }))
+      await Promise.resolve()
+    })
+
+    // order-a's late accept must never mutate the panel now showing order-b.
+    expect(screen.getByRole('button', { name: "Accepter l'ordre" })).toBeInTheDocument()
+    expect(screen.queryByText('Décision enregistrée — Accepté')).not.toBeInTheDocument()
+  })
+
+  it('RR6: a late reject response for order A never mutates the now-visible order B', async () => {
+    const rejectA = deferred<LabWorkflowOrder>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
+        makeOrder({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      rejectLabOrder: vi.fn(() => rejectA.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer le refus' })) // stalls on rejectA
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByRole('button', { name: "Refuser l'ordre" })
+
+    await act(async () => {
+      rejectA.resolve(makeOrder({ order_id: 'order-a', status: 'REJECTED' }))
+      await Promise.resolve()
+    })
+
+    // order-a's late reject must never mutate the panel now showing order-b.
+    expect(screen.getByRole('button', { name: "Refuser l'ordre" })).toBeInTheDocument()
+    expect(screen.queryByText('Décision enregistrée — Refusé')).not.toBeInTheDocument()
+  })
+
   it('RR7: a response arriving after unmount produces no error and no state update', async () => {
     const queue = deferred<LabWorkflowOrder[]>()
     const client = makeClient({ listLabOrders: vi.fn().mockReturnValue(queue.promise) })

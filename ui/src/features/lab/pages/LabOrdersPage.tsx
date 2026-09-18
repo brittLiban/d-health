@@ -212,12 +212,17 @@ export function LabOrdersPage() {
   )
 
   const handleOpenOrder = (orderId: string) => {
+    if (panel?.orderId === orderId) return
     setMutationState({ action: null, submitting: false, error: null })
     setConfirmingReject(false)
     loadPanel(orderId)
   }
 
   const handleClosePanel = () => {
+    // §41: bump the generation even though loadPanel isn't called here -- otherwise a mutation
+    // started before this close (see runMutation below) would still find its captured generation
+    // current and resurrect the just-closed panel once its response/recheck resolves.
+    panelGenerationRef.current += 1
     setPanel(null)
     setMutationState({ action: null, submitting: false, error: null })
     setConfirmingReject(false)
@@ -235,6 +240,13 @@ export function LabOrdersPage() {
       const orderId = panel.order.order_id
       const targetLab = activeLab.organization_id
       const targetStatus = action === 'accept' ? 'ACCEPTED' : 'REJECTED'
+      // §41: bound to the panel's generation at the moment the mutation was launched. If the
+      // user navigates to a different order (or closes the panel) before this resolves,
+      // panelGenerationRef advances past this value and every check below bails out of touching
+      // panel/mutation state -- a late accept/reject response must never mutate whatever order
+      // is now actually visible. The queue refresh alone stays safe to run regardless, since it
+      // isn't bound to any single order.
+      const mutationGeneration = panelGenerationRef.current
       setMutationState({ action, submitting: true, error: null })
       try {
         const response =
@@ -242,6 +254,10 @@ export function LabOrdersPage() {
             ? await client.acceptLabOrder(targetLab, orderId)
             : await client.rejectLabOrder(targetLab, orderId)
         if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) {
+          loadQueue(filter)
+          return
+        }
         if (response.order_id !== orderId) {
           setMutationState({ action, submitting: false, error: ORDER_MISMATCH_ERROR })
         } else {
@@ -252,10 +268,18 @@ export function LabOrdersPage() {
         loadQueue(filter)
       } catch {
         if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) {
+          loadQueue(filter)
+          return
+        }
         setConfirmingReject(false)
         try {
           const authoritative = await client.getLabOrder(targetLab, orderId)
           if (!mountedRef.current || currentLabRef.current !== targetLab) return
+          if (panelGenerationRef.current !== mutationGeneration) {
+            loadQueue(filter)
+            return
+          }
           if (authoritative.order_id !== orderId) {
             setMutationState({ action, submitting: false, error: ORDER_MISMATCH_ERROR })
           } else if (authoritative.status === targetStatus) {
@@ -271,6 +295,7 @@ export function LabOrdersPage() {
           loadQueue(filter)
         } catch {
           if (!mountedRef.current || currentLabRef.current !== targetLab) return
+          if (panelGenerationRef.current !== mutationGeneration) return
           setMutationState({ action, submitting: false, error: MUTATION_UNCONFIRMED_ERROR })
         }
       }

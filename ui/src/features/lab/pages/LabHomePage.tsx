@@ -12,6 +12,17 @@ export function LabHomePage() {
     error: string | null
   }>({ entries: [], loading: true, error: null })
 
+  // §12: the same render-phase (not effect-phase) tenant-switch clear LabOrdersPage uses. An
+  // effect-phase clear alone still leaves one paint showing the previous lab's stale counts
+  // under the new lab's already-updated header, between the switch and the passive effect
+  // below actually running -- the exact bug class DH-CLINIC-007 found and this ticket (§12)
+  // says not to repeat.
+  const [prevLabId, setPrevLabId] = useState<string | null>(activeLab?.organization_id ?? null)
+  if (activeLab && activeLab.organization_id !== prevLabId) {
+    setPrevLabId(activeLab.organization_id)
+    setQueueState({ entries: [], loading: true, error: null })
+  }
+
   useEffect(() => {
     if (status !== 'ready' || !activeLab || !capabilities.canWorkOrders) {
       return
