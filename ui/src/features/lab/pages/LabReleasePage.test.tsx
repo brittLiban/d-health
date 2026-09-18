@@ -198,6 +198,50 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     }),
     getAmendmentReleaseQueue: vi.fn().mockResolvedValue(makeAmendmentQueue()),
     getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
+    getLabOrderReleaseVersions: vi.fn().mockResolvedValue({
+      order_id: 'order-a',
+      versions: [
+        {
+          release_version_id: 'version-1',
+          version_number: 1,
+          lab_result_release_id: 'release-1',
+          amendment_id: null,
+          created_at: '2026-09-18T11:00:00Z',
+          is_amendment: false,
+        },
+      ],
+    }),
+    getLabOrderReleaseVersionContent: vi.fn().mockResolvedValue({
+      order_id: 'order-a',
+      release_version_id: 'version-1',
+      release_version_number: 1,
+      is_amendment: false,
+      patient: makePatient(),
+      ordering_provider_name: 'Clinique de la Paix',
+      results: [
+        {
+          item_id: 'item-a',
+          catalog_code_snapshot: 'GLU',
+          catalog_display_name_snapshot: 'Glycémie à jeun',
+          entry_completed_at: '2026-09-18T10:40:00Z',
+          observations: [
+            {
+              observation_id: 'obs-1',
+              source_code: 'GLU',
+              source_system: 'dhealth-exchange',
+              display_label_snapshot: 'Glycémie',
+              result_type: 'NUMERIC',
+              numeric_value: '5.4000',
+              numeric_unit: 'mmol/L',
+              reference_range_low: null,
+              reference_range_high: null,
+              text_value: null,
+              recorded_at: '2026-09-18T10:40:00Z',
+            },
+          ],
+        },
+      ],
+    }),
     releaseLabOrderAmendment: vi.fn().mockResolvedValue({
       release_version_id: 'version-2',
       version_number: 2,
@@ -557,6 +601,25 @@ describe('LabReleasePage', () => {
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Modifié dans cet amendement')
     expect(screen.queryByText(/Annuler l'amendement/)).not.toBeInTheDocument()
+  })
+
+  it('VH-UI1: a released order exposes its version history, and Version 1 content is shown', async () => {
+    const client = makeClient({
+      getLabOrderResults: vi.fn().mockResolvedValue(
+        makeInspection({ released: true, released_at: '2026-09-18T11:00:00Z' }),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="release" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Voir l'historique des versions" }))
+    expect(
+      await screen.findByText(
+        (_content, node) => node?.tagName === 'P' && /Version 1 — Version initiale/.test(node.textContent ?? ''),
+      ),
+    ).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Voir le contenu exact' }))
+    expect(await screen.findByText(/Glycémie à jeun — Glycémie : 5.4000 mmol\/L/)).toBeInTheDocument()
   })
 
   it('switching to Amendements never calls the original release queue/inspection endpoints, and vice versa', async () => {

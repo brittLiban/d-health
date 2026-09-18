@@ -12,6 +12,7 @@ import {
 import { AmendmentWorkspace } from '../components/AmendmentWorkspace'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { NativeResultEntryForm } from '../components/NativeResultEntryForm'
+import { ReleaseVersionHistory } from '../components/ReleaseVersionHistory'
 import { useLab } from '../LabContext'
 
 // DH-LAB-001 §29: SELECTED does NOT mean accepted -- preserve that distinction textually, never
@@ -959,6 +960,7 @@ export function LabOrdersPage() {
                       <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
                         Résultats libérés.
                       </p>
+                      <ReleaseVersionHistory client={client} labId={activeLab!.organization_id} orderId={panel.order!.order_id} />
                       {amendmentDiscovery?.loading ? (
                         <LoadingSkeleton />
                       ) : amendmentDiscovery?.error ? (

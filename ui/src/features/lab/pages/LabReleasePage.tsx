@@ -8,6 +8,7 @@ import type {
 } from '../../../api/exchangeTypes'
 import { Button, Card, EmptyState, ErrorState, LoadingSkeleton, StatusBadge } from '../../../design-system'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
+import { ReleaseVersionHistory } from '../components/ReleaseVersionHistory'
 import { useLab } from '../LabContext'
 
 const INSPECTION_LOAD_ERROR = 'Impossible de charger les résultats de cet ordre.'
@@ -617,6 +618,12 @@ export function LabReleasePage() {
                   </div>
 
                   {panel.inspection.released || releasedAt ? (
+                    <div style={{ marginBottom: 'var(--space-3)' }}>
+                      <ReleaseVersionHistory client={client} labId={activeLab!.organization_id} orderId={panel.inspection.order_id} />
+                    </div>
+                  ) : null}
+
+                  {panel.inspection.released || releasedAt ? (
                     <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-success, #15803d)' }}>
                       Résultats libérés
                       {panel.inspection.released_at || releasedAt
@@ -778,6 +785,12 @@ export function LabReleasePage() {
                       </div>
                     ))}
                   </div>
+
+                  {amendmentPanel.inspection.amendment.status === 'RELEASED' || amendmentReleasedVersion ? (
+                    <div style={{ marginBottom: 'var(--space-3)' }}>
+                      <ReleaseVersionHistory client={client} labId={activeLab!.organization_id} orderId={amendmentPanel.orderId} />
+                    </div>
+                  ) : null}
 
                   {amendmentPanel.inspection.amendment.status === 'RELEASED' || amendmentReleasedVersion ? (
                     <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-success, #15803d)' }}>
