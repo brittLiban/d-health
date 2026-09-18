@@ -159,6 +159,7 @@ __all__ = [
     "ReviewAlreadyFinalized",
     "ReviewNotAllowedYet",
     "ReviewNotFound",
+    "ReviewQueueEntryRecord",
     "StaleObservationVersion",
 ]
 
@@ -539,6 +540,31 @@ class DoctorReviewRecord:
     status: str
     reviewed_at: datetime | None
     reviewed_by_practitioner_reference_id: uuid.UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewQueueEntryRecord:
+    """DH-CLINIC-007: one review *obligation* -- exactly one per ``DoctorReview`` row that is
+    actionable right now (its order is ``COMPLETED``), never deduplicated down to one row per
+    order. An order with two amendment releases surfaces as two separate entries here, each
+    independently reviewable, exactly matching ``DoctorReview``'s own one-row-per-released-version
+    model. ``legacy_unversioned=True`` marks the one grandfathered shape (``release_version_id``/
+    ``release_version_number``/``released_at`` all ``None``, ``is_amendment=False``) -- a
+    ``COMPLETED``-without-``LabResultRelease`` order that predates DH-EX-012's explicit release
+    step (ADR-044's grandfather rule) -- so a caller never has to infer that meaning from three
+    simultaneous ``None``s."""
+
+    review_id: uuid.UUID
+    lab_order_id: uuid.UUID
+    patient_reference_id: uuid.UUID
+    release_version_id: uuid.UUID | None
+    release_version_number: int | None
+    is_amendment: bool
+    released_at: datetime | None
+    legacy_unversioned: bool
+    review_status: str
+    reviewed_at: datetime | None
+    order_created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -2415,6 +2441,47 @@ class DoctorReviewRepository:
             ).all()
             return tuple(_to_review_record(r) for r in rows)
 
+    def list_queue_for_provider(
+        self,
+        provider_organization_id: uuid.UUID,
+        *,
+        status_filter: DoctorReviewStatus | None = None,
+        limit: int = 50,
+    ) -> list[ReviewQueueEntryRecord]:
+        """DH-CLINIC-007 §8/§9/§13: the operational "what still needs my review" read -- one row
+        per actionable review *obligation*, batched in a single joined query (never N+1 regardless
+        of queue length). Deliberately gated on ``LabOrder.status == COMPLETED``, not merely
+        ``DoctorReview.status``: every order gets its own unbound ``PENDING`` review row at
+        *creation* time (see ``orders.py``'s own comment on this), long before any result exists to
+        review -- without this gate, every still-in-progress order in the provider's history would
+        wrongly appear as an outstanding review. Ordered by ``released_at`` ascending (oldest
+        outstanding review first), with a legacy-unversioned row (no ``released_at``) falling back
+        to the order's own ``created_at`` -- workflow age, never clinical priority (§14/§15: this
+        method computes no urgency/abnormality signal of any kind)."""
+        with self._sessions() as session:
+            query = (
+                select(DoctorReview, LabOrder, LabResultReleaseVersion)
+                .join(LabOrder, LabOrder.id == DoctorReview.lab_order_id)
+                .outerjoin(
+                    LabResultReleaseVersion,
+                    LabResultReleaseVersion.id == DoctorReview.release_version_id,
+                )
+                .where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+                    LabOrder.status == LabOrderStatus.COMPLETED.value,
+                )
+            )
+            if status_filter is not None:
+                query = query.where(DoctorReview.status == status_filter.value)
+            query = query.order_by(
+                func.coalesce(LabResultReleaseVersion.created_at, LabOrder.created_at).asc(),
+                DoctorReview.id.asc(),
+            ).limit(limit)
+            rows = session.execute(query).all()
+            return [
+                _to_queue_entry_record(review, order, version) for review, order, version in rows
+            ]
+
 
 def _lock_order_and_item_for_entry(
     session: Session,
@@ -2648,6 +2715,24 @@ def _to_review_record(review: DoctorReview) -> DoctorReviewRecord:
         status=review.status,
         reviewed_at=review.reviewed_at,
         reviewed_by_practitioner_reference_id=review.reviewed_by_practitioner_reference_id,
+    )
+
+
+def _to_queue_entry_record(
+    review: DoctorReview, order: LabOrder, version: LabResultReleaseVersion | None
+) -> ReviewQueueEntryRecord:
+    return ReviewQueueEntryRecord(
+        review_id=review.id,
+        lab_order_id=order.id,
+        patient_reference_id=order.patient_reference_id,
+        release_version_id=None if version is None else version.id,
+        release_version_number=None if version is None else version.version_number,
+        is_amendment=version is not None and version.version_number > 1,
+        released_at=None if version is None else _as_utc(version.created_at),
+        legacy_unversioned=version is None,
+        review_status=review.status,
+        reviewed_at=None if review.reviewed_at is None else _as_utc(review.reviewed_at),
+        order_created_at=_as_utc(order.created_at),
     )
 
 

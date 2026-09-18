@@ -3619,3 +3619,304 @@ def test_ri6_release_and_result_semantics_unchanged_alongside_patient_identity(
         "is_amendment",
         "results",
     }
+
+
+# -- DH-CLINIC-007: GET .../result-reviews (the provider-scoped review queue) ----------------------
+
+
+def _complete_and_release_order(
+    client, private_key, organizations, catalog, directory, patients, sessions, *, name: str
+):
+    """Full HTTP flow through IN_PROGRESS -> one recorded+completed observation per item ->
+    released (COMPLETED). Returns (provider, clinician_token, lab, order_id)."""
+    provider, clinician_token, lab, lab_tech_token, order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name=name
+    )
+    for item_id in _order_item_ids(sessions, order_id):
+        obs = client.post(
+            _observation_url(lab.id, order_id, item_id),
+            headers=_auth(lab_tech_token),
+            json={
+                "result_type": "NUMERIC",
+                "source_code": "SYN-OBS",
+                "display_label": "Synthetic observation",
+                "numeric_value": "1",
+            },
+        )
+        assert obs.status_code == 201, obs.text
+        completed = client.post(
+            _completion_url(lab.id, order_id, item_id), headers=_auth(lab_tech_token)
+        )
+        assert completed.status_code == 201, completed.text
+    _release_results(client, private_key, lab.id, order_id, name)
+    return provider, clinician_token, lab, order_id
+
+
+def _queue_url(provider_id, *, status: str | None = None, limit: int | None = None) -> str:
+    url = f"/exchange/v1/organizations/{provider_id}/result-reviews"
+    params = []
+    if status is not None:
+        params.append(f"status={status}")
+    if limit is not None:
+        params.append(f"limit={limit}")
+    if params:
+        url += "?" + "&".join(params)
+    return url
+
+
+def test_queue_default_shows_pending_review(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, _lab, order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QDefault"
+    )
+
+    response = client.get(_queue_url(provider.id), headers=_auth(clinician_token))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["provider_organization_id"] == str(provider.id)
+    assert len(body["entries"]) == 1
+    entry = body["entries"][0]
+    assert entry["order_id"] == str(order_id)
+    assert entry["review_status"] == "PENDING"
+    assert entry["release_version_number"] == 1
+    assert entry["is_amendment"] is False
+    assert entry["legacy_unversioned"] is False
+    assert entry["patient"]["display_name"] is not None
+    # Q12: no result/observation value of any kind in the queue -- metadata only.
+    assert "results" not in entry
+    assert "observations" not in entry
+
+
+def test_queue_in_progress_order_is_absent(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    """Q1/the critical exclusion: an order still in progress (never released) must never appear,
+    even though its DoctorReview row already exists, PENDING, unbound, from order-creation time."""
+    private_key, _ = keypair
+    provider, clinician_token, _lab, _tech_token, _order_id = _create_in_progress_order(
+        client, private_key, organizations, catalog, directory, patients, name="QInProgress"
+    )
+
+    response = client.get(_queue_url(provider.id), headers=_auth(clinician_token))
+    assert response.status_code == 200, response.text
+    assert response.json()["entries"] == []
+
+
+def test_queue_finalized_review_excluded_by_default_but_visible_with_status_all(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    private_key, _ = keypair
+    provider, clinician_token, _lab, order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QFinal"
+    )
+    review_response = client.post(
+        f"/exchange/v1/organizations/{provider.id}/orders/{order_id}/review/no-follow-up-required",
+        headers=_auth(clinician_token),
+    )
+    assert review_response.status_code == 200, review_response.text
+
+    pending_only = client.get(_queue_url(provider.id), headers=_auth(clinician_token))
+    assert pending_only.json()["entries"] == []
+
+    everything = client.get(_queue_url(provider.id, status="ALL"), headers=_auth(clinician_token))
+    assert len(everything.json()["entries"]) == 1
+    assert everything.json()["entries"][0]["review_status"] == "NO_FOLLOW_UP_REQUIRED"
+    assert everything.json()["entries"][0]["reviewed_at"] is not None
+
+
+def test_queue_two_pending_versions_on_one_order_are_two_entries(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Q6/AM6: an amendment on top of an already-released order must surface as a second,
+    independent queue entry -- never collapsed into the first, never hiding it."""
+    private_key, _ = keypair
+    provider, clinician_token, lab, order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QAmend"
+    )
+    item_id = _order_item_ids(sessions, order_id)[0]
+    tech_token = make_token(private_key, subject="labtech-actual-QAmend")
+
+    started = client.post(_amendment_url(lab.id, order_id), headers=_auth(tech_token))
+    assert started.status_code == 201, started.text
+    amendment_id = started.json()["amendment_id"]
+    with sessions() as session:
+        original_obs_id = session.scalar(
+            select(LabObservation.id).where(
+                LabObservation.lab_result_id.in_(
+                    select(LabResult.id).where(LabResult.lab_order_item_id == item_id)
+                )
+            )
+        )
+    corrected = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/items/{item_id}/observations/"
+        f"{original_obs_id}/correct",
+        headers=_auth(tech_token),
+        json={
+            "result_type": "NUMERIC",
+            "source_code": "SYN-OBS",
+            "display_label": "Synthetic observation",
+            "numeric_value": "2",
+        },
+    )
+    assert corrected.status_code == 201, corrected.text
+    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "QAmend-v2")
+    released = client.post(
+        f"{_amendment_url(lab.id, order_id, amendment_id)}/release", headers=_auth(releaser_token)
+    )
+    assert released.status_code == 201, released.text
+
+    response = client.get(_queue_url(provider.id, status="ALL"), headers=_auth(clinician_token))
+    entries = response.json()["entries"]
+    assert len(entries) == 2
+    version_numbers = {entry["release_version_number"] for entry in entries}
+    assert version_numbers == {1, 2}
+    assert all(entry["order_id"] == str(order_id) for entry in entries)
+    amendment_flags = {entry["release_version_number"]: entry["is_amendment"] for entry in entries}
+    assert amendment_flags == {1: False, 2: True}
+
+
+def test_queue_provider_isolation(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Q2: a provider must never see another provider's review obligations."""
+    private_key, _ = keypair
+    provider_a, _clinician_a, _lab, _order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QIsoA"
+    )
+    _provider_b, clinician_b_token = _setup_clinician(client, private_key, organizations, "QIsoB")
+
+    response = client.get(_queue_url(provider_a.id), headers=_auth(clinician_b_token))
+    # Anti-enumeration: clinician B has no membership at all in provider A -- the existing
+    # `_require_clinician` tenant gate refuses before the queue query ever runs.
+    assert response.status_code in (403, 404), response.text
+
+
+def test_queue_lab_user_cannot_access(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Q3: a LAB_TECH/LAB_RESULT_RELEASER has no clinician standing at any provider organization
+    and cannot call the provider-scoped review queue at all."""
+    private_key, _ = keypair
+    provider, _clinician_token, lab, _order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QLabUser"
+    )
+    lab_tech_token = make_token(private_key, subject="labtech-actual-QLabUser")
+
+    response = client.get(_queue_url(provider.id), headers=_auth(lab_tech_token))
+    assert response.status_code in (403, 404), response.text
+
+
+def test_queue_patient_identity_from_directory_not_reference_snapshot(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Q8: the queue's patient projection is the same server-resolved Patient-directory identity
+    every other order/result read already uses -- never a raw reference id."""
+    private_key, _ = keypair
+    provider, clinician_token, _lab, _order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QPatient"
+    )
+
+    entry = client.get(_queue_url(provider.id), headers=_auth(clinician_token)).json()["entries"][0]
+    assert entry["patient"]["display_name"] == "Synthetic Patient QPatient"
+    assert "patient_reference_id" not in entry
+
+
+def test_queue_resolution_is_not_n_plus_1(
+    client: TestClient,
+    keypair,
+    organizations,
+    catalog,
+    directory,
+    patients,
+    sessions,
+    engine: Engine,
+) -> None:
+    """Q9: mirrors DH-CLINIC-005's own N+1 proof exactly -- the actual SQL SELECT count for a
+    5-entry queue must equal the count for a 1-entry queue."""
+    private_key, _ = keypair
+    provider, clinician_token, _lab, _order_id = _complete_and_release_order(
+        client, private_key, organizations, catalog, directory, patients, sessions, name="QN1-seed"
+    )
+
+    def _measure_select_count() -> int:
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get(_queue_url(provider.id, status="ALL"), headers=_auth(clinician_token))
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert resp.status_code == 200, resp.text
+        return len([s for s in statements if s.strip().startswith("SELECT")])
+
+    selects_for_one = _measure_select_count()
+
+    # 4 more orders/patients/labs, all released under the SAME provider queue as the seed above.
+    for suffix in ("2", "3", "4", "5"):
+        entry, _ = catalog.create_entry(code=f"DHEALTH-QN1-{suffix}", display_name=f"QN1 {suffix}")
+        lab_n = _price_lab(
+            catalog,
+            directory,
+            organizations,
+            name=f"QN1Lab-{suffix}",
+            tests=[(entry.id, Decimal("500"))],
+        )
+        patient_id = _create_patient(client, private_key, patients, provider.id, f"QN1-{suffix}")
+        create_response = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(clinician_token), "Idempotency-Key": _new_key()},
+            json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(entry.id)]},
+        )
+        assert create_response.status_code == 201, create_response.text
+        order_n_id = uuid.UUID(create_response.json()["id"])
+        access = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders/{order_n_id}/patient-access",
+            headers=_auth(clinician_token),
+        ).json()
+        access_token = access["access_token"]
+        options = client.get(
+            "/exchange/v1/patient/order/lab-options", headers=_auth(access_token)
+        ).json()["options"]
+        matching = [opt for opt in options if opt["lab"]["id"] == str(lab_n.id)]
+        price_ids = [line["current_price_id"] for line in matching[0]["prices"]]
+        client.post(
+            "/exchange/v1/patient/order/selection",
+            headers=_auth(access_token),
+            json={"lab_organization_id": str(lab_n.id), "expected_price_ids": price_ids},
+        )
+        tech_id = _bootstrap_identity(client, private_key, f"labtech-qn1-{suffix}")
+        _grant_roles(client, private_key, lab_n.id, tech_id, f"labtech-qn1-{suffix}", ["LAB_TECH"])
+        tech_token = make_token(private_key, subject=f"labtech-qn1-{suffix}")
+        client.post(
+            f"/exchange/v1/organizations/{lab_n.id}/lab-orders/{order_n_id}/accept",
+            headers=_auth(tech_token),
+        )
+        client.post(
+            f"/exchange/v1/organizations/{lab_n.id}/lab-orders/{order_n_id}/record-collection",
+            headers=_auth(tech_token),
+        )
+        client.post(
+            f"/exchange/v1/organizations/{lab_n.id}/lab-orders/{order_n_id}/start-processing",
+            headers=_auth(tech_token),
+        )
+        item_id = _order_item_ids(sessions, order_n_id)[0]
+        client.post(
+            _observation_url(lab_n.id, order_n_id, item_id),
+            headers=_auth(tech_token),
+            json={
+                "result_type": "NUMERIC",
+                "source_code": "SYN-OBS",
+                "display_label": "Synthetic observation",
+                "numeric_value": "1",
+            },
+        )
+        client.post(_completion_url(lab_n.id, order_n_id, item_id), headers=_auth(tech_token))
+        _release_results(client, private_key, lab_n.id, order_n_id, f"qn1-{suffix}")
+
+    selects_for_five = _measure_select_count()
+    assert selects_for_five == selects_for_one

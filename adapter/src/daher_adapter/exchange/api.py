@@ -1432,6 +1432,35 @@ class ProviderReleaseVersionHistoryResponse(BaseModel):
     versions: list[ProviderReleaseVersionSummaryResponse]
 
 
+class ProviderResultReviewQueueEntryResponse(BaseModel):
+    """DH-CLINIC-007 §10/§12/§27: one review *obligation* -- deliberately carries no result/
+    observation value of any kind, metadata only. ``legacy_unversioned=True`` marks the one
+    grandfathered shape (``release_version_id``/``release_version_number``/``released_at`` all
+    ``None``) explicitly, rather than requiring a caller to infer that meaning from three
+    simultaneous ``None``s."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_id: uuid.UUID
+    order_id: uuid.UUID
+    release_version_id: uuid.UUID | None
+    release_version_number: int | None
+    is_amendment: bool
+    released_at: datetime | None
+    legacy_unversioned: bool
+    review_status: str
+    reviewed_at: datetime | None
+    patient: PatientIdentitySummaryResponse
+    order_created_at: datetime
+
+
+class ProviderResultReviewQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_organization_id: uuid.UUID
+    entries: list[ProviderResultReviewQueueEntryResponse]
+
+
 class AmendmentResponse(BaseModel):
     """DH-EX-014B/ADR-048: one amendment episode. No clinical content of any kind -- purely
     workflow/version metadata, matching ``LabResultReleaseVersionResponse``'s own convention."""
@@ -4539,6 +4568,52 @@ def build_exchange_router(
                 detail="release version has no clinician review obligation",
             )
         return review
+
+    # -- DH-CLINIC-007: provider-scoped result-review queue --------------------------------------
+
+    @router.get(
+        "/organizations/{provider_id}/result-reviews",
+        response_model=ProviderResultReviewQueueResponse,
+    )
+    def list_result_reviews(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        review_status: Annotated[
+            Literal["PENDING", "NO_FOLLOW_UP_REQUIRED", "FOLLOW_UP_REQUIRED", "ALL"],
+            Query(alias="status"),
+        ] = "PENDING",
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> ProviderResultReviewQueueResponse:
+        # DH-CLINIC-007 §8/§9/§12/§13: one row per actionable review obligation (never
+        # deduplicated to one per order), provider-scoped, batched patient resolution (never
+        # N+1) -- CLINICIAN minimum, same gate every other order/result read in this module uses.
+        _require_clinician(principal, provider_id)
+        status_filter = None if review_status == "ALL" else DoctorReviewStatus(review_status)
+        queue_records = reviews.list_queue_for_provider(
+            provider_id, status_filter=status_filter, limit=limit
+        )
+        identities_by_reference = _require_patient_identities(
+            provider_id, [record.patient_reference_id for record in queue_records]
+        )
+        return ProviderResultReviewQueueResponse(
+            provider_organization_id=provider_id,
+            entries=[
+                ProviderResultReviewQueueEntryResponse(
+                    review_id=record.review_id,
+                    order_id=record.lab_order_id,
+                    release_version_id=record.release_version_id,
+                    release_version_number=record.release_version_number,
+                    is_amendment=record.is_amendment,
+                    released_at=record.released_at,
+                    legacy_unversioned=record.legacy_unversioned,
+                    review_status=record.review_status,
+                    reviewed_at=record.reviewed_at,
+                    patient=identities_by_reference[record.patient_reference_id],
+                    order_created_at=record.order_created_at,
+                )
+                for record in queue_records
+            ],
+        )
 
     @router.get(
         "/organizations/{provider_id}/orders/{order_id}/release-versions",

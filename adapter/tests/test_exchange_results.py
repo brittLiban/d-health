@@ -2762,3 +2762,269 @@ def test_amendment_release_with_no_changes_refused(
             select(LabResultReleaseVersion).where(LabResultReleaseVersion.lab_order_id == order.id)
         ).all()
         assert len(versions) == 1
+
+
+# -- DH-CLINIC-007: DoctorReviewRepository.list_queue_for_provider ---------------------------------
+
+
+def _amend_and_release_second_version(repos, sessions, *, lab, order, originals, key: str):
+    """Shared helper: starts + corrects + releases one amendment against an already-released
+    2-item order, producing a genuine, independent version-2 PENDING review -- mirrors
+    ``test_amendment_release_preserves_unchanged_items_and_creates_new_review``'s own proven
+    sequence exactly, factored out for reuse by the new queue tests below."""
+    tech_id = _labtech_identity_id(repos, f"{key}-tech")
+    amendment = repos.amendments.start_amendment(
+        order_id=order.id, lab_organization_id=lab.id, started_by_identity_id=tech_id
+    )
+    repos.amendments.correct_observation(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_order_item_id=order.items[0].id,
+        lab_organization_id=lab.id,
+        observation_id=originals[0].id,
+        result_type=LabResultType.NUMERIC,
+        source_code="OBS-0",
+        display_label_snapshot="Synthetic observation 0",
+        numeric_value=Decimal("99"),
+        corrected_by_identity_id=tech_id,
+    )
+    releaser_id = _labtech_identity_id(repos, f"{key}-releaser")
+    version_two, _created = repos.amendments.release_amendment(
+        amendment_id=amendment.id,
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        released_by_identity_id=releaser_id,
+    )
+    return version_two
+
+
+def test_q_in_progress_order_never_appears_in_review_queue(sessions: sessionmaker[Session]) -> None:
+    """DH-CLINIC-007 §8/§9: the critical exclusion -- every order gets an unbound PENDING
+    ``DoctorReview`` row at *creation* time (see ``orders.py``'s own docstring), long before any
+    result exists. Without gating on ``LabOrder.status == COMPLETED``, every in-progress order in
+    the provider's history would wrongly appear as an outstanding review."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations, name="Lab-qip")
+    order, _practitioner = _create_and_select(
+        repos, sessions, lab_id=lab.id, key="qip", advance_to_in_progress=False
+    )
+    provider_id = order.provider_organization_id
+
+    entries = repos.reviews.list_queue_for_provider(provider_id)
+    assert entries == []
+
+    all_entries = repos.reviews.list_queue_for_provider(
+        provider_id, status_filter=None
+    )  # status_filter=None already means "no status filter" -- distinct from "ALL" at the API layer
+    assert all_entries == []
+
+
+def test_q_provider_isolation(sessions: sessionmaker[Session]) -> None:
+    """Q2: a provider never sees another provider's review obligations."""
+    repos, lab, order, _practitioner, _tech_id, _originals = _released_order_for_amendment(
+        sessions, key="qiso"
+    )
+    other_provider = make_provider(repos.organizations, name="OtherProvider-qiso")
+
+    own_entries = repos.reviews.list_queue_for_provider(order.provider_organization_id)
+    other_entries = repos.reviews.list_queue_for_provider(other_provider.id)
+
+    assert len(own_entries) == 1
+    assert own_entries[0].lab_order_id == order.id
+    assert other_entries == []
+
+
+def test_q_finalized_review_excluded_from_pending_filter(sessions: sessionmaker[Session]) -> None:
+    """Q4: once a review leaves PENDING, it must not appear in a ``status_filter=PENDING`` read."""
+    repos, lab, order, practitioner, _tech_id, _originals = _released_order_for_amendment(
+        sessions, key="qfin"
+    )
+    version_one = repos.releases.get_latest_release_version(order.id)
+    repos.reviews.mark_no_follow_up_required_for_release_version(
+        order.id,
+        version_one.id,
+        reviewed_by_practitioner_reference_id=practitioner.id,
+    )
+
+    pending_entries = repos.reviews.list_queue_for_provider(
+        order.provider_organization_id, status_filter=DoctorReviewStatus.PENDING
+    )
+    assert pending_entries == []
+
+
+def test_q_finalized_review_appears_in_unfiltered_history(sessions: sessionmaker[Session]) -> None:
+    """Q5: a finalized review remains discoverable when no status filter is applied -- reviewing
+    something must never make the record itself inaccessible."""
+    repos, lab, order, practitioner, _tech_id, _originals = _released_order_for_amendment(
+        sessions, key="qhist"
+    )
+    version_one = repos.releases.get_latest_release_version(order.id)
+    repos.reviews.mark_follow_up_required_for_release_version(
+        order.id,
+        version_one.id,
+        reviewed_by_practitioner_reference_id=practitioner.id,
+    )
+
+    all_entries = repos.reviews.list_queue_for_provider(order.provider_organization_id)
+    assert len(all_entries) == 1
+    assert all_entries[0].review_status == "FOLLOW_UP_REQUIRED"
+    assert all_entries[0].reviewed_at is not None
+
+
+def test_q_two_pending_versions_on_one_order_are_two_entries(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Q6/§9/AM6: the most important shape -- one order with two independently-pending release
+    versions must produce two separate queue entries, never deduplicated down to one row per
+    order."""
+    repos, lab, order, _practitioner, _tech_id, originals = _released_order_for_amendment(
+        sessions, key="qtwo", item_count=2
+    )
+    version_one = repos.releases.get_latest_release_version(order.id)
+    version_two = _amend_and_release_second_version(
+        repos, sessions, lab=lab, order=order, originals=originals, key="qtwo"
+    )
+
+    entries = repos.reviews.list_queue_for_provider(order.provider_organization_id)
+
+    assert len(entries) == 2
+    version_ids = {entry.release_version_id for entry in entries}
+    assert version_ids == {version_one.id, version_two.id}
+    assert all(entry.review_status == "PENDING" for entry in entries)
+    assert all(entry.lab_order_id == order.id for entry in entries)
+
+
+def test_q_version_number_and_amendment_flag_correct(sessions: sessionmaker[Session]) -> None:
+    """Q7: ``release_version_number``/``is_amendment`` are read straight from the version row,
+    never inferred -- version 1 is never amended, version 2 always is."""
+    repos, lab, order, _practitioner, _tech_id, originals = _released_order_for_amendment(
+        sessions, key="qver", item_count=2
+    )
+    _amend_and_release_second_version(
+        repos, sessions, lab=lab, order=order, originals=originals, key="qver"
+    )
+
+    entries = {
+        entry.release_version_number: entry
+        for entry in repos.reviews.list_queue_for_provider(order.provider_organization_id)
+    }
+    assert entries[1].is_amendment is False
+    assert entries[2].is_amendment is True
+    assert entries[1].legacy_unversioned is False
+    assert entries[2].legacy_unversioned is False
+
+
+def test_q_legacy_unversioned_review_represented_honestly(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Q10/Q11/§11: a grandfathered COMPLETED-without-LabResultRelease order's review row is never
+    fabricated a fake version number -- ``legacy_unversioned=True``,
+    ``release_version_number``/``release_version_id``/``released_at`` all ``None``."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations, name="Lab-qlegacy")
+    order, _practitioner = _create_and_select(repos, sessions, lab_id=lab.id, key="qlegacy")
+    tech_id = _labtech_identity_id(repos, "qlegacy-tech")
+    for item in order.items:
+        repos.results.record_observation(
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            result_type=LabResultType.NUMERIC,
+            source_code="OBS-0",
+            display_label_snapshot="Synthetic observation",
+            numeric_value=Decimal("1"),
+            recorded_by_identity_id=tech_id,
+        )
+        repos.results.complete_entry(
+            order_id=order.id,
+            lab_order_item_id=item.id,
+            lab_organization_id=lab.id,
+            completed_by_identity_id=tech_id,
+        )
+    # Simulate a pre-DH-EX-012 legacy order: COMPLETED directly, no LabResultRelease/version ever
+    # created -- the DoctorReview row created at order-creation time stays permanently unbound.
+    with sessions() as session:
+        order_row = session.get(LabOrder, order.id)
+        order_row.status = "COMPLETED"
+        session.commit()
+
+    entries = repos.reviews.list_queue_for_provider(order.provider_organization_id)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.legacy_unversioned is True
+    assert entry.release_version_id is None
+    assert entry.release_version_number is None
+    assert entry.released_at is None
+    assert entry.is_amendment is False
+    assert entry.review_status == "PENDING"
+
+
+def test_q_queue_ordering_oldest_first(sessions: sessionmaker[Session]) -> None:
+    """§14: deterministic workflow-age ordering, oldest outstanding review first -- never implying
+    clinical priority."""
+    repos = _build(sessions)
+    lab = make_lab(repos.organizations, name="Lab-qorder")
+    provider = make_provider(repos.organizations, name="Clinic-qorder")
+
+    def _release_one(key: str):
+        entry, offering = make_priced_offering(
+            repos.catalog, lab_organization_id=lab.id, amount=Decimal("100"), code=f"DH-{key}"
+        )
+        repos.directory.upsert(
+            lab_organization_id=lab.id,
+            public_address="X",
+            latitude=None,
+            longitude=None,
+            public_phone=None,
+            listed=True,
+            accepting_orders=True,
+        )
+        patient = make_patient_reference(
+            repos.patients, provider_org_id=provider.id, source_identity_value=key
+        )
+        practitioner = make_practitioner_reference(
+            repos.practitioners, provider_org_id=provider.id, source_identity_value=f"doc-{key}"
+        )
+        order = repos.orders.create(
+            idempotency_key=key,
+            provider_organization_id=provider.id,
+            patient_reference_id=patient.id,
+            practitioner_reference_id=practitioner.id,
+            items=[OrderItemInput(catalog_entry_id=entry.id)],
+        ).order
+        price_id = _current_price_id(sessions, offering.id)
+        repos.selections.select(
+            lab_order_id=order.id,
+            lab_organization_id=lab.id,
+            expected_price_ids=frozenset({price_id}),
+        )
+        repos.workflow.accept(order_id=order.id, lab_organization_id=lab.id)
+        repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+        repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
+        tech_id = _labtech_identity_id(repos, f"{key}-tech")
+        for item in order.items:
+            repos.results.record_observation(
+                order_id=order.id,
+                lab_order_item_id=item.id,
+                lab_organization_id=lab.id,
+                result_type=LabResultType.NUMERIC,
+                source_code="OBS-0",
+                display_label_snapshot="Synthetic observation",
+                numeric_value=Decimal("1"),
+                recorded_by_identity_id=tech_id,
+            )
+            repos.results.complete_entry(
+                order_id=order.id,
+                lab_order_item_id=item.id,
+                lab_organization_id=lab.id,
+                completed_by_identity_id=tech_id,
+            )
+        _release(repos, order_id=order.id, lab_id=lab.id, key=key)
+        return order
+
+    order_a = _release_one("qorder-a")
+    order_b = _release_one("qorder-b")
+
+    entries = repos.reviews.list_queue_for_provider(provider.id)
+    assert [entry.lab_order_id for entry in entries] == [order_a.id, order_b.id]
