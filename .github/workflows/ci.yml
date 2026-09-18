@@ -170,6 +170,21 @@ jobs:
           DHCLINIC006_PG_DATABASE: adapter
         working-directory: adapter
         run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhclinic006_postgres_qualification.py
+      - name: DH-CLINIC-007 real PostgreSQL result-review concurrency qualification
+        # Same disposable postgres:16-alpine service. The version-specific review row-locking
+        # behavior itself (PG-R1, PG-R3) is already qualified by the DH-EX-014A/014B steps above --
+        # DH-CLINIC-007 added no new locking or mutation code, only a read-only provider review
+        # queue. This proves the one net-new scenario those don't isolate (PG-R2: identical
+        # dispositions racing the same version never let a later caller silently overwrite the
+        # winning reviewer's provenance) plus a queue-consistency sanity check after the race.
+        env:
+          DHCLINIC007_PG_HOST: localhost
+          DHCLINIC007_PG_PORT: 5432
+          DHCLINIC007_PG_USER: adapter
+          DHCLINIC007_PG_PASSWORD: adapter
+          DHCLINIC007_PG_DATABASE: adapter
+        working-directory: adapter
+        run: PYTHONPATH=src python -m pytest -q tests/integration/test_dhclinic007_postgres_qualification.py
 
   provisioning:
     name: provisioning — ruff + pytest
