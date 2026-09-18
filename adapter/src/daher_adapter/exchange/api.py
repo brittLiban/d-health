@@ -143,6 +143,7 @@ from daher_adapter.exchange.results import (
     AmendmentNotFound,
     AmendmentNotPreparing,
     AmendmentNotReadyForRelease,
+    AmendmentQueueEntryRecord,
     AmendmentReleaseIntegrityError,
     DoctorReviewRecord,
     DoctorReviewRepository,
@@ -164,6 +165,7 @@ from daher_adapter.exchange.results import (
     NoActiveTemplateForOffering,
     ObservationNotEligibleForAmendment,
     ObservationNotFound,
+    ObservationNotTemplateBound,
     ObservationValueConflict,
     OrderItemNotFound,
     OrderNotCompletedForAmendment,
@@ -1465,6 +1467,11 @@ class LabObservationResponse(BaseModel):
     recorded_by_identity_id: uuid.UUID | None
     supersedes_observation_id: uuid.UUID | None
     superseded_at: datetime | None
+    template_observation_definition_id: uuid.UUID | None
+    """DH-LAB-005: non-``None`` exactly when this observation answers a controlled Native
+    template definition -- the frontend's own signal for whether the Native controlled
+    correction endpoint applies to it (never the raw free-structure one, which now refuses a
+    template-bound observation outright)."""
 
 
 class LabObservationHistoryResponse(BaseModel):
@@ -1569,6 +1576,7 @@ class LabResultInspectionObservationResponse(BaseModel):
     reference_range_high: Decimal | None
     text_value: str | None
     recorded_at: datetime
+    template_observation_definition_id: uuid.UUID | None
 
 
 class LabResultInspectionItemResponse(BaseModel):
@@ -1788,6 +1796,7 @@ class AmendmentInspectionObservationResponse(BaseModel):
     text_value: str | None
     recorded_at: datetime
     amendment_id: uuid.UUID | None
+    template_observation_definition_id: uuid.UUID | None
 
 
 class AmendmentInspectionItemResponse(BaseModel):
@@ -1802,15 +1811,114 @@ class AmendmentInspectionItemResponse(BaseModel):
 
 
 class AmendmentInspectionResponse(BaseModel):
-    """DH-EX-014B: the lab-authorized-only pre-release-of-amendment read -- ``LAB_TECH``/
-    ``LAB_RESULT_RELEASER`` only; never reachable by a provider or patient-bearer credential (no
-    route exposes this shape to either)."""
+    """DH-EX-014B, extended by DH-LAB-005: the lab-authorized-only pre-release-of-amendment read
+    -- ``LAB_TECH``/``LAB_RESULT_RELEASER`` only; never reachable by a provider or patient-bearer
+    credential (no route exposes this shape to either)."""
 
     model_config = ConfigDict(extra="forbid")
 
     amendment: AmendmentResponse
     items: list[AmendmentInspectionItemResponse]
     ready_to_release: bool
+    result_fingerprint: str
+    """DH-LAB-005 §37-40: the exact value an amendment release request must echo back as
+    ``expected_result_fingerprint`` -- see ``results.compute_result_fingerprint``'s own docstring
+    for the full canonicalization/safety-property reasoning. Changes the instant any effective
+    observation in this order is added or corrected."""
+
+
+class NativeCorrectionRequest(BaseModel):
+    """DH-LAB-005 §9-10: the browser submits only the new value -- never
+    ``source_code``/``display_label``/``result_type``/``numeric_unit``/``source_system``/
+    reference ranges/template definition identity. The predecessor observation's own
+    ``template_observation_definition_id`` already proves the controlled definition; the server
+    derives every structural field from it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    numeric_value: Decimal | None = Field(default=None, max_digits=18, decimal_places=4)
+    text_value: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _exactly_one_value(self) -> "NativeCorrectionRequest":
+        if (self.numeric_value is None) == (self.text_value is None):
+            raise ValueError("exactly one of numeric_value or text_value must be set")
+        if self.text_value is not None and not self.text_value.strip():
+            raise ValueError("text_value must not be blank")
+        return self
+
+
+class AmendmentReleaseRequest(BaseModel):
+    """DH-LAB-005 §40-42: the releaser must name the exact proposed result set they inspected --
+    deliberately required, no "release without inspecting" escape hatch, mirroring
+    ``LabResultReleaseRequest``'s identical discipline for the original release."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_result_fingerprint: str
+
+
+class AmendmentListResponse(BaseModel):
+    """DH-LAB-005 §27-28: every amendment episode for this order, oldest first -- lets the
+    frontend rediscover a ``PREPARING`` episode after a page refresh/browser close, never
+    dependent on browser memory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    amendments: list[AmendmentResponse]
+
+
+class AmendmentQueueEntryResponse(BaseModel):
+    """DH-LAB-005 §46-47: one ``PREPARING`` amendment ready for this lab's own
+    ``LAB_RESULT_RELEASER`` to inspect and release -- deliberately least-privilege and never
+    UUID-first, mirroring ``ReleaseQueueEntryResponse``'s own convention for the original
+    release."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    amendment_id: uuid.UUID
+    amendment_number: int
+    patient: LabPatientIdentityResponse
+    ordering_provider_name: str
+    requested_tests: list[LabWorkflowOrderItemResponse]
+    started_at: datetime
+
+
+class AmendmentQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lab_organization_id: uuid.UUID
+    amendments: list[AmendmentQueueEntryResponse]
+
+
+class LabReleaseVersionItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    entry_completed_at: datetime
+    observations: list[LabResultInspectionObservationResponse]
+
+
+class LabReleaseVersionContentResponse(BaseModel):
+    """DH-LAB-005 §52-54: the lab-side sibling of ``ProviderReleaseVersionContentResponse`` --
+    the exact, immutable content of one specific released version, by its own immutable id, never
+    derived from live current-effective state (identical historical-reconstruction semantic to
+    ``get_manifest_for_version``). Version 1 must return exactly what Version 1 contained even
+    after Version 2/3/... exist -- no mutation, no substitution, no "latest" leakage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    release_version_id: uuid.UUID
+    release_version_number: int
+    is_amendment: bool
+    patient: LabPatientIdentityResponse
+    ordering_provider_name: str
+    results: list[LabReleaseVersionItemResponse]
 
 
 class DoctorReviewResponse(BaseModel):
@@ -4744,6 +4852,7 @@ def build_exchange_router(
             recorded_by_identity_id=observation.recorded_by_identity_id,
             supersedes_observation_id=observation.supersedes_observation_id,
             superseded_at=observation.superseded_at,
+            template_observation_definition_id=observation.template_observation_definition_id,
         )
 
     @router.post(
@@ -4937,6 +5046,70 @@ def build_exchange_router(
 
         return _observation_response(order_id, item_id, successor)
 
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}"
+        "/observations/{observation_id}/native-correct",
+        response_model=LabObservationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def correct_lab_native_observation(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        body: NativeCorrectionRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationResponse:
+        # DH-LAB-005 §8-16: the Native controlled counterpart to `correct_lab_observation` above
+        # -- the browser submits only the new value; every structural field is derived
+        # server-side from the predecessor's own pinned template definition. LAB_TECH only,
+        # identical authority/IN_PROGRESS-gate/no-reason-field discipline as the raw endpoint.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                successor = results.correct_native_value(
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    observation_id=observation_id,
+                    corrected_by_identity_id=principal.identity_id,
+                    numeric_value=body.numeric_value,
+                    text_value=body.text_value,
+                    session=session,
+                )
+                # DH-LAB-005 §65: reuses `lab_observation_corrected` unchanged -- no new,
+                # Native-specific audit event name for what is the identical semantic fact (a
+                # pre-release observation was corrected), just via a controlled request shape.
+                security_audit.record(
+                    session,
+                    event_type="lab_observation_corrected",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidResultSubmissionState as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="observation not found"
+            ) from error
+        except StaleObservationVersion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotTemplateBound as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except NativeValueTypeMismatch as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
+
+        return _observation_response(order_id, item_id, successor)
+
     @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/items/{item_id}/observations/history",
         response_model=LabObservationHistoryResponse,
@@ -5024,6 +5197,62 @@ def build_exchange_router(
         )
 
     @router.get(
+        "/organizations/{lab_id}/amendment-release-queue",
+        response_model=AmendmentQueueResponse,
+    )
+    def get_amendment_release_queue(
+        lab_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AmendmentQueueResponse:
+        # DH-LAB-005 §46-47: this lab's own dedicated, least-privilege amendment release queue --
+        # LAB_RESULT_RELEASER only, exactly mirroring `get_release_queue`'s own convention for the
+        # original release. Never the LAB_TECH work queue broadened.
+        _require_lab_result_releaser(principal, lab_id)
+        candidates: list[AmendmentQueueEntryRecord] = amendments.list_amendment_release_candidates(
+            lab_id
+        )
+        provider_ids = list(dict.fromkeys(c.provider_organization_id for c in candidates))
+        providers_by_id = {pid: organizations.get(pid) for pid in provider_ids}
+        PatientMap = dict[uuid.UUID, PatientIdentitySummaryResponse]
+        patient_identities_by_provider: dict[uuid.UUID, PatientMap] = {}
+        for provider_id in provider_ids:
+            reference_ids = [
+                c.patient_reference_id
+                for c in candidates
+                if c.provider_organization_id == provider_id
+            ]
+            patient_identities_by_provider[provider_id] = _require_patient_identities(
+                provider_id, reference_ids
+            )
+        return AmendmentQueueResponse(
+            lab_organization_id=lab_id,
+            amendments=[
+                AmendmentQueueEntryResponse(
+                    order_id=candidate.order_id,
+                    amendment_id=candidate.amendment_id,
+                    amendment_number=candidate.amendment_number,
+                    patient=_to_lab_patient_identity(
+                        patient_identities_by_provider[candidate.provider_organization_id][
+                            candidate.patient_reference_id
+                        ]
+                    ),
+                    ordering_provider_name=providers_by_id[candidate.provider_organization_id].name,
+                    requested_tests=[
+                        LabWorkflowOrderItemResponse(
+                            catalog_code_snapshot=item.catalog_code_snapshot,
+                            catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                            selected_price_amount=None,
+                            selected_price_currency=None,
+                        )
+                        for item in candidate.items
+                    ],
+                    started_at=candidate.started_at,
+                )
+                for candidate in candidates
+            ],
+        )
+
+    @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/results",
         response_model=LabResultInspectionResponse,
     )
@@ -5074,6 +5303,9 @@ def build_exchange_router(
                             reference_range_high=observation.reference_range_high,
                             text_value=observation.text_value,
                             recorded_at=observation.recorded_at,
+                            template_observation_definition_id=(
+                                observation.template_observation_definition_id
+                            ),
                         )
                         for observation in item.observations
                     ],
@@ -5190,6 +5422,75 @@ def build_exchange_router(
             versions=[_release_version_response(version) for version in history],
         )
 
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/release-versions/{release_version_id}",
+        response_model=LabReleaseVersionContentResponse,
+    )
+    def get_lab_order_release_version_content(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabReleaseVersionContentResponse:
+        # DH-LAB-005 §52-54: the lab-side sibling of `get_provider_release_version_content` --
+        # the exact, immutable content of one specific released version, by its own immutable id,
+        # never derived from live current-effective state. Either LAB_TECH or
+        # LAB_RESULT_RELEASER, matching every other lab-side release-version read.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        inspection = results.get_for_lab(order_id, lab_id)
+        if inspection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        version = releases.get_release_version(release_version_id)
+        if version is None or version.lab_order_id != order_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+        manifest = releases.get_manifest_for_version(release_version_id)
+        if manifest is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+        provider = organizations.get(inspection.provider_organization_id)
+        patient_identity = _require_patient_identity(
+            inspection.provider_organization_id, inspection.patient_reference_id
+        )
+        return LabReleaseVersionContentResponse(
+            order_id=order_id,
+            release_version_id=version.id,
+            release_version_number=version.version_number,
+            is_amendment=version.version_number > 1,
+            patient=_to_lab_patient_identity(patient_identity),
+            ordering_provider_name=provider.name,
+            results=[
+                LabReleaseVersionItemResponse(
+                    item_id=item.item_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    entry_completed_at=item.entry_completed_at,
+                    observations=[
+                        LabResultInspectionObservationResponse(
+                            observation_id=observation.id,
+                            source_code=observation.source_code,
+                            source_system=observation.source_system,
+                            display_label_snapshot=observation.display_label_snapshot,
+                            result_type=observation.result_type,
+                            numeric_value=observation.numeric_value,
+                            numeric_unit=observation.numeric_unit,
+                            reference_range_low=observation.reference_range_low,
+                            reference_range_high=observation.reference_range_high,
+                            text_value=observation.text_value,
+                            recorded_at=observation.recorded_at,
+                            template_observation_definition_id=(
+                                observation.template_observation_definition_id
+                            ),
+                        )
+                        for observation in item.observations
+                    ],
+                )
+                for item in manifest.items
+            ],
+        )
+
     def _amendment_response(record: LabResultAmendmentRecord) -> AmendmentResponse:
         return AmendmentResponse(
             amendment_id=record.id,
@@ -5249,6 +5550,28 @@ def build_exchange_router(
         return _amendment_response(record)
 
     @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments",
+        response_model=AmendmentListResponse,
+    )
+    def list_lab_order_amendments(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AmendmentListResponse:
+        # DH-LAB-005 §27-28: lets the frontend rediscover a PREPARING amendment (or see the full
+        # amendment history) after a page refresh/browser close -- never dependent on browser
+        # memory. Either LAB_TECH or LAB_RESULT_RELEASER, matching every other amendment read.
+        _require_lab_tech_or_releaser(principal, lab_id)
+        tenant_check = results.get_for_lab(order_id, lab_id)
+        if tenant_check is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        records = amendments.list_amendments_for_order(order_id)
+        return AmendmentListResponse(
+            order_id=order_id,
+            amendments=[_amendment_response(record) for record in records],
+        )
+
+    @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}",
         response_model=AmendmentInspectionResponse,
     )
@@ -5297,6 +5620,9 @@ def build_exchange_router(
                             text_value=observation.text_value,
                             recorded_at=observation.recorded_at,
                             amendment_id=observation.amendment_id,
+                            template_observation_definition_id=(
+                                observation.template_observation_definition_id
+                            ),
                         )
                         for observation in item.observations
                     ],
@@ -5305,6 +5631,7 @@ def build_exchange_router(
                 for item in inspection.items
             ],
             ready_to_release=inspection.ready_to_release,
+            result_fingerprint=inspection.result_fingerprint,
         )
 
     @router.post(
@@ -5380,6 +5707,86 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ObservationNotEligibleForAmendment as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except TemplateBoundContainerRefusesUnstructuredWrite as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _observation_response(order_id, item_id, successor)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/amendments/{amendment_id}"
+        "/items/{item_id}/observations/{observation_id}/native-correct",
+        response_model=LabObservationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def correct_lab_order_amendment_native_observation(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        amendment_id: uuid.UUID,
+        item_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        body: NativeCorrectionRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabObservationResponse:
+        # DH-LAB-005 §30-35: the Native controlled counterpart to
+        # `correct_lab_order_amendment_observation` above -- the browser submits only the new
+        # value; structural fields are derived from the predecessor's own pinned template
+        # definition. LAB_TECH only, identical amendment-state/eligibility discipline as the raw
+        # endpoint.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                successor = amendments.correct_native_value(
+                    amendment_id=amendment_id,
+                    order_id=order_id,
+                    lab_order_item_id=item_id,
+                    lab_organization_id=lab_id,
+                    observation_id=observation_id,
+                    corrected_by_identity_id=principal.identity_id,
+                    numeric_value=body.numeric_value,
+                    text_value=body.text_value,
+                    session=session,
+                )
+                # DH-LAB-005 §65: reuses `lab_observation_amended` unchanged -- identical
+                # semantic fact as the raw amendment correction endpoint, just via a controlled
+                # request shape.
+                security_audit.record(
+                    session,
+                    event_type="lab_observation_amended",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=lab_id,
+                    outcome="created",
+                    resource_type="lab_order",
+                    resource_id=order_id,
+                )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except OrderNotCompletedForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except AmendmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="amendment not found"
+            ) from error
+        except AmendmentNotPreparing as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except OrderItemNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order item not found"
+            ) from error
+        except ObservationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="observation not found"
+            ) from error
+        except StaleObservationVersion as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotEligibleForAmendment as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ObservationNotTemplateBound as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except NativeValueTypeMismatch as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
         return _observation_response(order_id, item_id, successor)
 
     @router.post(
@@ -5390,6 +5797,7 @@ def build_exchange_router(
         lab_id: uuid.UUID,
         order_id: uuid.UUID,
         amendment_id: uuid.UUID,
+        body: AmendmentReleaseRequest,
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabResultReleaseVersionResponse:
@@ -5397,6 +5805,10 @@ def build_exchange_router(
         # provider and clinician may have already acted on, a materially higher-consequence event
         # than a pre-release fix, exactly mirroring the original release's own separate release
         # authority. Same human may hold both roles, unaffected by this ticket.
+        #
+        # DH-LAB-005 §40-43: `expected_result_fingerprint` is required -- the identical, deliberate
+        # breaking change DH-LAB-004 made to the original release endpoint's contract, closing the
+        # identical inspect-then-stale-release race for amendments.
         _require_lab_result_releaser(principal, lab_id)
         try:
             with session_factory.begin() as session:
@@ -5405,6 +5817,7 @@ def build_exchange_router(
                     order_id=order_id,
                     lab_organization_id=lab_id,
                     released_by_identity_id=principal.identity_id,
+                    expected_result_fingerprint=body.expected_result_fingerprint,
                     session=session,
                 )
                 # Only audited on a genuine new release -- a lost-response retry that returns the
@@ -5437,6 +5850,8 @@ def build_exchange_router(
         except AmendmentBaseVersionSuperseded as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ResultsNotReadyForRelease as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except StaleResultFingerprint as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return _release_version_response(version_record)

@@ -126,6 +126,8 @@ __all__ = [
     "AmendmentNotFound",
     "AmendmentNotReadyForRelease",
     "AmendmentNotPreparing",
+    "AmendmentQueueEntryRecord",
+    "AmendmentQueueItemRecord",
     "AmendmentReleaseIntegrityError",
     "DeliveryNotFound",
     "DoctorReviewRecord",
@@ -154,6 +156,7 @@ __all__ = [
     "NativeValueRecord",
     "NativeValueTypeMismatch",
     "NoActiveTemplateForOffering",
+    "ObservationNotTemplateBound",
     "ObservationValueConflict",
     "ReleaseManifestItemRecord",
     "ReleaseVersionManifestRecord",
@@ -360,6 +363,17 @@ class StaleObservationVersion(RuntimeError):
     correctly, but checked anyway as the database-constraint backstop) a genuine concurrent race.
     A correction must always start from the currently effective observation; this is the controlled
     conflict a caller sees instead of silently creating a second, ambiguous "current" value."""
+
+
+class ObservationNotTemplateBound(RuntimeError):
+    """DH-LAB-005: a controlled Native correction (``correct_native_value``, either pre-release or
+    amendment-scoped) was attempted against a predecessor observation with no
+    ``template_observation_definition_id`` -- a legacy/free-structure (Connect-style) observation
+    that was never Native-template-bound in the first place, so there is no controlled definition
+    to derive corrected structure from. The raw free-structure correction endpoint remains the
+    correct tool for that observation; this one refuses rather than silently fabricating structure
+    for it. Also raised (structurally unreachable in practice, checked as defense-in-depth only) if
+    the predecessor's own definition somehow does not belong to the container's pinned template."""
 
 
 class ReviewNotFound(RuntimeError):
@@ -838,6 +852,36 @@ class AmendmentInspectionRecord:
     amendment: LabResultAmendmentRecord
     items: tuple[AmendmentInspectionItemRecord, ...]
     ready_to_release: bool
+    result_fingerprint: str
+    """DH-LAB-005 §37-40: the exact digest of this amendment's proposed (``PREPARING``) or
+    released (historical manifest) effective observation set, computed by the identical
+    ``compute_result_fingerprint`` algorithm DH-LAB-004's original release already uses -- one
+    hashing algorithm, two callers, never a second implementation that could silently drift. A
+    ``PREPARING`` amendment release request must echo this value back exactly; any controlled
+    correction changes it, closing the identical inspect-then-stale-release race for amendments
+    that DH-LAB-004 closed for the original release."""
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentQueueItemRecord:
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentQueueEntryRecord:
+    """DH-LAB-005 §46-47: one ``PREPARING`` amendment ready for this lab's own
+    ``LAB_RESULT_RELEASER`` to inspect and release -- at least one revision belongs to it, exactly
+    mirroring ``ReleaseQueueEntryRecord``'s own least-privilege, never-the-work-queue-broadened
+    convention for the original release."""
+
+    order_id: uuid.UUID
+    amendment_id: uuid.UUID
+    amendment_number: int
+    patient_reference_id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    started_at: datetime
+    items: tuple[AmendmentQueueItemRecord, ...]
 
 
 class LabResultRepository:
@@ -1203,12 +1247,13 @@ class LabResultRepository:
             )
         if predecessor.template_observation_definition_id is not None:
             # DH-LAB-004 §27: correcting a controlled value into an unbound, unstructured
-            # successor would destroy this observation's own template provenance. Fails closed
-            # until DH-LAB-005 implements a template-aware correction workflow.
+            # successor would destroy this observation's own template provenance. Fails closed --
+            # `correct_native_value` below is the template-aware controlled correction path
+            # DH-LAB-005 adds for exactly this case; this raw endpoint remains hardened against it.
             raise TemplateBoundContainerRefusesUnstructuredWrite(
                 f"LabObservation {observation_id} answers a controlled template definition -- "
-                f"refusing the raw free-structure correction; a template-aware correction "
-                f"workflow is not yet implemented (DH-LAB-005)"
+                f"refusing the raw free-structure correction; use the Native controlled "
+                f"correction endpoint instead"
             )
 
         successor = LabObservation(
@@ -1235,6 +1280,150 @@ class LabResultRepository:
             # pattern -- the LabOrder FOR UPDATE lock above already serializes concurrent
             # corrections of this exact observation down to one winner, so this should never
             # actually fire in practice.
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective (constraint-detected)"
+            ) from None
+        return _to_observation_record(successor)
+
+    # -- DH-LAB-005: template-aware controlled pre-release correction ---------------------------
+
+    def correct_native_value(
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None = None,
+        text_value: str | None = None,
+        session: Session | None = None,
+    ) -> LabObservationRecord:
+        """DH-LAB-005 §8-16: the Native controlled counterpart to ``correct_observation`` above --
+        the browser submits only the new value; every structural field (``source_code``,
+        ``display_label``, ``result_type``, ``numeric_unit``) is derived server-side from the
+        predecessor's own ``template_observation_definition_id``, never trusted from the caller.
+        The pinned template context (``LabResult.result_template_id``) is never touched or
+        re-checked against the offering's current active template -- a correction lives entirely
+        within the container's own already-pinned template, exactly as first-write pinning
+        established (ADR-053 addendum): whichever template governed the original entry keeps
+        governing every correction of it, permanently.
+
+        Reuses the identical ``LabOrder FOR UPDATE`` lock-and-``IN_PROGRESS`` preamble, the
+        identical non-mutating supersession discipline (only ``superseded_at`` is ever written on
+        the predecessor), and the identical concurrency/stale-version behavior as
+        ``correct_observation`` -- see that method's own docstring for the full reasoning, all of
+        which applies here unchanged. The one addition: ``ObservationNotTemplateBound`` if the
+        predecessor was never Native-template-bound in the first place (the raw endpoint is the
+        correct tool for that case), and value-shape validation against the definition's own
+        ``result_type`` (never a caller-declared type -- there is none to trust)."""
+        if session is not None:
+            return self._correct_native_value_in_session(
+                session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                text_value=text_value,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._correct_native_value_in_session(
+                owned_session,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                text_value=text_value,
+            )
+
+    def _correct_native_value_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None,
+        text_value: str | None,
+    ) -> LabObservationRecord:
+        item, _order = _lock_order_and_item_for_entry(
+            session,
+            order_id=order_id,
+            lab_order_item_id=lab_order_item_id,
+            lab_organization_id=lab_organization_id,
+        )
+
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item.id))
+        if container is None:
+            raise ObservationNotFound(str(observation_id))
+
+        predecessor = session.scalar(
+            select(LabObservation).where(LabObservation.id == observation_id)
+        )
+        if predecessor is None or predecessor.lab_result_id != container.id:
+            raise ObservationNotFound(str(observation_id))
+        if predecessor.superseded_at is not None:
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective -- a correction must "
+                f"start from the currently effective observation"
+            )
+        if predecessor.template_observation_definition_id is None:
+            raise ObservationNotTemplateBound(
+                f"LabObservation {observation_id} was never Native-template-bound -- use the raw "
+                f"free-structure correction endpoint instead"
+            )
+
+        definition = session.get(
+            LabResultTemplateObservation, predecessor.template_observation_definition_id
+        )
+        if definition is None or definition.result_template_id != container.result_template_id:
+            # Structurally unreachable: only `record_native_values`'s own first-write pin ever
+            # sets `template_observation_definition_id`, and it always resolves the definition
+            # from the exact template it just pinned the container to. Checked anyway, never
+            # assumed absent.
+            raise ObservationNotTemplateBound(
+                f"LabObservation {observation_id}'s definition does not belong to this "
+                f"container's pinned template -- refusing to derive corrected structure from it"
+            )
+        if definition.result_type == "NUMERIC":
+            if numeric_value is None or text_value is not None:
+                raise NativeValueTypeMismatch(
+                    f"definition {definition.id} is NUMERIC -- numeric_value is required"
+                )
+        else:
+            if text_value is None or numeric_value is not None:
+                raise NativeValueTypeMismatch(
+                    f"definition {definition.id} is TEXT -- text_value is required"
+                )
+
+        successor = LabObservation(
+            lab_result_id=container.id,
+            source_code=definition.source_code,
+            source_system=NATIVE_OBSERVATION_SOURCE_SYSTEM,
+            display_label_snapshot=definition.display_label,
+            result_type=definition.result_type,
+            numeric_value=numeric_value,
+            numeric_unit=definition.numeric_unit,
+            text_value=text_value,
+            recorded_by_identity_id=corrected_by_identity_id,
+            supersedes_observation_id=predecessor.id,
+            template_observation_definition_id=definition.id,
+        )
+        try:
+            with session.begin_nested():
+                session.add(successor)
+                predecessor.superseded_at = utc_now()
+                session.flush()
+        except IntegrityError:
+            # Defensive last line only -- see `correct_observation`'s identical pattern for why
+            # this is structurally unreachable in practice given the LabOrder FOR UPDATE lock
+            # acquired above.
             raise StaleObservationVersion(
                 f"LabObservation {observation_id} is no longer effective (constraint-detected)"
             ) from None
@@ -2516,6 +2705,16 @@ class LabResultAmendmentRepository:
                 f"{amendment_id}'s base release version manifest nor a revision already created "
                 f"by this same amendment -- refusing to start a correction from it"
             )
+        if predecessor.template_observation_definition_id is not None:
+            # DH-LAB-005 §33: identical hardening to the pre-release raw correction path -- a
+            # controlled amendment revision must never be created through the free-structure
+            # endpoint, which would destroy this observation's own template provenance.
+            # `correct_native_value` below is the template-aware controlled path for this case.
+            raise TemplateBoundContainerRefusesUnstructuredWrite(
+                f"LabObservation {observation_id} answers a controlled template definition -- "
+                f"refusing the raw free-structure amendment correction; use the Native controlled "
+                f"correction endpoint instead"
+            )
 
         successor = LabObservation(
             lab_result_id=container.id,
@@ -2545,6 +2744,188 @@ class LabResultAmendmentRepository:
                 f"LabObservation {observation_id} is no longer effective (constraint-detected)"
             ) from None
         return _to_observation_record(successor)
+
+    # -- DH-LAB-005: template-aware controlled amendment correction ------------------------------
+
+    def correct_native_value(
+        self,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None = None,
+        text_value: str | None = None,
+        session: Session | None = None,
+    ) -> LabObservationRecord:
+        """DH-LAB-005 §30-35: the Native controlled counterpart to ``correct_observation`` above.
+        Identical amendment-state/ownership/eligibility predicate (see that method's own
+        docstring for the full reasoning -- unchanged here), plus the identical
+        template-provenance derivation ``LabResultRepository.correct_native_value`` uses: the
+        browser submits only the new value, and every structural field is derived from the
+        predecessor's own ``template_observation_definition_id``, never from the caller."""
+        if session is not None:
+            return self._correct_native_value_in_session(
+                session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                text_value=text_value,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._correct_native_value_in_session(
+                owned_session,
+                amendment_id=amendment_id,
+                order_id=order_id,
+                lab_order_item_id=lab_order_item_id,
+                lab_organization_id=lab_organization_id,
+                observation_id=observation_id,
+                corrected_by_identity_id=corrected_by_identity_id,
+                numeric_value=numeric_value,
+                text_value=text_value,
+            )
+
+    def _correct_native_value_in_session(
+        self,
+        session: Session,
+        *,
+        amendment_id: uuid.UUID,
+        order_id: uuid.UUID,
+        lab_order_item_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        observation_id: uuid.UUID,
+        corrected_by_identity_id: uuid.UUID,
+        numeric_value: Decimal | None,
+        text_value: str | None,
+    ) -> LabObservationRecord:
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        if LabOrderStatus(order.status) != LabOrderStatus.COMPLETED:
+            raise OrderNotCompletedForAmendment(
+                f"LabOrder {order_id} is {order.status!r}, not 'COMPLETED'"
+            )
+
+        amendment = session.get(LabResultAmendment, amendment_id)
+        if amendment is None or amendment.lab_order_id != order_id:
+            raise AmendmentNotFound(str(amendment_id))
+        if LabResultAmendmentStatus(amendment.status) != LabResultAmendmentStatus.PREPARING:
+            raise AmendmentNotPreparing(
+                f"LabResultAmendment {amendment_id} is {amendment.status!r}, not 'PREPARING'"
+            )
+
+        item = session.get(LabOrderItem, lab_order_item_id)
+        if item is None or item.lab_order_id != order_id:
+            raise OrderItemNotFound(str(lab_order_item_id))
+
+        container = session.scalar(select(LabResult).where(LabResult.lab_order_item_id == item.id))
+        if container is None:
+            raise ObservationNotFound(str(observation_id))
+
+        predecessor = session.scalar(
+            select(LabObservation).where(LabObservation.id == observation_id)
+        )
+        if predecessor is None or predecessor.lab_result_id != container.id:
+            raise ObservationNotFound(str(observation_id))
+        if predecessor.superseded_at is not None:
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective -- an amendment "
+                f"correction must start from the currently effective observation"
+            )
+
+        in_base_manifest = session.scalar(
+            select(LabResultReleaseManifestEntry.id).where(
+                LabResultReleaseManifestEntry.release_version_id
+                == amendment.base_release_version_id,
+                LabResultReleaseManifestEntry.lab_observation_id == predecessor.id,
+            )
+        )
+        eligible = in_base_manifest is not None or predecessor.amendment_id == amendment.id
+        if not eligible:
+            raise ObservationNotEligibleForAmendment(
+                f"LabObservation {observation_id} is neither part of amendment "
+                f"{amendment_id}'s base release version manifest nor a revision already created "
+                f"by this same amendment -- refusing to start a correction from it"
+            )
+        if predecessor.template_observation_definition_id is None:
+            raise ObservationNotTemplateBound(
+                f"LabObservation {observation_id} was never Native-template-bound -- use the raw "
+                f"free-structure amendment correction endpoint instead"
+            )
+
+        definition = session.get(
+            LabResultTemplateObservation, predecessor.template_observation_definition_id
+        )
+        if definition is None or definition.result_template_id != container.result_template_id:
+            # Structurally unreachable -- see `LabResultRepository._correct_native_value_in_
+            # session`'s identical defense-in-depth check for why.
+            raise ObservationNotTemplateBound(
+                f"LabObservation {observation_id}'s definition does not belong to this "
+                f"container's pinned template -- refusing to derive corrected structure from it"
+            )
+        if definition.result_type == "NUMERIC":
+            if numeric_value is None or text_value is not None:
+                raise NativeValueTypeMismatch(
+                    f"definition {definition.id} is NUMERIC -- numeric_value is required"
+                )
+        else:
+            if text_value is None or numeric_value is not None:
+                raise NativeValueTypeMismatch(
+                    f"definition {definition.id} is TEXT -- text_value is required"
+                )
+
+        successor = LabObservation(
+            lab_result_id=container.id,
+            source_code=definition.source_code,
+            source_system=NATIVE_OBSERVATION_SOURCE_SYSTEM,
+            display_label_snapshot=definition.display_label,
+            result_type=definition.result_type,
+            numeric_value=numeric_value,
+            numeric_unit=definition.numeric_unit,
+            text_value=text_value,
+            recorded_by_identity_id=corrected_by_identity_id,
+            supersedes_observation_id=predecessor.id,
+            amendment_id=amendment.id,
+            template_observation_definition_id=definition.id,
+        )
+        try:
+            with session.begin_nested():
+                session.add(successor)
+                predecessor.superseded_at = utc_now()
+                session.flush()
+        except IntegrityError:
+            raise StaleObservationVersion(
+                f"LabObservation {observation_id} is no longer effective (constraint-detected)"
+            ) from None
+        return _to_observation_record(successor)
+
+    # -- discovery ----------------------------------------------------------------------------
+
+    def list_amendments_for_order(self, order_id: uuid.UUID) -> list[LabResultAmendmentRecord]:
+        """DH-LAB-005 §27-28: every amendment episode for this order, oldest first -- a PREPARING
+        episode must be rediscoverable after a page refresh/browser close/return-later, never
+        dependent on browser memory. Callers are responsible for their own lab/tenant
+        authorization check first, exactly mirroring ``get_amendment``'s own convention."""
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(LabResultAmendment)
+                .where(LabResultAmendment.lab_order_id == order_id)
+                .order_by(LabResultAmendment.amendment_number)
+            ).all()
+            return [_to_amendment_record(row) for row in rows]
 
     # -- inspection -------------------------------------------------------------------------------
 
@@ -2580,6 +2961,11 @@ class LabResultAmendmentRepository:
                         f"released LabResultAmendment {amendment.id} has no release version"
                     )
                 manifest = _manifest_record_for_version(session, version)
+                released_fingerprint_pairs = [
+                    (item.item_id, observation.id)
+                    for item in manifest.items
+                    for observation in item.observations
+                ]
                 return AmendmentInspectionRecord(
                     amendment=_to_amendment_record(amendment),
                     items=tuple(
@@ -2597,6 +2983,7 @@ class LabResultAmendmentRepository:
                         for item in manifest.items
                     ),
                     ready_to_release=False,
+                    result_fingerprint=compute_result_fingerprint(released_fingerprint_pairs),
                 )
 
             rows = session.execute(
@@ -2646,10 +3033,22 @@ class LabResultAmendmentRepository:
                 )
                 for item, container in rows
             )
+            # DH-LAB-005 §37-40: identical canonical source `_effective_observation_rows` derives
+            # for the original release's own fingerprint -- every item's current effective
+            # observation, not merely the ones this amendment happened to touch (a concurrent
+            # correction to an *unrelated* item must also invalidate a stale inspection, exactly
+            # as it does for the original release).
+            preparing_fingerprint_pairs = [
+                (item.id, observation.id)
+                for item, container in rows
+                if container is not None
+                for observation in observations_by_result.get(container.id, [])
+            ]
             return AmendmentInspectionRecord(
                 amendment=_to_amendment_record(amendment),
                 items=items,
                 ready_to_release=any(item.changed_in_this_amendment for item in items),
+                result_fingerprint=compute_result_fingerprint(preparing_fingerprint_pairs),
             )
 
     # -- release --------------------------------------------------------------------------------
@@ -2661,12 +3060,23 @@ class LabResultAmendmentRepository:
         order_id: uuid.UUID,
         lab_organization_id: uuid.UUID,
         released_by_identity_id: uuid.UUID,
+        expected_result_fingerprint: str | None = None,
         session: Session | None = None,
     ) -> tuple[LabResultReleaseVersionRecord, bool]:
         """Returns ``(record, created)``. ``created=False`` means an already-``RELEASED`` amendment
         was returned as a safe idempotent replay -- unconditionally, regardless of who is retrying,
-        mirroring ``LabResultReleaseRepository.release``'s identical replay discipline exactly: the
-        fact is who actually released it first, never rewritten by a later retry."""
+        and regardless of what ``expected_result_fingerprint`` claims (identical exception to the
+        original release's own replay discipline: a replay reports a fact that already happened;
+        it does not re-evaluate whether the caller's own inspection is current), mirroring
+        ``LabResultReleaseRepository.release``'s identical replay discipline exactly: the fact is
+        who actually released it first, never rewritten by a later retry.
+
+        DH-LAB-005 §37-43: when ``expected_result_fingerprint`` is given and does not match the
+        exact proposed effective observation set this call just recomputed (inside the same
+        ``LabOrder FOR UPDATE`` lock this release already holds), raises ``StaleResultFingerprint``
+        *before* any release version row is created -- the identical safety property DH-LAB-004's
+        original release established, reused here via the identical
+        ``compute_result_fingerprint`` algorithm, never a second implementation."""
         if session is not None:
             return self._release_amendment_in_session(
                 session,
@@ -2674,6 +3084,7 @@ class LabResultAmendmentRepository:
                 order_id=order_id,
                 lab_organization_id=lab_organization_id,
                 released_by_identity_id=released_by_identity_id,
+                expected_result_fingerprint=expected_result_fingerprint,
             )
         with self._sessions.begin() as owned_session:
             return self._release_amendment_in_session(
@@ -2682,6 +3093,7 @@ class LabResultAmendmentRepository:
                 order_id=order_id,
                 lab_organization_id=lab_organization_id,
                 released_by_identity_id=released_by_identity_id,
+                expected_result_fingerprint=expected_result_fingerprint,
             )
 
     def _release_amendment_in_session(
@@ -2692,6 +3104,7 @@ class LabResultAmendmentRepository:
         order_id: uuid.UUID,
         lab_organization_id: uuid.UUID,
         released_by_identity_id: uuid.UUID,
+        expected_result_fingerprint: str | None = None,
     ) -> tuple[LabResultReleaseVersionRecord, bool]:
         order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
         if order is None:
@@ -2770,6 +3183,23 @@ class LabResultAmendmentRepository:
                 f"item(s) no longer have a completed, observation-backed result entry"
             )
 
+        # DH-EX-014B: the complete, newly-released manifest -- every unchanged observation carried
+        # forward (referenced again, never copied) plus every amendment-created revision now
+        # replacing what it superseded. Identical shared query to the original release's own
+        # manifest construction (`_effective_observation_rows`) -- structurally cannot omit an
+        # unaffected item merely because another item changed. DH-LAB-005: also the exact input to
+        # the fingerprint re-check below -- computed once, reused for both, never two independent
+        # reads that could disagree.
+        effective_rows = _effective_observation_rows(session, order_id)
+
+        if expected_result_fingerprint is not None:
+            actual_fingerprint = compute_result_fingerprint(effective_rows)
+            if actual_fingerprint != expected_result_fingerprint:
+                raise StaleResultFingerprint(
+                    f"cannot release amendment {amendment_id} for LabOrder {order_id} -- the "
+                    f"proposed effective result set has changed since it was last inspected"
+                )
+
         released_at = utc_now()
         new_version_number = latest_version.version_number + 1
         version = LabResultReleaseVersion(
@@ -2781,13 +3211,6 @@ class LabResultAmendmentRepository:
         )
         session.add(version)
         session.flush()
-
-        # DH-EX-014B: the complete, newly-released manifest -- every unchanged observation carried
-        # forward (referenced again, never copied) plus every amendment-created revision now
-        # replacing what it superseded. Identical shared query to the original release's own
-        # manifest construction (`_effective_observation_rows`) -- structurally cannot omit an
-        # unaffected item merely because another item changed.
-        effective_rows = _effective_observation_rows(session, order_id)
 
         base_manifest_items = session.scalars(
             select(LabResultReleaseManifestEntry.lab_observation_id).where(
@@ -2832,6 +3255,69 @@ class LabResultAmendmentRepository:
         session.flush()
 
         return _to_release_version_record(version), True
+
+    # -- release queue ----------------------------------------------------------------------------
+
+    def list_amendment_release_candidates(
+        self, lab_organization_id: uuid.UUID
+    ) -> list[AmendmentQueueEntryRecord]:
+        """DH-LAB-005 §46-47: this lab's own least-privilege amendment release queue -- every
+        ``PREPARING`` amendment for an order assigned to this lab that has at least one revision
+        of its own. Deliberately a dedicated read, never the ``LAB_TECH`` work queue broadened,
+        exactly mirroring ``LabResultReleaseRepository.list_release_candidates``'s own convention
+        for the original release."""
+        with self._sessions() as session:
+            rows = session.execute(
+                select(LabResultAmendment, LabOrder)
+                .join(LabOrder, LabOrder.id == LabResultAmendment.lab_order_id)
+                .join(LabSelection, LabSelection.lab_order_id == LabOrder.id)
+                .where(
+                    LabSelection.lab_organization_id == lab_organization_id,
+                    LabResultAmendment.status == LabResultAmendmentStatus.PREPARING.value,
+                )
+                .order_by(LabResultAmendment.started_at)
+            ).all()
+            if not rows:
+                return []
+            amendment_ids = [amendment.id for amendment, _order in rows]
+            changed_amendment_ids = set(
+                session.scalars(
+                    select(LabObservation.amendment_id)
+                    .where(LabObservation.amendment_id.in_(amendment_ids))
+                    .distinct()
+                )
+            )
+            candidates = [
+                (amendment, order)
+                for amendment, order in rows
+                if amendment.id in changed_amendment_ids
+            ]
+            if not candidates:
+                return []
+            order_ids = [order.id for _amendment, order in candidates]
+            items_by_order: dict[uuid.UUID, list[LabOrderItem]] = {}
+            for item in session.scalars(
+                select(LabOrderItem).where(LabOrderItem.lab_order_id.in_(order_ids))
+            ):
+                items_by_order.setdefault(item.lab_order_id, []).append(item)
+            return [
+                AmendmentQueueEntryRecord(
+                    order_id=order.id,
+                    amendment_id=amendment.id,
+                    amendment_number=amendment.amendment_number,
+                    patient_reference_id=order.patient_reference_id,
+                    provider_organization_id=order.provider_organization_id,
+                    started_at=amendment.started_at,
+                    items=tuple(
+                        AmendmentQueueItemRecord(
+                            catalog_code_snapshot=item.catalog_code_snapshot,
+                            catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                        )
+                        for item in items_by_order.get(order.id, [])
+                    ),
+                )
+                for amendment, order in candidates
+            ]
 
 
 class ResultDeliveryRepository:

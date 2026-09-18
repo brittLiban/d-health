@@ -2869,6 +2869,26 @@ def _amendment_releaser_token(client, private_key, lab_id, name: str) -> str:
     return make_token(private_key, subject=f"amend-releaser-{name}")
 
 
+def _current_amendment_fingerprint(client: TestClient, token: str, lab_id, order_id, amendment_id) -> str:
+    """DH-LAB-005 §37-42: fetches the exact ``result_fingerprint`` an amendment release request
+    must echo back -- the inspection step every releaser is now required to actually perform."""
+    response = client.get(_amendment_url(lab_id, order_id, amendment_id), headers=_auth(token))
+    assert response.status_code == 200, response.text
+    return response.json()["result_fingerprint"]
+
+
+def _release_amendment(client, private_key, lab_id, order_id, amendment_id, name: str) -> dict:
+    releaser_token = _amendment_releaser_token(client, private_key, lab_id, name)
+    fingerprint = _current_amendment_fingerprint(client, releaser_token, lab_id, order_id, amendment_id)
+    response = client.post(
+        f"{_amendment_url(lab_id, order_id, amendment_id)}/release",
+        headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": fingerprint},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def test_amendment_golden_flow_provider_history_and_explicit_review(
     client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:
@@ -2924,9 +2944,11 @@ def test_amendment_golden_flow_provider_history_and_explicit_review(
     assert corrected.json()["supersedes_observation_id"] == original.json()["observation_id"]
 
     releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendGolden-v2")
+    fingerprint = _current_amendment_fingerprint(client, releaser_token, lab.id, order_id, amendment_id)
     released = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": fingerprint},
     )
     assert released.status_code == 201, released.text
     version_two = released.json()["release_version_id"]
@@ -2936,6 +2958,7 @@ def test_amendment_golden_flow_provider_history_and_explicit_review(
     replay = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": "irrelevant-replay-returns-first-committer-fact"},
     )
     assert replay.status_code == 200, replay.text
     assert replay.json() == released.json()
@@ -3046,6 +3069,7 @@ def test_amendment_and_version_routes_preserve_role_and_tenant_boundaries(
     tech_release = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(tech_token),
+        json={"expected_result_fingerprint": "irrelevant-role-check-fails-first"},
     )
     assert tech_release.status_code == 403
 
@@ -3151,9 +3175,13 @@ def test_provider_release_version_history_query_count_does_not_scale_with_versio
         )
         assert corrected.status_code == 201, corrected.text
         current_obs_id = corrected.json()["observation_id"]
+        amend_fingerprint = _current_amendment_fingerprint(
+            client, releaser_token, lab.id, order_id, amend_id
+        )
         rel = client.post(
             f"{_amendment_url(lab.id, order_id, amend_id)}/release",
             headers=_auth(releaser_token),
+            json={"expected_result_fingerprint": amend_fingerprint},
         )
         assert rel.status_code == 201, rel.text
 
@@ -3271,11 +3299,17 @@ def test_amendment_release_route_fails_closed_on_integrity_violation(
         session.commit()
 
     releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendLineageReleaser")
+    fingerprint = _current_amendment_fingerprint(
+        client, releaser_token, lab.id, order_id, amendment_id
+    )
 
-    # Attempt to release amendment -> must fail closed with 409 Conflict
+    # Attempt to release amendment -> must fail closed with 409 Conflict (the fingerprint itself
+    # matches the current, still-malformed effective set -- this test exercises the deeper
+    # attribution/integrity check inside the manifest-building loop, not the fingerprint gate).
     release_resp = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": fingerprint},
     )
     assert release_resp.status_code == 409, release_resp.text
     detail = release_resp.json()["detail"]
@@ -3355,9 +3389,13 @@ def test_provider_exact_version_content_route_returns_target_manifest_and_review
     )
     assert corrected.status_code == 201
     releaser_token = _amendment_releaser_token(client, private_key, lab.id, "ExactVerNC10Releaser")
+    v2_fingerprint = _current_amendment_fingerprint(
+        client, releaser_token, lab.id, order_id, amendment_id
+    )
     v2_rel = client.post(
         f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
         headers=_auth(releaser_token),
+        json={"expected_result_fingerprint": v2_fingerprint},
     )
     assert v2_rel.status_code == 201
     v2_id = v2_rel.json()["release_version_id"]
@@ -3462,6 +3500,9 @@ def test_amendment_release_audit_atomicity(
     assert corrected.status_code == 201
 
     releaser_token = _amendment_releaser_token(client, private_key, lab.id, "AmendAuditReleaser")
+    fingerprint = _current_amendment_fingerprint(
+        client, releaser_token, lab.id, order_id, amendment_id
+    )
 
     # Simulate audit write failure
     original_record = ExchangeSecurityAuditRepository.record
@@ -3478,6 +3519,7 @@ def test_amendment_release_audit_atomicity(
         client.post(
             f"{_amendment_url(lab.id, order_id, amendment_id)}/release",
             headers=_auth(releaser_token),
+            json={"expected_result_fingerprint": fingerprint},
         )
 
     # Verify complete atomicity rollback:
@@ -3793,11 +3835,7 @@ def test_queue_two_pending_versions_on_one_order_are_two_entries(
         },
     )
     assert corrected.status_code == 201, corrected.text
-    releaser_token = _amendment_releaser_token(client, private_key, lab.id, "QAmend-v2")
-    released = client.post(
-        f"{_amendment_url(lab.id, order_id, amendment_id)}/release", headers=_auth(releaser_token)
-    )
-    assert released.status_code == 201, released.text
+    _release_amendment(client, private_key, lab.id, order_id, amendment_id, "QAmend-v2")
 
     response = client.get(_queue_url(provider.id, status="ALL"), headers=_auth(clinician_token))
     entries = response.json()["entries"]
