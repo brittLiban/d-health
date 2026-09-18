@@ -465,6 +465,118 @@ class LabPrice(Base):
     lab_offering: Mapped[LabOffering] = relationship(back_populates="prices")
 
 
+class LabResultTemplate(Base):
+    """DH-LAB-003/ADR-053: a controlled, immutable, versioned result-structure definition scoped
+    to one ``LabOffering`` -- **not** to ``TestCatalogEntry``. `TestCatalogEntry` is the provider-
+    facing ordered *service* identity; `LabOffering` is one particular lab's own implementation of
+    that service, and two labs offering the identical catalog test may legitimately report a
+    different observation structure (different methodology, different local reporting format,
+    different number of observations) without that being a second ordered-service identity. See
+    this class's own ADR for the full reasoning.
+
+    Immutable once created: no field on this row or its ``observations`` children is ever updated
+    after creation (`LabResultTemplateRepository` exposes no edit method at all). A structural
+    change is always a new row -- `version` N+1 for the same `lab_offering_id` -- never a mutation
+    of version N, because a template version may eventually be referenced by historical Patient
+    result entry (LAB-004's own forward concern, not implemented here).
+
+    Exactly one ``active=True`` row may exist per `lab_offering_id` at a time (the partial unique
+    index below is the database backstop; `LabResultTemplateRepository.activate_template`'s own
+    `FOR UPDATE`-locked compare-and-swap is the actual serializing mechanism, mirroring
+    `CatalogRepository.set_price`'s established discover-and-swap discipline). An offering may
+    legitimately have **zero** active templates (before initial configuration, or between v1's
+    retirement and v2's activation in the same transaction) -- `null` is a valid, honestly
+    represented state, never fabricated.
+
+    No reference-range field exists here by design (§14 of this ticket): a static low/high pair
+    depends on age/sex/methodology/population/instrument facts this product has no approved
+    applicability model for yet. No clinical-interpretation field (normal/abnormal/critical) exists
+    either -- this table is result *structure*, never decision support."""
+
+    __tablename__ = "exchange_lab_result_templates"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_exchange_lab_result_templates_version"),
+        UniqueConstraint(
+            "lab_offering_id", "version", name="uq_exchange_lab_result_templates_offering_version"
+        ),
+        Index(
+            "uq_exchange_lab_result_templates_one_active_per_offering",
+            "lab_offering_id",
+            unique=True,
+            postgresql_where=text("active = true"),
+            sqlite_where=text("active = 1"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lab_offering_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_offerings.id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    observations: Mapped[list[LabResultTemplateObservation]] = relationship(
+        back_populates="template", order_by="LabResultTemplateObservation.sort_order"
+    )
+
+
+class LabResultTemplateObservation(Base):
+    """One controlled observation definition within a ``LabResultTemplate`` version -- pure
+    configuration, never a Patient result value (contrast with ``LabObservation``, which LAB-004
+    will populate by referencing one of these definitions, never by letting the browser invent
+    ``source_code``/``display_label``/``result_type``/``numeric_unit`` at write time -- see this
+    ticket's own ADR for that forward contract).
+
+    ``result_type``/``numeric_unit`` column shapes deliberately match ``LabObservation``'s own
+    exactly (``String(16)`` CHECK NUMERIC/TEXT, ``String(32)`` unit) so a template value can never
+    be too long to copy into the observation LAB-004 eventually derives from it. Same reasoning for
+    ``source_code``/``display_label`` matching ``LabObservation.source_code``/
+    ``display_label_snapshot``'s own ``String(64)``/``String(256)`` shapes.
+
+    No enumerated ``allowed_values`` for TEXT and no reference range on this table -- both
+    deliberately deferred, per this ticket's own scope boundary (§14/§16)."""
+
+    __tablename__ = "exchange_lab_result_template_observations"
+    __table_args__ = (
+        CheckConstraint(
+            "result_type IN ('NUMERIC', 'TEXT')",
+            name="ck_exchange_lab_result_template_observations_result_type",
+        ),
+        CheckConstraint(
+            "result_type = 'NUMERIC' OR numeric_unit IS NULL",
+            name="ck_exchange_lab_result_template_observations_text_no_unit",
+        ),
+        CheckConstraint(
+            "sort_order >= 0", name="ck_exchange_lab_result_template_observations_sort"
+        ),
+        UniqueConstraint(
+            "result_template_id",
+            "source_code",
+            name="uq_exchange_lab_result_template_observations_code",
+        ),
+        UniqueConstraint(
+            "result_template_id",
+            "sort_order",
+            name="uq_exchange_lab_result_template_observations_sort_order",
+        ),
+        Index("ix_exchange_lab_result_template_observations_template_id", "result_template_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    result_template_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_result_templates.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_label: Mapped[str] = mapped_column(String(256), nullable=False)
+    result_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    numeric_unit: Mapped[str | None] = mapped_column(String(32))
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    template: Mapped[LabResultTemplate] = relationship(back_populates="observations")
+
+
 class LabOrder(Base):
     """The DHealth-owned order aggregate. No assumption that OpenMRS (or any connector) created
     it -- ``provider_organization_id`` is the only required sender identity.
@@ -1520,7 +1632,11 @@ class ExchangeSecurityAuditEvent(Base):
             # Separate from `lab_order_assigned` above -- that event records a clinician's
             # order-level lab assignment; these record the platform-level relationship that makes
             # such an assignment possible at all.
-            "'provider_lab_route_created', 'provider_lab_route_updated'"
+            "'provider_lab_route_created', 'provider_lab_route_updated', "
+            # DH-LAB-003/ADR-053: controlled, LabOffering-scoped Native Lab result-structure
+            # template configuration. See `security_audit.py`'s own `SecurityEventType` docstring
+            # for the create/activate distinction.
+            "'lab_result_template_created', 'lab_result_template_activated'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1535,7 +1651,8 @@ class ExchangeSecurityAuditEvent(Base):
         CheckConstraint(
             "resource_type IS NULL OR resource_type IN "
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
-            "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route')",
+            "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route', "
+            "'lab_result_template')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

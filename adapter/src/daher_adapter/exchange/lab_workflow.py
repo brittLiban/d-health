@@ -84,6 +84,7 @@ class InvalidLabWorkflowTransition(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LabWorkflowOrderItemRecord:
+    id: uuid.UUID
     catalog_entry_id: uuid.UUID
     catalog_code_snapshot: str
     catalog_display_name_snapshot: str
@@ -388,6 +389,7 @@ def _to_record(
         updated_at=order.updated_at,
         items=tuple(
             LabWorkflowOrderItemRecord(
+                id=item.id,
                 catalog_entry_id=item.catalog_entry_id,
                 catalog_code_snapshot=item.catalog_code_snapshot,
                 catalog_display_name_snapshot=item.catalog_display_name_snapshot,

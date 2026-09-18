@@ -205,6 +205,20 @@ class CatalogRepository:
                 raise CatalogEntryNotFound(str(entry_id))
             return _to_entry_record(entry)
 
+    def get_entries_by_ids(
+        self, catalog_entry_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, CatalogEntryRecord]:
+        """DH-LAB-003 §39: batched, one query regardless of how many ids are requested -- the
+        result-entry-plan read's own `is_synthetic` derivation needs this without ever issuing one
+        query per ordered item."""
+        if not catalog_entry_ids:
+            return {}
+        with self._sessions() as session:
+            entries = session.scalars(
+                select(TestCatalogEntry).where(TestCatalogEntry.id.in_(catalog_entry_ids))
+            ).all()
+            return {e.id: _to_entry_record(e) for e in entries}
+
     def list_entries(self, *, active_synthetic_only: bool = False) -> list[CatalogEntryRecord]:
         """DH-EX-003R: ``active_synthetic_only=True`` is the pilot-facing view -- an ordinary
         network member must never see an inactive or non-synthetic catalog entry as though it
@@ -296,6 +310,26 @@ class CatalogRepository:
             if offering is None:
                 raise OfferingNotFound(str(offering_id))
             return _to_offering_record(offering)
+
+    def get_offerings_for_lab_and_entries(
+        self, lab_organization_id: uuid.UUID, catalog_entry_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, LabOfferingRecord]:
+        """DH-LAB-003 §39: batched lookup for the order-scoped result-entry-plan read -- one query
+        regardless of how many catalog entries are requested, keyed by ``catalog_entry_id`` (this
+        lab's own `UNIQUE(lab_organization_id, catalog_entry_id)` makes that key collision-free).
+        Deliberately does not filter on ``LabOffering.active`` -- an offering that became inactive
+        after an order was already assigned here must still resolve (§33's own historical-
+        commitment principle); the *template*-activeness check is a separate, later step."""
+        if not catalog_entry_ids:
+            return {}
+        with self._sessions() as session:
+            offerings = session.scalars(
+                select(LabOffering).where(
+                    LabOffering.lab_organization_id == lab_organization_id,
+                    LabOffering.catalog_entry_id.in_(catalog_entry_ids),
+                )
+            ).all()
+            return {o.catalog_entry_id: _to_offering_record(o) for o in offerings}
 
     def list_offerings_for_lab(self, lab_organization_id: uuid.UUID) -> list[LabOfferingRecord]:
         with self._sessions() as session:

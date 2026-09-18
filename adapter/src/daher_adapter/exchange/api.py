@@ -65,6 +65,16 @@ from daher_adapter.exchange.identity import (
     PractitionerReferenceRepository,
 )
 from daher_adapter.exchange.identity_auth import TokenValidationError, TokenValidator
+from daher_adapter.exchange.lab_result_templates import (
+    LabResultTemplateRepository,
+    ResultEntryPlanIntegrityError,
+    TemplateActivationConflict,
+    TemplateConflict,
+    TemplateNotFound,
+    TemplateObservationDefinitionInput,
+    TemplateRecord,
+    TemplateValidationError,
+)
 from daher_adapter.exchange.lab_workflow import (
     InvalidLabWorkflowTransition,
     LabOrderNotAssigned,
@@ -427,6 +437,56 @@ class LabPriceResponse(BaseModel):
     currency: str
     effective_at: datetime
     superseded_at: datetime | None
+
+
+# -- DH-LAB-003/ADR-053: controlled, LabOffering-scoped Native Lab result templates -------------
+
+
+class ResultTemplateObservationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_code: str = Field(min_length=1, max_length=64)
+    display_label: str = Field(min_length=1, max_length=256)
+    result_type: Literal["NUMERIC", "TEXT"]
+    numeric_unit: str | None = Field(default=None, max_length=32)
+    required: bool
+    sort_order: int = Field(ge=0)
+
+
+class ResultTemplateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(ge=1)
+    observations: list[ResultTemplateObservationCreateRequest] = Field(min_length=1, max_length=64)
+
+
+class ResultTemplateObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    source_code: str
+    display_label: str
+    result_type: str
+    numeric_unit: str | None
+    required: bool
+    sort_order: int
+
+
+class ResultTemplateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    lab_offering_id: uuid.UUID
+    version: int
+    active: bool
+    created_at: datetime
+    observations: list[ResultTemplateObservationResponse]
+
+
+class ResultTemplateActivateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_template_id: uuid.UUID | None = None
 
 
 class MarketplaceLabOptionsRequest(BaseModel):
@@ -1070,6 +1130,50 @@ class LabCollectionResponse(BaseModel):
     recorded_at: datetime
 
 
+class ResultEntryPlanObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: uuid.UUID
+    source_code: str
+    display_label: str
+    result_type: str
+    numeric_unit: str | None
+    required: bool
+    sort_order: int
+
+
+class ResultEntryPlanTemplateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: uuid.UUID
+    version: int
+    is_synthetic: bool
+    observations: list[ResultEntryPlanObservationResponse]
+
+
+class ResultEntryPlanItemResponse(BaseModel):
+    """DH-LAB-003 §37: ``template: None`` is a valid, honestly represented read state -- no active
+    ``LabResultTemplate`` exists yet for this item's offering. Never fabricated, never a fallback
+    to free-form structure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_entry_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    template: ResultEntryPlanTemplateResponse | None
+
+
+class ResultEntryPlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    order_status: str
+    all_items_configured: bool
+    items: list[ResultEntryPlanItemResponse]
+
+
 # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review ----
 
 
@@ -1582,6 +1686,7 @@ def build_exchange_router(
         session_factory, ttl_hours=patient_access_ttl_hours
     )
     lab_workflow = LabWorkflowRepository(session_factory, organizations)
+    result_templates = LabResultTemplateRepository(session_factory)
     results = LabResultRepository(session_factory)
     releases = LabResultReleaseRepository(session_factory)
     reviews = DoctorReviewRepository(session_factory)
@@ -2326,6 +2431,156 @@ def build_exchange_router(
         if existing.lab_organization_id != lab_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="offering not found")
         return existing
+
+    # -- DH-LAB-003/ADR-053: controlled result templates -----------------------------------------
+
+    def _to_template_response(record: TemplateRecord) -> ResultTemplateResponse:
+        return ResultTemplateResponse(
+            id=record.id,
+            lab_offering_id=record.lab_offering_id,
+            version=record.version,
+            active=record.active,
+            created_at=record.created_at,
+            observations=[
+                ResultTemplateObservationResponse(
+                    id=o.id,
+                    source_code=o.source_code,
+                    display_label=o.display_label,
+                    result_type=o.result_type,
+                    numeric_unit=o.numeric_unit,
+                    required=o.required,
+                    sort_order=o.sort_order,
+                )
+                for o in record.observations
+            ],
+        )
+
+    def _existing_template_for_offering_or_404(
+        template_id: uuid.UUID, offering_id: uuid.UUID
+    ) -> TemplateRecord:
+        try:
+            existing = result_templates.get_template(template_id)
+        except TemplateNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="template not found"
+            ) from error
+        if existing.lab_offering_id != offering_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="template not found")
+        return existing
+
+    @router.get(
+        "/organizations/{lab_id}/offerings/{offering_id}/result-templates",
+        response_model=list[ResultTemplateResponse],
+    )
+    def list_result_templates(
+        lab_id: uuid.UUID,
+        offering_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[ResultTemplateResponse]:
+        _require_org_admin(principal, lab_id)
+        _existing_offering_for_lab_or_404(offering_id, lab_id)
+        return [
+            _to_template_response(t)
+            for t in result_templates.list_templates_for_offering(offering_id)
+        ]
+
+    @router.post(
+        "/organizations/{lab_id}/offerings/{offering_id}/result-templates",
+        response_model=ResultTemplateResponse,
+    )
+    def create_result_template(
+        lab_id: uuid.UUID,
+        offering_id: uuid.UUID,
+        body: ResultTemplateCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ResultTemplateResponse:
+        # DH-LAB-003 §22: configuration authority mirrors offerings/prices exactly -- an ordinary
+        # LAB_TECH who enters Patient results is never automatically the authority who defines the
+        # controlled structure they enter results into.
+        _require_org_admin(principal, lab_id)
+        _existing_offering_for_lab_or_404(offering_id, lab_id)
+
+        definitions = [
+            TemplateObservationDefinitionInput(
+                source_code=o.source_code,
+                display_label=o.display_label,
+                result_type=o.result_type,
+                numeric_unit=o.numeric_unit,
+                required=o.required,
+                sort_order=o.sort_order,
+            )
+            for o in body.observations
+        ]
+        try:
+            with session_factory.begin() as session:
+                record, created = result_templates.create_template(
+                    lab_offering_id=offering_id,
+                    version=body.version,
+                    observations=definitions,
+                    session=session,
+                )
+                # DH-LAB-003 §55: audited only on a genuine new version -- an exact-content replay
+                # is never a second authoritative audit row, matching `catalog_entry_created`'s own
+                # established convention for this exact idempotent-create shape.
+                if created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_result_template_created",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_result_template",
+                        resource_id=record.id,
+                    )
+        except TemplateValidationError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
+        except TemplateConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return _to_template_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/offerings/{offering_id}/result-templates/{template_id}/activate",
+        response_model=ResultTemplateResponse,
+    )
+    def activate_result_template(
+        lab_id: uuid.UUID,
+        offering_id: uuid.UUID,
+        template_id: uuid.UUID,
+        body: ResultTemplateActivateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ResultTemplateResponse:
+        _require_org_admin(principal, lab_id)
+        _existing_offering_for_lab_or_404(offering_id, lab_id)
+        _existing_template_for_offering_or_404(template_id, offering_id)
+
+        try:
+            with session_factory.begin() as session:
+                record, outcome = result_templates.activate_template(
+                    lab_offering_id=offering_id,
+                    template_id=template_id,
+                    expected_current_template_id=body.expected_current_template_id,
+                    session=session,
+                )
+                # DH-LAB-003 §56: audited only on a real active-template switch -- an already-
+                # active-target replay (`outcome == "unchanged"`) is never a second authoritative
+                # audit row, matching every other idempotent-mutation convention in this module.
+                if outcome != "unchanged":
+                    security_audit.record(
+                        session,
+                        event_type="lab_result_template_activated",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome=outcome,
+                        resource_type="lab_result_template",
+                        resource_id=record.id,
+                    )
+        except TemplateActivationConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _to_template_response(record)
 
     # -- DH-EX-003: marketplace (read-only query, never mutates order state) --------------------
 
@@ -3891,6 +4146,93 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return LabCollectionResponse(order_id=record.lab_order_id, recorded_at=record.recorded_at)
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/result-entry-plan",
+        response_model=ResultEntryPlanResponse,
+    )
+    def get_result_entry_plan(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ResultEntryPlanResponse:
+        # DH-LAB-003 §34/§35: a safe, server-owned answer to "what result structure would Native
+        # DHealth Lab use for this order right now" -- never a mutation, never a Patient-result
+        # write. Exposed only while `IN_PROGRESS`: result entry is not yet operationally meaningful
+        # in any other status, and this ticket does not change order status.
+        _require_lab_tech(principal, lab_id)
+        record = lab_workflow.get_for_lab(order_id, lab_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        if LabOrderStatus(record.status) != LabOrderStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="result-entry plan is only available while the order is IN_PROGRESS",
+            )
+
+        # DH-LAB-003 §39: bounded, never one query per ordered item -- one batched offering lookup,
+        # one batched catalog-entry lookup (for `is_synthetic`), and `get_active_templates_for_
+        # offerings`'s own two batched queries (active templates + their observation definitions).
+        catalog_entry_ids = [item.catalog_entry_id for item in record.items]
+        offerings_by_entry = catalog.get_offerings_for_lab_and_entries(lab_id, catalog_entry_ids)
+        entries_by_id = catalog.get_entries_by_ids(catalog_entry_ids)
+        offering_ids = [o.id for o in offerings_by_entry.values()]
+        templates_by_offering = result_templates.get_active_templates_for_offerings(offering_ids)
+
+        item_responses: list[ResultEntryPlanItemResponse] = []
+        all_configured = True
+        for item in record.items:
+            offering = offerings_by_entry.get(item.catalog_entry_id)
+            if offering is None:
+                # DH-LAB-003 §38: structurally impossible for a *currently assigned* order --
+                # `LabSelectionRepository.assign_by_provider`/`select` both require an ACTIVE
+                # LabOffering for every requested item at assignment time, and offering rows are
+                # never deleted (only deactivated). Fail closed rather than silently fabricating
+                # structure -- this must never be reached by a genuinely assigned order.
+                raise ResultEntryPlanIntegrityError(
+                    f"LabOrder {order_id} item {item.id} references catalog entry "
+                    f"{item.catalog_entry_id}, which has no LabOffering at lab {lab_id} despite "
+                    f"being currently assigned there -- refusing to render this result-entry plan"
+                )
+            template_record = templates_by_offering.get(offering.id)
+            template_response: ResultEntryPlanTemplateResponse | None = None
+            if template_record is not None:
+                entry = entries_by_id.get(item.catalog_entry_id)
+                template_response = ResultEntryPlanTemplateResponse(
+                    template_id=template_record.id,
+                    version=template_record.version,
+                    is_synthetic=entry.is_synthetic if entry is not None else True,
+                    observations=[
+                        ResultEntryPlanObservationResponse(
+                            definition_id=o.id,
+                            source_code=o.source_code,
+                            display_label=o.display_label,
+                            result_type=o.result_type,
+                            numeric_unit=o.numeric_unit,
+                            required=o.required,
+                            sort_order=o.sort_order,
+                        )
+                        for o in template_record.observations
+                    ],
+                )
+            else:
+                all_configured = False
+            item_responses.append(
+                ResultEntryPlanItemResponse(
+                    item_id=item.id,
+                    catalog_entry_id=item.catalog_entry_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    template=template_response,
+                )
+            )
+
+        return ResultEntryPlanResponse(
+            order_id=record.id,
+            order_status=record.status,
+            all_items_configured=all_configured,
+            items=item_responses,
+        )
 
     # -- DH-EX-007: lab result recording, order completion, provider result access, doctor review
 

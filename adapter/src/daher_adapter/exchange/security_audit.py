@@ -107,6 +107,14 @@ SecurityEventType = Literal[
     # these record the platform-level relationship that makes such an assignment possible at all.
     "provider_lab_route_created",
     "provider_lab_route_updated",
+    # DH-LAB-003/ADR-053: controlled, LabOffering-scoped Native Lab result-structure template
+    # configuration. `lab_result_template_created` fires once per genuinely new template version
+    # (never on an exact-content replay -- see `LabResultTemplateRepository.create_template`'s own
+    # docstring). `lab_result_template_activated` fires on a real active-template switch, matching
+    # `lab_offering_status_changed`/`lab_price_changed`'s own convention of auditing the
+    # activation/deactivation event, not merely the create.
+    "lab_result_template_created",
+    "lab_result_template_activated",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
 SecurityResourceType = Literal[
@@ -119,6 +127,7 @@ SecurityResourceType = Literal[
     "patient_reference",
     "patient",
     "provider_lab_route",
+    "lab_result_template",
 ]
 
 
