@@ -118,7 +118,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0023_provider_lab_routes
+          EXPECTED_HEAD: 0024_result_templates
         working-directory: adapter
         run: |
           alembic upgrade head
