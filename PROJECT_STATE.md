@@ -16047,7 +16047,14 @@ collection recording (DH-LAB-002), LIS/Connect integration, and demo seed data (
   prev-preserving effect-phase one and re-running RR1b alone — it failed as expected, confirming the
   test actually discriminates the fix rather than passing against both versions. The clear was then
   restored (`git diff --stat` confirmed a clean 5-line net diff from the round trip, no stray
-  changes).
+  changes). **The same check caught that RR5/RR6 themselves did not discriminate the `runMutation`
+  generation-guard fix**, on a second independent review pass: their original button-presence/absent-
+  text assertions passed even with the guard's four checks disabled, because the pre-fix recheck
+  fetch still returns `SELECTED` for order-a, so "Accepter l'ordre" stays visible and "Décision
+  enregistrée" stays absent regardless of which order the panel actually swapped to. Rewritten to
+  the same identity-count assertions RR2 already used (`getAllByText('Patient B').length === 2` /
+  `'Patient A').length === 1`, inverting if the panel wrongly swaps to order-a) and re-verified:
+  fails with the guard disabled, passes restored.
 - `<ErrorState>{queueState.error}</ErrorState>` — TS2741, `ErrorState` takes a `code: ErrorCode`
   prop, not children. Fixed to `<ErrorState code="NETWORK_ERROR" onRetry={...} />`.
 - A pre-existing `App.test.tsx` test broke because the new header's "DHealth Laboratoire (Natif)"
@@ -16067,7 +16074,10 @@ collection recording (DH-LAB-002), LIS/Connect integration, and demo seed data (
 failed.** UI: the three Lab-specific files individually confirmed green —
 `LabOrdersPage.test.tsx` (31, including RR5/RR6), `LabApp.test.tsx` (8), `LabA11y.test.tsx` (4, no
 axe violations on home/queue/detail/reject-confirmation) — 43 tests, 0 failed; `App.test.tsx`
-individually confirmed green, 12 tests, 0 failed, including its own fixed test above. A full
+individually confirmed green, 14 tests, 0 failed, including its own fixed test above and two new
+Lab-side tests (`?app=lab` mounts the Lab shell; switching Lab → Clinic never calls Exchange
+logout) added on review, mirroring the equivalent pre-existing Clinic-side tests this ticket had
+been citing before those two actually existed. A full
 `npx vitest run` in this sandbox's WSL2/`/mnt/c` environment again showed the same known,
 pre-existing `vitest-pool-runner: Timeout waiting for worker to respond` flakiness class this
 repository has already disclosed repeatedly (332 passed, 0 failed, 8 worker-crash errors across

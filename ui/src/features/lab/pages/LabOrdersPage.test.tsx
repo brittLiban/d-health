@@ -429,12 +429,19 @@ describe('LabOrdersPage', () => {
 
     await act(async () => {
       acceptA.resolve(makeOrder({ order_id: 'order-a', status: 'ACCEPTED' }))
-      await Promise.resolve()
     })
 
-    // order-a's late accept must never mutate the panel now showing order-b.
-    expect(screen.getByRole('button', { name: "Accepter l'ordre" })).toBeInTheDocument()
-    expect(screen.queryByText('Décision enregistrée — Accepté')).not.toBeInTheDocument()
+    // order-a's late accept must never mutate the panel now showing order-b: "Patient B" stays at
+    // 2 (its own queue row + the still-open panel), "Patient A" stays at 1 (queue row only). A
+    // regression of the §41 generation guard swaps the panel back to order-a's (now-ACCEPTED)
+    // detail via the success path's own `loadPanel(orderId, {isRecheck:true})` call, which
+    // inverts these counts -- proven by disabling the guard and confirming this exact assertion
+    // then fails, rather than trusting a button-presence check the pre-fix code also satisfies
+    // (its recheck fetch still returns SELECTED, so "Accepter l'ordre" stays visible either way).
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
   })
 
   it('RR6: a late reject response for order A never mutates the now-visible order B', async () => {
@@ -466,12 +473,13 @@ describe('LabOrdersPage', () => {
 
     await act(async () => {
       rejectA.resolve(makeOrder({ order_id: 'order-a', status: 'REJECTED' }))
-      await Promise.resolve()
     })
 
-    // order-a's late reject must never mutate the panel now showing order-b.
-    expect(screen.getByRole('button', { name: "Refuser l'ordre" })).toBeInTheDocument()
-    expect(screen.queryByText('Décision enregistrée — Refusé')).not.toBeInTheDocument()
+    // Same discriminating identity-count check as RR5, mirrored for reject -- see its own comment.
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
   })
 
   it('RR7: a response arriving after unmount produces no error and no state update', async () => {

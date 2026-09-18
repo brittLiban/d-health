@@ -202,6 +202,35 @@ describe('App', () => {
     expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
   })
 
+  // DH-LAB-001 §6: '?app=lab' mounts native Lab the same way '?app=clinic' mounts native Clinic.
+  // The shared beforeEach's `/exchange/v1/me` fixture has a PROVIDER-only membership, so this also
+  // proves §13's truthful no-labs state renders rather than a blank page -- the nav landmark below
+  // is what actually proves the Lab shell mounted at all.
+  it('mounts native Lab directly when initialApp="lab"', async () => {
+    render(<App initialApp="lab" />)
+    expect(
+      await screen.findByRole('navigation', { name: 'Navigation DHealth Laboratoire' }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
+    ).toBeInTheDocument()
+  })
+
+  // DH-LAB-001 §7: switching apps unmounts the ExchangeAuthProvider's in-memory token state only --
+  // it must never itself call Keycloak's logout endpoint. Mirrors the identical Clinic-side test
+  // above (LabApp has no Lab-side auth code of its own to diverge from Clinic's).
+  it('switching from Lab to Clinic does not call Exchange logout', async () => {
+    const user = userEvent.setup()
+    render(<App initialApp="lab" />)
+    await screen.findByRole('navigation', { name: 'Navigation DHealth Laboratoire' })
+    const instance = getLatestKeycloakInstance()
+
+    await user.click(screen.getByRole('button', { name: 'Passer à DHealth Clinique' }))
+    await screen.findByText('DHEALTH CLINIQUE')
+
+    expect(instance?.logout).not.toHaveBeenCalled()
+  })
+
   // §28: staying on the reference-connector app must never initialize the
   // native Exchange auth layer — no Keycloak instance, no OIDC round trip.
   it('never constructs a Keycloak session while only the Maternity connector is used', async () => {
