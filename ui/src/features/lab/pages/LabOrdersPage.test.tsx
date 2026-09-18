@@ -79,8 +79,14 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getLabOrder: vi.fn().mockResolvedValue(makeOrder()),
     acceptLabOrder: vi.fn(),
     rejectLabOrder: vi.fn(),
+    recordLabOrderCollection: vi.fn(),
+    startProcessingLabOrder: vi.fn(),
     ...overrides,
   } as unknown as ExchangeClient
+}
+
+function makeCollectionResponse(overrides: { order_id?: string; recorded_at?: string } = {}) {
+  return { order_id: 'order-a', recorded_at: '2026-09-18T10:42:00Z', ...overrides }
 }
 
 interface Deferred<T> {
@@ -98,6 +104,49 @@ function makeGetLabOrderRecheckMock(terminalStatus: LabWorkflowOrder['status']) 
   return vi.fn().mockImplementation((_labId: string, orderId: string) => {
     calls += 1
     return Promise.resolve(makeOrder({ order_id: orderId, status: calls === 1 ? 'SELECTED' : terminalStatus }))
+  })
+}
+
+/** Same shape as `makeGetLabOrderRecheckMock`, but for collection: first call (the initial panel
+ * open) returns ACCEPTED with no collection milestone; every later call (the post-mutation
+ * recheck) returns ACCEPTED with a recorded milestone -- collection never changes `status`. */
+function makeGetLabOrderRecheckMockForCollection() {
+  let calls = 0
+  return vi.fn().mockImplementation((_labId: string, orderId: string) => {
+    calls += 1
+    return Promise.resolve(
+      makeOrder({
+        order_id: orderId,
+        status: 'ACCEPTED',
+        collection_recorded_at: calls === 1 ? null : '2026-09-18T10:42:00Z',
+      }),
+    )
+  })
+}
+
+/** General lost-response recheck mock carrying collection state on both calls -- the first call
+ * is the initial panel open (`initialStatus`/`initialCollectionRecordedAt`), every later call is
+ * the post-mutation recheck (`terminalStatus`/`recordedAt`). */
+function makeGetLabOrderRecheckWithCollection(
+  terminalStatus: LabWorkflowOrder['status'],
+  recordedAt: string,
+  options: {
+    initialStatus?: LabWorkflowOrder['status']
+    initialCollectionRecordedAt?: string | null
+  } = {},
+) {
+  let calls = 0
+  const initialStatus = options.initialStatus ?? 'ACCEPTED'
+  const initialCollectionRecordedAt = options.initialCollectionRecordedAt ?? null
+  return vi.fn().mockImplementation((_labId: string, orderId: string) => {
+    calls += 1
+    return Promise.resolve(
+      makeOrder({
+        order_id: orderId,
+        status: calls === 1 ? initialStatus : terminalStatus,
+        collection_recorded_at: calls === 1 ? initialCollectionRecordedAt : recordedAt,
+      }),
+    )
   })
 }
 
@@ -501,6 +550,696 @@ describe('LabOrdersPage', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
+  })
+
+  // -- CUI-group: collection UI (DH-LAB-002) -------------------------------------------------
+
+  it('CUI1: ACCEPTED with no collection shows "Enregistrer la collecte"', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByRole('button', { name: 'Enregistrer la collecte' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
+  })
+
+  it('CUI2: a SELECTED order does not show any collection mutation control', async () => {
+    const client = makeClient()
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('button', { name: "Accepter l'ordre" })
+    expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).not.toBeInTheDocument()
+  })
+
+  it('CUI3: a legacy IN_PROGRESS order with no recorded collection offers no collection mutation', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: null }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: null }),
+      ),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    // §49: truthful "not recorded," never a false claim collection did not happen. ("En cours"
+    // itself is ambiguous -- it also labels the filter tab -- so wait on this unique text instead.
+    await screen.findByText('Collecte non enregistrée dans DHealth')
+    expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('En cours').length).toBeGreaterThan(0)
+  })
+
+  it('CUI4: an existing collection timestamp is displayed', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText('Collecte enregistrée')).toBeInTheDocument()
+  })
+
+  it('CUI5/CUI6: collection requires explicit confirmation, and cancelling makes no request', async () => {
+    const recordLabOrderCollection = vi.fn()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+      recordLabOrderCollection,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+
+    expect(await screen.findByText(/Enregistrer la collecte \?/)).toBeInTheDocument()
+    expect(recordLabOrderCollection).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Annuler' }))
+    expect(screen.queryByText(/Enregistrer la collecte \?/)).not.toBeInTheDocument()
+    expect(recordLabOrderCollection).not.toHaveBeenCalled()
+  })
+
+  it('CUI7/CUI8: confirming calls the exact record-collection endpoint and re-reads authoritative state', async () => {
+    const recordLabOrderCollection = vi.fn().mockResolvedValue(makeCollectionResponse())
+    const getLabOrder = makeGetLabOrderRecheckMockForCollection()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder,
+      recordLabOrderCollection,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+
+    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledWith('lab-a', 'order-a'))
+    expect(await screen.findByText('Collecte enregistrée')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).not.toBeInTheDocument()
+  })
+
+  it('CUI9: a collection response whose order_id disagrees fails closed', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+      recordLabOrderCollection: vi.fn().mockResolvedValue(makeCollectionResponse({ order_id: 'order-DIFFERENT' })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+    expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
+  })
+
+  it('CUI10: no free-text, time, or specimen field exists anywhere in the panel', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await screen.findByText(/Enregistrer la collecte \?/)
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0)
+    expect(screen.queryAllByRole('spinbutton')).toHaveLength(0)
+  })
+
+  // -- PUI-group: processing UI (DH-LAB-002) -------------------------------------------------
+
+  it('PUI1: ACCEPTED with no collection does not show start-processing', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('button', { name: 'Enregistrer la collecte' })
+    expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
+  })
+
+  it('PUI2: ACCEPTED with collection recorded shows start-processing', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByRole('button', { name: "Commencer l'analyse" })).toBeInTheDocument()
+  })
+
+  it('PUI3: start-processing requires explicit confirmation', async () => {
+    const startProcessingLabOrder = vi.fn()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ),
+      startProcessingLabOrder,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+
+    expect(await screen.findByText(/Commencer l'analyse \?/)).toBeInTheDocument()
+    expect(startProcessingLabOrder).not.toHaveBeenCalled()
+  })
+
+  it('PUI4/PUI6/PUI7: confirming calls the exact start-processing endpoint and the order becomes IN_PROGRESS', async () => {
+    const startProcessingLabOrder = vi.fn().mockResolvedValue(
+      makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+    )
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: makeGetLabOrderRecheckWithCollection('IN_PROGRESS', '2026-09-18T10:42:00Z', {
+        initialCollectionRecordedAt: '2026-09-18T10:42:00Z',
+      }),
+      startProcessingLabOrder,
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' }))
+
+    await waitFor(() => expect(startProcessingLabOrder).toHaveBeenCalledWith('lab-a', 'order-a'))
+    await waitFor(() => expect(screen.getAllByText('En cours').length).toBeGreaterThan(0))
+    expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
+  })
+
+  it('PUI5: a start-processing response whose order_id disagrees fails closed', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ),
+      startProcessingLabOrder: vi
+        .fn()
+        .mockResolvedValue(makeOrder({ order_id: 'order-DIFFERENT', status: 'IN_PROGRESS' })),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' }))
+    expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
+  })
+
+  it('PUI8: no result-entry control appears once IN_PROGRESS', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ),
+    })
+    render(<LabApp client={client} initialTab="orders" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
+    expect(await screen.findByText(/La saisie des résultats sera disponible/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /résultat/i })).not.toBeInTheDocument()
+  })
+
+  // -- LR-C/LR-P-group: lost-response recovery (DH-LAB-002) ---------------------------------
+
+  it('LR-C1: collection commits but the response is lost -- recheck shows success, no error', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+      recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('network lost')),
+    })
+    client.getLabOrder = makeGetLabOrderRecheckWithCollection('ACCEPTED', '2026-09-18T10:42:00Z')
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+
+    await waitFor(() => expect(screen.getAllByText('Collecte enregistrée').length).toBeGreaterThan(0))
+    expect(
+      screen.queryByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer."),
+    ).not.toBeInTheDocument()
+  })
+
+  it('LR-C2: collection response lost, order still ACCEPTED/null -- explicit retry stays available', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockImplementation((_labId, orderId) =>
+        Promise.resolve(makeOrder({ order_id: orderId, status: 'ACCEPTED', collection_recorded_at: null })),
+      ),
+      recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('timeout')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+
+    expect(await screen.findByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Enregistrer la collecte' })).toBeInTheDocument()
+  })
+
+  it('LR-C3: collection response lost, order moved on -- current state shown, never fabricated', async () => {
+    let calls = 0
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      // First call is the initial panel open (must be ACCEPTED, no collection, so the button can
+      // be clicked); every later call is the post-failure recheck, reporting the order moved on
+      // with no collection ever recorded.
+      getLabOrder: vi.fn().mockImplementation((_labId, orderId) => {
+        calls += 1
+        return Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: calls === 1 ? 'ACCEPTED' : 'CANCELLED',
+            collection_recorded_at: null,
+          }),
+        )
+      }),
+      recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('conflict')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+
+    await waitFor(() => expect(screen.getAllByText('Annulé').length).toBeGreaterThan(0))
+    expect(
+      screen.getByText("Cet ordre a déjà été traité différemment -- l'état actuel est affiché ci-dessous."),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Collecte non enregistrée dans DHealth')).toBeInTheDocument()
+  })
+
+  it('LR-P1: processing commits but the response is lost -- recheck shows success, no error', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi
+        .fn()
+        .mockResolvedValue(makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' })),
+      startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('network lost')),
+    })
+    client.getLabOrder = makeGetLabOrderRecheckWithCollection('IN_PROGRESS', '2026-09-18T10:42:00Z', {
+      initialCollectionRecordedAt: '2026-09-18T10:42:00Z',
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' }))
+
+    await waitFor(() => expect(screen.getAllByText('En cours').length).toBeGreaterThan(0))
+    expect(
+      screen.queryByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer."),
+    ).not.toBeInTheDocument()
+  })
+
+  it('LR-P2: processing ambiguous, ACCEPTED + collection present -- explicit retry stays available', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      getLabOrder: vi.fn().mockImplementation((_labId, orderId) =>
+        Promise.resolve(
+          makeOrder({ order_id: orderId, status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+        ),
+      ),
+      startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('timeout')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' }))
+
+    expect(await screen.findByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: "Commencer l'analyse" })).toBeInTheDocument()
+  })
+
+  it('LR-P3: processing ambiguous, ACCEPTED + no collection -- prerequisite not met, no auto-retry', async () => {
+    let calls = 0
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      ]),
+      // First call is the initial panel open (collection present, so "Commencer l'analyse" can be
+      // clicked); the recheck after the ambiguous failure reports the milestone gone -- proving
+      // this branch reads the fresh authoritative state, never the stale panel it started from.
+      getLabOrder: vi.fn().mockImplementation((_labId, orderId) => {
+        calls += 1
+        return Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            collection_recorded_at: calls === 1 ? '2026-09-18T10:42:00Z' : null,
+          }),
+        )
+      }),
+      startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('timeout')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' }))
+
+    expect(
+      await screen.findByText("La collecte n'a pas été enregistrée dans DHealth -- l'analyse ne peut pas commencer avant."),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Enregistrer la collecte' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
+  })
+
+  // -- RR-C/RR-P/RR-L/RR-U-group: race/stale-response safety (DH-LAB-002) -------------------
+
+  it('RR-C1: a late collection response for order A never mutates the now-visible order B', async () => {
+    const collectA = deferred<{ order_id: string; recorded_at: string }>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ order_id: 'order-a', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient A' }) }),
+        makeOrder({ order_id: 'order-b', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      recordLabOrderCollection: vi.fn(() => collectA.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // stalls
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByRole('button', { name: 'Enregistrer la collecte' })
+
+    await act(async () => {
+      collectA.resolve(makeCollectionResponse({ order_id: 'order-a' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
+  })
+
+  it('RR-C2: a late collection recheck for order A never mutates the now-visible order B', async () => {
+    const recheckA = deferred<LabWorkflowOrder>()
+    let callsForA = 0
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({ order_id: 'order-a', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient A' }) }),
+        makeOrder({ order_id: 'order-b', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient B' }) }),
+      ]),
+      // order-a's first getLabOrder call is the initial panel open (must resolve so the
+      // "Enregistrer la collecte" button can be clicked); its second call is the post-failure
+      // recheck, which stalls until resolved below.
+      getLabOrder: vi.fn((_labId: string, orderId: string) => {
+        if (orderId === 'order-a') {
+          callsForA += 1
+          if (callsForA === 1) {
+            return Promise.resolve(
+              makeOrder({ order_id: 'order-a', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient A' }) }),
+            )
+          }
+          return recheckA.promise
+        }
+        return Promise.resolve(
+          makeOrder({ order_id: 'order-b', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient B' }) }),
+        )
+      }),
+      recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('network lost')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // fails, stalls on recheck
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByRole('button', { name: 'Enregistrer la collecte' })
+
+    await act(async () => {
+      recheckA.resolve(makeOrder({ order_id: 'order-a', status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
+  })
+
+  it('RR-P1: a late processing response for order A never mutates the now-visible order B', async () => {
+    const startA = deferred<LabWorkflowOrder>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({
+          order_id: 'order-a',
+          status: 'ACCEPTED',
+          collection_recorded_at: '2026-09-18T10:42:00Z',
+          patient: makePatient({ display_name: 'Patient A' }),
+        }),
+        makeOrder({
+          order_id: 'order-b',
+          status: 'ACCEPTED',
+          collection_recorded_at: '2026-09-18T10:42:00Z',
+          patient: makePatient({ display_name: 'Patient B' }),
+        }),
+      ]),
+      getLabOrder: vi.fn((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            collection_recorded_at: '2026-09-18T10:42:00Z',
+            patient: makePatient({ display_name: orderId === 'order-a' ? 'Patient A' : 'Patient B' }),
+          }),
+        ),
+      ),
+      startProcessingLabOrder: vi.fn(() => startA.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' })) // stalls
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByRole('button', { name: "Commencer l'analyse" })
+
+    await act(async () => {
+      startA.resolve(makeOrder({ order_id: 'order-a', status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
+  })
+
+  it('RR-P2: a late processing recheck for order A never mutates the now-visible order B', async () => {
+    const recheckA = deferred<LabWorkflowOrder>()
+    let callsForA = 0
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([
+        makeOrder({
+          order_id: 'order-a',
+          status: 'ACCEPTED',
+          collection_recorded_at: '2026-09-18T10:42:00Z',
+          patient: makePatient({ display_name: 'Patient A' }),
+        }),
+        makeOrder({
+          order_id: 'order-b',
+          status: 'ACCEPTED',
+          collection_recorded_at: '2026-09-18T10:42:00Z',
+          patient: makePatient({ display_name: 'Patient B' }),
+        }),
+      ]),
+      // order-a's first getLabOrder call is the initial panel open; its second call is the
+      // post-failure recheck, which stalls until resolved below.
+      getLabOrder: vi.fn((_labId: string, orderId: string) => {
+        if (orderId === 'order-a') {
+          callsForA += 1
+          if (callsForA === 1) {
+            return Promise.resolve(
+              makeOrder({
+                order_id: 'order-a',
+                status: 'ACCEPTED',
+                collection_recorded_at: '2026-09-18T10:42:00Z',
+                patient: makePatient({ display_name: 'Patient A' }),
+              }),
+            )
+          }
+          return recheckA.promise
+        }
+        return Promise.resolve(
+          makeOrder({
+            order_id: 'order-b',
+            status: 'ACCEPTED',
+            collection_recorded_at: '2026-09-18T10:42:00Z',
+            patient: makePatient({ display_name: 'Patient B' }),
+          }),
+        )
+      }),
+      startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('network lost')),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' })) // fails, stalls on recheck
+
+    await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
+    await screen.findByRole('button', { name: "Commencer l'analyse" })
+
+    await act(async () => {
+      recheckA.resolve(
+        makeOrder({ order_id: 'order-a', status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
+      )
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Patient B').length).toBe(2)
+      expect(screen.getAllByText('Patient A').length).toBe(1)
+    })
+  })
+
+  it('RR-L1: switching labs invalidates an outstanding collection action', async () => {
+    const collectStall = deferred<{ order_id: string; recorded_at: string }>()
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue(meWithTwoLabs),
+      listLabOrders: vi.fn((labId: string) =>
+        Promise.resolve([
+          makeOrder({
+            order_id: labId === 'lab-a' ? 'order-a' : 'order-b',
+            status: 'ACCEPTED',
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ]),
+      ),
+      getLabOrder: vi.fn((labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ),
+      ),
+      recordLabOrderCollection: vi.fn(() => collectStall.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // stalls
+
+    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    await user.selectOptions(select, 'lab-b')
+    await screen.findByText('Patient Lab B')
+
+    await act(async () => {
+      collectStall.resolve(makeCollectionResponse({ order_id: 'order-a' }))
+    })
+
+    expect(screen.queryByText('Patient Lab A')).not.toBeInTheDocument()
+    expect(screen.getByText('Patient Lab B')).toBeInTheDocument()
+  })
+
+  it('RR-L2: switching labs invalidates an outstanding processing action', async () => {
+    const startStall = deferred<LabWorkflowOrder>()
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue(meWithTwoLabs),
+      listLabOrders: vi.fn((labId: string) =>
+        Promise.resolve([
+          makeOrder({
+            order_id: labId === 'lab-a' ? 'order-a' : 'order-b',
+            status: 'ACCEPTED',
+            collection_recorded_at: '2026-09-18T10:42:00Z',
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ]),
+      ),
+      getLabOrder: vi.fn((labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            collection_recorded_at: '2026-09-18T10:42:00Z',
+            patient: makePatient({ display_name: labId === 'lab-a' ? 'Patient Lab A' : 'Patient Lab B' }),
+          }),
+        ),
+      ),
+      startProcessingLabOrder: vi.fn(() => startStall.promise),
+    })
+    const user = userEvent.setup()
+    render(<LabApp client={client} initialTab="orders" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await user.click(await screen.findByRole('button', { name: 'Commencer' })) // stalls
+
+    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    await user.selectOptions(select, 'lab-b')
+    await screen.findByText('Patient Lab B')
+
+    await act(async () => {
+      startStall.resolve(makeOrder({ order_id: 'order-a', status: 'IN_PROGRESS' }))
+    })
+
+    expect(screen.queryByText('Patient Lab A')).not.toBeInTheDocument()
+    expect(screen.getByText('Patient Lab B')).toBeInTheDocument()
+  })
+
+  it('RR-U1: a collection/processing response arriving after unmount produces no error and no state update', async () => {
+    const collectStall = deferred<{ order_id: string; recorded_at: string }>()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
+      recordLabOrderCollection: vi.fn(() => collectStall.promise),
+    })
+    const user = userEvent.setup()
+    const { unmount } = render(<LabApp client={client} initialTab="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // stalls
+
+    unmount()
+    await act(async () => {
+      collectStall.resolve(makeCollectionResponse())
+      await Promise.resolve()
+    })
   })
 
   // -- Capability model / negative controls --------------------------------------------------

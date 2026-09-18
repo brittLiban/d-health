@@ -23,6 +23,7 @@ import type {
   ExchangeErrorCode,
   ExchangeMeResponse,
   LabAssignmentResponse,
+  LabCollectionResponse,
   LabOrder,
   LabOrderCreateOutcome,
   LabOrderCreateRequest,
@@ -918,6 +919,43 @@ export class ExchangeClient {
   ): Promise<LabWorkflowOrder> {
     return this.request<LabWorkflowOrder>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/reject`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/record-collection
+   * DH-LAB-002 §21/§25: records the explicit, order-level sample/specimen collection workflow
+   * milestone. No request body -- the order and lab come from the URL, the actor from
+   * authentication, the timestamp from the server clock. Idempotent replay-safe on the server; the
+   * UI-level lost-response recovery (re-read via getLabOrder, never a blind retry) is built on top
+   * of this call, not implemented here.
+   */
+  async recordLabOrderCollection(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabCollectionResponse> {
+    return this.request<LabCollectionResponse>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/record-collection`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/start-processing
+   * DH-LAB-002 §21/§26: ACCEPTED -> IN_PROGRESS, gated server-side on an existing collection
+   * milestone. Idempotent replay-safe on the server for an order already IN_PROGRESS.
+   */
+  async startProcessingLabOrder(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/start-processing`,
       { method: 'POST', signal: options.signal },
       options.token,
     )

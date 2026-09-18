@@ -419,6 +419,17 @@ export interface LabWorkflowOrder {
   collection_recorded_at: string | null
 }
 
+/**
+ * DH-LAB-002 §22: the response to recording (or idempotently replaying) the order-level
+ * sample/specimen collection workflow milestone -- deliberately narrow, mirroring the backend's
+ * own `LabCollectionResponse` exactly (`adapter/src/daher_adapter/exchange/api.py`). No specimen
+ * type/tube/barcode/free-text field exists here because none is modeled.
+ */
+export interface LabCollectionResponse {
+  order_id: string
+  recorded_at: string
+}
+
 export type ExchangeErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'

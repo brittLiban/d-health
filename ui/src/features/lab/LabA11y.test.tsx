@@ -90,4 +90,39 @@ describe('Lab Accessibility', () => {
     await screen.findByText(/Refuser cet ordre \?/)
     expect(await axe(container)).toHaveNoViolations()
   })
+
+  // -- DH-LAB-002 §69: collection/processing confirmation accessibility ---------------------
+
+  it('Lab collection confirmation step has no detectable axe violations', async () => {
+    mockClient = {
+      ...mockClient,
+      listLabOrders: vi.fn().mockResolvedValue([{ ...sampleOrders[0], status: 'ACCEPTED' }]),
+      getLabOrder: vi.fn().mockResolvedValue({ ...sampleOrders[0], status: 'ACCEPTED' }),
+    } as unknown as ExchangeClient
+    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await screen.findByText(/Enregistrer la collecte \?/)
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('Lab start-processing confirmation step has no detectable axe violations', async () => {
+    const acceptedWithCollection = {
+      ...sampleOrders[0],
+      status: 'ACCEPTED' as const,
+      collection_recorded_at: '2026-09-18T10:42:00Z',
+    }
+    mockClient = {
+      ...mockClient,
+      listLabOrders: vi.fn().mockResolvedValue([acceptedWithCollection]),
+      getLabOrder: vi.fn().mockResolvedValue(acceptedWithCollection),
+    } as unknown as ExchangeClient
+    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
+    await screen.findByText(/Commencer l'analyse \?/)
+    expect(await axe(container)).toHaveNoViolations()
+  })
 })

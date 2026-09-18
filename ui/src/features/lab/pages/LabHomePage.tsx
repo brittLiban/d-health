@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { mapExchangeErrorToCode } from '../../../api/exchangeClient'
 import type { LabWorkflowOrder } from '../../../api/exchangeTypes'
 import { Card, EmptyState, ErrorState, LoadingSkeleton } from '../../../design-system'
@@ -12,7 +12,27 @@ export function LabHomePage() {
     error: string | null
   }>({ entries: [], loading: true, error: null })
 
-  // §12: the same render-phase (not effect-phase) tenant-switch clear LabOrdersPage uses. An
+  // DH-LAB-002 §35/§61/§62: hardened to the exact same request-generation/tenant-ref/unmount
+  // discipline as `LabOrdersPage`'s own `loadQueue` -- this ticket's own disclosed adjacent gap
+  // (the previous `let isMounted = true` closure alone happened to be safe against the common
+  // single-switch case, via useEffect's own cleanup-before-rerun ordering, but carried no
+  // AbortController and no explicit tenant-id check, so it did not actually match LabOrdersPage's
+  // own stated discipline). A generation counter (not the closure-scoped boolean this replaces)
+  // is what §61 requires to be provably discriminating: it can be asserted against directly in a
+  // test by disabling the check.
+  const queueGenerationRef = useRef(0)
+  const mountedRef = useRef(true)
+  const currentLabRef = useRef<string | null>(activeLab?.organization_id ?? null)
+  currentLabRef.current = activeLab?.organization_id ?? null
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  // §12/§35: the same render-phase (not effect-phase) tenant-switch clear LabOrdersPage uses. An
   // effect-phase clear alone still leaves one paint showing the previous lab's stale counts
   // under the new lab's already-updated header, between the switch and the passive effect
   // below actually running -- the exact bug class DH-CLINIC-007 found and this ticket (§12)
@@ -21,29 +41,35 @@ export function LabHomePage() {
   if (activeLab && activeLab.organization_id !== prevLabId) {
     setPrevLabId(activeLab.organization_id)
     setQueueState({ entries: [], loading: true, error: null })
+    queueGenerationRef.current += 1
   }
 
   useEffect(() => {
     if (status !== 'ready' || !activeLab || !capabilities.canWorkOrders) {
       return
     }
-    let isMounted = true
+    const generation = ++queueGenerationRef.current
+    const targetLab = activeLab.organization_id
+    const controller = new AbortController()
     // DH-LAB-001 §27: counts are derived client-side from the same bounded queue read the
     // Orders tab uses -- no separate KPI endpoint invented, and the 100-item cap this endpoint
     // already enforces is the same honest limit the count is subject to.
     client
-      .listLabOrders(activeLab.organization_id, { limit: 100 })
+      .listLabOrders(activeLab.organization_id, { limit: 100, signal: controller.signal })
       .then((entries) => {
-        if (isMounted) setQueueState({ entries, loading: false, error: null })
+        if (!mountedRef.current) return
+        if (queueGenerationRef.current !== generation) return
+        if (currentLabRef.current !== targetLab) return
+        setQueueState({ entries, loading: false, error: null })
       })
       .catch(() => {
-        if (isMounted) {
-          setQueueState({ entries: [], loading: false, error: 'Impossible de charger les ordres.' })
-        }
+        if (controller.signal.aborted) return
+        if (!mountedRef.current) return
+        if (queueGenerationRef.current !== generation) return
+        if (currentLabRef.current !== targetLab) return
+        setQueueState({ entries: [], loading: false, error: 'Impossible de charger les ordres.' })
       })
-    return () => {
-      isMounted = false
-    }
+    return () => controller.abort()
   }, [client, activeLab, status, capabilities.canWorkOrders])
 
   if (status === 'loading') {
