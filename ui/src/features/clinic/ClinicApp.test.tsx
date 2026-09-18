@@ -63,45 +63,67 @@ describe('ClinicApp', () => {
     },
   ]
 
+  const sampleReleaseVersionContent = {
+    order_id: 'ord-5555-6666',
+    release_version_id: 'rel-v1',
+    release_version_number: 1,
+    is_amendment: false,
+    patient: {
+      patient_id: 'patient-7777',
+      display_name: 'Warsame Ali',
+      date_of_birth: '1975-11-20',
+      contact_channel_type: 'PHONE',
+      contact_value: '+25377222333',
+    },
+    review_status: 'PENDING',
+    reviewed_at: null,
+    reviewed_by_practitioner_reference_id: null,
+    results: [
+      {
+        item_id: 'item-1',
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        entry_completed_at: '2026-09-15T08:30:00Z',
+        observations: [
+          {
+            observation_id: 'obs-1',
+            source_code: 'GLU',
+            source_system: 'LOINC',
+            display_label_snapshot: 'Glycémie',
+            result_type: 'NUMERIC',
+            numeric_value: '5.4',
+            numeric_unit: 'mmol/L',
+            reference_range_low: '3.9',
+            reference_range_high: '6.1',
+            text_value: null,
+            recorded_at: '2026-09-15T08:30:00Z',
+          },
+        ],
+      },
+    ],
+  }
+
   beforeEach(() => {
     mockClient = {
       getMe: vi.fn().mockResolvedValue(sampleMe),
       listOrders: vi.fn().mockResolvedValue(sampleOrders),
       getOrder: vi.fn(),
-      getOrderResults: vi.fn().mockResolvedValue({
-        order_id: 'ord-5555-6666',
-        order_status: 'COMPLETED',
-        patient: {
-          patient_id: 'patient-7777',
-          display_name: 'Warsame Ali',
-          date_of_birth: '1975-11-20',
-          contact_channel_type: 'PHONE',
-          contact_value: '+25377222333',
-        },
-        release_version_id: 'rel-v1',
-        release_version_number: 1,
-        is_amendment: false,
-        results: [
+      getOrderResults: vi.fn(),
+      listResultReviews: vi.fn().mockResolvedValue({
+        provider_organization_id: 'prov-1',
+        entries: [
           {
-            item_id: 'item-1',
-            catalog_code_snapshot: 'GLU',
-            catalog_display_name_snapshot: 'Glycémie à jeun',
-            entry_completed_at: '2026-09-15T08:30:00Z',
-            observations: [
-              {
-                observation_id: 'obs-1',
-                source_code: 'GLU',
-                source_system: 'LOINC',
-                display_label_snapshot: 'Glycémie',
-                result_type: 'NUMERIC',
-                numeric_value: '5.4',
-                numeric_unit: 'mmol/L',
-                reference_range_low: '3.9',
-                reference_range_high: '6.1',
-                text_value: null,
-                recorded_at: '2026-09-15T08:30:00Z',
-              },
-            ],
+            review_id: 'review-1',
+            order_id: 'ord-5555-6666',
+            release_version_id: 'rel-v1',
+            release_version_number: 1,
+            is_amendment: false,
+            released_at: '2026-09-15T08:30:00Z',
+            legacy_unversioned: false,
+            review_status: 'PENDING',
+            reviewed_at: null,
+            patient: sampleReleaseVersionContent.patient,
+            order_created_at: '2026-09-15T08:00:00Z',
           },
         ],
       }),
@@ -119,6 +141,11 @@ describe('ClinicApp', () => {
           },
         ],
       }),
+      getReleaseVersion: vi.fn().mockResolvedValue(sampleReleaseVersionContent),
+      reviewReleaseVersionNoFollowUp: vi.fn(),
+      reviewReleaseVersionFollowUp: vi.fn(),
+      reviewLegacyOrderNoFollowUp: vi.fn(),
+      reviewLegacyOrderFollowUp: vi.fn(),
       createPatientWithOutcome: vi.fn(),
       listPatients: vi.fn().mockResolvedValue([]),
       searchPatients: vi.fn().mockResolvedValue([]),
@@ -170,8 +197,8 @@ describe('ClinicApp', () => {
     await user.click(screen.getByRole('button', { name: 'Résultats' }))
     expect(await screen.findByRole('heading', { name: 'Résultats de laboratoire' })).toBeInTheDocument()
 
-    // Click on Consulter for completed order
-    await user.click(screen.getByRole('button', { name: /^Consulter/ }))
+    // Open the pending review queue entry for the completed order
+    await user.click(screen.getByRole('button', { name: /^Examiner/ }))
 
     expect(await screen.findByText(/Glycémie à jeun/)).toBeInTheDocument()
     expect(screen.getByText('5.4')).toBeInTheDocument()

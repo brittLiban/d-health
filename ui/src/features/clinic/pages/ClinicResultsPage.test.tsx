@@ -1,13 +1,16 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { ExchangeClient } from '../../../api/exchangeClient'
+import { ExchangeApiError, type ExchangeClient } from '../../../api/exchangeClient'
 import type {
+  DoctorReviewResponse,
   ExchangeMeResponse,
-  LabOrderSummary,
   PatientIdentitySummary,
   ProviderOrderResultsResponse,
+  ProviderReleaseVersionContentResponse,
   ProviderReleaseVersionHistoryResponse,
+  ProviderResultReviewQueueEntry,
+  ProviderResultReviewQueueResponse,
 } from '../../../api/exchangeTypes'
 import { ClinicApp } from '../ClinicApp'
 
@@ -49,29 +52,64 @@ function makePatient(overrides: Partial<PatientIdentitySummary> = {}): PatientId
   }
 }
 
-function makeOrder(overrides: Partial<LabOrderSummary> = {}): LabOrderSummary {
+function makeQueueEntry(
+  overrides: Partial<ProviderResultReviewQueueEntry> = {},
+): ProviderResultReviewQueueEntry {
   return {
-    id: 'order-a',
-    provider_organization_id: 'provider-a',
-    patient_reference_id: 'ref-a',
-    practitioner_reference_id: 'prac-1',
+    review_id: 'review-1',
+    order_id: 'order-a',
+    release_version_id: 'rel-v1',
+    release_version_number: 1,
+    is_amendment: false,
+    released_at: '2026-09-17T09:30:00Z',
+    legacy_unversioned: false,
+    review_status: 'PENDING',
+    reviewed_at: null,
     patient: makePatient(),
-    status: 'COMPLETED',
-    created_at: '2026-09-17T08:00:00Z',
-    item_count: 1,
-    lab_assignment: null,
+    order_created_at: '2026-09-17T08:00:00Z',
     ...overrides,
   }
 }
 
-function makeResults(overrides: Partial<ProviderOrderResultsResponse> = {}): ProviderOrderResultsResponse {
+function makeQueueResponse(
+  entries: ProviderResultReviewQueueEntry[],
+): ProviderResultReviewQueueResponse {
+  return { provider_organization_id: 'provider-a', entries }
+}
+
+function makeHistory(
+  orderId: string,
+  overrides: Partial<ProviderReleaseVersionHistoryResponse> = {},
+): ProviderReleaseVersionHistoryResponse {
+  return {
+    order_id: orderId,
+    versions: [
+      {
+        release_version_id: 'rel-v1',
+        release_version_number: 1,
+        is_amendment: false,
+        released_at: '2026-09-17T09:30:00Z',
+        review_status: 'PENDING',
+        reviewed_at: null,
+        reviewed_by_practitioner_reference_id: null,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function makeVersionContent(
+  overrides: Partial<ProviderReleaseVersionContentResponse> = {},
+): ProviderReleaseVersionContentResponse {
   return {
     order_id: 'order-a',
-    order_status: 'COMPLETED',
-    patient: makePatient(),
     release_version_id: 'rel-v1',
     release_version_number: 1,
     is_amendment: false,
+    patient: makePatient(),
+    review_status: 'PENDING',
+    reviewed_at: null,
+    reviewed_by_practitioner_reference_id: null,
     results: [
       {
         item_id: 'item-1',
@@ -99,23 +137,28 @@ function makeResults(overrides: Partial<ProviderOrderResultsResponse> = {}): Pro
   }
 }
 
-function makeHistory(
-  orderId: string,
-  overrides: Partial<ProviderReleaseVersionHistoryResponse> = {},
-): ProviderReleaseVersionHistoryResponse {
+function makeLegacyResults(
+  overrides: Partial<ProviderOrderResultsResponse> = {},
+): ProviderOrderResultsResponse {
   return {
-    order_id: orderId,
-    versions: [
-      {
-        release_version_id: 'rel-v1',
-        release_version_number: 1,
-        is_amendment: false,
-        released_at: '2026-09-17T09:30:00Z',
-        review_status: 'PENDING',
-        reviewed_at: null,
-        reviewed_by_practitioner_reference_id: null,
-      },
-    ],
+    order_id: 'order-legacy',
+    order_status: 'COMPLETED',
+    patient: makePatient(),
+    release_version_id: null,
+    release_version_number: null,
+    is_amendment: null,
+    results: [],
+    ...overrides,
+  }
+}
+
+function makeReviewResponse(overrides: Partial<DoctorReviewResponse> = {}): DoctorReviewResponse {
+  return {
+    order_id: 'order-a',
+    release_version_id: 'rel-v1',
+    status: 'NO_FOLLOW_UP_REQUIRED',
+    reviewed_at: '2026-09-17T10:00:00Z',
+    reviewed_by_practitioner_reference_id: 'prac-2',
     ...overrides,
   }
 }
@@ -123,9 +166,14 @@ function makeHistory(
 function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
   return {
     getMe: vi.fn().mockResolvedValue(me),
-    listOrders: vi.fn().mockResolvedValue([]),
-    getOrderResults: vi.fn(),
+    listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([])),
     getReleaseVersions: vi.fn(),
+    getReleaseVersion: vi.fn(),
+    getOrderResults: vi.fn(),
+    reviewReleaseVersionNoFollowUp: vi.fn(),
+    reviewReleaseVersionFollowUp: vi.fn(),
+    reviewLegacyOrderNoFollowUp: vi.fn(),
+    reviewLegacyOrderFollowUp: vi.fn(),
     ...overrides,
   } as unknown as ExchangeClient
 }
@@ -147,276 +195,520 @@ function deferred<T>(): Deferred<T> {
 }
 
 describe('ClinicResultsPage', () => {
-  it('RS1/RS2/RS3: list shows patient name and DOB, never a patient-reference fragment as identity', async () => {
-    const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="results" />)
-
-    expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
-    expect(screen.getByText('Né(e) le 2 juin 1988')).toBeInTheDocument()
-    expect(screen.queryByText('Réf. Patient')).not.toBeInTheDocument()
-    expect(screen.queryByText(/^ref-a/)).not.toBeInTheDocument()
-  })
-
-  it('RS6: the order technical reference remains available as a secondary column', async () => {
-    const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="results" />)
-
-    expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
-    expect(screen.getByText("Référence de l'ordre")).toBeInTheDocument()
-    expect(screen.getByText('order-a…')).toBeInTheDocument()
-  })
-
-  it('RS4/RS5: opening a result shows the patient banner before any observation value', async () => {
+  it('UI-Q1: shows the pending-review count prominently', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([makeOrder()]),
-      getOrderResults: vi.fn().mockResolvedValue(makeResults()),
-      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
     })
-    const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
 
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
-
-    // Both the list row and the detail banner render the same patient's DOB -- the banner is the
-    // one that appears later in DOM order (the detail panel renders below the list).
-    const banners = await screen.findAllByText('Né(e) le 2 juin 1988')
-    const banner = banners[banners.length - 1]
-    const value = await screen.findByText('0.9')
-    expect(
-      banner.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
+    expect(await screen.findByText('Résultats à examiner (1)')).toBeInTheDocument()
   })
 
-  it('RR1: selecting B before A resolves shows only B once both eventually resolve', async () => {
-    const a = deferred<ProviderOrderResultsResponse>()
-    const b = deferred<ProviderOrderResultsResponse>()
-    const historyA = deferred<ProviderReleaseVersionHistoryResponse>()
-    const historyB = deferred<ProviderReleaseVersionHistoryResponse>()
-
+  it('UI-Q2: a completed review remains discoverable in the history section, never disappearing', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([
-        makeOrder({ id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }),
-        makeOrder({ id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }),
-      ]),
-      getOrderResults: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? a.promise : b.promise,
-      ),
-      getReleaseVersions: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? historyA.promise : historyB.promise,
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ review_id: 'r1', review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
+        ]),
       ),
     })
-    const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
 
-    const buttons = await screen.findAllByRole('button', { name: /^Consulter/ })
-    await user.click(buttons[0]) // select A
-    await user.click(buttons[1]) // select B, before A resolved
-
-    // Resolve B first, then A late -- the classic out-of-order race.
-    b.resolve(makeResults({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient B' }) }))
-    historyB.resolve(makeHistory('order-b'))
-    await screen.findByRole('heading', { name: /order-b/ })
-
-    await act(async () => {
-      a.resolve(makeResults({ order_id: 'order-a', patient: makePatient({ display_name: 'Patient A' }) }))
-      historyA.resolve(makeHistory('order-a'))
-      await Promise.resolve()
-    })
-
-    // B's own patient identity is the one shown in the detail banner; A never overwrote it.
-    expect(screen.getByRole('heading', { name: /order-b/ })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: /order-a$/ })).not.toBeInTheDocument()
+    expect(await screen.findByText('Résultats à examiner (0)')).toBeInTheDocument()
+    expect(screen.getByText('Historique (1)')).toBeInTheDocument()
+    expect(screen.getByText('Fatouma Robleh')).toBeInTheDocument()
   })
 
-  it('RR2: a late failure from an earlier selection must not overwrite the current success', async () => {
-    const a = deferred<ProviderOrderResultsResponse>()
-    const historyA = deferred<ProviderReleaseVersionHistoryResponse>()
-
+  it('UI-Q3: two pending versions on the same order render as two distinct queue entries', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([
-        makeOrder({ id: 'order-a' }),
-        makeOrder({ id: 'order-b' }),
-      ]),
-      getOrderResults: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? a.promise : Promise.resolve(makeResults({ order_id: 'order-b' })),
-      ),
-      getReleaseVersions: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? historyA.promise : Promise.resolve(makeHistory('order-b')),
-      ),
-    })
-    const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
-
-    const buttons = await screen.findAllByRole('button', { name: /^Consulter/ })
-    await user.click(buttons[0]) // select A (stalls)
-    await user.click(buttons[1]) // select B (resolves immediately)
-
-    await screen.findByRole('heading', { name: /order-b/ })
-
-    await act(async () => {
-      a.reject(new Error('stale network failure'))
-      try {
-        await a.promise
-      } catch {
-        // expected
-      }
-    })
-
-    // B's successful content must remain on screen -- a stale A failure never replaces it.
-    expect(screen.getByRole('heading', { name: /order-b/ })).toBeInTheDocument()
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-  })
-
-  it('RR3: a late success from an earlier selection must not overwrite the current failure', async () => {
-    const a = deferred<ProviderOrderResultsResponse>()
-    const historyA = deferred<ProviderReleaseVersionHistoryResponse>()
-
-    const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([
-        makeOrder({ id: 'order-a' }),
-        makeOrder({ id: 'order-b' }),
-      ]),
-      getOrderResults: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? a.promise : Promise.reject(new Error('order-b failed')),
-      ),
-      getReleaseVersions: vi.fn((_providerId: string, orderId: string) =>
-        orderId === 'order-a' ? historyA.promise : Promise.reject(new Error('order-b failed')),
-      ),
-    })
-    const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
-
-    const buttons = await screen.findAllByRole('button', { name: /^Consulter/ })
-    await user.click(buttons[0]) // select A (stalls)
-    await user.click(buttons[1]) // select B (fails immediately)
-
-    await screen.findByRole('alert')
-
-    await act(async () => {
-      a.resolve(makeResults({ order_id: 'order-a' }))
-      historyA.resolve(makeHistory('order-a'))
-      await Promise.resolve()
-    })
-
-    // The truthful current error state must survive -- a late A success never replaces it.
-    expect(screen.getByRole('alert')).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: /Ordre/ })).not.toBeInTheDocument()
-  })
-
-  it('RR4: a stale response from the previous provider must never render after switching providers', async () => {
-    const staleResults = deferred<ProviderOrderResultsResponse>()
-    const staleHistory = deferred<ProviderReleaseVersionHistoryResponse>()
-
-    const client = makeClient({
-      getMe: vi.fn().mockResolvedValue(meWithTwoProviders),
-      listOrders: vi.fn((providerId: string) =>
-        Promise.resolve([
-          makeOrder({
-            id: providerId === 'provider-a' ? 'order-a' : 'order-b',
-            provider_organization_id: providerId,
-            patient: makePatient({
-              display_name: providerId === 'provider-a' ? 'Patient Provider A' : 'Patient Provider B',
-            }),
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ review_id: 'r1', release_version_id: 'rel-v1', release_version_number: 1 }),
+          makeQueueEntry({
+            review_id: 'r2',
+            release_version_id: 'rel-v2',
+            release_version_number: 2,
+            is_amendment: true,
           }),
         ]),
       ),
-      getOrderResults: vi.fn((providerId: string) =>
-        providerId === 'provider-a' ? staleResults.promise : Promise.resolve(makeResults({ order_id: 'order-b' })),
-      ),
-      getReleaseVersions: vi.fn((providerId: string) =>
-        providerId === 'provider-a' ? staleHistory.promise : Promise.resolve(makeHistory('order-b')),
-      ),
     })
-    const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
 
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
-
-    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
-    await user.selectOptions(providerSelect, 'provider-b')
-    await waitFor(() => expect(providerSelect).toHaveValue('provider-b'))
-
-    await act(async () => {
-      staleResults.resolve(makeResults({ order_id: 'order-a' }))
-      staleHistory.resolve(makeHistory('order-a'))
-      await Promise.resolve()
-    })
-
-    // Provider A's stale response must never render under Provider B's active scope.
-    expect(screen.queryByText(/order-a$/)).not.toBeInTheDocument()
+    expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
+    expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
+    expect(screen.getByText(/^Version 2 — Amendée$/)).toBeInTheDocument()
   })
 
-  it('RR5: a response whose order_id disagrees with the request fails closed with no leaked identity', async () => {
+  it('UI-Q4: a legacy unversioned entry is labelled truthfully, never a fabricated version', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([makeOrder({ id: 'order-a' })]),
-      getOrderResults: vi.fn().mockResolvedValue(makeResults({ order_id: 'order-mismatched' })),
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            release_version_id: null,
+            release_version_number: null,
+            legacy_unversioned: true,
+            released_at: null,
+          }),
+        ]),
+      ),
+    })
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    expect(
+      await screen.findByText('Résultat historique — aucune version de libération enregistrée'),
+    ).toBeInTheDocument()
+  })
+
+  it('UI-V1: opening a pending version loads its exact content via getReleaseVersion, not the legacy read', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
       getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
 
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText('0.9')).toBeInTheDocument()
+    expect(client.getReleaseVersion).toHaveBeenCalledWith('provider-a', 'order-a', 'rel-v1')
+    expect(client.getOrderResults).not.toHaveBeenCalled()
+  })
+
+  it('UI-V2: switching to a different version fetches that version\'s own distinct exact content', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ release_version_id: 'rel-v2', release_version_number: 2, is_amendment: true }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v1',
+              release_version_number: 1,
+              is_amendment: false,
+              released_at: '2026-09-17T09:00:00Z',
+              review_status: 'NO_FOLLOW_UP_REQUIRED',
+              reviewed_at: '2026-09-17T09:15:00Z',
+              reviewed_by_practitioner_reference_id: 'prac-1',
+            },
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-17T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi.fn((_providerId: string, _orderId: string, versionId: string) =>
+        Promise.resolve(
+          versionId === 'rel-v1'
+            ? makeVersionContent({
+                release_version_id: 'rel-v1',
+                review_status: 'NO_FOLLOW_UP_REQUIRED',
+                results: [],
+              })
+            : makeVersionContent({ release_version_id: 'rel-v2', is_amendment: true }),
+        ),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9')
+
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+
+    await waitFor(() => expect(client.getReleaseVersion).toHaveBeenLastCalledWith('provider-a', 'order-a', 'rel-v1'))
+    expect(screen.queryByText('0.9')).not.toBeInTheDocument()
+  })
+
+  it('UI-V3: a mismatched release_version_id in the content response fails closed', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent({ release_version_id: 'rel-mismatched' })),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('Impossible de vérifier de manière sûre le résultat demandé.')
-    expect(alert.textContent).not.toMatch(/order-a|order-mismatched/)
+    expect(alert.textContent).not.toMatch(/rel-v1|rel-mismatched/)
   })
 
-  it('RR6: a release-history response whose order_id disagrees fails closed', async () => {
+  it('UI-V4: a mismatched patient identity in the content response fails closed', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([makeOrder({ id: 'order-a' })]),
-      getOrderResults: vi.fn().mockResolvedValue(makeResults({ order_id: 'order-a' })),
-      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-mismatched')),
-    })
-    const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
-
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('Impossible de vérifier de manière sûre le résultat demandé.')
-  })
-
-  it('a results response whose patient disagrees with the list row fails closed', async () => {
-    const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([
-        makeOrder({ id: 'order-a', patient: makePatient({ patient_id: 'list-row-patient' }) }),
-      ]),
-      getOrderResults: vi.fn().mockResolvedValue(
-        makeResults({ order_id: 'order-a', patient: makePatient({ patient_id: 'different-patient' }) }),
-      ),
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
       getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(
+        makeVersionContent({ patient: makePatient({ patient_id: 'different-patient' }) }),
+      ),
     })
     const user = userEvent.setup()
     render(<ClinicApp client={client} initialTab="results" />)
 
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Impossible de vérifier de manière sûre le résultat demandé.',
     )
   })
 
-  it('RR7: a response arriving after unmount produces no error and no state update', async () => {
-    const results = deferred<ProviderOrderResultsResponse>()
-    const history = deferred<ProviderReleaseVersionHistoryResponse>()
+  it('UI-V5: a legacy queue entry loads via getOrderResults and never calls the version-content route', async () => {
     const client = makeClient({
-      listOrders: vi.fn().mockResolvedValue([makeOrder()]),
-      getOrderResults: vi.fn().mockResolvedValue(results.promise),
-      getReleaseVersions: vi.fn().mockResolvedValue(history.promise),
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            order_id: 'order-legacy',
+            release_version_id: null,
+            release_version_number: null,
+            legacy_unversioned: true,
+            released_at: null,
+          }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-legacy', { versions: [] })),
+      getOrderResults: vi.fn().mockResolvedValue(makeLegacyResults()),
     })
     const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(
+      await screen.findByText('Résultat historique — aucune version de libération enregistrée.'),
+    ).toBeInTheDocument()
+    expect(client.getReleaseVersion).not.toHaveBeenCalled()
+  })
+
+  it('UI-R1: exactly two disposition choices are offered for a pending review, never a third', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    const group = await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    expect(within(group).getAllByRole('radio')).toHaveLength(2)
+    expect(within(group).getByLabelText('Aucun suivi requis')).toBeInTheDocument()
+    expect(within(group).getByLabelText('Suivi requis')).toBeInTheDocument()
+  })
+
+  it('UI-R2: the confirm button stays disabled until a disposition is chosen, and discloses immutability first', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+
+    const confirmButton = screen.getByRole('button', { name: 'Confirmer la revue' })
+    expect(confirmButton).toBeDisabled()
+    expect(screen.queryByText(/ne peut actuellement pas/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    expect(confirmButton).toBeEnabled()
+    expect(screen.getByText(/ne peut actuellement pas/)).toBeInTheDocument()
+  })
+
+  it('UI-R3: selecting "Suivi requis" discloses the truthful follow-up scope limit', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Suivi requis'))
+
+    expect(
+      screen.getByText(/ne planifie pas automatiquement un rendez-vous ni un contact patient/),
+    ).toBeInTheDocument()
+  })
+
+  it('UI-R4: confirming targets the exact version-specific mutation route, never the legacy one', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+      reviewReleaseVersionNoFollowUp: vi.fn().mockResolvedValue(makeReviewResponse()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    await waitFor(() =>
+      expect(client.reviewReleaseVersionNoFollowUp).toHaveBeenCalledWith('provider-a', 'order-a', 'rel-v1'),
+    )
+    expect(client.reviewLegacyOrderNoFollowUp).not.toHaveBeenCalled()
+  })
+
+  it('UI-R5: a successful review is shown as terminal and the queue count drops', async () => {
+    const listResultReviews = vi
+      .fn()
+      .mockResolvedValueOnce(makeQueueResponse([makeQueueEntry()]))
+      .mockResolvedValueOnce(
+        makeQueueResponse([
+          makeQueueEntry({ review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
+        ]),
+      )
+    const client = makeClient({
+      listResultReviews,
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi
+        .fn()
+        .mockResolvedValueOnce(makeVersionContent())
+        .mockResolvedValueOnce(makeVersionContent({ review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' })),
+      reviewReleaseVersionNoFollowUp: vi.fn().mockResolvedValue(makeReviewResponse()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    await waitFor(() => expect(screen.getByText('Résultats à examiner (0)')).toBeInTheDocument())
+    expect(screen.getByText(/Revue enregistrée/)).toBeInTheDocument()
+  })
+
+  it('UI-R6: a 409 conflict from a concurrent reviewer never overwrites -- shows the authoritative outcome', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi
+        .fn()
+        .mockResolvedValueOnce(makeVersionContent())
+        .mockResolvedValueOnce(
+          makeVersionContent({ review_status: 'FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:05:00Z' }),
+        ),
+      reviewReleaseVersionNoFollowUp: vi
+        .fn()
+        .mockRejectedValue(new ExchangeApiError(409, 'CONFLICT', 'already finalized')),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    expect(await screen.findByText(/a déjà été revue/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Revue enregistrée/)).toBeInTheDocument())
+    expect(screen.getAllByText('Revu — suivi requis').length).toBeGreaterThan(0)
+  })
+
+  it('UI-R7: an ambiguous mutation failure re-reads authoritative state rather than blindly retrying', async () => {
+    const getReleaseVersion = vi
+      .fn()
+      .mockResolvedValueOnce(makeVersionContent())
+      .mockResolvedValueOnce(makeVersionContent())
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion,
+      reviewReleaseVersionNoFollowUp: vi.fn().mockRejectedValue(new Error('network timeout')),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    expect(await screen.findByText(/n'a pas pu être confirmée/)).toBeInTheDocument()
+    await waitFor(() => expect(getReleaseVersion).toHaveBeenCalledTimes(2))
+  })
+
+  it('UI-R8: a response whose status disagrees with the requested disposition fails closed', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+      reviewReleaseVersionNoFollowUp: vi
+        .fn()
+        .mockResolvedValue(makeReviewResponse({ status: 'FOLLOW_UP_REQUIRED' })),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    expect(await screen.findByText('Impossible de vérifier de manière sûre le résultat demandé.')).toBeInTheDocument()
+  })
+
+  it('RR8: reviewing version 1 never touches or hides an independently pending version 2', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ review_id: 'r1', release_version_id: 'rel-v1', release_version_number: 1 }),
+          makeQueueEntry({
+            review_id: 'r2',
+            release_version_id: 'rel-v2',
+            release_version_number: 2,
+            is_amendment: true,
+          }),
+        ]),
+      ),
+    })
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
+    expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
+    expect(screen.getByText(/^Version 2 — Amendée$/)).toBeInTheDocument()
+  })
+
+  it('RR9: a stale version-switch response must never render after a newer version was opened', async () => {
+    const v1 = deferred<ProviderReleaseVersionContentResponse>()
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({ release_version_id: 'rel-v2', release_version_number: 2, is_amendment: true }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v1',
+              release_version_number: 1,
+              is_amendment: false,
+              released_at: '2026-09-17T09:00:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-17T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi.fn((_providerId: string, _orderId: string, versionId: string) =>
+        versionId === 'rel-v1' ? v1.promise : Promise.resolve(makeVersionContent({ release_version_id: 'rel-v2', is_amendment: true })),
+      ),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9') // v2 content loaded first
+
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ })) // starts loading v1, stalls
+    await user.click(screen.getByRole('tab', { name: /^Version 2/ })) // switches back to v2 before v1 resolves
+
+    await act(async () => {
+      v1.resolve(makeVersionContent({ release_version_id: 'rel-v1', results: [] }))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('0.9')).toBeInTheDocument()
+  })
+
+  it('RR10: a stale response from the previous provider must never render after switching providers', async () => {
+    const staleQueue = deferred<ProviderResultReviewQueueResponse>()
+
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue(meWithTwoProviders),
+      listResultReviews: vi.fn((providerId: string) =>
+        providerId === 'provider-a'
+          ? staleQueue.promise
+          : Promise.resolve(
+              makeQueueResponse([
+                makeQueueEntry({
+                  order_id: 'order-b',
+                  patient: makePatient({ display_name: 'Patient Provider B' }),
+                }),
+              ]),
+            ),
+      ),
+    })
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    await userEvent.setup().selectOptions(providerSelect, 'provider-b')
+    await waitFor(() => expect(providerSelect).toHaveValue('provider-b'))
+    await screen.findByText('Patient Provider B')
+
+    await act(async () => {
+      staleQueue.resolve(
+        makeQueueResponse([makeQueueEntry({ patient: makePatient({ display_name: 'Patient Provider A' }) })]),
+      )
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText('Patient Provider A')).not.toBeInTheDocument()
+    expect(screen.getByText('Patient Provider B')).toBeInTheDocument()
+  })
+
+  it('RR11: a response arriving after unmount produces no error and no state update', async () => {
+    const queue = deferred<ProviderResultReviewQueueResponse>()
+    const client = makeClient({ listResultReviews: vi.fn().mockReturnValue(queue.promise) })
     const { unmount } = render(<ClinicApp client={client} initialTab="results" />)
 
-    await user.click(await screen.findByRole('button', { name: /^Consulter/ }))
     unmount()
 
     await act(async () => {
-      results.resolve(makeResults())
-      history.resolve(makeHistory('order-a'))
+      queue.resolve(makeQueueResponse([makeQueueEntry()]))
       await Promise.resolve()
     })
     // No assertion beyond "this did not throw" -- React would warn/throw on a state update
     // against an unmounted component if the generation/mounted guard were missing.
+  })
+
+  it('patient identity is shown before any observation value in the detail panel', async () => {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+    })
+    const user = userEvent.setup()
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    const banners = await screen.findAllByText('Fatouma Robleh')
+    const banner = banners[banners.length - 1]
+    const value = await screen.findByText('0.9')
+    expect(banner.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

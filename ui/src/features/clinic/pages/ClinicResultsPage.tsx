@@ -1,8 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ExchangeApiError } from '../../../api/exchangeClient'
 import type {
-  LabOrderSummary,
+  DoctorReviewResponse,
+  DoctorReviewStatus,
+  PatientIdentitySummary,
   ProviderOrderResults,
-  ProviderReleaseVersionHistory,
+  ProviderReleaseVersionContent,
+  ProviderReleaseVersionSummary,
+  ProviderResultReviewQueueEntry,
 } from '../../../api/exchangeTypes'
 import {
   Button,
@@ -15,57 +20,116 @@ import {
 import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
 
+// DH-CLINIC-007 §64: distinct from ACCEPTED's own meaning elsewhere in this app -- these three
+// labels are the exact, already-existing DoctorReviewStatus values, never a fourth invented state.
 function formatReviewStatusLabel(status: string | null | undefined): string {
   switch (status) {
     case 'PENDING':
       return 'À examiner'
     case 'NO_FOLLOW_UP_REQUIRED':
-      return 'Sans suite requise'
+      return 'Revu — aucun suivi requis'
     case 'FOLLOW_UP_REQUIRED':
-      return 'Suivi clinique requis'
+      return 'Revu — suivi requis'
     default:
       return status || 'Non renseigné'
   }
 }
 
-// DH-CLINIC-005 §57: a consistency-check failure must never leak which context disagreed with
-// which -- a single fixed, generic message, never interpolated with an order/patient identifier.
-const RESULT_CONSISTENCY_ERROR =
-  'Impossible de vérifier de manière sûre le résultat demandé.'
-const RESULT_LOAD_ERROR = 'Impossible de charger le détail des résultats.'
+function reviewStatusTone(status: string | null | undefined): 'neutral' | 'success' | 'warning' {
+  if (status === 'PENDING') return 'neutral'
+  if (status === 'FOLLOW_UP_REQUIRED') return 'warning'
+  if (status === 'NO_FOLLOW_UP_REQUIRED') return 'success'
+  return 'neutral'
+}
 
-interface OrderDetail {
-  requestedOrderId: string
-  providerId: string
-  results: ProviderOrderResults
-  releaseHistory: ProviderReleaseVersionHistory
+function formatVersionLabel(versionNumber: number, isAmendment: boolean): string {
+  return isAmendment ? `Version ${versionNumber} — Amendée` : `Version ${versionNumber}`
+}
+
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleDateString('fr-FR', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// DH-CLINIC-007 §57: a consistency-check failure must never leak which context disagreed with
+// which -- a single fixed, generic message, never interpolated with an order/patient/version id.
+const RESULT_CONSISTENCY_ERROR = 'Impossible de vérifier de manière sûre le résultat demandé.'
+const RESULT_LOAD_ERROR = 'Impossible de charger le détail de ce résultat.'
+const REVIEW_UNCONFIRMED_ERROR = "La revue n'a pas pu être confirmée. Vous pouvez réessayer."
+const REVIEW_ALREADY_FINALIZED_NOTICE =
+  'Cette version a déjà été revue -- la décision enregistrée est affichée ci-dessous.'
+
+// DH-CLINIC-007 §25/§26: shown once, next to the disposition choice -- the follow-up disposition
+// is a workflow record, never a scheduling/contact/notification action.
+const FOLLOW_UP_SCOPE_DISCLOSURE =
+  "DHealth enregistre ici qu'un suivi est requis. Cette action ne planifie pas automatiquement " +
+  'un rendez-vous ni un contact patient.'
+const IMMUTABILITY_DISCLOSURE =
+  'Cette décision sera enregistrée pour cette version du résultat et ne peut actuellement pas ' +
+  'être modifiée dans DHealth une fois confirmée.'
+
+type ReviewTarget =
+  | { kind: 'version'; orderId: string; versionId: string }
+  | { kind: 'legacy'; orderId: string }
+
+function targetsEqual(a: ReviewTarget, b: ReviewTarget): boolean {
+  if (a.kind !== b.kind || a.orderId !== b.orderId) return false
+  if (a.kind === 'version' && b.kind === 'version') return a.versionId === b.versionId
+  return true
+}
+
+interface PanelState {
+  target: ReviewTarget
+  // True only until the very first content (version-specific or legacy) has loaded for this
+  // order -- the whole panel (patient banner, version strip) is not shown yet.
+  initializing: boolean
+  // True while fetching the exact content for `target` specifically -- during a version switch
+  // or a post-mutation recheck, the patient banner and version strip stay on screen and only the
+  // content area itself shows a transient loading message (§16/§35: the version strip must
+  // remain visible and interactive while switching, never disappear mid-switch). `content` is
+  // always null while this is true -- the previous version's content is never shown under a
+  // different version's selected tab, even transiently.
+  contentLoading: boolean
+  // True only while `contentLoading` is specifically a re-read after an ambiguous/conflicting
+  // mutation (§70/§71) -- lets the content area say "Vérification..." instead of a generic one.
+  checking: boolean
+  error: string | null
+  // Known once any content has loaded for this order; persists across version switches (the
+  // patient never changes between versions of the same order) so the banner never disappears.
+  patient: PatientIdentitySummary | null
+  // `null` means "not yet known"; `[]` means "checked, and this order is genuinely
+  // legacy/unversioned" -- never confused with "not yet known".
+  versions: ProviderReleaseVersionSummary[] | null
+  content: ProviderReleaseVersionContent | null
+  legacyContent: ProviderOrderResults | null
 }
 
 export function ClinicResultsPage() {
   const { status: authStatus, activeProvider, client, reload } = useClinic()
-  const [completedOrdersState, setCompletedOrdersState] = useState<{
-    completedOrders: LabOrderSummary[]
+
+  const [queueState, setQueueState] = useState<{
+    entries: ProviderResultReviewQueueEntry[]
     loading: boolean
     error: string | null
-  }>({
-    completedOrders: [],
-    loading: true,
+  }>({ entries: [], loading: true, error: null })
+
+  const [panel, setPanel] = useState<PanelState | null>(null)
+  const [disposition, setDisposition] = useState<DoctorReviewStatus | null>(null)
+  const [submitState, setSubmitState] = useState<{ submitting: boolean; error: string | null }>({
+    submitting: false,
     error: null,
   })
 
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
-  // DH-CLINIC-005 §28/§29: both results-read requests resolve into one atomic state update --
-  // `detail` either reflects a single, mutually-consistent (results, releaseHistory) pair for the
-  // exact order that was requested, or it is null. There is no intermediate shape where one half
-  // is stale and the other is current.
-  const [detail, setDetail] = useState<OrderDetail | null>(null)
-  const [detailsLoading, setDetailsLoading] = useState(false)
-  const [detailsError, setDetailsError] = useState<string | null>(null)
-
-  // DH-CLINIC-005 §29: every in-flight detail request is bound to the generation that started it,
-  // the provider that started it, and (via `mountedRef`) whether the page is still mounted at all.
-  // A response may only update state if all three still match at resolution time.
-  const detailGenerationRef = useRef(0)
+  // DH-CLINIC-007 §45-48: every in-flight request (queue load, panel load, review mutation) is
+  // bound to the generation that started it, the provider that started it, and (via `mountedRef`)
+  // whether the page is still mounted -- mirrors DH-CLINIC-005's own established discipline.
+  const queueGenerationRef = useRef(0)
+  const panelGenerationRef = useRef(0)
   const mountedRef = useRef(true)
   const currentProviderRef = useRef<string | null>(activeProvider?.organization_id ?? null)
   currentProviderRef.current = activeProvider?.organization_id ?? null
@@ -80,98 +144,309 @@ export function ClinicResultsPage() {
   const [prevOrgId, setPrevOrgId] = useState<string | null>(activeProvider?.organization_id ?? null)
   if (activeProvider && activeProvider.organization_id !== prevOrgId) {
     setPrevOrgId(activeProvider.organization_id)
-    setSelectedOrderId(null)
-    setDetail(null)
-    setDetailsError(null)
-    // A provider switch invalidates any outstanding detail request -- its resolution must never
-    // be allowed to land, even though `currentProviderRef` alone would already reject it.
-    detailGenerationRef.current += 1
+    setPanel(null)
+    setDisposition(null)
+    setSubmitState({ submitting: false, error: null })
+    // A provider switch invalidates every outstanding request -- their resolution must never be
+    // allowed to land, even though `currentProviderRef` alone would already reject them.
+    queueGenerationRef.current += 1
+    panelGenerationRef.current += 1
   }
 
-  useEffect(() => {
-    if (authStatus !== 'ready' || !activeProvider) {
-      return
-    }
+  const loadQueue = useCallback(() => {
+    if (authStatus !== 'ready' || !activeProvider) return
+    const generation = ++queueGenerationRef.current
+    const targetProvider = activeProvider.organization_id
+    const controller = new AbortController()
 
-    let isMounted = true
-
+    setQueueState((prev) => ({ entries: prev.entries, loading: true, error: null }))
     client
-      .listOrders(activeProvider.organization_id, { limit: 50 })
-      .then((data) => {
-        if (isMounted) {
-          const completed = data.filter((o) => o.status === 'COMPLETED')
-          setCompletedOrdersState({
-            completedOrders: completed,
-            loading: false,
-            error: null,
-          })
-        }
-      })
-      .catch((err) => {
-        if (isMounted) {
-          setCompletedOrdersState({
-            completedOrders: [],
-            loading: false,
-            error: err instanceof Error ? err.message : 'Erreur lors du chargement des résultats.',
-          })
-        }
-      })
-
-    return () => {
-      isMounted = false
-    }
-  }, [client, activeProvider, authStatus])
-
-  const { completedOrders, loading, error } = completedOrdersState
-
-  const handleSelectOrder = (orderId: string) => {
-    if (!activeProvider) return
-    const targetProviderId = activeProvider.organization_id
-    const generation = ++detailGenerationRef.current
-    // The list row's own patient identity, resolved independently by the list-read API -- used
-    // below as a cross-check (§31) against the detail read's own patient identity, never trusted
-    // over it.
-    const listRow = completedOrders.find((order) => order.id === orderId) ?? null
-
-    setSelectedOrderId(orderId)
-    setDetail(null)
-    setDetailsLoading(true)
-    setDetailsError(null)
-
-    Promise.all([
-      client.getOrderResults(targetProviderId, orderId),
-      client.getReleaseVersions(targetProviderId, orderId),
-    ])
-      .then(([results, releaseHistory]) => {
+      .listResultReviews(targetProvider, { status: 'ALL', signal: controller.signal })
+      .then((response) => {
         if (!mountedRef.current) return
-        if (detailGenerationRef.current !== generation) return
-        if (currentProviderRef.current !== targetProviderId) return
-
-        // §30: the response itself, never the request that was sent, is the authority on which
-        // order it describes -- both reads must agree with what was actually requested.
-        if (results.order_id !== orderId || releaseHistory.order_id !== orderId) {
-          setDetailsError(RESULT_CONSISTENCY_ERROR)
-          setDetailsLoading(false)
-          return
-        }
-        // §31: the detail read's own patient identity must agree with the list row that was
-        // clicked -- LabOrder's patient_reference_id is immutable once created, so any
-        // disagreement here is a genuine inconsistency, never assembled into one screen.
-        if (listRow && results.patient.patient_id !== listRow.patient.patient_id) {
-          setDetailsError(RESULT_CONSISTENCY_ERROR)
-          setDetailsLoading(false)
-          return
-        }
-
-        setDetail({ requestedOrderId: orderId, providerId: targetProviderId, results, releaseHistory })
-        setDetailsLoading(false)
+        if (queueGenerationRef.current !== generation) return
+        if (currentProviderRef.current !== targetProvider) return
+        setQueueState({ entries: response.entries, loading: false, error: null })
       })
       .catch(() => {
+        if (controller.signal.aborted) return
         if (!mountedRef.current) return
-        if (detailGenerationRef.current !== generation) return
-        if (currentProviderRef.current !== targetProviderId) return
-        setDetailsError(RESULT_LOAD_ERROR)
-        setDetailsLoading(false)
+        if (queueGenerationRef.current !== generation) return
+        if (currentProviderRef.current !== targetProvider) return
+        setQueueState({
+          entries: [],
+          loading: false,
+          error: 'Erreur lors du chargement des résultats à examiner.',
+        })
+      })
+    return () => controller.abort()
+  }, [client, activeProvider, authStatus])
+
+  useEffect(() => {
+    return loadQueue()
+  }, [loadQueue])
+
+  const pendingEntries = queueState.entries.filter((e) => e.review_status === 'PENDING')
+  const reviewedEntries = queueState.entries.filter((e) => e.review_status !== 'PENDING')
+
+  const loadPanel = useCallback(
+    (
+      target: ReviewTarget,
+      expectedPatientId: string | null,
+      options: { isRecheck?: boolean; knownVersions?: ProviderReleaseVersionSummary[] | null } = {},
+    ) => {
+      if (!activeProvider) return
+      const targetProvider = activeProvider.organization_id
+      const generation = ++panelGenerationRef.current
+      const isRecheck = options.isRecheck ?? false
+      // A version switch or a post-mutation recheck already knows this order's version topology
+      // (or that it's legacy, via an empty array) -- both keep the patient banner and version
+      // strip on screen and never re-derive legacy-ness from scratch (§16/§35).
+      const knownVersions = options.knownVersions ?? null
+      const isSoftReload = knownVersions !== null
+
+      setPanel((prev) => ({
+        target,
+        initializing: !isSoftReload,
+        contentLoading: true,
+        checking: isRecheck,
+        error: null,
+        patient: isSoftReload ? prev?.patient ?? null : null,
+        versions: isSoftReload ? knownVersions : null,
+        content: null,
+        legacyContent: null,
+      }))
+      // A recheck after an ambiguous/conflicting mutation must keep the explanatory message on
+      // screen (§70/§71) -- only a genuine fresh open resets the disposition/submit state.
+      if (!isRecheck) {
+        setDisposition(null)
+        setSubmitState({ submitting: false, error: null })
+      }
+
+      const fetchVersionContent = (versions: ProviderReleaseVersionSummary[]) => {
+        const resolvedVersionId =
+          target.kind === 'version' ? target.versionId : versions[versions.length - 1].release_version_id
+
+        client
+          .getReleaseVersion(targetProvider, target.orderId, resolvedVersionId)
+          .then((content) => {
+            if (!mountedRef.current) return
+            if (panelGenerationRef.current !== generation) return
+            if (currentProviderRef.current !== targetProvider) return
+            if (
+              content.order_id !== target.orderId ||
+              content.release_version_id !== resolvedVersionId ||
+              (expectedPatientId !== null && content.patient.patient_id !== expectedPatientId)
+            ) {
+              setPanel((prev) =>
+                prev && targetsEqual(prev.target, target)
+                  ? { ...prev, initializing: false, contentLoading: false, error: RESULT_CONSISTENCY_ERROR }
+                  : prev,
+              )
+              return
+            }
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? {
+                    ...prev,
+                    target: { kind: 'version', orderId: target.orderId, versionId: resolvedVersionId },
+                    initializing: false,
+                    contentLoading: false,
+                    error: null,
+                    patient: content.patient,
+                    versions,
+                    content,
+                  }
+                : prev,
+            )
+          })
+          .catch(() => {
+            if (!mountedRef.current) return
+            if (panelGenerationRef.current !== generation) return
+            if (currentProviderRef.current !== targetProvider) return
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? { ...prev, initializing: false, contentLoading: false, error: RESULT_LOAD_ERROR }
+                : prev,
+            )
+          })
+      }
+
+      const fetchLegacyContent = () => {
+        client
+          .getOrderResults(targetProvider, target.orderId)
+          .then((legacy) => {
+            if (!mountedRef.current) return
+            if (panelGenerationRef.current !== generation) return
+            if (currentProviderRef.current !== targetProvider) return
+            if (
+              legacy.order_id !== target.orderId ||
+              (expectedPatientId !== null && legacy.patient.patient_id !== expectedPatientId)
+            ) {
+              setPanel((prev) =>
+                prev && targetsEqual(prev.target, target)
+                  ? { ...prev, initializing: false, contentLoading: false, error: RESULT_CONSISTENCY_ERROR }
+                  : prev,
+              )
+              return
+            }
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? {
+                    ...prev,
+                    initializing: false,
+                    contentLoading: false,
+                    error: null,
+                    patient: legacy.patient,
+                    versions: [],
+                    legacyContent: legacy,
+                  }
+                : prev,
+            )
+          })
+          .catch(() => {
+            if (!mountedRef.current) return
+            if (panelGenerationRef.current !== generation) return
+            if (currentProviderRef.current !== targetProvider) return
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? { ...prev, initializing: false, contentLoading: false, error: RESULT_LOAD_ERROR }
+                : prev,
+            )
+          })
+      }
+
+      if (isSoftReload) {
+        if (knownVersions.length > 0) {
+          fetchVersionContent(knownVersions)
+        } else {
+          fetchLegacyContent()
+        }
+        return
+      }
+
+      client
+        .getReleaseVersions(targetProvider, target.orderId)
+        .then((history) => {
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentProviderRef.current !== targetProvider) return
+          if (history.order_id !== target.orderId) {
+            setPanel((prev) =>
+              prev && targetsEqual(prev.target, target)
+                ? { ...prev, initializing: false, contentLoading: false, error: RESULT_CONSISTENCY_ERROR }
+                : prev,
+            )
+            return
+          }
+
+          if (history.versions.length === 0) {
+            // Genuinely legacy/unversioned (§7/§51) -- fall back to the live/legacy read.
+            fetchLegacyContent()
+            return
+          }
+
+          fetchVersionContent(history.versions)
+        })
+        .catch(() => {
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentProviderRef.current !== targetProvider) return
+          setPanel((prev) =>
+            prev && targetsEqual(prev.target, target)
+              ? { ...prev, initializing: false, contentLoading: false, error: RESULT_LOAD_ERROR }
+              : prev,
+          )
+        })
+    },
+    [client, activeProvider],
+  )
+
+  const handleOpenFromQueueEntry = (entry: ProviderResultReviewQueueEntry) => {
+    const target: ReviewTarget = entry.legacy_unversioned
+      ? { kind: 'legacy', orderId: entry.order_id }
+      : { kind: 'version', orderId: entry.order_id, versionId: entry.release_version_id as string }
+    loadPanel(target, entry.patient.patient_id)
+  }
+
+  const handleSwitchVersion = (versionId: string) => {
+    if (!panel || !panel.versions) return
+    loadPanel(
+      { kind: 'version', orderId: panel.target.orderId, versionId },
+      null,
+      { knownVersions: panel.versions },
+    )
+  }
+
+  const handleClosePanel = () => {
+    panelGenerationRef.current += 1
+    setPanel(null)
+    setDisposition(null)
+    setSubmitState({ submitting: false, error: null })
+  }
+
+  const reReadPanelAfterAmbiguousMutation = (target: ReviewTarget) => {
+    // DH-CLINIC-007 §70/§71: never assume success or blindly re-POST -- re-read the authoritative
+    // state and let it speak for itself, whether that turns out to be terminal or still PENDING.
+    // Reuses the already-known version topology so the patient banner and version strip stay on
+    // screen throughout the re-check, rather than flickering away.
+    loadPanel(target, null, { isRecheck: true, knownVersions: panel?.versions ?? null })
+  }
+
+  const handleSubmitReview = () => {
+    if (!panel || !disposition || !activeProvider) return
+    const targetProvider = activeProvider.organization_id
+    const target = panel.target
+    const generation = panelGenerationRef.current
+
+    setSubmitState({ submitting: true, error: null })
+
+    const call: Promise<DoctorReviewResponse> =
+      target.kind === 'version'
+        ? disposition === 'NO_FOLLOW_UP_REQUIRED'
+          ? client.reviewReleaseVersionNoFollowUp(targetProvider, target.orderId, target.versionId)
+          : client.reviewReleaseVersionFollowUp(targetProvider, target.orderId, target.versionId)
+        : disposition === 'NO_FOLLOW_UP_REQUIRED'
+          ? client.reviewLegacyOrderNoFollowUp(targetProvider, target.orderId)
+          : client.reviewLegacyOrderFollowUp(targetProvider, target.orderId)
+
+    call
+      .then((response) => {
+        if (!mountedRef.current) return
+        if (panelGenerationRef.current !== generation) return
+        if (currentProviderRef.current !== targetProvider) return
+        // §43: validate the response matches what was requested -- order, version, and the exact
+        // disposition -- before treating the mutation as a success. Never display success on a
+        // response that doesn't provably confirm what was asked for.
+        const expectedVersionId = target.kind === 'version' ? target.versionId : null
+        if (
+          response.order_id !== target.orderId ||
+          response.release_version_id !== expectedVersionId ||
+          response.status !== disposition
+        ) {
+          setSubmitState({ submitting: false, error: RESULT_CONSISTENCY_ERROR })
+          loadQueue()
+          reReadPanelAfterAmbiguousMutation(target)
+          return
+        }
+        setSubmitState({ submitting: false, error: null })
+        setDisposition(null)
+        loadQueue()
+        reReadPanelAfterAmbiguousMutation(target)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        if (panelGenerationRef.current !== generation) return
+        if (currentProviderRef.current !== targetProvider) return
+        if (err instanceof ExchangeApiError && err.status === 409) {
+          // Already finalized -- by this same clinician's own lost-earlier-response, or by a
+          // concurrent second clinician (§38-40). Never overwritten; re-read and show the truth.
+          setSubmitState({ submitting: false, error: REVIEW_ALREADY_FINALIZED_NOTICE })
+        } else {
+          setSubmitState({ submitting: false, error: REVIEW_UNCONFIRMED_ERROR })
+        }
+        loadQueue()
+        reReadPanelAfterAmbiguousMutation(target)
       })
   }
 
@@ -203,6 +478,32 @@ export function ClinicResultsPage() {
     )
   }
 
+  const displayedContent =
+    panel?.content ?? (panel?.legacyContent
+      ? {
+          order_id: panel.legacyContent.order_id,
+          release_version_id: null,
+          release_version_number: null,
+          is_amendment: false,
+          patient: panel.legacyContent.patient,
+          review_status: null as string | null,
+          reviewed_at: null as string | null,
+          results: panel.legacyContent.results,
+        }
+      : null)
+  const displayedReviewStatus =
+    panel?.content?.review_status ??
+    queueState.entries.find(
+      (e) => e.order_id === panel?.target.orderId && e.legacy_unversioned,
+    )?.review_status ??
+    null
+  const displayedReviewedAt =
+    panel?.content?.reviewed_at ??
+    queueState.entries.find(
+      (e) => e.order_id === panel?.target.orderId && e.legacy_unversioned,
+    )?.reviewed_at ??
+    null
+
   return (
     <div style={{ padding: 'var(--space-5)', maxWidth: '1000px', margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)' }}>
@@ -216,105 +517,154 @@ export function ClinicResultsPage() {
         ) : null}
       </header>
 
-      {loading ? (
+      {queueState.loading ? (
         <LoadingSkeleton />
-      ) : error ? (
+      ) : queueState.error ? (
         <ErrorState code="NETWORK_ERROR" onRetry={() => void reload()} />
-      ) : completedOrders.length === 0 ? (
+      ) : queueState.entries.length === 0 ? (
         <EmptyState title="Aucun résultat disponible">
           Aucun ordre de laboratoire avec des résultats validés et libérés n'a été trouvé.
         </EmptyState>
       ) : (
         <div style={{ display: 'grid', gap: 'var(--space-5)' }}>
-          {/* The list stays visible and clickable at all times -- selecting a different order
-              while one is still loading is a normal interaction, not an edge case (DH-CLINIC-005
-              §56 RR1): each click starts its own tracked request, and only the most recent one for
-              the current provider can ever update `detail`. */}
           <Card>
-            <div style={{ overflowX: 'auto' }}>
-              <table
-                style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  textAlign: 'left',
-                  fontSize: 'var(--font-size-sm)',
-                }}
-              >
-                <thead>
-                  <tr style={{ borderBottom: '1px solid var(--color-neutral-200)' }}>
-                    <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Patient</th>
-                    <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Statut</th>
-                    <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>Date d'ordre</th>
-                    <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Action</th>
-                    <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, textAlign: 'right' }}>
-                      Référence de l'ordre
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {completedOrders.map((order) => (
-                    <tr
-                      key={order.id}
+            <div style={{ padding: 'var(--space-4)' }}>
+              <h2 style={{ margin: '0 0 var(--space-3)', fontSize: 'var(--font-size-lg)' }}>
+                Résultats à examiner ({pendingEntries.length})
+              </h2>
+              {pendingEntries.length === 0 ? (
+                <p style={{ color: 'var(--color-neutral-600)', margin: 0 }}>
+                  Aucun résultat en attente de revue.
+                </p>
+              ) : (
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-2)' }}>
+                  {pendingEntries.map((entry) => {
+                    const isOpenEntry =
+                      panel !== null &&
+                      panel.target.orderId === entry.order_id &&
+                      (panel.target.kind !== 'version' || panel.target.versionId === entry.release_version_id)
+                    return (
+                    <li
+                      key={entry.review_id}
                       style={{
-                        borderBottom: '1px solid var(--color-neutral-100)',
-                        background:
-                          order.id === selectedOrderId ? 'var(--color-surface-alt, #f9fafb)' : undefined,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 'var(--space-3)',
+                        padding: 'var(--space-3)',
+                        border: '1px solid var(--color-neutral-200)',
+                        borderRadius: 'var(--radius-md, 6px)',
+                        background: isOpenEntry ? 'var(--color-surface-alt, #f9fafb)' : undefined,
                       }}
                     >
-                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                        <PatientIdentity patient={order.patient} />
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                        <StatusBadge tone="success" label="Résultats libérés" />
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-neutral-600)' }}>
-                        {new Date(order.created_at).toLocaleDateString('fr-FR', {
-                          year: 'numeric',
-                          month: 'short',
-                          day: 'numeric',
-                        })}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>
-                        <Button
-                          variant="secondary"
-                          onClick={() => handleSelectOrder(order.id)}
-                          aria-label={`Consulter les résultats de ${order.patient.display_name?.trim() || 'Nom non renseigné'}`}
-                        >
-                          Consulter
-                        </Button>
-                      </td>
-                      <td
-                        style={{
-                          padding: 'var(--space-3) var(--space-4)',
-                          textAlign: 'right',
-                          fontFamily: 'monospace',
-                          fontSize: '0.8rem',
-                          color: 'var(--color-neutral-500)',
-                        }}
+                      <div>
+                        <PatientIdentity patient={entry.patient} />
+                        <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                          <span>
+                            {entry.legacy_unversioned
+                              ? 'Résultat historique — aucune version de libération enregistrée'
+                              : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
+                          </span>
+                          {entry.released_at ? <> · Libéré le {formatDateTime(entry.released_at)}</> : null}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        onClick={() => handleOpenFromQueueEntry(entry)}
+                        aria-label={`Examiner le résultat de ${entry.patient.display_name?.trim() || 'Nom non renseigné'}`}
                       >
-                        {order.id.slice(0, 8)}…
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        Examiner
+                      </Button>
+                    </li>
+                    )
+                  })}
+                </ul>
+              )}
             </div>
           </Card>
 
-          {selectedOrderId ? (
+          <Card>
+            <div style={{ padding: 'var(--space-4)' }}>
+              <h2 style={{ margin: '0 0 var(--space-3)', fontSize: 'var(--font-size-lg)' }}>
+                Historique ({reviewedEntries.length})
+              </h2>
+              {reviewedEntries.length === 0 ? (
+                <p style={{ color: 'var(--color-neutral-600)', margin: 0 }}>Aucune revue enregistrée.</p>
+              ) : (
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-2)' }}>
+                  {reviewedEntries.map((entry) => (
+                    <li
+                      key={entry.review_id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 'var(--space-3)',
+                        padding: 'var(--space-3)',
+                        border: '1px solid var(--color-neutral-100)',
+                        borderRadius: 'var(--radius-md, 6px)',
+                      }}
+                    >
+                      <div>
+                        <PatientIdentity patient={entry.patient} />
+                        <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                          <span>
+                            {entry.legacy_unversioned
+                              ? 'Résultat historique'
+                              : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
+                          </span>
+                          {entry.reviewed_at ? <> · Revu le {formatDateTime(entry.reviewed_at)}</> : null}
+                        </p>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <StatusBadge
+                          tone={reviewStatusTone(entry.review_status)}
+                          label={formatReviewStatusLabel(entry.review_status)}
+                        />
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => handleOpenFromQueueEntry(entry)}
+                          aria-label={`Consulter le résultat de ${entry.patient.display_name?.trim() || 'Nom non renseigné'}`}
+                        >
+                          Consulter
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Card>
+
+          {panel ? (
             <div>
-              <div style={{ marginBottom: 'var(--space-4)' }}>
-                <Button variant="secondary" onClick={() => setSelectedOrderId(null)}>
+              <div style={{ marginBottom: 'var(--space-3)' }}>
+                <Button variant="secondary" onClick={handleClosePanel}>
                   Fermer le détail
                 </Button>
               </div>
 
-              {detail ? (
+              {submitState.error ? (
+                <p role="alert" style={{ color: 'var(--color-danger, #b91c1c)', marginBottom: 'var(--space-3)' }}>
+                  {submitState.error}
+                </p>
+              ) : null}
+
+              {panel.initializing ? (
+                <LoadingSkeleton />
+              ) : panel.error ? (
+                <p role="alert" style={{ color: 'var(--color-danger, #b91c1c)' }}>
+                  {panel.error}
+                </p>
+              ) : panel.patient ? (
                 <Card>
                   <div style={{ padding: 'var(--space-4)' }}>
-                    {/* DH-CLINIC-005 §24: the patient identity is shown before any clinical
-                        content -- a clinician must never have to scroll back or remember whose
-                        result this is. */}
+                    {/* §21/§38: patient, then version identity, then result content, then the
+                        review decision -- always in this order, never the lab/version alone. The
+                        patient banner and version strip below stay mounted across a version
+                        switch or a post-mutation recheck -- only the content area beneath them
+                        toggles to a loading/checking message (§16/§35). */}
                     <div
                       style={{
                         paddingBottom: 'var(--space-3)',
@@ -322,113 +672,193 @@ export function ClinicResultsPage() {
                         borderBottom: '1px solid var(--color-neutral-200)',
                       }}
                     >
-                      <PatientIdentity patient={detail.results.patient} variant="full" />
+                      <PatientIdentity patient={panel.patient} variant="full" />
                     </div>
 
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
-                      <h2 style={{ margin: 0, fontSize: 'var(--font-size-lg)' }}>
-                        Ordre{' '}
-                        <span style={{ fontFamily: 'monospace', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-500)' }}>
-                          {detail.results.order_id}
-                        </span>
-                      </h2>
-                      <StatusBadge
-                        tone="success"
-                        label={
-                          detail.results.release_version_number !== null
-                            ? `Version ${detail.results.release_version_number}${detail.results.is_amendment ? ' (Amendée)' : ''}`
-                            : 'Résultats initiaux'
-                        }
-                      />
-                    </div>
-
-                    {(() => {
-                      const currentVersion = detail.results.release_version_id
-                        ? detail.releaseHistory.versions.find(
-                            (v) => v.release_version_id === detail.results.release_version_id,
-                          ) ?? null
-                        : detail.releaseHistory.versions[0] ?? null
-                      const reviewStatus = currentVersion?.review_status
-
-                      return (
-                        <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)', margin: '0 0 var(--space-4)' }}>
-                          Statut de revue clinique : <strong>{formatReviewStatusLabel(reviewStatus)}</strong>
-                          {detail.releaseHistory.versions.length > 1 ? (
-                            <span> ({detail.releaseHistory.versions.length} versions disponibles)</span>
-                          ) : null}
-                        </p>
-                      )
-                    })()}
-
-                    {detail.results.results.length === 0 ? (
-                      <p style={{ color: 'var(--color-neutral-500)', fontStyle: 'italic' }}>
-                        Aucun élément d'observation contenu dans cette version de libération.
-                      </p>
-                    ) : (
-                      detail.results.results.map((item) => (
-                        <div
-                          key={item.item_id}
-                          style={{
-                            borderTop: '1px solid var(--color-neutral-200)',
-                            paddingTop: 'var(--space-3)',
-                            marginTop: 'var(--space-3)',
-                          }}
-                        >
-                          <h3 style={{ fontSize: 'var(--font-size-base)', margin: '0 0 var(--space-2)', color: 'var(--color-neutral-800)' }}>
-                            {item.catalog_display_name_snapshot} ({item.catalog_code_snapshot})
-                          </h3>
-
-                          <table
+                    {panel.versions && panel.versions.length > 0 ? (
+                      <div
+                        role="tablist"
+                        aria-label="Historique des versions de résultat"
+                        style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}
+                      >
+                        {panel.versions.map((version) => (
+                          <button
+                            key={version.release_version_id}
+                            type="button"
+                            role="tab"
+                            aria-selected={
+                              panel.target.kind === 'version' &&
+                              panel.target.versionId === version.release_version_id
+                            }
+                            onClick={() => handleSwitchVersion(version.release_version_id)}
                             style={{
-                              width: '100%',
-                              borderCollapse: 'collapse',
-                              fontSize: 'var(--font-size-sm)',
+                              padding: 'var(--space-2) var(--space-3)',
+                              borderRadius: 'var(--radius-md, 6px)',
+                              border: '1px solid var(--color-neutral-300)',
+                              background:
+                                panel.target.kind === 'version' &&
+                                panel.target.versionId === version.release_version_id
+                                  ? 'var(--color-surface-alt, #eef2ff)'
+                                  : 'transparent',
+                              cursor: 'pointer',
                             }}
                           >
-                            <thead>
-                              <tr style={{ borderBottom: '1px solid var(--color-neutral-200)', textAlign: 'left' }}>
-                                <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Observation</th>
-                                <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Valeur</th>
-                                <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Unité</th>
-                                <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Normes</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {item.observations.map((obs) => (
-                                <tr key={obs.observation_id} style={{ borderBottom: '1px solid var(--color-neutral-100)' }}>
-                                  <td style={{ padding: 'var(--space-2) var(--space-3)' }}>{obs.display_label_snapshot}</td>
-                                  <td style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>
-                                    {obs.numeric_value !== null
-                                      ? obs.numeric_value
-                                      : obs.text_value ?? '-'}
-                                  </td>
-                                  <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
-                                    {obs.numeric_unit ?? '-'}
-                                  </td>
-                                  <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
-                                    {obs.reference_range_low !== null && obs.reference_range_high !== null
-                                      ? `${obs.reference_range_low} - ${obs.reference_range_high}`
-                                      : '-'}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ))
+                            {formatVersionLabel(version.release_version_number, version.is_amendment)}
+                            {' — '}
+                            {formatReviewStatusLabel(version.review_status)}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                        Résultat historique — aucune version de libération enregistrée.
+                      </p>
                     )}
+
+                    {panel.contentLoading ? (
+                      panel.checking ? (
+                        <p role="status">Vérification de l'état de la revue…</p>
+                      ) : (
+                        <p role="status">Chargement de la version…</p>
+                      )
+                    ) : displayedContent ? (
+                      <>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+                          <h2 style={{ margin: 0, fontSize: 'var(--font-size-lg)' }}>
+                            Ordre{' '}
+                            <span style={{ fontFamily: 'monospace', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-500)' }}>
+                              {displayedContent.order_id}
+                            </span>
+                          </h2>
+                          <StatusBadge
+                            tone={reviewStatusTone(displayedReviewStatus)}
+                            label={formatReviewStatusLabel(displayedReviewStatus)}
+                          />
+                        </div>
+
+                        {displayedContent.results.length === 0 ? (
+                          <p style={{ color: 'var(--color-neutral-500)', fontStyle: 'italic' }}>
+                            Aucun élément d'observation contenu dans cette version de libération.
+                          </p>
+                        ) : (
+                          displayedContent.results.map((item) => (
+                            <div
+                              key={item.item_id}
+                              style={{
+                                borderTop: '1px solid var(--color-neutral-200)',
+                                paddingTop: 'var(--space-3)',
+                                marginTop: 'var(--space-3)',
+                              }}
+                            >
+                              <h3 style={{ fontSize: 'var(--font-size-base)', margin: '0 0 var(--space-2)', color: 'var(--color-neutral-800)' }}>
+                                {item.catalog_display_name_snapshot} ({item.catalog_code_snapshot})
+                              </h3>
+
+                              <table
+                                style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-sm)' }}
+                              >
+                                <thead>
+                                  <tr style={{ borderBottom: '1px solid var(--color-neutral-200)', textAlign: 'left' }}>
+                                    <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Observation</th>
+                                    <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Valeur</th>
+                                    <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Unité</th>
+                                    <th style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>Normes</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {item.observations.map((obs) => (
+                                    <tr key={obs.observation_id} style={{ borderBottom: '1px solid var(--color-neutral-100)' }}>
+                                      <td style={{ padding: 'var(--space-2) var(--space-3)' }}>{obs.display_label_snapshot}</td>
+                                      <td style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>
+                                        {obs.numeric_value !== null ? obs.numeric_value : obs.text_value ?? '-'}
+                                      </td>
+                                      <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
+                                        {obs.numeric_unit ?? '-'}
+                                      </td>
+                                      <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-neutral-600)' }}>
+                                        {obs.reference_range_low !== null && obs.reference_range_high !== null
+                                          ? `${obs.reference_range_low} - ${obs.reference_range_high}`
+                                          : '-'}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ))
+                        )}
+
+                        <div
+                          style={{
+                            marginTop: 'var(--space-4)',
+                            paddingTop: 'var(--space-4)',
+                            borderTop: '1px solid var(--color-neutral-200)',
+                          }}
+                        >
+                          {displayedReviewStatus !== 'PENDING' ? (
+                            <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                              Revue enregistrée{displayedReviewedAt ? ` le ${formatDateTime(displayedReviewedAt)}` : ''} —{' '}
+                              <strong>{formatReviewStatusLabel(displayedReviewStatus)}</strong>.
+                            </p>
+                          ) : (
+                            <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
+                              <h3 style={{ margin: 0, fontSize: 'var(--font-size-base)' }}>
+                                Décision de revue clinique
+                              </h3>
+                              <div
+                                role="radiogroup"
+                                aria-label="Décision de revue"
+                                style={{ display: 'grid', gap: 'var(--space-2)' }}
+                              >
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                                  <input
+                                    type="radio"
+                                    name="review-disposition"
+                                    value="NO_FOLLOW_UP_REQUIRED"
+                                    checked={disposition === 'NO_FOLLOW_UP_REQUIRED'}
+                                    onChange={() => setDisposition('NO_FOLLOW_UP_REQUIRED')}
+                                    disabled={submitState.submitting}
+                                  />
+                                  Aucun suivi requis
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                                  <input
+                                    type="radio"
+                                    name="review-disposition"
+                                    value="FOLLOW_UP_REQUIRED"
+                                    checked={disposition === 'FOLLOW_UP_REQUIRED'}
+                                    onChange={() => setDisposition('FOLLOW_UP_REQUIRED')}
+                                    disabled={submitState.submitting}
+                                  />
+                                  Suivi requis
+                                </label>
+                              </div>
+
+                              {disposition ? (
+                                <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                                  {disposition === 'FOLLOW_UP_REQUIRED'
+                                    ? FOLLOW_UP_SCOPE_DISCLOSURE + ' '
+                                    : ''}
+                                  {IMMUTABILITY_DISCLOSURE}
+                                </p>
+                              ) : null}
+
+                              <div>
+                                <Button
+                                  type="button"
+                                  onClick={handleSubmitReview}
+                                  disabled={!disposition || submitState.submitting}
+                                >
+                                  {submitState.submitting ? 'Enregistrement…' : 'Confirmer la revue'}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                 </Card>
-              ) : detailsLoading ? (
-                <LoadingSkeleton />
-              ) : detailsError ? (
-                // DH-CLINIC-005 §57: the exact, fixed fail-closed string this page produced --
-                // never a generic ErrorState code, which would lose the distinction between
-                // "network failed" and "the response failed an identity consistency check."
-                // Neither ever names an order/patient identifier.
-                <p role="alert" style={{ color: 'var(--color-danger, #b91c1c)' }}>
-                  {detailsError}
-                </p>
               ) : null}
             </div>
           ) : null}
