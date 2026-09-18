@@ -55,7 +55,10 @@ function makeQueue(overrides: Partial<ReleaseQueue> = {}): ReleaseQueue {
       {
         order_id: 'order-a',
         patient: makePatient(),
-        ordering_provider_name: 'Clinique de la Paix',
+        // Deliberately distinct from `makeInspection()`'s own `ordering_provider_name` below --
+        // the queue row and the inspection panel render simultaneously once a panel is open, so
+        // sharing a string would make `findByText` ambiguous across the two.
+        ordering_provider_name: 'Queue Row Provider',
         requested_tests: [
           {
             catalog_code_snapshot: 'GLU',
@@ -281,7 +284,7 @@ describe('LabReleasePage', () => {
                     {
                       order_id: 'order-a',
                       patient: makePatient({ display_name: 'Patient A' }),
-                      ordering_provider_name: 'Clinique de la Paix',
+                      ordering_provider_name: 'Queue Row Provider',
                       requested_tests: [],
                       updated_at: '2026-09-18T10:00:00Z',
                     },
@@ -294,6 +297,9 @@ describe('LabReleasePage', () => {
     const user = userEvent.setup()
     render(<LabApp client={client} initialTab="release" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    // The panel's own inspection read uses `makeClient()`'s default `getLabOrderResults`
+    // (`makeInspection()`, ordering_provider_name "Clinique de la Paix") -- unambiguous against
+    // this queue row's own distinct "Queue Row Provider" text.
     await screen.findByText('Clinique de la Paix')
 
     const select = await screen.findByLabelText('Sélectionner le laboratoire')
@@ -312,14 +318,14 @@ describe('LabReleasePage', () => {
             {
               order_id: 'order-a',
               patient: makePatient({ display_name: 'Patient A' }),
-              ordering_provider_name: 'Clinic A',
+              ordering_provider_name: 'Queue Row A',
               requested_tests: [],
               updated_at: '2026-09-18T10:00:00Z',
             },
             {
               order_id: 'order-b',
               patient: makePatient({ display_name: 'Patient B' }),
-              ordering_provider_name: 'Clinic B',
+              ordering_provider_name: 'Queue Row B',
               requested_tests: [],
               updated_at: '2026-09-18T10:00:00Z',
             },
