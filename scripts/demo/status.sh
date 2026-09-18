@@ -1,0 +1,40 @@
+#!/bin/bash
+# DHealth Native Demo — status (DH-DEMO-001)
+#
+# A truthful health summary, never fabricated: every line below reflects a real
+# `docker compose ps`/`alembic current` read taken right now, not an assumption. Prints demo
+# login usernames only -- never a password, matching every other status output in this
+# repository (see backup/README.md's own convention).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+
+COMPOSE=(docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
+
+set -a
+# shellcheck disable=SC1091
+source demo/native/demo.env
+set +a
+
+echo "DHealth Native Demo"
+echo
+
+"${COMPOSE[@]}" ps --format 'table {{.Service}}\t{{.State}}\t{{.Health}}'
+echo
+
+if migration_output=$("${COMPOSE[@]}" exec -T adapter alembic current 2>/dev/null); then
+    echo "Migration head:  ${migration_output}"
+else
+    echo "Migration head:  could not read (is the adapter service running? try scripts/demo/up.sh)"
+fi
+echo
+
+echo "Demo logins (usernames only -- passwords are in demo/native/demo.env):"
+echo "  ${DEMO_CLINICIAN_USERNAME}  (clinic)"
+echo "  ${DEMO_LAB_TECH_USERNAME}   (lab technician)"
+echo "  ${DEMO_RELEASER_USERNAME}   (result releaser)"
+echo
+
+echo "Open: https://app.${BASE_DOMAIN}   (DHealth Clinic / DHealth Lab)"

@@ -1,0 +1,29 @@
+#!/bin/bash
+# DHealth Native Demo — reset (DH-DEMO-001)
+#
+# Restores the running demo to its one deterministic synthetic baseline: clears every workflow
+# object a golden journey created (orders, results, releases, amendments, reviews, patient-access
+# grants) and reconciles the baseline organizations/catalog/route/offering/template/patient/users
+# back to exactly the expected state. Safe to run repeatedly -- see
+# `adapter/src/daher_adapter/exchange/demo_seed.py`'s own docstring for the three independent
+# facts it checks before touching anything, and its `_WORKFLOW_TABLES` list for exactly what gets
+# cleared. Requires the demo to already be running (`scripts/demo/up.sh`) -- this script does not
+# start it.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+
+COMPOSE=(docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
+
+echo "Resetting the DHealth Native Demo to its deterministic baseline..."
+
+# Re-converges the three demo Keycloak accounts first, including clearing any brute-force
+# lockout a mistyped password left behind -- otherwise "reset" would restore every database fact
+# but could leave a demo login still locked out, which is not a full reset from an operator's
+# point of view.
+"${COMPOSE[@]}" up --no-deps keycloak-demo-users
+
+"${COMPOSE[@]}" exec -T adapter python -m daher_adapter.exchange.demo_seed reset
+echo "Done."
