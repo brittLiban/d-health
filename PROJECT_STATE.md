@@ -15901,3 +15901,205 @@ patient notification of any kind was added.
 ticket — forward context only, per this ticket's own explicit instruction not to implement it here.
 No pull request was created or used for this ticket's work, per its own explicit instruction; every
 change landed as a focused commit directly on `master`.
+
+**2026-09-18 dated correction (DH-LAB-001), appended — not a rewrite of the line above:** the "NEXT"
+line this ticket ended on was itself correct as a sequencing statement (build the native Lab
+frontend before deciding delivery topology), but read, and had started to be carried forward in
+`STATUS.md`, as if native DHealth Lab and DHealth Connect were a fork to pick between before more
+native work could continue. DH-LAB-001's own ticket text caught this and required the correction:
+they are parallel, permanently supported capabilities, not alternatives — see `DECISIONS.md`
+ADR-043's 2026-09-18 dated clarification for the full seven-point correction. DH-PILOT-TOPOLOGY-001
+is accordingly no longer the immediate next ticket; see DH-LAB-001's own entry below for the
+corrected forward roadmap.
+
+## DH-LAB-001 (2026-09-18) — Native DHealth Lab shell + assigned-order queue + accept/reject
+
+**Starting master SHA:** `e8021f5939d287c647eb10904fd565bc14b12891` (DH-CLINIC-007's own final
+documentation commit) — confirmed exact match at session start; migration head confirmed
+`0023_provider_lab_routes`. **No branch, no PR** — this ticket's own explicit instruction. **Does
+not touch, does not runtime-qualify, and does not change DH-CLINIC-004B's own open item.**
+
+**Critical correction carried by this ticket's own text (§0), recorded first because it reshapes
+everything after it:** native DHealth Lab and DHealth Connect are not mutually exclusive product
+directions to choose between — both are permanent, parallel capabilities of the same DHealth
+Exchange backbone. A complete native DHealth environment (Clinic + Lab, full golden journey) is
+itself a product requirement, not a stepping stone to a connector decision. DH-PILOT-TOPOLOGY-001
+is accordingly no longer the immediate next ticket; it only decides which deployment model a real
+target facility uses, once one exists. Full seven-point correction: `DECISIONS.md` ADR-043's
+2026-09-18 dated clarification. This is an append-only correction to how the roadmap was being
+read, not a rewrite of DH-CLINIC-007's own historical entry above, which stands unchanged.
+
+**Objective and scope.** The Exchange backend has had a lab-side workflow — assigned queue, accept,
+reject, and later-stage capabilities (collection, processing, result entry, completion, release,
+amendments) — since DH-EX-010/011/012. None of it had ever had a DHealth Lab frontend; only direct
+API access existed. This ticket builds that frontend's first slice only: authentication → lab
+organization context → assigned order queue → safe order detail → accept/reject. Deliberately
+excluded (per the ticket's own scope, §3/§46-49): result entry (the existing APIs are too
+free-form to expose without a controlled result-definition layer — deferred to DH-LAB-003/004),
+collection recording (DH-LAB-002), LIS/Connect integration, and demo seed data (DH-DEMO-001).
+
+**What was built — backend, commit 1 `22da104`:**
+
+- **`adapter/src/daher_adapter/exchange/organizations.py`/`identity.py`**: `get_many()` added to
+  `OrganizationRepository` and `PatientReferenceRepository` — batched siblings of the existing
+  `get()`, never raising on a missing id.
+- **`adapter/src/daher_adapter/exchange/api.py`**: extended DH-CLINIC-005's "human-facing patient
+  identity comes from `Patient`, not `PatientReference`'s own snapshot" rule (§15) to Lab. New
+  `LabPatientIdentityResponse` (`patient_id`/`display_name`/`date_of_birth` — no contact fields at
+  all, structurally, not merely hidden) added to `LabWorkflowOrderResponse` as a `patient` field,
+  alongside the pre-existing `patient_display_name` (kept, now unused by the new frontend, for
+  compatibility). New `_lab_workflow_order_responses()` batched builder: since a lab's queue can
+  span **multiple** distinct ordering providers (unlike Clinic's own always-single-provider lists),
+  this groups `patient_reference_id`s by `provider_organization_id` and calls the existing
+  provider-scoped `_require_patient_identities()` once per distinct provider — bounded by provider
+  count, not order count. Fails closed (`LabAssignmentIntegrityError`/`PatientIdentityIntegrityError`)
+  on any unresolvable id, matching existing codebase convention.
+- **Tests** (`test_exchange_lab_workflow.py`, +~500 lines): BI1-BI7 (patient identity sourced from
+  `Patient`, including a same-name-different-identity discriminating test that directly mutates
+  `Patient.display_name` via a raw session to prove divergence from `PatientReference`'s own
+  snapshot; unknown DOB stays `null`, never fabricated; no contact fields anywhere in the response;
+  no standalone patient route exists for Lab; cross-tenant queue isolation). BQ1/BQ2: query-count
+  regression tests, precisely scoped (via `before_cursor_execute`) to only the three
+  identity-related tables (`exchange_organizations`/`exchange_patients`/`exchange_patient_references`)
+  — deliberately excluding an unrelated, pre-existing `LabOrder.items` lazy-relationship N+1 that
+  the initial combined test draft conflated with this fix before being split apart. BQ1: query count
+  does not scale with order count for a single provider. BQ2: query count scales with distinct
+  provider count, not order count, for orders split across providers.
+
+**What was built — frontend, commit 2 `520625c`, fix commit 3 `92f6791`:**
+
+- **`ui/src/api/exchangeTypes.ts`/`exchangeClient.ts`**: `LabWorkflowPatientIdentity`,
+  `LabWorkflowOrderItem`, `LabWorkflowOrder` types (reusing the existing `LabOrderStatus`); client
+  methods `listLabOrders`/`getLabOrder`/`acceptLabOrder`/`rejectLabOrder` against the existing
+  `GET/POST .../organizations/{lab_id}/lab-orders...` routes — no new backend, no mock fallback, no
+  result-entry method added.
+- **`ui/src/features/lab/`** (new directory): `LabContext`/`LabProvider` mirror
+  `ClinicContext`/`ClinicProvider`'s pattern — a fresh `ExchangeAuthProvider` instance wrapping Lab
+  exactly as Clinic's own, per ADR-050 Decision 6, so switching apps unmounts/remounts in-memory
+  token state only and never calls Keycloak logout (verified by `App.test.tsx`'s existing
+  Clinic-side tests for the identical property, plus new Lab-side coverage). Lab-membership
+  eligibility: ACTIVE `LAB` org + ACTIVE membership + (`LAB_TECH` or `LAB_RESULT_RELEASER`, never
+  both required — holding both counts as one eligible membership). A `canWorkOrders`/
+  `canReleaseResults` capability model, explicitly UX-only and never weakening backend
+  authorization: a releaser-only user still authenticates and selects a lab, and sees a truthful
+  "not yet available" message rather than a fabricated queue (§11).
+- **`LabShell.tsx`**: Accueil/Ordres tabs, active-lab display, a lab selector for multi-membership
+  users, switch-to-Clinic, logout. A no-labs state renders truthfully, never blank or auto-redirect.
+- **`LabHomePage.tsx`**: truthful, derivable-only counts (new/accepted/in-progress) from the same
+  bounded `listLabOrders(limit:100)` read the queue uses — no invented KPI, no pricing.
+- **`LabOrdersPage.tsx`** (the largest file, ~550 lines after the fix commit): the work queue and
+  order-detail/accept/reject panel.
+  - Information hierarchy leads with patient identity (via the new, deliberately narrower
+    `LabPatientIdentity` component — cannot reuse Clinic's own, whose prop type requires contact
+    fields `LabWorkflowPatientIdentity` structurally lacks) / provider / tests / status / date /
+    action; the technical order reference is present but secondary, never truncated.
+  - Truthful status labels distinguish `SELECTED` ("Nouvel ordre — à accepter") from `ACCEPTED`
+    ("Accepté") textually, never by color alone. A default "Nouveaux" filter plus five others.
+  - Order detail shows "Collection non enregistrée dans DHealth" for a null collection timestamp —
+    worded to never imply collection definitely did not happen elsewhere.
+  - Accept/reject are mutually exclusive in the UI, matching the backend state machine. Reject
+    requires an explicit confirmation step and takes no free-text reason or reason code — rejection
+    is terminal.
+  - **Race/staleness discipline** — the generation-ref/mounted-ref/tenant-ref pattern
+    DH-CLINIC-005/007 established, extended across the lab-switch dimension from the very first
+    implementation (not a post-hoc fix, per this ticket's own explicit instruction not to repeat
+    DH-CLINIC-007's "item 13" class of bug): a lab switch clears panel, mutation, confirmation, and
+    queue state to empty in the **same render pass** (not merely `loading: true` on stale data,
+    and not only in an effect, which would still let one paint show the old lab's data under the
+    new lab's already-updated header). `runMutation`'s three-way lost-response recovery (§36/§37):
+    an ambiguous accept/reject error triggers a separate authoritative `GET`, branching on whether
+    the target status was actually reached (success), the order is still `SELECTED` (genuinely
+    unconfirmed, retry available), or the *opposite* terminal status was reached by a concurrent
+    caller (a real conflict, never mislabeled "unconfirmed"). Every response validates its own
+    `order_id` against what was requested before ever being displayed, failing closed on mismatch.
+
+**Errors found and fixed — backend:**
+
+- A dead, broken helper (`_add_order_to_lab`, an unreachable `NotImplementedError` plus an
+  undefined variable) was written and removed during self-review before running any test.
+- The first combined query-count test conflated "provider count" with "order count" and measured
+  every SELECT rather than only the identity-related ones, so it grew by exactly one per added
+  order regardless of the batching fix — a pre-existing, unrelated `LabOrder.items` lazy-relationship
+  N+1 it hadn't isolated. Diagnosed by inspecting the SQL statements' own target tables; fixed by
+  splitting into BQ1/BQ2 and scoping the measurement helper to only the three identity tables.
+
+**Errors found and fixed — frontend, independent review (`advisor()`) before push:**
+
+- **`runMutation` had no generation guard of its own.** Accepting/rejecting order A, then
+  navigating to order B before A's response (or its lost-response recheck) resolved, let A's late
+  response overwrite B's now-visible panel and mutation state — exactly the class of bug §41
+  requires guarding against, and one the initial implementation's own commit message claimed was
+  already handled but wasn't. Fixed (fix commit `92f6791`) by capturing `panelGenerationRef`'s
+  value when a mutation starts and checking it after every `await`; `handleClosePanel` now also
+  bumps the ref so a mutation in flight for an already-closed panel cannot resurrect it. Covered by
+  two new tests, RR5 (late accept) and RR6 (late reject), each opening order A, triggering the
+  mutation, navigating to order B before it resolves, then resolving A's response and asserting
+  B's panel is untouched.
+- **`LabHomePage` had no lab-switch clear at all**, unlike `LabOrdersPage`. A viewer switching labs
+  saw the new lab's header next to the *previous* lab's stale order counts until the new fetch
+  resolved — the same stale-tenant rendering bug class DH-CLINIC-007 found, which this ticket's own
+  §12 explicitly says not to repeat. Fixed with the same render-phase clear `LabOrdersPage` already
+  uses. **Disclosed, not fixed:** `ClinicHomePage` has this identical latent gap (confirmed by
+  inspection — no render-phase or lab/provider-switch clear exists there either); out of scope for
+  this ticket, left as a candidate for a future Clinic-track fix.
+- **Verified empirically, not assumed:** RR1b (queue rows clear before the new lab's fetch resolves)
+  was checked against the pre-fix code by temporarily reverting the render-phase clear to a
+  prev-preserving effect-phase one and re-running RR1b alone — it failed as expected, confirming the
+  test actually discriminates the fix rather than passing against both versions. The clear was then
+  restored (`git diff --stat` confirmed a clean 5-line net diff from the round trip, no stray
+  changes).
+- `<ErrorState>{queueState.error}</ErrorState>` — TS2741, `ErrorState` takes a `code: ErrorCode`
+  prop, not children. Fixed to `<ErrorState code="NETWORK_ERROR" onRetry={...} />`.
+- A pre-existing `App.test.tsx` test broke because the new header's "DHealth Laboratoire (Natif)"
+  button also matched its old loose `/Laboratoire/` name regex (now ambiguous, two matches). Fixed
+  by scoping that test's query to the sidebar `navigation` landmark specifically, preserving its
+  original intent (the still-unbuilt placeholder sidebar item, not the new app-switch button).
+- Several `LabOrdersPage.test.tsx` cases (A3/A4/A5/A6/A7/LR1/LR2/LR5) initially failed because their
+  `getLabOrder` mocks returned the terminal status even for the *initial* panel-open fetch, so the
+  Accept/Reject buttons never rendered to click. Fixed via a `makeGetLabOrderRecheckMock` helper
+  returning `SELECTED` on the first call and the terminal status only on later calls. Several
+  `getByText`/`toHaveBeenCalledWith` assertions were ambiguous (a status label appearing in both a
+  badge and a confirmation sentence; a provider name repeated across queue rows) — fixed to
+  `getAllByText(...).length` counts or `within()`-scoped queries, and one extra expected mutation
+  argument (`acceptLabOrder` is called with 2 arguments, not 3) was removed from an assertion.
+
+**Test evidence.** Adapter, full suite, fresh run on the final commit: **985 passed, 106 skipped, 0
+failed.** UI: the three Lab-specific files individually confirmed green —
+`LabOrdersPage.test.tsx` (31, including RR5/RR6), `LabApp.test.tsx` (8), `LabA11y.test.tsx` (4, no
+axe violations on home/queue/detail/reject-confirmation) — 43 tests, 0 failed; `App.test.tsx`
+individually confirmed green, 12 tests, 0 failed, including its own fixed test above. A full
+`npx vitest run` in this sandbox's WSL2/`/mnt/c` environment again showed the same known,
+pre-existing `vitest-pool-runner: Timeout waiting for worker to respond` flakiness class this
+repository has already disclosed repeatedly (332 passed, 0 failed, 8 worker-crash errors across
+unrelated files) — CI's own run is treated as ground truth for the authoritative full-suite count,
+per the practice DH-CLINIC-007 already established, not chased further locally. `tsc -b --noEmit`:
+clean. `npm run build` + bundle secret scan: clean, no secrets found across 4 built files.
+`npm run lint` (oxlint): 0 errors, 6 warnings on the new/changed Lab files — the same
+already-accepted `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this codebase's
+own `ClinicPatientsPage.tsx`/`ClinicResultsPage.tsx` already carry for the identical generation-ref
+idiom (9 warnings there), non-blocking, exit code 0.
+
+**Qualification (§67).** `git diff --check` across all three commits: clean. No secrets in the diff
+(grepped for secret/`.env`/credential-named files: none). No migration was needed or added —
+`EXPECTED_HEAD` unchanged at `0023_provider_lab_routes`, confirmed by the fact that every
+read/mutation this ticket relies on (`GET/POST .../lab-orders...`) already existed from
+DH-EX-010/011/012; per §50, this was confirmed rather than merely assumed before writing any code.
+No `docker-compose`/CI-workflow file changes were needed.
+
+**Human Decision Required: NO.** No clinical content, decision support, or new patient-data
+disclosure was added — the lab-safe patient projection *narrows* what leaves the system relative to
+the pre-existing `patient_display_name` field, it does not widen it. The one genuine judgment call
+(grouping-by-provider for the batched identity resolution, rather than a single-provider-scoped call
+per order) was a direct consequence of Lab's queue spanning multiple providers, not a product/scope
+decision — already implied by this ticket's own §21 instruction to fix the N+1.
+
+**Status: IMPLEMENTED.** Backend and UI CI/component-tested, same evidence level as the rest of
+DHealth Clinic/Lab — no real-Keycloak or real-browser demonstration exists or is claimed.
+**DH-CLINIC-004B's own open item is unchanged by this ticket.** Result entry, result release,
+collection recording, LIS/Connect integration, and demo seed data remain **not built** — explicitly
+out of this ticket's own scope, not a gap discovered late.
+
+**NEXT: DH-LAB-002 — Collection + Processing Workflow.** Not started in this ticket — forward
+context only, per this ticket's own explicit instruction not to implement it here. No pull request
+was created or used for this ticket's work, per its own explicit instruction; every change landed as
+a focused commit directly on `master`.

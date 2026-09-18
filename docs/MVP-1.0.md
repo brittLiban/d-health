@@ -109,7 +109,14 @@ incoming work queue; accept/reject assigned orders; specimen/sample workflow suf
 pilot; processing state; structured result entry; result validation/release workflow; completed
 work/history. **It is not initially intended to replace every advanced LIS capability.**
 
-`NOT BUILT`: no dedicated DHealth Lab frontend exists. The Exchange backend implements the work
+**2026-09-18 update (DH-LAB-001):** a dedicated DHealth Lab frontend now exists
+(`ui/src/features/lab/`), `WRITTEN, TESTED, CI-QUALIFIED` — but only its first slice: authentication,
+lab-organization context, the assigned-order work queue, safe order detail, and accept/reject. It is
+**not** yet real-Keycloak/browser-runtime-qualified (same evidence-level boundary as DHealth
+Clinic), and result entry, result validation/release, and specimen/sample-collection recording are
+still `NOT BUILT` on the frontend — deliberately deferred to DH-LAB-002 through DH-LAB-004, since the
+existing result-entry APIs described below are too free-form to expose directly without a
+controlled result-definition/template layer first. The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
 *release* step (DH-EX-012/ADR-044) **[re-audited 2026-09-13 — was "specimen/sample workflow and

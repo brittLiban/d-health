@@ -4941,6 +4941,50 @@ evidence, not something rewritten to look as though the current vision always ex
 metrics, and the complete out-of-scope/known-gaps/follow-up lists:** `docs/MVP-1.0.md`. Ticket and
 follow-up-backlog record: `PROJECT_STATE.md`'s DH-MVP-001 entry.
 
+### Dated clarification (2026-09-18, DH-LAB-001) — Native DHealth and DHealth Connect are parallel supported capabilities, not a fork to choose between
+
+**Status:** clarification, not a revision — this ADR's original five-surface product definition
+above (DHealth Exchange/Clinic/Lab/Patient/Connect) already named both the native and connector
+paths from the start and is not changed by this entry. It is recorded because forward-looking
+sections of `STATUS.md`/`PROJECT_STATE.md` had drifted toward framing that read as "decide the
+delivery topology, then build toward it" — a fork this ADR never actually intended. DH-LAB-001's
+own ticket text caught the drift before any code was affected and required this correction as part
+of its own scope (§0).
+
+1. **Native DHealth Lab and DHealth Connect are not mutually exclusive product directions.**
+   Neither supersedes or is a fallback for the other. Both are permanent, supported capabilities of
+   the same DHealth Exchange backbone.
+2. **A complete native DHealth environment — Clinic and Lab together, exercising the full golden
+   journey — is a product requirement in its own right**, not merely a reference implementation or
+   a demo scaffold to be discarded once a connector exists. It is what makes DHealth usable by a
+   facility or lab with no adequate existing system at all (Law 2, "no double entry" — the native
+   side of that law's two branches).
+3. **The native apps are a usable deployment product.** A facility whose systems are inadequate
+   uses DHealth Clinic/Lab directly, in production, indefinitely if that remains the right fit for
+   them — not only until a connector is available.
+4. **DHealth Connect exists for facilities that already run an adequate EMR/LIS**, so staff keep
+   working in the system they already know rather than maintaining the same transaction twice (Law
+   2's other branch).
+5. **Hybrid deployment is first-class, not a compromise.** A single pilot may run, for example, a
+   native DHealth Lab against a provider connected through DHealth Connect, or the reverse. Nothing
+   in this ADR requires a facility and its counterpart lab to be on the same delivery model.
+6. **Which model a given real facility uses is decided per facility, later, once one exists** — that
+   is DH-PILOT-TOPOLOGY-001's question, and only that question: "which deployment model fits this
+   specific customer," never "which product path DHealth permanently supports." Answering it does
+   not retroactively make the other path unsupported.
+7. **The native-demo roadmap must not be blocked on pilot-facility integration-API availability.**
+   Building out native DHealth Clinic/Lab into a fully demoable, synthetic-data golden journey
+   (DH-LAB-001 through DH-DEMO-001 and DH-DEMO-E2E-001 in `PROJECT_STATE.md`'s forward roadmap)
+   proceeds independently of whether or when any specific pilot facility's existing system exposes
+   an integration API for DHealth Connect to speak to.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-LAB-001 entry (the first DHealth Lab frontend
+surface, built against the existing Exchange lab-workflow backend) and its corrected forward
+roadmap, which now runs DH-LAB-001 → DH-LAB-002 → DH-LAB-003 → DH-LAB-004 → DH-LAB-005 →
+DH-DEMO-001 → DH-SEC-001 → DH-OPS-001 → DH-RECOVERY-001 → DH-DEMO-E2E-001 →
+DH-CONNECT-CONTRACT-001 → DH-PILOT-TOPOLOGY-001, with DH-PILOT-TOPOLOGY-001 moved to the end,
+gated on a real target facility existing, not on native build order.
+
 ---
 
 ## ADR-044 — OPEN: the result-entry → release contract (who may release, and whether the same

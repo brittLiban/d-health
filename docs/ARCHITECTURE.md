@@ -977,6 +977,22 @@ the pending-review and history sections, replacing a separate `listOrders`-based
 `DECISIONS.md` ADR-048's 2026-09-18 dated clarification for the resulting UX operating rule (review
 actions always target the exact displayed version, never "latest").
 
+**2026-09-18 dated note (DH-LAB-001):** the first DHealth Lab frontend (`ui/src/features/lab/`) now
+exists, against the pre-existing lab-workflow backend (DH-EX-010/011/012) -- no new backend was
+built for it beyond a lab-safe patient-identity projection and its N+1-safe batched resolution
+(below). Scope is deliberately narrow: authentication, lab-organization context, assigned-order
+queue, safe order detail, accept/reject. Result entry, result release, collection recording, and
+LIS/Connect integration are explicitly out of scope, deferred to DH-LAB-002 through DH-LAB-005. The
+lab-safe `LabPatientIdentityResponse` (`patient_id`/`display_name`/`date_of_birth` only, no contact
+fields at all) extends DH-CLINIC-005's "identity from `Patient`, never `PatientReference`'s own
+snapshot" rule to Lab. Because a lab's own queue can span multiple distinct ordering providers
+(unlike Clinic's always-single-provider lists), the batched resolution groups patient-reference ids
+by provider and calls the existing provider-scoped batch resolver once per distinct provider,
+bounded by provider count rather than order count. **This ticket also corrected a documentation
+drift** (recorded in `DECISIONS.md` ADR-043's own 2026-09-18 dated clarification): native DHealth
+Lab and DHealth Connect are parallel, permanently supported capabilities, not a fork to choose
+between before more native work continues.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |
@@ -1377,8 +1393,10 @@ confidential `dhealth-exchange-api` client and never the reference-connector's `
   `status === 'authenticated'`, so the data layer beneath it (`ClinicProvider`'s `/me` call) cannot
   fire before real authentication exists. `App.tsx` wraps native Clinic in
   `ExchangeAuthProvider` + `ExchangeAuthGate` and passes the resulting authenticated `ExchangeClient`
-  into `ClinicApp`; Clinic itself contains no OAuth/OIDC code. A future DHealth Lab frontend reuses
-  the identical provider/gate pair.
+  into `ClinicApp`; Clinic itself contains no OAuth/OIDC code. **2026-09-18 update (DH-LAB-001):**
+  DHealth Lab (`ui/src/features/lab/`) now exists and reuses the identical provider/gate pair — a
+  second, independent `ExchangeAuthProvider` instance wraps `LabApp` exactly as Clinic's own wraps
+  `ClinicApp`, per ADR-050 decision 6. No second OAuth client was introduced.
 
 **Configuration, fail-closed** (`exchangeAuthConfig.ts`): the Keycloak origin is derived from the
 browser's own hostname (`app.<domain>` → `https://id.<domain>`) only when the hostname genuinely
