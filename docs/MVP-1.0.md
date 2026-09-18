@@ -116,7 +116,15 @@ lab-organization context, the assigned-order work queue, safe order detail, and 
 Clinic), and result entry, result validation/release, and specimen/sample-collection recording are
 still `NOT BUILT` on the frontend — deliberately deferred to DH-LAB-002 through DH-LAB-004, since the
 existing result-entry APIs described below are too free-form to expose directly without a
-controlled result-definition/template layer first. The Exchange backend implements the work
+controlled result-definition/template layer first.
+
+**2026-09-18 update (DH-LAB-002):** the frontend's specimen/sample-collection-recording gap noted
+just above is now closed — `Enregistrer la collecte` (gated to `ACCEPTED` with no existing
+milestone) and `Commencer l'analyse` (gated to `ACCEPTED` with a milestone present) are wired into
+the order-detail panel, each behind an explicit confirmation, against the pre-existing
+`record_collection`/`start_processing` backend (DH-EX-011) unchanged. Result entry and result
+validation/release remain `NOT BUILT` on the frontend, still deliberately deferred to DH-LAB-003/004
+for the same controlled-result-definition reason. The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
 *release* step (DH-EX-012/ADR-044) **[re-audited 2026-09-13 — was "specimen/sample workflow and

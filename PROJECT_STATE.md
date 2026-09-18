@@ -16135,3 +16135,333 @@ out of this ticket's own scope, not a gap discovered late.
 context only, per this ticket's own explicit instruction not to implement it here. No pull request
 was created or used for this ticket's work, per its own explicit instruction; every change landed as
 a focused commit directly on `master`.
+
+## DH-LAB-002 (2026-09-18) — Collection + processing workflow for Native DHealth Lab
+
+**Starting master SHA:** `318e2ca98751b6da55ad878f5dccc7bcc65012ef` (DH-LAB-001's own final
+documentation commit) — confirmed exact match at session start (`git status` clean, `git pull
+--ff-only` no-op). Alembic head confirmed `0023_provider_lab_routes` before any code change
+(`adapter/migrations/versions/0023_provider_lab_routes.py` present, no file after it).
+
+**Ending master SHA:** `124e147` (frontend commit; backend commit `6363e40` immediately precedes
+it; this docs commit follows).
+
+**Commits, in order:**
+1. `6363e40` — `fix(DH-LAB-002): close LabOrder.items N+1 in lab work queue, add LAB_RESULT_RELEASER negative controls`
+2. `124e147` — `feat(DH-LAB-002): collection + start-processing workflow in Native DHealth Lab`
+3. (this commit) — `docs(DH-LAB-002): record collection/processing workflow evidence`
+
+**Direct master, no PR — confirmed.** No branch was created; every commit landed directly on
+`master` per this ticket's own explicit instruction.
+
+### What was already built (DH-EX-011, before this ticket) — verified, not rebuilt
+
+Before writing any code, the actual state of `adapter/src/daher_adapter/exchange/lab_workflow.py`
+and its test suites was read directly (not assumed from the ticket text). DH-EX-011 had already
+shipped and real-PostgreSQL-qualified the entire backend this ticket's §6-§13/§36-§42 describe:
+`LabWorkflowRepository.record_collection`/`start_processing`, the `LabSampleCollection` model and
+its `0014_exchange_collection` migration, the two HTTP routes (`POST .../record-collection`,
+`POST .../start-processing`), idempotent replay semantics, the ACCEPTED-only creation rule, the
+no-retroactive-fabrication rule for legacy orders, the start-processing collection-gate (duplicated
+in both `lab_workflow.py` and `orders.py`'s generic `transition()` on purpose), and role/cross-lab
+authorization for every role *except* `LAB_RESULT_RELEASER` (introduced later, by DH-EX-012).
+`adapter/tests/integration/test_dhex011_postgres_qualification.py` (340 lines, not run by CI —
+confirmed via `.github/workflows/ci.yml`, which lists only `dhex003c`/`dhidentity001`/`dhclinic006`/
+`dhclinic007` postgres-qualification files by name) already covered PG-C1/PG-C2/PG-P1/PG-P2 and the
+collection-vs-processing race, along with 10-way and 25-way concurrency. This meant the ticket's own
+§63-§65/§77 backend test matrix was **already satisfied** except for two gaps, found by reading the
+existing suites rather than assumed: the `LAB_RESULT_RELEASER`-alone negative control (BC10/BP8,
+§40) and the disclosed `LabOrder.items` N+1 (§33/§66) — both fixed in commit 1.
+
+### What this ticket actually built
+
+**Backend (commit `6363e40`).**
+- `LabWorkflowRepository.list_for_lab` gained `.options(selectinload(LabOrder.items))`. Root cause:
+  `_to_record`'s `order.items` access triggered one lazy-load query per returned order — found and
+  disclosed by DH-EX-011's own `test_list_for_lab_collection_join_adds_no_marginal_per_order_query`,
+  which *tolerated* rather than fixed it (its assertion allowed a delta scaling with order count).
+  That test's assertion is now tightened to `delta <= 1` (flat, not scaling), and a new test,
+  `test_list_for_lab_items_selectinload_issues_one_bounded_query_regardless_of_order_count`,
+  measures queries against `exchange_lab_order_items` specifically (not total query count) for a
+  1-order and an 8-order lab, asserting exactly 1 in both cases. Before the fix this count equalled
+  the order count; after, it is 1 regardless of N.
+- Two new tests: `test_releaser_alone_cannot_record_collection`,
+  `test_releaser_alone_cannot_start_processing` (`adapter/tests/test_exchange_sample_collection.py`)
+  — a `LAB_RESULT_RELEASER`-only identity gets 403 on both endpoints; the second also asserts the
+  order stays `ACCEPTED` afterward, not silently advanced.
+- No new endpoint, no new table, no new `LabOrderStatus` value, no migration.
+
+**Frontend (commit `124e147`).**
+- `exchangeTypes.ts`: `LabCollectionResponse { order_id, recorded_at }`, matching the backend's own
+  Pydantic model field-for-field (verified by reading `api.py`'s `LabCollectionResponse` directly).
+- `exchangeClient.ts`: `recordLabOrderCollection(labId, orderId, options)`,
+  `startProcessingLabOrder(labId, orderId, options)` — thin typed wrappers over the two existing
+  endpoints, no mock fallback.
+- `LabOrdersPage.tsx`: the order-detail panel now offers, per the action-availability matrix (§48):
+  `ACCEPTED` + no milestone → `Enregistrer la collecte` (explicit confirm, patient identity stays
+  visible in the same panel); `ACCEPTED` + milestone present → `Commencer l'analyse` (explicit
+  confirm); `IN_PROGRESS` → truthful "result entry comes later" text, no fabricated control.
+  `mutationState.action` extended to `'collect' | 'start'`; the single `confirmingReject` boolean
+  replaced with a `confirming: 'reject' | 'collect' | 'start' | null` slot. Two new mutation runners
+  (`runCollection`, `runProcessing`) were written **alongside**, not merged into, the existing
+  `runMutation` — each has a genuinely different recovery predicate (collection: judged by
+  `collection_recorded_at`, never `status`; processing: a real fourth "prerequisite not met" branch
+  the other three actions never have), and forcing them through one generic helper would have hidden
+  that distinction, which §28 explicitly warns against.
+- `LabHomePage.tsx`: its count-request `useEffect` — previously a bare `let isMounted` closure with
+  no `AbortController` and no explicit tenant-id check — is now hardened to the identical
+  generation-ref/`currentLabRef`/`AbortController` pattern `LabOrdersPage.loadQueue` already used.
+
+### Collection UI behavior (AC1, AC3, AC6, AC7)
+
+Explicit `Enregistrer la collecte` button appears only for `ACCEPTED` orders with no recorded
+milestone (CUI1/CUI2/CUI3). Clicking it shows an inline confirmation naming the action in plain
+French ("Enregistrer la collecte ? Confirmez que la collecte correspondant à cet ordre doit être
+enregistrée dans DHealth.") with **Confirmer la collecte** / **Annuler** — Annuler makes no request
+(CUI5/CUI6). No specimen/tube/barcode/free-text/manual-timestamp field exists anywhere in this flow
+(CUI10, `queryAllByRole('textbox'|'spinbutton')` asserted empty). A recorded milestone displays as
+"Collecte enregistrée" plus the French-locale date+time (CUI4); an unrecorded one displays "Collecte
+non enregistrée dans DHealth" — worded as *not recorded*, never *not collected* (AC3, CUI3 for the
+legacy-`IN_PROGRESS`-with-null case specifically).
+
+### Collection confirmation / timestamp / replay behavior (AC5, AC7, AC8)
+
+No request body — the endpoint takes none, and the client sends none. Timestamp is exclusively
+server-generated (`LabSampleCollection.recorded_at`, DH-EX-011); no client-side clock is ever read
+or displayed as authoritative. Replay safety is the backend's own pre-existing, DH-EX-011-qualified
+behavior (`_record_collection_in_session`'s unconditional existing-row short-circuit); this ticket's
+own new test, `LR-C1`, additionally proves the *frontend* accepts a replay's recorded state (from a
+recheck after a lost response) as success without ever issuing a second POST.
+
+### Collection lost-response recovery (AC13, §25)
+
+Three-way, matching §25 exactly: (Case A) recheck shows `collection_recorded_at != null` → success,
+no error, no second POST (`LR-C1`); (Case B) recheck shows `ACCEPTED` + still `null` → unconfirmed,
+explicit retry stays available (`LR-C2`); (Case C) recheck shows the order moved on with no milestone
+ever recorded → conflict shown, never fabricated (`LR-C3`).
+
+### Processing UI behavior (AC10, §18, §48)
+
+`Commencer l'analyse` appears only for `ACCEPTED` orders with a recorded milestone (PUI1/PUI2); never
+for `ACCEPTED` without one, never once `IN_PROGRESS` (PUI7). No result-entry control appears at any
+point (PUI8, LAB-003/004 scope untouched).
+
+### Processing confirmation / prerequisite / replay behavior (AC9, AC11, AC12)
+
+Explicit confirmation ("Commencer l'analyse ? L'ordre passera à l'état « En cours ».") with
+**Commencer** / **Annuler** (PUI3). The prerequisite (a recorded milestone) is enforced
+authoritatively by the backend (unchanged DH-EX-011 gate, duplicated in both `lab_workflow.py` and
+`orders.py`); the frontend never offers `Commencer l'analyse` without a milestone in the first place
+(PUI1), so a direct-API bypass attempt is the only way to exercise the gate, and that path is
+DH-EX-011's own qualified behavior, unchanged. Replay of an already-`IN_PROGRESS` order is the
+backend's own pre-existing idempotent short-circuit (§13); `LR-P1` proves the frontend accepts that
+recheck result as success.
+
+### Processing lost-response recovery (AC14, §26)
+
+Four-way, the one genuinely new recovery shape in this ticket: (Case A) recheck shows
+`IN_PROGRESS` → success (`LR-P1`); (Case B) recheck shows `ACCEPTED` + milestone present →
+unconfirmed, explicit retry stays available (`LR-P2`); (Case C) recheck shows `ACCEPTED` + **no**
+milestone → prerequisite not met, `PROCESSING_PREREQUISITE_ERROR` shown, **no auto-retry offered**
+— the panel's own status/collection-driven render falls back to `Enregistrer la collecte` instead,
+since that is what the authoritative state now calls for (`LR-P3`); (Case D, not separately tested
+beyond the shared conflict path accept/reject also exercise) a terminal status reached by a
+concurrent caller → conflict shown.
+
+### Direct-API no-collection rejection evidence (AC9, §13)
+
+Not re-demonstrated fresh in this session — this is exactly DH-EX-011's own
+`test_start_processing_gate_enforced_via_workflow_repository` and
+`test_start_processing_gate_enforced_via_generic_transition_path`
+(`adapter/tests/integration/test_dhex011_postgres_qualification.py`), both still present and passing
+(local run, this session, `988 passed, 106 skipped` includes the SQLite-side equivalents in
+`test_exchange_lab_workflow.py`; the PG-side file itself is skipped by default, matching CI's own
+existing behavior for it — see the PG-qualification disclosure below).
+
+### Collection/processing concurrency + race PG evidence (§36-§39, AC16)
+
+**Not re-run against real PostgreSQL in this session — no Docker/PostgreSQL was reachable in this
+environment** (`docker`/`docker-compose` unavailable in both the Bash and PowerShell tool, and in
+the WSL2 distribution used for `.venv`/`gh`). This is disclosed, not hidden. The evidence that
+stands is DH-EX-011's own, already-committed real-PostgreSQL qualification (10-way concurrent
+collection, 25-way concurrent start-processing, the collection-vs-start-processing race ×5,
+documented in its own `PROJECT_STATE.md` entry above as "DH-EX-011 QUALIFIED: YES") — **unchanged**
+by this ticket's backend edit, which is a read-only `selectinload` on a `GET`-side query with no
+lock or transaction-boundary implication. Proof that `IN_PROGRESS` can never occur without a
+recorded collection milestone (§38, forbidden outcome) is therefore DH-EX-011's own prior evidence,
+cited, not fabricated as freshly re-run.
+
+### Cross-lab / role-negative-control evidence (AC17, AC18)
+
+Cross-lab: DH-EX-011's own pre-existing `test_cross_lab_lab_tech_gets_anti_enumeration_404`, still
+passing, unchanged. Role: `LAB_TECH` required for both actions, enforced by the pre-existing
+`_require_lab_tech` HTTP dependency (unchanged); `test_clinician_cannot_record_collection`,
+`test_org_admin_alone_cannot_record_collection`, `test_platform_admin_alone_cannot_record_collection`
+(DH-EX-011, unchanged) plus this ticket's own new
+`test_releaser_alone_cannot_record_collection`/`test_releaser_alone_cannot_start_processing` close
+the one gap DH-EX-011 could not have covered (§40).
+
+### Stale-response / lab-switch / unmount test evidence (AC16, §29-§32, §61)
+
+`RR-C1`/`RR-C2` (collection), `RR-P1`/`RR-P2` (processing), `RR-L1`/`RR-L2` (lab switch mid-mutation),
+`RR-U1` (unmount) — all new, mirroring the discrimination discipline `RR5`/`RR6` established in
+DH-LAB-001. **Discrimination verified, not assumed:** `RR-C1` and `RR-P1`'s own generation guard
+(`if (panelGenerationRef.current !== mutationGeneration)`) was temporarily replaced with
+`if (false && ...)` in `LabOrdersPage.tsx`, both tests were re-run and observed to **fail**
+(`Patient A`/`Patient B` counts inverted), and the guard was restored and re-verified green before
+moving on.
+
+### LabHome stale-count test evidence (AC21, §35, §62)
+
+New file `ui/src/features/lab/pages/LabHomePage.test.tsx`. **Verified discriminating with an honest
+finding recorded in the test's own comment:** disabling *either* the new generation check or the
+`currentLabRef` check alone still passed (each independently blocks this exact scenario, since a lab
+switch already bumps the generation ref in the same render pass as the earlier `let isMounted`
+closure's own cleanup-before-rerun behavior happened to as well); disabling **both** together made
+the assertion genuinely fail (a stale "5" rendered under Lab B). Both checks were then restored and
+re-verified. This is a more honest characterization than simply asserting "discriminating" — the
+old code was not as broken as the ticket's framing implied, but the new code is provably hardened to
+the stated discipline regardless.
+
+### LabOrder.items N+1 — root cause, fix, before/after evidence (AC20, §33-§34, §66)
+
+Root cause: `LabWorkflowRepository._to_record`'s access to the ORM relationship
+`LabOrder.items` (no eager-load option on the query that produced `order`) triggers one lazy `SELECT
+... FROM exchange_lab_order_items WHERE lab_order_id = :id` per row in `list_for_lab`'s result set —
+disclosed by DH-EX-011, left unfixed as out of its own scope. Fix: `.options(selectinload(LabOrder.
+items))` added to `list_for_lab`'s query (`selectinload`, not `joinedload`, because the primary query
+already returns one row per order via its own joins — a `joinedload` of the one-to-many `items` would
+multiply rows and require deduplication). Before/after, measured directly against `exchange_
+lab_order_items`: **before**, 1 query per order (N queries for N orders, confirmed by re-reading the
+pre-fix test's own tolerant assertion); **after**,
+`test_list_for_lab_items_selectinload_issues_one_bounded_query_regardless_of_order_count` asserts
+exactly 1 query against that table for both a 1-order and an 8-order lab.
+
+### Patient context, legacy IN_PROGRESS/null behavior (AC19, §44-§46, §49)
+
+Every confirmation (collect, start, reject) renders inline inside the same panel that already shows
+full Patient identity, ordering facility, and requested tests above it (§46 hierarchy unchanged) —
+no detached "Confirmer ?" dialog was created. A legacy `IN_PROGRESS` order with `collection_recorded_
+at: null` shows "Collecte non enregistrée dans DHealth" and offers no collection-mutation control
+(`CUI3`) — the backend's own no-retroactive-fabrication rule is never worked around client-side.
+
+### Browser-storage / PHI-logging audit (§71-§72)
+
+No new `localStorage`/`sessionStorage`/`IndexedDB`/cookie usage was added — collection/processing
+state lives only in React component state, refetched from the server on every mutation and recheck.
+No `console.log` of `patient`/`order`/response objects was added; the only new logging-adjacent
+surface is the generic error-message constants already reviewed above, none of which interpolate
+Patient/order content.
+
+### Confirmations (§52-§56, AC22)
+
+No specimen/barcode/container/free-text field: confirmed above (CUI10). No manual collection-time
+field: confirmed — the endpoint carries no body, the client sends none, no datetime input exists in
+the DOM at any point in the flow. No result-entry UI: confirmed (PUI8) — `queryByRole('button', {
+name: /résultat/i })` asserted absent once `IN_PROGRESS`. No new clinical content: no analyte,
+reference range, unit, or specimen-requirement was invented; the only new UI copy is workflow-status
+wording matching §47/§70's plain-language requirement. No Connect/LIS integration: no FHIR/HL7/
+OpenELIS/webhook/vendor-adapter code was added anywhere in this ticket's diff.
+
+### LAB-001 / Clinic shared-auth regression results (§67-§68)
+
+All pre-existing LAB-001 tests in `LabOrdersPage.test.tsx`/`LabA11y.test.tsx`/`LabApp.test.tsx` still
+pass unchanged (28 pre-existing `LabOrdersPage.test.tsx` tests + 4 pre-existing `LabA11y.test.tsx`
+tests + 8 `LabApp.test.tsx` tests, all present in the 543-test CI-authoritative total below). No
+Clinic file was touched by this ticket (confirmed: `git diff 318e2ca..124e147 --name-only` lists
+only `adapter/src/daher_adapter/exchange/lab_workflow.py`,
+`adapter/tests/test_exchange_sample_collection.py`, and files under `ui/src/api/` and
+`ui/src/features/lab/`) — Clinic's own shared `ExchangeAuthProvider`/`ExchangeClient` usage is
+exercised only indirectly, via the same CI `ui` job that already runs Clinic's own suites, which
+stayed green.
+
+### Accessibility results (§69)
+
+`LabA11y.test.tsx` grew from 4 to 6 tests: the two new ones assert zero detectable axe violations on
+the collection confirmation step and the start-processing confirmation step respectively, both
+reached through the same real component tree (not a mocked confirmation snippet).
+
+### Adapter test totals (§75, CI-authoritative)
+
+**988 passed, 106 skipped, 0 failed** — CI run `35320857962`, job `adapter — ruff + pytest`
+(+3 over DH-LAB-001's own 985/106 baseline: the two new releaser-negative tests plus the new
+items-selectinload N+1 test; the pre-existing N+1 test was tightened, not added). `ruff check`/
+`ruff format --check` clean. Locally reproduced identically before pushing (WSL2 `.venv`, same
+counts).
+
+### UI test totals (§75, CI-authoritative)
+
+**543 passed across 37 test files, 0 failed** — CI run `35320857962`, job `ui — lint, typecheck,
+test, build` (+58 over DH-LAB-001's own 511/34-ish baseline area: 30 new `LabOrdersPage.test.tsx`
+tests (CUI1-10, PUI1-8, LR-C1-3, LR-P1-3, RR-C1/C2/P1/P2/L1/L2/U1), 1 new `LabHomePage.test.tsx`
+file, 2 new `LabA11y.test.tsx` tests). Locally reproduced (WSL2, same repo) with an unrelated
+resource-limited flake noted below.
+
+### Lint/typecheck/build result (§75)
+
+`npm run lint`: 0 errors, 21 warnings (same pre-existing `react(refs)`/`react(set-state-in-effect)`
+pattern already present in `LabOrdersPage.tsx` and elsewhere in the codebase before this ticket —
+not a new lint regression, confirmed by grepping the lint output for file:line and finding the
+identical pattern at `LabOrdersPage.tsx`'s own pre-existing `currentLabRef.current = ...` line).
+`npm run typecheck`: clean. `npm run build`: clean, `postbuild`'s secret scan found none.
+
+### Documentation changes
+
+`STATUS.md` (As-of header, §C/§D/§F bullets, new DH-LAB-002 narrative paragraph, forward-context
+line), `docs/ARCHITECTURE.md` (dated note under the existing DH-LAB-001 note), `docs/MVP-1.0.md`
+(dated note under the existing DH-LAB-001 note), and this `PROJECT_STATE.md` entry. No ADR was
+added — nothing here changes an already-decided semantic, per §73's own instruction.
+
+### CI-found / local-found bugs and how they were fixed
+
+**Local-only, found before pushing, never reached CI:** the pre-existing
+`test_list_for_lab_collection_join_adds_no_marginal_per_order_query`'s own assertion *tolerated* the
+N+1 this ticket was asked to fix (it allowed a delta scaling with order count) — not a bug in the
+sense of broken code, but a test that would have silently kept passing after the fix without
+actually proving the fix worked, so it was tightened rather than left as-is. Several new UI tests
+initially used ambiguous test setup (an unconditional `getLabOrder` mock returning the terminal
+state on the very first, initial-panel-open call too, before any mutation had even been attempted) —
+caught locally by 4 failing assertions on first run (`CUI3`, `PUI4/PUI6/PUI7`, `LR-C3`, `LR-P3`),
+diagnosed as test-fixture ordering bugs (not app-code bugs — the `LabOrdersPage.tsx` logic itself was
+correct throughout), and fixed by making each mock's *first* call return the pre-mutation state and
+only later calls return the post-mutation/recheck state, matching how the real client is actually
+called twice (initial open, then recheck).
+
+**CI infra flake, this session:** none on the actual push-triggered run (`35320857962` was green on
+the first attempt). A local, non-CI worker-pool timeout was observed running `npx vitest run` across
+the *entire* UI suite in this session's cross-filesystem (Windows↔WSL2) environment under load (10 of
+37 files failed to even start a worker process, timing out); every one of those files, re-run
+individually or in a smaller batch immediately after, passed cleanly with zero code changes,
+confirming resource contention rather than a real failure. CI itself (a native Linux runner) hit no
+such issue, per the clean `35320857962` run above.
+
+### Known remaining gaps — not hidden
+
+- **No real-PostgreSQL requalification this session** (see the concurrency/race section above) —
+  Docker was unavailable in every tool this session had access to. The backend logic this ticket
+  depends on for concurrency/race safety is unchanged from DH-EX-011's own already-qualified state;
+  only a read-only `selectinload` was added. This is a genuine session-environment limitation, not a
+  design gap, but it means this ticket's own §65 "mandatory PG qualification" was not freshly
+  re-run — DH-EX-011's prior evidence is cited instead, not fabricated as new.
+- Result entry, result release, LIS/Connect integration, and demo seed data remain **not built** —
+  explicitly out of this ticket's own scope (§52-§56), not a gap discovered late.
+- No real-Keycloak or real-browser qualification exists for any part of Native Lab, including this
+  ticket's own additions — same evidence-level boundary every other Native Lab/Clinic entry states.
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED.** This ticket touched no authentication/Keycloak/
+Caddy code and made no claim about DH-CLINIC-004B's own open item.
+
+### Confirmation no real patient data used
+
+All patient names/dates of birth/identifiers in every test added by this ticket are synthetic,
+matching the existing suites' own convention (e.g. `Fatouma Robleh`, `Patient A`/`Patient B`,
+`Amina Hassan` reused from the existing `LabA11y.test.tsx` fixture).
+
+### Confirmation no PR
+
+No pull request was created or used for this ticket's work, per its own explicit instruction; every
+change landed as a focused commit directly on `master`.
+
+`NEXT: DH-LAB-003 — Controlled Result Definitions / Templates`

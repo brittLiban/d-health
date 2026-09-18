@@ -993,6 +993,26 @@ drift** (recorded in `DECISIONS.md` ADR-043's own 2026-09-18 dated clarification
 Lab and DHealth Connect are parallel, permanently supported capabilities, not a fork to choose
 between before more native work continues.
 
+**2026-09-18 dated note (DH-LAB-002):** collection-milestone recording and start-processing are now
+wired into Native Lab (`LabOrdersPage`), against the pre-existing `LabWorkflowRepository.
+record_collection`/`start_processing` (DH-EX-011) -- again no new backend workflow endpoint, table,
+or `LabOrderStatus` value. Two things did change backend-side: (1) `list_for_lab`'s query gained
+`.options(selectinload(LabOrder.items))`, closing the `LabOrder.items` lazy-load N+1 that DH-EX-011
+found and explicitly left unfixed as out of its own scope -- one bounded `WHERE lab_order_id IN
+(...)` query per queue read now, not one per order; (2) two backend authorization negative-control
+tests were added (`LAB_RESULT_RELEASER`-alone denied on both `record-collection` and
+`start-processing`) that DH-EX-011 could not have written, since that role was introduced afterward
+by DH-EX-012. Frontend-side, collection and processing each get their own explicit confirmation step
+(reusing the inline-panel-confirmation pattern DH-LAB-001 established for reject, which keeps Patient
+identity visible throughout per DH-LAB-002's own §44) and their own lost-response recovery predicate
+-- deliberately *not* unified into one generic mutation helper with accept/reject, since collection
+(no `LabOrder.status` change at all, success judged by `collection_recorded_at`) and processing (a
+genuine fourth "prerequisite not met" outcome the other three actions never have) each have a
+recovery shape the others don't. `LabHomePage`'s own count-request effect is hardened to the same
+generation/`currentLabRef`/`AbortController` discipline `LabOrdersPage` already used, closing a gap
+DH-LAB-001 disclosed but left open. Result entry, result release, and LIS/Connect integration remain
+explicitly out of scope, deferred to DH-LAB-003 onward.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |
