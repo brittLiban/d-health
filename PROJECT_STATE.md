@@ -15814,6 +15814,38 @@ Also added two test gaps an independent review flagged: a legacy order's confirm
 response for a since-switched-away version never touches the newly-opened version's own controls
 (RR12).
 
+**One more finding, surfaced by a second independent review pass after commit 6-12's fix had
+already landed and been pushed — fixed in the same follow-up commit as items 6-12, not a separate
+push:**
+
+13. **The provider-switch reset cleared `panel`/`disposition`/`submitState` but never `queueState`
+    itself**, and `loadQueue`'s own `setQueueState` only ever sets `loading: true` without clearing
+    `entries` — before finding #10 above, that was masked by the whole-panel skeleton always firing
+    on `loading: true`; after fixing #10 to gate the skeleton on `loading && entries.length === 0`,
+    switching providers opened a window where provider A's own patient names rendered under
+    provider B's own "Résultats libérés pour :" heading until B's fetch resolved. A genuine §47/§73
+    violation. Fixed by explicitly clearing `queueState` to `{ entries: [], loading: true, error:
+    null }` in the same provider-switch block, so the skeleton-gate fix from #10 and this one work
+    together correctly. Added RR13, which resolves provider A's queue before switching (so its
+    entries are actually in state, unlike RR10's own never-resolving provider A) and asserts its
+    patient name is gone immediately after switching, before provider B's own deferred fetch is
+    ever resolved.
+
+    Same review pass also flagged three smaller issues, all fixed in this same commit: (a) the two
+    parallel `listResultReviews` calls in `loadQueue` could disagree if an entry flipped
+    PENDING→terminal between them, landing in both halves under the same `review_id` — fixed by
+    excluding from the "reviewed" half any id already present in the "pending" half, rather than
+    trusting each response's own status label; (b) a queue entry legitimately missing from the
+    reloaded queue (transient reload failure, or beyond the 100-item cap) rendered a fabricated-
+    looking "Revue enregistrée — Non renseigné" instead of a neutral "unavailable" message with no
+    controls — fixed with an explicit `null`-status branch; (c) the RS6 restoration (#11 above) had
+    no test assertion — added one to UI-Q1. A fourth suggestion — disabling the version tabs while
+    a submission is in flight — was tried and then reverted: it directly contradicts RR12, which
+    deliberately proves that switching versions mid-submission is already safe (a stale mutation
+    response for the abandoned version never touches the newly-opened one). Disabling "Fermer le
+    détail" during submission was kept (no test exercises it, and closing the panel mid-submission
+    would lose the outcome entirely, unlike switching versions).
+
 **Evidence.**
 
 - Adapter: **976 passed, 106 skipped** (skipped = every opt-in real-PostgreSQL qualification test
@@ -15824,15 +15856,17 @@ response for a since-switched-away version never touches the newly-opened versio
   pre-existing `test_dhex014a_postgres_qualification.py`/`test_dhex014b_postgres_qualification.py`
   (PG-R1/PG-R3, 14/14 passed) re-run against the same database to reconfirm on the current schema. A
   matching CI step was added mirroring the DH-CLINIC-006 precedent.
-- UI: the rewritten `ClinicResultsPage.test.tsx`, after the post-push fix commit (items 6-12 above,
-  plus the two new test-gap cases) — **24 passed** (was 22 before that commit). Full clinic-feature
-  suite plus `exchangeClient.test.ts` together — **202 passed** across 11 files (0 failed), after
-  fixing the two pre-existing regression suites broken by the mock-client contract gap (see "Errors
-  found" #5). Full project suite (all files) — **403 passed** with 4 unrelated files dropped by this
-  sandbox's own known, pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner:
-  Timeout waiting for worker to respond`, not a test assertion failure); all 4 re-run individually
-  and passed cleanly (37/37) — none touch this ticket's files. `tsc -b --noEmit`: clean. `npm run
-  build` + bundle secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
+- UI: the rewritten `ClinicResultsPage.test.tsx`, after the post-push fix commit (items 6-13 above,
+  plus the three new test-gap cases: UI-V6, RR12, RR13) — **25 passed** (was 22 before that commit).
+  Full clinic-feature suite plus `exchangeClient.test.ts` together — **78 passed** across 4 files (0
+  failed), after fixing the two pre-existing regression suites broken by the mock-client contract
+  gap (see "Errors found" #5). Full project suite (all files) — **315 passed** across 27 files (0
+  failed), with 3 unrelated files dropped from the first pass by this sandbox's own known,
+  pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner: Timeout waiting for
+  worker to respond`, not a test assertion failure); all 3 re-run individually and passed cleanly
+  (30/30) — none touch this ticket's files. This full-suite number was re-verified after item 13's
+  fix landed, not carried forward from before it. `tsc -b --noEmit`: clean. `npm run build` + bundle
+  secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
   previously-disclosed `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this
   codebase already accepted for this exact file's own prior version and for `LabRoutingStep.tsx`'s
   identical idiom (DH-CLINIC-006's own precedent), non-blocking.

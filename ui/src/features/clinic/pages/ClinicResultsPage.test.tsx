@@ -224,6 +224,9 @@ describe('ClinicResultsPage', () => {
     render(<ClinicApp client={client} initialTab="results" />)
 
     expect(await screen.findByText('Résultats à examiner (1)')).toBeInTheDocument()
+    // DH-CLINIC-005 RS6 parity: two orders for the same patient must stay distinguishable before
+    // either is opened.
+    expect(screen.getByText(/Référence de l'ordre/)).toBeInTheDocument()
   })
 
   it('UI-Q2: a completed review remains discoverable in the history section, never disappearing', async () => {
@@ -747,6 +750,38 @@ describe('ClinicResultsPage', () => {
 
     expect(screen.queryByText('Patient Provider A')).not.toBeInTheDocument()
     expect(screen.getByText('Patient Provider B')).toBeInTheDocument()
+  })
+
+  it('RR13: the outgoing provider\'s own queue entries must never render under the new provider, even before the new fetch resolves', async () => {
+    const providerBQueue = deferred<ProviderResultReviewQueueResponse>()
+
+    const client = makeClient({
+      getMe: vi.fn().mockResolvedValue(meWithTwoProviders),
+      listResultReviews: vi.fn((providerId: string) =>
+        providerId === 'provider-a'
+          ? Promise.resolve(
+              makeQueueResponse([
+                makeQueueEntry({ patient: makePatient({ display_name: 'Patient Provider A' }) }),
+              ]),
+            )
+          : providerBQueue.promise,
+      ),
+    })
+    render(<ClinicApp client={client} initialTab="results" />)
+
+    await screen.findByText('Patient Provider A')
+
+    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    await userEvent.setup().selectOptions(providerSelect, 'provider-b')
+
+    // Provider B's own fetch is still unresolved at this point -- provider A's entries must
+    // already be gone, not merely overwritten once B's fetch eventually settles.
+    await waitFor(() => expect(screen.queryByText('Patient Provider A')).not.toBeInTheDocument())
+
+    await act(async () => {
+      providerBQueue.resolve(makeQueueResponse([]))
+      await Promise.resolve()
+    })
   })
 
   it('RR11: a response arriving after unmount produces no error and no state update', async () => {

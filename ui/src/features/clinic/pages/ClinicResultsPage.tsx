@@ -147,6 +147,11 @@ export function ClinicResultsPage() {
     setPanel(null)
     setDisposition(null)
     setSubmitState({ submitting: false, error: null })
+    // §47/§73: the outgoing provider's queue entries must never render, even transiently, under
+    // the new provider's own heading -- clearing here (not just setting `loading: true`) means
+    // the top-level skeleton gate (`loading && entries.length === 0`) still fires for a provider
+    // switch, not just a genuine first load.
+    setQueueState({ entries: [], loading: true, error: null })
     // A provider switch invalidates every outstanding request -- their resolution must never be
     // allowed to land, even though `currentProviderRef` alone would already reject them.
     queueGenerationRef.current += 1
@@ -185,7 +190,14 @@ export function ClinicResultsPage() {
         if (!mountedRef.current) return
         if (queueGenerationRef.current !== generation) return
         if (currentProviderRef.current !== targetProvider) return
-        const reviewed = allResponse.entries.filter((entry) => entry.review_status !== 'PENDING')
+        // The two fetches are not atomic -- an entry can flip PENDING -> terminal between them.
+        // Trust the PENDING fetch for membership (it is the one that must never undercount) and
+        // exclude by id from the ALL side, rather than trusting each response's own status label,
+        // so a flipped entry is never rendered twice under the same review_id.
+        const pendingIds = new Set(pendingResponse.entries.map((entry) => entry.review_id))
+        const reviewed = allResponse.entries.filter(
+          (entry) => entry.review_status !== 'PENDING' && !pendingIds.has(entry.review_id),
+        )
         setQueueState({
           entries: [...pendingResponse.entries, ...reviewed],
           loading: false,
@@ -700,7 +712,7 @@ export function ClinicResultsPage() {
           {panel ? (
             <div>
               <div style={{ marginBottom: 'var(--space-3)' }}>
-                <Button variant="secondary" onClick={handleClosePanel}>
+                <Button variant="secondary" onClick={handleClosePanel} disabled={submitState.submitting}>
                   Fermer le détail
                 </Button>
               </div>
@@ -855,7 +867,15 @@ export function ClinicResultsPage() {
                             borderTop: '1px solid var(--color-neutral-200)',
                           }}
                         >
-                          {displayedReviewStatus !== 'PENDING' ? (
+                          {displayedReviewStatus === null ? (
+                            // §5/§57: a queue entry this order/version should have is missing from
+                            // the reloaded queue (transient reload failure, or beyond the page
+                            // cap) -- render neither a fabricated "PENDING" nor a fabricated
+                            // "recorded" state, and show no review controls until it is known.
+                            <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                              État de la revue indisponible pour le moment.
+                            </p>
+                          ) : displayedReviewStatus !== 'PENDING' ? (
                             <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
                               Revue enregistrée{displayedReviewedAt ? ` le ${formatDateTime(displayedReviewedAt)}` : ''} —{' '}
                               <strong>{formatReviewStatusLabel(displayedReviewStatus)}</strong>.
