@@ -12,10 +12,11 @@ branch, no PR). Starting point was `master` at `318e2ca98751b6da55ad878f5dccc7bc
 the current repository and fresh local test runs on this exact commit — none are carried forward
 from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
 unchanged by this ticket** — the DHealth Lab frontend surface does not prove authentication
-runtime, and is not represented as doing so anywhere below. **No local PostgreSQL/Docker was
-available in this session** (see the DH-LAB-002 entry below) — the concurrency/race guarantees this
-ticket relies on were already real-PostgreSQL-qualified under DH-EX-011/DH-EX-012 (unchanged
-backend logic) and are cited as prior evidence, not re-run here.
+runtime, and is not represented as doing so anywhere below. **Real-PostgreSQL requalification was
+not run this session** — Docker was reachable, but pulling `postgres:16-alpine` was blocked by this
+sandbox's network egress to Docker Hub's CDN (see the DH-LAB-002 entry below for the exact error) —
+the concurrency/race guarantees this ticket relies on were already real-PostgreSQL-qualified under
+DH-EX-011/DH-EX-012 (unchanged backend logic) and are cited as prior evidence, not re-run here.
 
 ## B. Product direction
 
@@ -353,10 +354,12 @@ race/stale-response/lab-switch/unmount test suites (mirroring, not sharing, LAB-
 `LabOrder.items` queue N+1 fix (§C) with its own query-count proof, `LabHomePage`'s hardening to the
 same tenant/generation discipline with a dedicated stale-count test, and two backend role-negative
 tests (`LAB_RESULT_RELEASER`-alone denied on both actions) that DH-EX-011 could not have written
-because that role did not exist until DH-EX-012. **No local PostgreSQL/Docker was available in this
-session**, so the concurrency/race backend guarantees this ticket depends on were not re-run against
-real PostgreSQL here — they are cited as DH-EX-011's own prior, still-valid evidence (the backend
-transition/lock logic is unchanged; only a read-only `selectinload` was added to the queue query).
+because that role did not exist until DH-EX-012. **Docker was reachable this session (via `sudo
+docker` in WSL2) but pulling `postgres:16-alpine` was blocked by this sandbox's network egress to
+Docker Hub's CDN** (two attempts, both timing out mid-transfer on different blob layers), so the
+concurrency/race backend guarantees this ticket depends on were not re-run against real PostgreSQL
+here — they are cited as DH-EX-011's own prior, still-valid evidence (the backend transition/lock
+logic is unchanged; only a read-only `selectinload` was added to the queue query).
 Same evidence-level boundary as every other DHealth Lab entry above: not real-Keycloak-qualified,
 not real-browser-demonstrated. Result entry, release, LIS/Connect integration, and demo seed data
 remain not built (§F). See `PROJECT_STATE.md`'s DH-LAB-002 entry for full evidence.

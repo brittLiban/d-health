@@ -16280,9 +16280,16 @@ existing behavior for it — see the PG-qualification disclosure below).
 
 ### Collection/processing concurrency + race PG evidence (§36-§39, AC16)
 
-**Not re-run against real PostgreSQL in this session — no Docker/PostgreSQL was reachable in this
-environment** (`docker`/`docker-compose` unavailable in both the Bash and PowerShell tool, and in
-the WSL2 distribution used for `.venv`/`gh`). This is disclosed, not hidden. The evidence that
+**Not re-run against real PostgreSQL in this session.** `docker` is not present in the Bash/
+PowerShell tools directly, but *is* present in the WSL2 distribution this session used for the
+adapter `.venv` and `gh` (`sudo docker ps` works, daemon reachable). The actual blocker: pulling
+`postgres:16-alpine` fails there with a DNS/TLS timeout reaching Docker Hub's CDN
+(`registry-1.docker.io` / `production.cloudfront.docker.com`, confirmed by two separate pull
+attempts, both failing mid-transfer on different blob layers with `TLS handshake timeout` and `dial
+tcp: ... i/o timeout` respectively) — this sandbox's network egress does not reach that CDN, a
+pre-existing, previously-documented limitation of this environment, not a missing-tool gap. No
+cached `postgres` image existed locally to fall back on (`sudo docker images` showed only
+`curlimages/curl`/`hello-world`). This is disclosed, not hidden. The evidence that
 stands is DH-EX-011's own, already-committed real-PostgreSQL qualification (10-way concurrent
 collection, 25-way concurrent start-processing, the collection-vs-start-processing race ×5,
 documented in its own `PROJECT_STATE.md` entry above as "DH-EX-011 QUALIFIED: YES") — **unchanged**
@@ -16438,8 +16445,11 @@ such issue, per the clean `35320857962` run above.
 ### Known remaining gaps — not hidden
 
 - **No real-PostgreSQL requalification this session** (see the concurrency/race section above) —
-  Docker was unavailable in every tool this session had access to. The backend logic this ticket
-  depends on for concurrency/race safety is unchanged from DH-EX-011's own already-qualified state;
+  Docker itself was reachable (via `sudo docker` in this session's WSL2 distribution), but pulling
+  the required `postgres:16-alpine` image was blocked by this sandbox's network egress (DNS/TLS
+  timeout reaching Docker Hub's CDN), a pre-existing environment limitation, not a missing tool. The
+  backend logic this ticket depends on for concurrency/race safety is unchanged from DH-EX-011's own
+  already-qualified state;
   only a read-only `selectinload` was added. This is a genuine session-environment limitation, not a
   design gap, but it means this ticket's own §65 "mandatory PG qualification" was not freshly
   re-run — DH-EX-011's prior evidence is cited instead, not fabricated as new.
