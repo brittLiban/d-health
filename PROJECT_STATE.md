@@ -16079,6 +16079,14 @@ already-accepted `react(refs)`-during-render/`set-state-in-effect` heuristic qui
 own `ClinicPatientsPage.tsx`/`ClinicResultsPage.tsx` already carry for the identical generation-ref
 idiom (9 warnings there), non-blocking, exit code 0.
 
+**Push-triggered CI, run `35312968220`, all 9 jobs green** (`ui — lint, typecheck, test, build`;
+`adapter — ruff + pytest`; `static checks`; `compose interpolates and parses`; `openelis
+order-correlation patch — compiles`; `oauth2login — patched identity tests`; `seed + form-safety
+suites`; `OpenMRS narrow TestOrder module`; `provisioning — ruff + pytest`). This run's own logs are
+the authoritative full-suite counts (not the locally-crashed run above): **UI — 511 passed across 36
+test files, 0 failed. Adapter — 985 passed, 106 skipped, 0 failed**, matching the fresh local
+adapter run cited above exactly.
+
 **Qualification (§67).** `git diff --check` across all three commits: clean. No secrets in the diff
 (grepped for secret/`.env`/credential-named files: none). No migration was needed or added —
 `EXPECTED_HEAD` unchanged at `0023_provider_lab_routes`, confirmed by the fact that every
