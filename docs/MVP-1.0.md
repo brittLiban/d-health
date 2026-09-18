@@ -420,6 +420,17 @@ for any Exchange ticket** (DH-EX-008 wired the deployment but could not qualify 
 14 below). **Manual live/browser demonstration: NOT RUN.** No production deployment exists. No pilot
 has begun.
 
+**2026-09-18 dated update (DH-DEMO-001):** none of the above changes. What is new is a way to
+*observe* this golden journey end to end without a real hospital's EMR/LIS: a dedicated Compose
+project (`docker-compose.native-demo.yml`) runs the real Keycloak/adapter/DHealth-UI/Caddy code
+paths — never a parallel mock stack — without ever waiting on OpenMRS/OpenELIS, seeded with
+deterministic synthetic-only data via `adapter/src/daher_adapter/exchange/demo_seed.py` and a P0
+reset-safety boundary that is real-PostgreSQL-qualified (three independent facts refused/allowed
+correctly, 4 clean runs). **This does not upgrade any row above to RUNTIME-QUALIFIED**: this
+sandbox's Docker cannot pull real image blobs from the CDN, so the demo stack has never actually
+booted anywhere yet. See `PROJECT_STATE.md`'s DH-DEMO-001 entry and `STATUS.md` §D for the full
+evidence matrix.
+
 ## 9. Explicit out-of-scope list
 
 DHealth MVP 1.0 does **not** require:

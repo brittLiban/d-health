@@ -461,6 +461,27 @@ opening a firewall port:
 ssh -L 8080:127.0.0.1:8080 user@your-vm
 ```
 
+## Native demo environment (DH-DEMO-001)
+
+If you want the native DHealth Clinic → Exchange → DHealth Lab loop with synthetic data — no
+50-minute OpenMRS/OpenELIS boot, no real patient data — use the dedicated demo Compose project
+instead of the foundation above:
+
+```bash
+./scripts/demo/up.sh       # builds, starts, waits for healthy, seeds the synthetic baseline
+./scripts/demo/status.sh   # health summary + demo login usernames (passwords: demo/native/demo.env)
+./scripts/demo/reset.sh    # restores the deterministic baseline, clears everything a demo run created
+./scripts/demo/down.sh     # stops (keeps data); `down.sh -v` also deletes the demo's own volumes
+```
+
+This runs the real Keycloak/adapter/DHealth-UI/Caddy code and configuration (`docker-compose.
+native-demo.yml` `extends:` the real service definitions above) as its own independent Compose
+project (`dhealth-native-demo`) — it never starts, waits on, or otherwise touches any
+`openmrs-*`/`openelis-*` container or volume from the foundation above. All data is synthetic; a
+three-fact safety boundary (`adapter/src/daher_adapter/exchange/demo_seed.py`) refuses to run
+against anything that is not unambiguously this demo's own database. See `docs/ARCHITECTURE.md`
+§18 and `PROJECT_STATE.md`'s DH-DEMO-001 entry for full detail.
+
 ## Reaching the system through the reverse proxy (DH-016)
 
 Caddy is the **only** container that publishes host ports. Everything else — both databases, both

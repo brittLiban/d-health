@@ -4985,6 +4985,17 @@ DH-DEMO-001 → DH-SEC-001 → DH-OPS-001 → DH-RECOVERY-001 → DH-DEMO-E2E-00
 DH-CONNECT-CONTRACT-001 → DH-PILOT-TOPOLOGY-001, with DH-PILOT-TOPOLOGY-001 moved to the end,
 gated on a real target facility existing, not on native build order.
 
+### Dated note (2026-09-18, DH-DEMO-001) — a native demo environment now exists, deployment topology only
+
+Not a new decision, and not a revision of anything above — point 2's "complete native DHealth
+environment ... is a product requirement in its own right" now has a concrete implementation:
+`docker-compose.native-demo.yml` (`extends:` the real `docker-compose.yml` service definitions —
+the demo runs the real code, never a parallel mock) boots the native Clinic → Exchange → Lab loop
+without waiting on OpenMRS/OpenELIS, which is preserved untouched. This is a deployment-topology
+choice, not a product-boundary one, so it does not warrant its own ADR — recorded here only so a
+future reader does not need to infer that this repo now has two independent Compose projects and
+why. Full detail: `docs/ARCHITECTURE.md` §18, `PROJECT_STATE.md`'s DH-DEMO-001 entry.
+
 ---
 
 ## ADR-044 — OPEN: the result-entry → release contract (who may release, and whether the same

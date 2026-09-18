@@ -6,20 +6,31 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-18, DH-LAB-005, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `eefc1f2` (DH-LAB-004's own final documentation
-commit). All facts below were re-verified directly against the current repository and fresh local
-test runs on this exact commit — none are carried forward from an earlier session's report without
-re-checking. **DH-CLINIC-004B's own claims (§C/§I) are unchanged by this ticket** — the DHealth Lab
-frontend surface does not prove authentication runtime, and is not represented as doing so anywhere
-below. **Real-PostgreSQL qualification of this ticket's own four new concurrency races (concurrent
-Native corrections of the same observation, Native correction vs. original release, amendment
-Native correction vs. amendment release, two releasers racing the same amendment) was actually run
-this session** against the identical native PostgreSQL 18 instance DH-LAB-004 first located inside
-the sandbox, migrated to head via real `alembic upgrade head`, all 4 tests run clean 4x in a row.
-See the DH-LAB-005 entry in `PROJECT_STATE.md` for exact commands and evidence. This ticket adds no
-new migration — Alembic head stays `0025_native_result_binding`, confirmed against CI's own
-`EXPECTED_HEAD`.
+**2026-09-18, DH-DEMO-001, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `0916afd` (DH-LAB-005's own final commit). All
+facts below were re-verified directly against the current repository and fresh local test runs on
+this exact commit. **DH-CLINIC-004B's own claims (§C/§I) are unchanged by this ticket** — this
+ticket's `git diff` touched no authentication/Keycloak/Caddy production code at all; the only
+pre-existing files modified are `.github/workflows/ci.yml` (additive) and one UI test file, every
+other file is new. **Real-PostgreSQL qualification of this ticket's own reset-safety boundary and
+baseline/reset idempotency was actually run this session** (2 tests, 4 executions, zero flakes,
+including a genuine positive control and a genuine permission bug found and fixed) against the
+same native PostgreSQL 18 instance prior tickets located inside the sandbox. **This sandbox's
+Docker still cannot pull real image blobs from the CDN** (documented since DH-LAB-002), so this
+ticket's own central claim — a native-only Compose stack reaching healthy without ever waiting on
+OpenMRS/OpenELIS — has **not** been observed booting anywhere yet; the CI job this ticket's single
+push triggers is its first real attempt, not a confirmation of something already proven locally.
+This ticket adds no new migration — Alembic head stays `0025_native_result_binding`.
+
+**2026-09-18, DH-LAB-005, directly on `master`.** Starting point was `master` at `eefc1f2`
+(DH-LAB-004's own final documentation commit). Real-PostgreSQL qualification of this ticket's own
+four new concurrency races (concurrent Native corrections of the same observation, Native
+correction vs. original release, amendment Native correction vs. amendment release, two releasers
+racing the same amendment) was run against the identical native PostgreSQL 18 instance DH-LAB-004
+first located inside the sandbox, migrated to head via real `alembic upgrade head`, all 4 tests run
+clean 4x in a row. See the DH-LAB-005 entry in `PROJECT_STATE.md` for exact commands and evidence.
+This ticket added no new migration — Alembic head stayed `0025_native_result_binding`, confirmed
+against CI's own `EXPECTED_HEAD`.
 
 ## B. Product direction
 
@@ -200,6 +211,14 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   with this repo's own documented ~50-minute-plus full-stack cold boot (`.github/workflows/ci.yml`
   header), not a defect in this ADR's own code. See `DECISIONS.md` ADR-050's 2026-09-17 overlay and
   `PROJECT_STATE.md`'s DH-CLINIC-004B entry.
+- **Native demo reset-safety boundary and baseline/reset idempotency (DH-DEMO-001)**:
+  `demo_seed.py`'s three-fact refusal (wrong database name; a process-own env var; an unreadable/
+  missing marker table) and its `TRUNCATE ... CASCADE` reset (clears every workflow table,
+  preserves every baseline row, idempotent on replay) are **real-PostgreSQL-qualified** — 2 tests,
+  4 clean executions, including a genuine positive control (a differently-named scratch database
+  was correctly refused) and a genuine permission bug found and fixed (the marker table's missing
+  `GRANT SELECT`, which without the fix would have made a non-demo database raise a raw DB error
+  instead of a clean refusal). See `PROJECT_STATE.md`'s DH-DEMO-001 entry.
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
@@ -243,11 +262,24 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   component exposes every release version (status always textual, never color-only) and one
   version's exact, immutable content on demand. Built and component/UI-tested only — **same "built
   but not runtime-proven" boundary as DHealth Clinic above**: no real-Keycloak or real-browser
-  qualification exists for it either. LIS/Connect integration and any demo seed data remain
-  explicitly **not** part of this surface (deferred to DH-DEMO-001+). See `DECISIONS.md`
-  ADR-043's 2026-09-18 clarification, ADR-053 and its DH-LAB-004/DH-LAB-005 addenda, ADR-044's
-  DH-LAB-004 addendum, ADR-045's DH-LAB-005 addendum, ADR-048's DH-LAB-005 addendum, and
-  `PROJECT_STATE.md`'s DH-LAB-001/DH-LAB-002/DH-LAB-003/DH-LAB-004/DH-LAB-005 entries.
+  qualification exists for it either. LIS/Connect integration remains explicitly **not** part of
+  this surface. See `DECISIONS.md` ADR-043's 2026-09-18 clarification, ADR-053 and its
+  DH-LAB-004/DH-LAB-005 addenda, ADR-044's DH-LAB-004 addendum, ADR-045's DH-LAB-005 addendum,
+  ADR-048's DH-LAB-005 addendum, and `PROJECT_STATE.md`'s DH-LAB-001/DH-LAB-002/DH-LAB-003/
+  DH-LAB-004/DH-LAB-005 entries.
+- **Native demo environment** (DH-DEMO-001, `docker-compose.native-demo.yml`,
+  `scripts/demo/*.sh`, `adapter/src/daher_adapter/exchange/demo_seed.py`): a dedicated Compose
+  project running the real Keycloak/adapter/DHealth-UI/Caddy code paths, deliberately never
+  waiting on OpenMRS/OpenELIS (which stays completely untouched), with a P0 reset-safety boundary
+  (three independent facts, real-PostgreSQL-qualified — §C) and deterministic synthetic-only
+  baseline data. Real Keycloak-backed authentication throughout — grepped, zero demo-conditional
+  branch exists in any authentication/request-handling code. **Built and locally qualified only —
+  the demo has never actually booted anywhere.** This sandbox's Docker cannot pull real image
+  blobs from the CDN, so the one thing this ticket exists to prove — native-only boot reaching
+  healthy — has not yet been observed; the CI job this ticket's push triggers is its first
+  attempt, not a confirmation. No real Keycloak login and no real browser walkthrough of the
+  golden journey exist yet either. See `PROJECT_STATE.md`'s DH-DEMO-001 entry for the full
+  evidence matrix.
 - Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: no real-Keycloak
   qualification, no manual live/browser demonstration, no production deployment, for any Exchange
   ticket.
@@ -282,13 +314,13 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## F. NOT BUILT
 
-- **DHealth Lab LIS/Connect integration and demo seed data.** DH-LAB-001 through DH-LAB-004 built
-  the full native loop (authentication/queue/accept/reject, collection-milestone recording and
-  start-processing, the controlled result-structure template layer, controlled entry,
-  required-gated completion, a least-privilege release queue, and fingerprint-gated release); §D's
-  DH-LAB-005 entry closed the remaining correction/amendment gap DH-LAB-004 deliberately left
-  closed rather than building unsafely. No LIS/Connect integration and no demo seed data exist for
-  DHealth Lab yet (deferred to DH-DEMO-001+).
+- **DHealth Lab LIS/Connect integration.** DH-LAB-001 through DH-LAB-004 built the full native
+  loop (authentication/queue/accept/reject, collection-milestone recording and start-processing,
+  the controlled result-structure template layer, controlled entry, required-gated completion, a
+  least-privilege release queue, and fingerprint-gated release); §D's DH-LAB-005 entry closed the
+  remaining correction/amendment gap DH-LAB-004 deliberately left closed rather than building
+  unsafely. Demo seed data now exists (§D, DH-DEMO-001), but LIS/Connect integration still does
+  not.
 - **DHealth Patient** (assisted-digital patient layer) and **DHealth Connect** (EMR/LIS integration
   layer, beyond the OpenMRS/OpenELIS reference track itself): no code of their own exists yet.
 - **Any patient-facing marketplace or pricing surface.** Not built, not scheduled for Launch 1 —
@@ -456,8 +488,23 @@ boundary as above: does not touch, does not runtime-qualify, and does not change
 own open item; DH-CLINIC-004B remains separately open, unchanged. See `DECISIONS.md` ADR-045's and
 ADR-048's 2026-09-18 addenda and `PROJECT_STATE.md`'s DH-LAB-005 entry for full evidence.
 
-**Forward context only, not started:** DH-DEMO-001 (a fully demoable native synthetic environment),
-then DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-DEMO-E2E-001, DH-CONNECT-CONTRACT-001, and finally
+**DH-DEMO-001 — Resettable Visible Native DHealth Demo Environment — is now implemented, but
+NOT yet runtime-proven** (§C/§D): a dedicated Compose project running the real Keycloak/adapter/
+DHealth-UI/Caddy code paths without ever waiting on OpenMRS/OpenELIS (untouched, preserved), a
+P0 reset-safety boundary independently real-PostgreSQL-qualified (three facts: database name,
+a process-own env var, a marker table only the demo's own db-init script creates), and
+deterministic synthetic-only baseline data — real Keycloak-backed authentication throughout, no
+bypass anywhere (grepped). **What remains open, stated plainly:** this sandbox's Docker cannot
+pull real image blobs from the CDN, so the demo has never actually booted anywhere. The CI job
+this ticket's own push triggers (`native-demo-boot`) is its first real attempt at the one thing
+this ticket exists to prove, not a rerun of something already observed. No real Keycloak login
+and no real browser walkthrough of the golden journey exist yet. This does not touch, does not
+runtime-qualify, and does not change DH-CLINIC-004B's own open item. See `PROJECT_STATE.md`'s
+DH-DEMO-001 entry for the full evidence matrix.
+
+**Forward context only, not started:** DH-DEMO-001's own forward sequence begins with native
+runtime/browser golden-journey qualification (the immediate next step — see above), then
+DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-DEMO-E2E-001, DH-CONNECT-CONTRACT-001, and finally
 DH-PILOT-TOPOLOGY-001 — last, not first, since it answers only "which deployment model fits a
 specific real facility" once one exists, never "which product path DHealth permanently supports"
 (ADR-043's 2026-09-18 clarification). Full order: `PROJECT_STATE.md`'s DH-LAB-003 entry.

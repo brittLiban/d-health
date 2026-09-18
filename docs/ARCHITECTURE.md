@@ -1539,3 +1539,66 @@ OpenELIS/`daher` realm), which continues to run only from the Maternity connecto
 
 Full decision record: **ADR-050** (`DECISIONS.md`). Implementation and qualification detail:
 `PROJECT_STATE.md`'s DH-CLINIC-004A entry.
+
+## 18. Native demo environment topology (DH-DEMO-001) — added 2026-09-18
+
+A dedicated Compose project, `docker-compose.native-demo.yml`, exists so the native Clinic →
+Exchange → Lab loop can be booted and demonstrated **without** the historical OpenMRS/OpenELIS
+reference-connector stack (§2) becoming healthy — that stack is preserved untouched, never
+deleted or deprecated, and remains the repo's real production topology for the maternity/lab
+track. The demo is a second, independent project (`name: dhealth-native-demo` — a distinct
+Compose project name, so `docker compose down` in one never touches the other's containers or
+volumes), not a fork of `docker-compose.yml` and not a parallel mock stack:
+
+```
+                    dhealth-native-demo (independent Compose project)
+
+                          Internet (localhost only)
+                             │
+                       ┌─────▼─────┐
+                       │   caddy   │  narrower Caddyfile: id./exchange./app. only
+                       └─────┬─────┘
+        ┌──────────────┬─────┴────────┐
+        │              │              │
+  id.<domain>    exchange.<domain>  app.<domain>
+        │              │              │
+   ┌────▼────┐    ┌────▼────┐   ┌─────▼──────┐
+   │keycloak │    │ adapter │   │ daher-ui   │   <- the REAL images/code, via extends:
+   └────┬────┘    └────┬────┘   └────────────┘
+        │              │
+        └──────┬───────┘
+          ┌─────▼─────┐
+          │openelis-db│   <- demo's OWN lightweight Postgres (name reused
+          └───────────┘      deliberately so extends:-copied depends_on/
+                              hostnames resolve with zero overrides)
+
+   NOT present at all: openmrs-*, openelis-frontend/webapp/fhir, mariadb
+   -> nothing in this project's dependency graph can ever wait on them.
+```
+
+**Mechanism: Compose `extends:`, not duplication.** `keycloak`/`adapter`/`daher-ui`/`caddy` are
+`extends:`ed verbatim from `docker-compose.yml` — the demo runs the identical images, entrypoints,
+and application code a real deployment runs, so a regression in the real service definitions is
+also a regression here. Two `extends:` semantics were confirmed empirically (not assumed) while
+building this, and are load-bearing for anyone editing either compose file:
+- `extends:` forces Compose's interpolation pass to validate every `${VAR:?}` across the **entire**
+  base file, not only the extended service's own — `demo/native/demo.env` therefore carries a full
+  dummy-value block for `OMRS_*`/`OE_*` variables this project never actually uses, mirroring this
+  repo's own CI `ci-dummy` convention.
+- `extends:` copies a service's own `volumes:` list but **not** the base file's top-level named-
+  volume declaration — `docker-compose.native-demo.yml` therefore redeclares `adapter-audit:` in
+  its own top-level `volumes:` section.
+
+**Reset safety (P0):** the demo's own `adapter` service carries `ADAPTER_DB_NAME=
+dhealth_native_demo` (never the real deployment's default) and `ADAPTER_DEMO_ENVIRONMENT=1` (a key
+`docker-compose.yml` does not have at all), and `demo/native/db-init/init-tenant-databases.sh`
+creates a marker table no Alembic migration ever creates. `demo_seed.py`'s reset path refuses to
+run unless all three hold — see `PROJECT_STATE.md`'s DH-DEMO-001 entry for the full mechanism and
+its real-PostgreSQL qualification.
+
+**Evidence boundary, stated plainly:** this topology has been validated by `docker compose config`
+(interpolation/parsing) but has **not** been observed actually booting anywhere — this repo's own
+sandbox cannot pull real container image blobs from the CDN (§2's own build environment did not
+have this restriction; this is a later, different sandbox limitation). The `native-demo-boot` job
+in `.github/workflows/ci.yml` is this topology's first real-boot attempt. Full decision record and
+evidence: `PROJECT_STATE.md`'s DH-DEMO-001 entry.

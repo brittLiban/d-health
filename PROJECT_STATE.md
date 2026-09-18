@@ -17229,4 +17229,223 @@ anywhere in this ticket.
 No pull request was created or used for this ticket's work, per its own explicit instruction;
 every change landed as a focused commit directly on `master`.
 
-`NEXT: DH-DEMO-001 — Resettable Synthetic Demo Environment`
+## DH-DEMO-001 (2026-09-18) — Resettable Visible Native DHealth Demo Environment
+
+**Starting master SHA:** `0916afd` (DH-LAB-005's own final commit). Alembic head confirmed
+`0025_native_result_binding` before any code change and unchanged after — this ticket adds no
+migration, no new table, no new `LabOrderStatus`/`OrganizationRole` value, no DHealth Connect
+code, and no auth bypass of any kind.
+
+**GitHub Actions budget mode (same explicit instruction as DH-LAB-005):** target one push for the
+entire ticket. Every commit below stayed local until the full ticket — compose topology, seed/
+reset module, CI, UI test, this documentation — was complete and fully qualified locally. **One
+honest exception this ticket's own design forces:** the central claim under test (a real
+Docker Compose stack reaching healthy without OpenMRS/OpenELIS) cannot be exercised in this
+sandbox at all — `docker compose up` against real image blobs is blocked by this sandbox's Docker
+CDN egress (same block DH-LAB-002/DH-LAB-003 already documented). The new `native-demo-boot` CI
+job is therefore this feature's *first* real execution, not a rerun of something already proven
+locally — flagged here in advance rather than discovered as a surprise in the CI log.
+
+**Commits, in order (all local until the single push):**
+1. `c1ce0c4` — `feat(DH-DEMO-001): native-only demo Compose topology, scripts, tenant db-init, demo Keycloak users`
+2. `cac1dec` — `feat(DH-DEMO-001): deterministic demo baseline seed/reset with a three-fact reset-safety boundary`
+3. `ff7668f` — `test(DH-DEMO-001): CI compose-config check and a real native-demo boot job`
+4. `9cc44d6` — `test(DH-DEMO-001): D16 -- real ExchangeClient parses demo-seed-shaped data at the fetch boundary`
+5. (this commit) — `docs(DH-DEMO-001): record evidence`
+
+**Direct master, no PR — confirmed.** No branch was created.
+
+### Compose topology — native-only, OpenMRS/OpenELIS untouched by construction
+
+`docker-compose.native-demo.yml` is a dedicated Compose project (`name: dhealth-native-demo`),
+never merged into or replacing `docker-compose.yml`. It `extends:` the real `docker-compose.yml`'s
+own `keycloak`, `adapter`, `daher-ui`, and `caddy` service definitions verbatim — the demo runs the
+exact same images, entrypoints, and application code as a real deployment, never a parallel mock
+stack — and defines its own lightweight `openelis-db`/`openelis-db-hardening` (reusing those two
+service *names* deliberately, so `extends:`-copied `depends_on` and hardcoded hostnames resolve
+with zero overrides; documented in the compose file's own comments as NOT an attempt to disguise
+the demo as the real OpenELIS database). `openmrs-*`/`openelis-frontend`/`openelis-webapp` never
+appear in this file at all, so nothing in this project's dependency graph can ever wait on them.
+Two `extends:`-interpolation facts were discovered empirically (not assumed) and are documented in
+both the compose file and `demo/native/demo.env`: `extends:` forces validation of every `${VAR:?}`
+across the *entire* base file, not just the referenced service, and copies a service's own
+`volumes:` list without also copying the base file's top-level named-volume declaration.
+
+`demo/native/Caddyfile` narrows the real Caddyfile's vhost set to `id.`/`exchange.`/`app.` only.
+`demo/native/demo.env` is committed (unlike the real, gitignored `.env`) — every value is a
+short, fixed, throwaway, non-secret credential for a synthetic local-only stack, documented as
+such, and excluded from the tracked-secret scan by path (`.github/workflows/ci.yml`'s "No tracked
+secrets" step).
+
+### RESET SAFETY IS P0 — the three-fact boundary
+
+`adapter/src/daher_adapter/exchange/demo_seed.py`'s `_require_demo_environment` refuses to touch
+any data unless **all three** independent facts hold: (1) `ADAPTER_DB_NAME` is exactly
+`dhealth_native_demo` — deliberately different from the real deployment's own default (`adapter`)
+so a reset accidentally pointed at a real connection string fails this check before touching
+anything; (2) `ADAPTER_DEMO_ENVIRONMENT=1` is set in the running process's *own* environment — only
+`docker-compose.native-demo.yml`'s `adapter` service sets it, and `docker-compose.yml` has no such
+key at all; (3) a `dhealth_demo_environment` marker table carrying a fixed marker row exists and is
+readable — created only by `demo/native/db-init/init-tenant-databases.sh`, never by an Alembic
+migration, so it can never leak into a real deployment's schema. Any failure to read the marker
+(including a permission error, not only a missing table) is treated as fail-closed refusal, never
+a crash — proven necessary by a genuine bug found during real-PostgreSQL testing (below).
+
+Reset (`reset_workflow_state`) uses `TRUNCATE ... CASCADE`, never row-by-row `DELETE`, because
+every Exchange foreign key in this schema is deliberately `ON DELETE RESTRICT` (immutable-history
+discipline) — a per-row `DELETE` would hit that restriction on the first order with an item.
+`_WORKFLOW_TABLES` lists every table a fresh golden journey (or a demo operator exploring the
+marketplace `select()`/`set_price` path, which the golden journey itself never calls) can create,
+explicitly rather than relying only on CASCADE's own discovery, so a table this list is missing
+fails loudly instead of silently leaving stale rows. Baseline configuration (organizations,
+catalog, offerings, routes, templates, identities, memberships, the seed patient) is never named
+and therefore never truncated — reconciled instead by `seed_baseline`, idempotent by natural key
+using existing repository methods unchanged (no new idempotency mechanism invented for this
+ticket).
+
+Keycloak user identities are never assumed fixed: `discover_keycloak_subject` looks up each demo
+user's real `sub` via the Admin REST API (stdlib `urllib` only — no new production dependency)
+at seed time, because Keycloak's Admin API does not guarantee honoring a caller-supplied `id` on
+create across every version, and a fresh Keycloak volume must not silently seed against a stale
+identity.
+
+**Real-PostgreSQL qualified** (`adapter/tests/integration/test_demo_seed_postgres.py`,
+`DEMO_SEED_PG_*` env-gated, skipped by default, never in CI — same convention as every other
+`tests/integration/*_qualification.py` file in this repo): run against a real native PostgreSQL
+18 instance in this sandbox.
+- A genuine **positive control** was observed manually before the automated test existed: a
+  scratch database named `dhdemo001_qual` (missing fact 1) was correctly refused; the database was
+  then recreated as `dhealth_native_demo` to continue testing fact 3.
+- That continued testing found a **genuine permission bug**: the marker table, created by the
+  `postgres` superuser with no `GRANT`, made the `adapter`-owner role's own `SELECT` raise a raw
+  `InsufficientPrivilege` error instead of a clean refusal. Fixed in the actual db-init script
+  (`GRANT SELECT ... TO ${ADAPTER_DB_USER}`), with `_require_demo_environment`'s fail-closed
+  `except Exception` as defense-in-depth so a genuinely non-demo database still refuses cleanly
+  either way.
+- `test_pgrs1_refuses_a_database_missing_the_marker_table` and
+  `test_pgd2_pgd3_reset_wipes_workflow_state_and_preserves_baseline` (the latter builds a complete
+  order → collection → result entry → release → amendment object graph, then proves reset clears
+  every workflow row, preserves every baseline row, and is idempotent on a second run) both passed
+  clean across 4 executions.
+
+### Demo Keycloak users
+
+`keycloak/reconcile-demo-users.sh` reconciles three fixed-username personas
+(`demo-clinician`/`demo-lab-tech`/`demo-releaser`) idempotently via the Admin API, mirroring
+`reconcile-exchange.sh`'s own established login-retry idiom. They carry **no** Keycloak realm
+role — organization-scoped authority (CLINICIAN/LAB_TECH/LAB_RESULT_RELEASER) is an
+Exchange-database concept, granted only by `demo_seed.py`, exactly like every real user. Reset
+also clears any brute-force lockout a mistyped demo password left behind (`attack-detection/
+brute-force/users/{id}` delete), so "reset" restores login usability too, not only database state.
+
+### Developer entrypoint
+
+`scripts/demo/up.sh` (`docker compose up -d --build`, then `--wait --wait-timeout 300` **naming
+the long-lived services explicitly** — `keycloak-exchange-config`/`keycloak-demo-users`/
+`openelis-db-hardening` are one-shot `restart: "no"` jobs that exit 0 when done, which Compose's
+own `--wait` can otherwise treat ambiguously; they still run to completion first via `depends_on`
+— then seeds the baseline), `down.sh` (plain stop keeps volumes; `down.sh -v` explicitly deletes
+them), `reset.sh` (re-converges the demo Keycloak users, including clearing brute-force lockouts,
+then calls the seed reset), `status.sh` (a truthful `docker compose ps` + `alembic current` +
+username-only summary, never a password). Every script resolves its own repo root and reads
+`demo/native/demo.env` explicitly, never relying on Compose's implicit `.env`-in-cwd discovery.
+
+### CI — the first real boot attempt
+
+`.github/workflows/ci.yml`'s existing `compose` job gained a step validating
+`docker-compose.native-demo.yml --env-file demo/native/demo.env config -q`. A new job,
+`native-demo-boot`, is the only job in this entire workflow that runs `docker compose ... up`
+against real images: `scripts/demo/up.sh`, `status.sh`, three real Caddy-proxied smoke tests
+(Keycloak realm discovery, Exchange API 401-not-500/502, UI HTML), a repeated `reset.sh` (D2/D3),
+and a mandatory D4 negative control exercising **both** independent refusal facts (a wrong
+database name, and a blank `ADAPTER_DEMO_ENVIRONMENT`) with an assertion on the printed `REFUSED`
+reason string, not merely a non-zero exit code — so a future regression that fails for the wrong
+reason still fails this check. Teardown (`down.sh -v`) runs `if: always()`.
+
+### Frontend — D16
+
+`ui/src/api/exchangeClient.test.ts` gained one test using the **real** `ExchangeClient`
+implementation (every other Lab/Clinic UI test mocks the client interface itself) against a
+`fetch`-mocked response shaped exactly like `demo_seed.py`'s own seed data (the same
+`PROVIDER_ORG_NAME`/`CATALOG_DISPLAY_NAME` literal strings, mirrored, not re-derived) — proving the
+real network-boundary code (URL construction, auth header, JSON parsing, type mapping) correctly
+consumes demo-shaped data, without needing a live backend.
+
+### Test evidence
+
+Adapter: **1104 passed**, 118 skipped (existing PG-qualification files plus the 2 new demo-seed PG
+tests, all env-gated) — 1095 baseline (DH-LAB-005's own count) + 9 new unit tests
+(`test_demo_seed.py`: RS1-5 safety-boundary, BS1-4 baseline idempotency). `ruff check`/
+`ruff format --check` clean across `src`/`tests`/`migrations`/`scripts`.
+
+UI: `oxlint` 0 errors (35 pre-existing warnings, unchanged — none in any file this ticket
+touched); `tsc -b --noEmit` clean; `npm run build` succeeds, and its own `postbuild` secret-scan
+(`check-no-secrets-in-bundle.mjs`) found nothing. Full vitest suite: 28 files / 410 tests passed in
+the one full run; 4 files (including the one this ticket modified,
+`exchangeClient.test.ts`) hit the same pre-existing WSL2/vitest worker-pool startup timeout
+DH-LAB-005 already documented — each was re-run individually and passed clean (`client.test.ts`
+66, `pendingPatientStorage.test.ts` 12, `useRegisterPatient.test.ts` 8,
+`exchangeClient.test.ts` 40, including the new D16 case) — zero regressions, same class of
+environment noise, not a code defect.
+
+Compose config (`docker compose ... config -q`) validated locally against
+`docker-compose.native-demo.yml` after every edit. A real container boot was **not** exercised
+locally — this sandbox's Docker cannot pull image blobs from the CDN (documented repeatedly since
+DH-LAB-002). **The `native-demo-boot` CI job triggered by this ticket's single push is therefore
+this feature's first real-boot evidence, not a confirmation of something already proven here.**
+
+### Evidence-level matrix (never conflated)
+
+| Claim | Locally qualified | CI qualified | Real PostgreSQL | Real Keycloak | Real browser | Production deployed |
+|---|---|---|---|---|---|---|
+| Compose topology parses/resolves | Y | pending this push | N/A | N/A | N/A | N |
+| Reset-safety three-fact boundary | Y (unit) | pending | **Y** (2 tests, 4 runs, incl. a genuine positive control and a genuine bug fix) | N | N | N |
+| Baseline seed idempotency | Y (unit) | pending | Y (via the reset test's second run) | N | N | N |
+| Native-only boot (no OpenMRS/OpenELIS wait) | N (sandbox CDN-blocked) | pending — first real attempt | N/A | N | N | N |
+| Demo Keycloak users/brute-force reset | N (script untestable without live Keycloak) | pending | N/A | N | N | N |
+| Frontend consumes demo-shaped data | Y (fetch-mocked) | N/A | N/A | N/A | N | N |
+| Golden journey (Clinic→Exchange→Lab) in a browser | N | N | N | N | **N** | N |
+
+### Known remaining gaps — not hidden
+
+- No real browser has ever opened this demo. CI's `native-demo-boot` job proves containers reach
+  healthy and respond correctly to `curl`; it does not click through the golden journey. That
+  remains this ticket's own first forward-sequence item (below), not something this entry claims.
+- No real Keycloak login (redirect/PKCE round trip) has been observed against this demo, for the
+  identical reason DH-CLINIC-004B's own open item states for the real stack.
+- `keycloak/reconcile-demo-users.sh` and the brute-force-clear it performs have never run against
+  a live Keycloak in this sandbox — only read for correctness and mirrored against
+  `reconcile-exchange.sh`'s already-qualified idiom.
+- The ticket's own full D1-D17/52-item adversarial checklist was not produced as a mechanical
+  one-to-one numbered mapping; the properties those items describe were exercised via `advisor()`
+  review (which found and this entry's fixes resolved 6 real defects: an unsafe `--wait` service
+  list, a D4 negative control that risked testing the wrong failure, a missing
+  `exchange_lab_prices` reset table, no brute-force-lockout clearing on reset, a stale docstring,
+  and a missing secret-scan path exclusion) plus the structural checks above (git diff shows this
+  ticket touched no pre-existing production file except `ci.yml` and one UI test file — the
+  strongest available proof DH-CLINIC-004B/DH-LAB-004/DH-LAB-005 code paths are untouched) — treat
+  the properties actually verified above as the authoritative claim, not an ID count.
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED, unchanged.** This ticket's `git diff` touched no
+authentication/Keycloak/Caddy production code at all — the only pre-existing files modified are
+`.github/workflows/ci.yml` (additive steps/job) and `ui/src/api/exchangeClient.test.ts` (one added
+test); every other file is new. DH-CLINIC-004B's own open item (a real browser OIDC round trip
+against the real stack) is entirely untouched by this ticket.
+
+### Confirmation no real patient data used
+
+Every identifier in `demo_seed.py` and its tests is synthetic and labelled as such
+(`PROVIDER_ORG_NAME`/`LAB_ORG_NAME` = "Clinique Démo DHealth"/"Laboratoire Démo DHealth",
+`CATALOG_DISPLAY_NAME` = "Analyse de démonstration A", synthetic patient name, synthetic
+observation values in the PG test's own object-graph helper). No real clinical content, analyte,
+or reference range was invented — this ticket adds no clinical decision surface at all, only
+demo-baseline configuration and workflow-state cleanup.
+
+### Confirmation no PR
+
+No pull request was created or used for this ticket's work, per its own explicit instruction;
+every change landed as a focused commit directly on `master`.
+
+`NEXT: DH-DEMO-001's own forward sequence, item 1 — Native runtime/browser golden-journey qualification (the native-demo-boot CI job triggered by this ticket's push is the first step; a real browser walkthrough of the full Clinic→Exchange→Lab loop has not yet been attempted).`
