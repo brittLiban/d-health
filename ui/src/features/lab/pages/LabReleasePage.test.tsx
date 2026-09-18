@@ -206,12 +206,9 @@ describe('LabReleasePage', () => {
     await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
 
     await waitFor(() => expect(releaseLabOrderResults).toHaveBeenCalledTimes(1))
-    expect(releaseLabOrderResults).toHaveBeenCalledWith(
-      'lab-a',
-      'order-a',
-      { expected_result_fingerprint: 'fingerprint-1' },
-      expect.anything(),
-    )
+    expect(releaseLabOrderResults).toHaveBeenCalledWith('lab-a', 'order-a', {
+      expected_result_fingerprint: 'fingerprint-1',
+    })
     expect(await screen.findByText(/Résultats libérés/)).toBeInTheDocument()
   })
 

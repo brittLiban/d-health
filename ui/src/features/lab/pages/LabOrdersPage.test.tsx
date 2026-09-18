@@ -803,7 +803,12 @@ describe('LabOrdersPage', () => {
     expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
   })
 
-  it('PUI8: no result-entry control appears once IN_PROGRESS', async () => {
+  it('PUI8: once IN_PROGRESS, the controlled Native entry form loads -- never a release control', async () => {
+    // DH-LAB-002's original invariant here ("no result-entry control appears once IN_PROGRESS")
+    // predates DH-LAB-003/004's own controlled entry form and no longer holds -- the entry form
+    // is now the expected, correct content for this state (see the UI-group below for full
+    // coverage). What remains true and worth asserting here: no *release* control ever appears
+    // on this page (release lives only on the dedicated Libération surface, DH-LAB-004).
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([
         makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
@@ -814,8 +819,8 @@ describe('LabOrdersPage', () => {
     })
     render(<LabApp client={client} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    expect(await screen.findByText(/La saisie des résultats sera disponible/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /résultat/i })).not.toBeInTheDocument()
+    expect(await screen.findByText('Saisie des résultats')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Libérer/i })).not.toBeInTheDocument()
   })
 
   // -- LR-C/LR-P-group: lost-response recovery (DH-LAB-002) ---------------------------------
@@ -1581,13 +1586,10 @@ describe('LabOrdersPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Enregistrer les valeurs' }))
 
     await waitFor(() => expect(recordNativeResultValues).toHaveBeenCalledTimes(1))
-    expect(recordNativeResultValues).toHaveBeenCalledWith(
-      'lab-a',
-      'order-a',
-      'item-a',
-      { template_id: 'template-a', values: [{ definition_id: 'def-a', numeric_value: '7.2' }] },
-      expect.anything(),
-    )
+    expect(recordNativeResultValues).toHaveBeenCalledWith('lab-a', 'order-a', 'item-a', {
+      template_id: 'template-a',
+      values: [{ definition_id: 'def-a', numeric_value: '7.2' }],
+    })
   })
 
   it('UI15: completion is blocked until every required definition has a value, with its own confirmation', async () => {

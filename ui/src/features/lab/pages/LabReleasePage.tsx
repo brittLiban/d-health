@@ -196,8 +196,11 @@ export function LabReleasePage() {
         // result set before any further release attempt. Re-fetching here (rather than merely
         // showing the message) also updates `panel.inspection.result_fingerprint` to the current
         // value, so the next confirm click is a genuine fresh inspection, not a stale replay.
-        setReleaseState({ submitting: false, error: RELEASE_STALE_ERROR })
+        // `loadInspection` itself resets `releaseState` to clear any *previous* mutation error --
+        // called first, so the stale-fingerprint message set immediately after is the one that
+        // actually survives to render, not the reset's `null`.
         loadInspection(orderId)
+        setReleaseState({ submitting: false, error: RELEASE_STALE_ERROR })
         return
       }
       // Ambiguous (network/5xx) response -- re-read authoritative state, never blind-retry.

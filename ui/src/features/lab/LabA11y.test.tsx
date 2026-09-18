@@ -61,12 +61,13 @@ describe('Lab Accessibility', () => {
       rejectLabOrder: vi.fn(),
       recordLabOrderCollection: vi.fn(),
       startProcessingLabOrder: vi.fn(),
-      getResultEntryPlan: vi.fn().mockResolvedValue({
+      getResultEntryWorkspace: vi.fn().mockResolvedValue({
         order_id: 'order-1',
         order_status: 'IN_PROGRESS',
-        all_items_configured: true,
         items: [],
       }),
+      recordNativeResultValues: vi.fn(),
+      completeResultEntry: vi.fn(),
     } as unknown as ExchangeClient
   })
 
@@ -134,22 +135,20 @@ describe('Lab Accessibility', () => {
     expect(await axe(container)).toHaveNoViolations()
   })
 
-  // -- DH-LAB-003 §69: read-only result-structure preview accessibility ---------------------
+  // -- DH-LAB-004 §69: controlled Native result-entry form accessibility --------------------
 
-  it('Lab result-structure preview has no detectable axe violations', async () => {
+  it('Lab result-entry form has no detectable axe violations', async () => {
     const inProgress = { ...sampleOrders[0], status: 'IN_PROGRESS' as const }
     mockClient = {
       ...mockClient,
       listLabOrders: vi.fn().mockResolvedValue([inProgress]),
       getLabOrder: vi.fn().mockResolvedValue(inProgress),
-      getResultEntryPlan: vi.fn().mockResolvedValue({
+      getResultEntryWorkspace: vi.fn().mockResolvedValue({
         order_id: 'order-1',
         order_status: 'IN_PROGRESS',
-        all_items_configured: true,
         items: [
           {
             item_id: 'item-1',
-            catalog_entry_id: 'entry-1',
             catalog_code_snapshot: 'GLU',
             catalog_display_name_snapshot: 'Glycémie à jeun',
             template: {
@@ -168,14 +167,19 @@ describe('Lab Accessibility', () => {
                 },
               ],
             },
+            template_pinned: false,
+            entry_mode: 'NATIVE_TEMPLATE',
+            entry_completed: false,
+            entry_completed_at: null,
+            entered_values: [],
           },
         ],
       }),
     } as unknown as ExchangeClient
     const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
-    await screen.findByText('Structure des résultats')
-    await screen.findByText(/Demo Measure A/)
+    await screen.findByText('Saisie des résultats')
+    await screen.findByLabelText(/Demo Measure A/)
     expect(await axe(container)).toHaveNoViolations()
   })
 })
