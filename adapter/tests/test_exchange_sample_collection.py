@@ -587,11 +587,13 @@ def _seed_n_orders_for_one_lab(
     return order_ids
 
 
-def _count_list_for_lab_queries(sessions, workflow, lab_id) -> int:
+def _count_list_for_lab_queries(sessions, workflow, lab_id) -> tuple[int, list[str]]:
     query_count = {"n": 0}
+    statements: list[str] = []
 
-    def _count(*_args, **_kwargs) -> None:
+    def _count(_conn, _cursor, statement, *_args, **_kwargs) -> None:
         query_count["n"] += 1
+        statements.append(statement)
 
     engine = sessions.kw["bind"]
     event.listen(engine, "after_cursor_execute", _count)
@@ -599,23 +601,28 @@ def _count_list_for_lab_queries(sessions, workflow, lab_id) -> int:
         workflow.list_for_lab(lab_id)
     finally:
         event.remove(engine, "after_cursor_execute", _count)
-    return query_count["n"]
+    return query_count["n"], statements
 
 
 def test_list_for_lab_collection_join_adds_no_marginal_per_order_query(
     organizations, catalog, directory, patients, sessions
 ) -> None:
     """Isolates DH-EX-011's own marginal contribution to `list_for_lab`'s query cost, at the
-    repository level, bypassing the HTTP layer entirely. `list_for_lab` is not a single-query
-    method even before this ticket: `_to_record`'s access to `order.items` triggers one lazy-load
-    query per returned order -- a pre-existing DH-EX-006 N+1 this ticket discovered but does not
-    fix, since it predates and is orthogonal to the collection-milestone feature (out of this
-    ticket's scope; recorded as a finding, not silently patched). What this test actually proves is
-    the thing DH-EX-011 is responsible for: adding the ``LabSampleCollection`` outer join must not
-    make that pre-existing per-order cost *worse* -- comparing a 2-order lab against an 8-order lab,
-    the query-count delta must track the existing one-lazy-load-per-order cost (roughly 1 extra
-    query per extra order), never roughly 2 (which would mean the collection join added its own
-    second per-order query on top)."""
+    repository level, bypassing the HTTP layer entirely. Comparing a 2-order lab against an
+    8-order lab, the total query-count delta must stay flat (0, or at most 1 for incidental
+    variance) -- a genuine per-order cost from the collection join, or a regression of the
+    DH-LAB-002 `items` fix below, would show up here as a delta that scales with order count.
+
+    DH-LAB-002 update: `list_for_lab`'s pre-existing `LabOrder.items` lazy-load N+1 -- found here
+    by DH-EX-011 and deliberately left unfixed as out of that ticket's scope -- is now closed via
+    `selectinload(LabOrder.items)` (see `lab_workflow.py`'s own docstring on that query). This test
+    is updated, not just left passing by coincidence: before the fix its assertion tolerated a
+    delta scaling with order count (`extra_orders * 1.5`); it now asserts the delta is flat,
+    because there is no longer any per-order query left to scale. The `items`-table-specific
+    assertion that the fix issues exactly one additional query regardless of N lives in
+    `test_list_for_lab_items_selectinload_issues_one_bounded_query_regardless_of_order_count`
+    below, which is the test that actually exercises the `items` relationship the ticket asked
+    for."""
     from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
 
     workflow = LabWorkflowRepository(sessions, organizations)
@@ -652,18 +659,72 @@ def test_list_for_lab_collection_join_adds_no_marginal_per_order_query(
     workflow.accept(order_id=large_orders[0], lab_organization_id=lab_large.id)
     workflow.record_collection(order_id=large_orders[0], lab_organization_id=lab_large.id)
 
-    small_count = _count_list_for_lab_queries(sessions, workflow, lab_small.id)
-    large_count = _count_list_for_lab_queries(sessions, workflow, lab_large.id)
+    small_count, _ = _count_list_for_lab_queries(sessions, workflow, lab_small.id)
+    large_count, _ = _count_list_for_lab_queries(sessions, workflow, lab_large.id)
 
     extra_orders = len(large_orders) - len(small_orders)
     delta = large_count - small_count
-    # Allow up to 1.5 queries per extra order (the existing one-lazy-load-per-order cost plus
-    # slack) -- a genuine second per-order query from the collection join would push this well
-    # past 2x, not just over the slack margin.
-    assert delta <= extra_orders * 1.5, (
+    assert delta <= 1, (
         f"query count grew {delta} for {extra_orders} extra orders "
-        f"({small_count} -> {large_count}) -- looks like the collection join added its own "
-        f"per-order query on top of the pre-existing items lazy-load"
+        f"({small_count} -> {large_count}) -- list_for_lab should now be flat/bounded, not "
+        f"scaling with order count, now that the items lazy-load N+1 is fixed"
+    )
+
+
+def test_list_for_lab_items_selectinload_issues_one_bounded_query_regardless_of_order_count(
+    organizations, catalog, directory, patients, sessions
+) -> None:
+    """DH-LAB-002 §33/§34/§66: directly measures the `LabOrder.items` relationship this ticket was
+    asked to close, by counting queries that actually hit `exchange_lab_order_items` -- not just
+    the total query count (which the test above already covers). Before the `selectinload` fix,
+    this count equals the number of orders returned (one lazy-load per row); after the fix it is
+    exactly 1, for both a 1-order and an 8-order lab, proving the query no longer scales with N."""
+    from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
+
+    workflow = LabWorkflowRepository(sessions, organizations)
+
+    lab_one = make_lab(organizations, name="N1ItemsOne")
+    directory.upsert(
+        lab_organization_id=lab_one.id,
+        public_address="X",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    _seed_n_orders_for_one_lab(
+        organizations, catalog, directory, patients, sessions, lab=lab_one, count=1
+    )
+
+    lab_many = make_lab(organizations, name="N1ItemsMany")
+    directory.upsert(
+        lab_organization_id=lab_many.id,
+        public_address="X",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    _seed_n_orders_for_one_lab(
+        organizations, catalog, directory, patients, sessions, lab=lab_many, count=8
+    )
+
+    _, statements_one = _count_list_for_lab_queries(sessions, workflow, lab_one.id)
+    _, statements_many = _count_list_for_lab_queries(sessions, workflow, lab_many.id)
+
+    items_queries_one = [s for s in statements_one if "exchange_lab_order_items" in s]
+    items_queries_many = [s for s in statements_many if "exchange_lab_order_items" in s]
+
+    assert len(items_queries_one) == 1, (
+        f"expected exactly 1 query against exchange_lab_order_items for a 1-order lab, got "
+        f"{len(items_queries_one)}: {items_queries_one}"
+    )
+    assert len(items_queries_many) == 1, (
+        f"expected exactly 1 query against exchange_lab_order_items for an 8-order lab, got "
+        f"{len(items_queries_many)} -- items lazy-load is scaling with order count again: "
+        f"{items_queries_many}"
     )
 
 
@@ -803,6 +864,100 @@ def test_platform_admin_alone_cannot_record_collection(
         headers=_auth(admin_token),
     )
     assert response.status_code == 403
+
+
+def test_releaser_alone_cannot_record_collection(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    """DH-LAB-002 §40/§63 (BC10): `LAB_RESULT_RELEASER` is DH-EX-012's own role, introduced after
+    DH-EX-011 shipped -- DH-EX-011's own authorization matrix (above) could not have exercised it,
+    so this negative control genuinely did not exist before this ticket. Recording collection is a
+    `LAB_TECH`-only action; a releaser with no `LAB_TECH` membership must be refused exactly like
+    the bare-ORG_ADMIN case above, not silently allowed because it holds *some* lab role."""
+    private_key, _ = keypair
+    provider, order_id, entry_id, clinician_token = _create_order(
+        client, private_key, organizations, catalog, patients, name="ReleaserDenied"
+    )
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ReleaserDeniedLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
+    assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
+
+    identity_id = _bootstrap_identity(client, private_key, "releaser-denied")
+    _grant_roles(
+        client, private_key, lab.id, identity_id, "releaser-denied", ["LAB_RESULT_RELEASER"]
+    )
+    releaser_token = make_token(private_key, subject="releaser-denied")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(releaser_token),
+    )
+    assert response.status_code == 403
+
+
+def test_releaser_alone_cannot_start_processing(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    """DH-LAB-002 §40/§64 (BP8): same gap as `test_releaser_alone_cannot_record_collection` above,
+    for `start-processing`. A LAB_TECH accepts and records collection first so the only variable
+    under test is the releaser-only caller's own authorization on `start-processing` -- the order
+    must remain `ACCEPTED`, never silently advanced to `IN_PROGRESS`."""
+    private_key, _ = keypair
+    provider, order_id, entry_id, clinician_token = _create_order(
+        client, private_key, organizations, catalog, patients, name="ReleaserProcDenied"
+    )
+    lab = _referral_lab(
+        organizations,
+        directory,
+        catalog,
+        name="ReleaserProcDeniedLab",
+        entry_id=entry_id,
+        client=client,
+        private_key=private_key,
+        provider_id=provider.id,
+    )
+    assert _assign_lab(client, clinician_token, provider.id, order_id, lab.id).status_code == 201
+    lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, "releaser-proc-denied")
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/accept",
+        headers=_auth(lab_tech_token),
+    )
+    client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
+    )
+
+    identity_id = _bootstrap_identity(client, private_key, "releaser-proc-denied")
+    _grant_roles(
+        client,
+        private_key,
+        lab.id,
+        identity_id,
+        "releaser-proc-denied",
+        ["LAB_RESULT_RELEASER"],
+    )
+    releaser_token = make_token(private_key, subject="releaser-proc-denied")
+
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/start-processing",
+        headers=_auth(releaser_token),
+    )
+    assert response.status_code == 403
+
+    check = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}",
+        headers=_auth(lab_tech_token),
+    )
+    assert check.status_code == 200, check.text
+    assert check.json()["status"] == "ACCEPTED"
 
 
 def test_cross_lab_lab_tech_gets_anti_enumeration_404(

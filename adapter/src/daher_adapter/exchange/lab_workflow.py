@@ -57,7 +57,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from daher_adapter.exchange.models import (
     LabOrder,
@@ -156,13 +156,25 @@ class LabWorkflowRepository:
 
         DH-EX-011: collection state is folded into this same query via ``outerjoin`` -- never a
         second per-row query -- so exposing ``collection_recorded_at`` here introduces zero N+1
-        regression regardless of how many orders this bounded listing returns."""
+        regression regardless of how many orders this bounded listing returns.
+
+        DH-LAB-002: ``.options(selectinload(LabOrder.items))`` closes the pre-existing,
+        DH-EX-011-disclosed ``LabOrder.items`` lazy-load N+1 (see
+        ``test_list_for_lab_collection_join_adds_no_marginal_per_order_query``'s own docstring for
+        where this was first found and deliberately left unfixed, out of that ticket's scope).
+        ``selectinload`` -- not ``joinedload`` -- because the primary query already returns one row
+        per ``LabOrder`` via the ``LabSelection``/``LabSampleCollection`` joins above; a
+        ``joinedload`` of the one-to-many ``items`` would multiply those rows per item and require
+        deduplication, where ``selectinload`` instead issues exactly one additional bounded
+        ``WHERE lab_order_id IN (...)`` query for every order in this page's result set, regardless
+        of how many orders or items each order has."""
         with self._sessions() as session:
             query = (
                 select(LabOrder, LabSelection, LabSampleCollection)
                 .join(LabSelection, LabSelection.lab_order_id == LabOrder.id)
                 .outerjoin(LabSampleCollection, LabSampleCollection.lab_order_id == LabOrder.id)
                 .where(LabSelection.lab_organization_id == lab_organization_id)
+                .options(selectinload(LabOrder.items))
             )
             if status_filter is not None:
                 query = query.where(LabOrder.status == status_filter.value)
