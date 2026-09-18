@@ -1008,13 +1008,39 @@ class LabWorkflowOrderItemResponse(BaseModel):
     selected_price_currency: str | None
 
 
+class LabPatientIdentityResponse(BaseModel):
+    """DH-LAB-001 §16/§17: the minimal, lab-safe human-identity projection -- name and exact date
+    of birth only, deliberately never `PatientIdentitySummaryResponse`'s own `contact_channel_type`/
+    `contact_value` fields. Native Lab staff need enough identity to safely distinguish one patient
+    from another (§18), not the provider's full directory entry. Sourced from `Patient` via
+    `PatientReference.patient_id`, never from `PatientReference.display_name`'s own source-system
+    snapshot (§17) -- the same DH-CLINIC-005 rule ADR-051's dated clarification already states,
+    extended here to Native Lab."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+
+
+def _to_lab_patient_identity(summary: PatientIdentitySummaryResponse) -> LabPatientIdentityResponse:
+    return LabPatientIdentityResponse(
+        patient_id=summary.patient_id,
+        display_name=summary.display_name,
+        date_of_birth=summary.date_of_birth,
+    )
+
+
 class LabWorkflowOrderResponse(BaseModel):
     """The selected lab's own narrow clinical-work view -- deliberately excludes
     `PatientReference`/`ExchangeIdentity`/membership/audit internal ids, patient contact data, and
     any Provider-side detail beyond a safe organization display name. `patient_display_name` is
     whatever transaction-scoped snapshot DH-EX-001 recorded, or `None` if it was never supplied --
     never fabricated, never used for anything beyond operational display (see
-    `exchange/lab_workflow.py`'s module docstring)."""
+    `exchange/lab_workflow.py`'s module docstring). Kept, unchanged, for API compatibility:
+    `patient` (DH-LAB-001 §16) is the new authoritative field Native Lab actually renders
+    identity from."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1023,6 +1049,7 @@ class LabWorkflowOrderResponse(BaseModel):
     selected_at: datetime
     updated_at: datetime
     patient_display_name: str | None
+    patient: LabPatientIdentityResponse
     ordering_provider_name: str
     requested_tests: list[LabWorkflowOrderItemResponse]
     collection_recorded_at: datetime | None
@@ -3607,14 +3634,21 @@ def build_exchange_router(
     # -- DH-EX-006: selected-lab assigned-order workflow ------------------------------------------
 
     def _lab_workflow_order_response(record: LabWorkflowOrderRecord) -> LabWorkflowOrderResponse:
+        """Single-order builder -- one provider lookup, one patient-identity lookup. Acceptable
+        for a single detail read (§21); list responses use the batched
+        ``_lab_workflow_order_responses`` below instead of calling this per row."""
         provider = organizations.get(record.provider_organization_id)
         patient = patients.get(record.patient_reference_id)
+        identity = _require_patient_identity(
+            record.provider_organization_id, record.patient_reference_id
+        )
         return LabWorkflowOrderResponse(
             order_id=record.id,
             status=record.status,
             selected_at=record.selected_at,
             updated_at=record.updated_at,
             patient_display_name=patient.display_name,
+            patient=_to_lab_patient_identity(identity),
             ordering_provider_name=provider.name,
             requested_tests=[
                 LabWorkflowOrderItemResponse(
@@ -3628,6 +3662,70 @@ def build_exchange_router(
             collection_recorded_at=record.collection_recorded_at,
         )
 
+    def _lab_workflow_order_responses(
+        records: list[LabWorkflowOrderRecord],
+    ) -> list[LabWorkflowOrderResponse]:
+        """DH-LAB-001 §21: batched sibling of ``_lab_workflow_order_response`` for the work-queue
+        listing -- never one provider/patient query per row. A lab's assigned queue can span
+        multiple distinct ordering providers (unlike Clinic's own single-provider order/result
+        lists), so provider names are resolved in exactly one query for every distinct provider id
+        on the page (``organizations.get_many``), and patient identities are resolved via
+        ``_require_patient_identities`` once per distinct provider id -- bounded by the number of
+        *distinct providers* represented on this page, never by the number of orders."""
+        provider_ids = [record.provider_organization_id for record in records]
+        providers_by_id = organizations.get_many(provider_ids)
+        references_by_id = patients.get_many([record.patient_reference_id for record in records])
+
+        references_by_provider: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for record in records:
+            references_by_provider.setdefault(record.provider_organization_id, []).append(
+                record.patient_reference_id
+            )
+        identities_by_reference: dict[uuid.UUID, PatientIdentitySummaryResponse] = {}
+        for provider_id, reference_ids in references_by_provider.items():
+            identities_by_reference.update(_require_patient_identities(provider_id, reference_ids))
+
+        responses = []
+        for record in records:
+            provider = providers_by_id.get(record.provider_organization_id)
+            if provider is None:
+                raise LabAssignmentIntegrityError(
+                    f"LabOrder {record.id} references provider organization "
+                    f"{record.provider_organization_id}, which does not resolve -- refusing to "
+                    f"render this order list"
+                )
+            patient = references_by_id.get(record.patient_reference_id)
+            if patient is None:
+                raise PatientIdentityIntegrityError(
+                    f"LabOrder {record.id} references PatientReference "
+                    f"{record.patient_reference_id}, which does not resolve -- refusing to render "
+                    f"this order list"
+                )
+            responses.append(
+                LabWorkflowOrderResponse(
+                    order_id=record.id,
+                    status=record.status,
+                    selected_at=record.selected_at,
+                    updated_at=record.updated_at,
+                    patient_display_name=patient.display_name,
+                    patient=_to_lab_patient_identity(
+                        identities_by_reference[record.patient_reference_id]
+                    ),
+                    ordering_provider_name=provider.name,
+                    requested_tests=[
+                        LabWorkflowOrderItemResponse(
+                            catalog_code_snapshot=item.catalog_code_snapshot,
+                            catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                            selected_price_amount=item.selected_price_amount,
+                            selected_price_currency=item.selected_price_currency,
+                        )
+                        for item in record.items
+                    ],
+                    collection_recorded_at=record.collection_recorded_at,
+                )
+            )
+        return responses
+
     @router.get("/organizations/{lab_id}/lab-orders", response_model=list[LabWorkflowOrderResponse])
     def list_lab_workflow_orders(
         lab_id: uuid.UUID,
@@ -3637,7 +3735,7 @@ def build_exchange_router(
     ) -> list[LabWorkflowOrderResponse]:
         _require_lab_tech(principal, lab_id)
         records = lab_workflow.list_for_lab(lab_id, limit=limit, status_filter=order_status)
-        return [_lab_workflow_order_response(record) for record in records]
+        return _lab_workflow_order_responses(records)
 
     @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}", response_model=LabWorkflowOrderResponse

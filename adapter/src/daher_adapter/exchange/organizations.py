@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -92,6 +93,24 @@ class OrganizationRepository:
                 )
             ).all()
             return [_to_record(organization) for organization in organizations]
+
+    def get_many(
+        self, organization_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, OrganizationRecord]:
+        """DH-LAB-001 §21: batched sibling of ``get`` for list-response builders -- one query
+        regardless of how many distinct organization ids a page needs, never one lookup per row.
+        An id absent from the returned dict simply was not found; unlike ``get``, this never
+        raises -- callers that require every id to resolve (they always do, in practice, since
+        these ids come from a foreign key) check for missing keys themselves, exactly like
+        ``_require_patient_identities``'s own missing-id discipline."""
+        unique_ids = list(dict.fromkeys(organization_ids))
+        if not unique_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(Organization).where(Organization.id.in_(unique_ids))
+            ).all()
+            return {row.id: _to_record(row) for row in rows}
 
 
 def _to_record(organization: Organization) -> OrganizationRecord:

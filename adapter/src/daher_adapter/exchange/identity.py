@@ -27,6 +27,7 @@ invariant instead of a convention 40 call sites could each get wrong."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import or_, select
@@ -253,6 +254,21 @@ class PatientReferenceRepository:
             if reference is None:
                 raise ReferenceNotFound(str(reference_id))
             return _to_patient_record(reference)
+
+    def get_many(
+        self, reference_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, PatientReferenceRecord]:
+        """DH-LAB-001 §21: batched sibling of ``get`` for list-response builders -- one query
+        regardless of page size, never one lookup per row. An id absent from the returned dict
+        simply was not found; unlike ``get``, this never raises."""
+        unique_ids = list(dict.fromkeys(reference_ids))
+        if not unique_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(PatientReference).where(PatientReference.id.in_(unique_ids))
+            ).all()
+            return {row.id: _to_patient_record(row) for row in rows}
 
     def get_for_organization(
         self, reference_id: uuid.UUID, organization_id: uuid.UUID

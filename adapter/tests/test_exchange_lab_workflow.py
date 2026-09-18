@@ -18,7 +18,7 @@ from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate
 from exchange_support import make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
@@ -1876,3 +1876,384 @@ def test_10way_concurrent_collection_recording(tmp_path: Path) -> None:
 
         count = session.scalar(select(func.count()).select_from(LabSampleCollection))
     assert count == 1
+
+
+# -- DH-LAB-001 §16/§17/§51: lab-safe Patient-directory identity (BI1-BI7) ----------------------
+
+
+def test_bi1_lab_work_queue_uses_patient_directory_identity(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    private_key, _ = keypair
+    provider, lab, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI1"
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bi1")
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    ).json()
+    assert detail["patient"]["display_name"] == "Synthetic Patient BI1"
+    assert "patient_id" in detail["patient"]
+
+
+def test_bi2_patient_reference_snapshot_intentionally_differs_api_returns_patient_value(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    """Adversarial: mutate the linked ``Patient`` row directly (never reachable through any real
+    API -- ADR-051 Decision 12 has no PATCH/PUT on Patient) so it genuinely diverges from the
+    immutable ``PatientReference`` snapshot recorded at order-creation time. The lab-facing
+    `patient` field must reflect the current `Patient` row, never the stale snapshot -- exactly
+    the DH-CLINIC-005 rule ADR-051's dated clarification states, now proven for Native Lab too."""
+    from daher_adapter.exchange.models import Patient
+
+    private_key, _ = keypair
+    provider, lab, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI2"
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bi2")
+
+    # `LabOrder.patient_reference_id` points at PatientReference, not Patient directly --
+    # resolve through the reference row to find the linked Patient to mutate.
+    from daher_adapter.exchange.models import PatientReference
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        reference = session.get(PatientReference, order.patient_reference_id)
+        patient_id = reference.patient_id
+        assert reference.display_name == "Synthetic Patient BI2"
+        patient_row = session.get(Patient, patient_id)
+        patient_row.display_name = "Corrected Real Name BI2"
+        session.commit()
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    ).json()
+    assert detail["patient"]["display_name"] == "Corrected Real Name BI2"
+    # The legacy compat field still carries the original, now-stale PatientReference snapshot --
+    # proving the two fields genuinely come from different tables, not one derived from the other.
+    assert detail["patient_display_name"] == "Synthetic Patient BI2"
+
+    list_response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders", headers=_auth(lab_tech_token)
+    ).json()
+    matching = next(o for o in list_response if o["order_id"] == str(order_id))
+    assert matching["patient"]["display_name"] == "Corrected Real Name BI2"
+
+
+def test_bi3_date_of_birth_returned_when_known(
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
+) -> None:
+    import datetime as dt
+
+    from daher_adapter.exchange.models import Patient, PatientReference
+
+    private_key, _ = keypair
+    provider, lab, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI3"
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bi3")
+
+    with sessions() as session:
+        order = session.get(LabOrder, order_id)
+        reference = session.get(PatientReference, order.patient_reference_id)
+        patient_row = session.get(Patient, reference.patient_id)
+        patient_row.date_of_birth = dt.date(1990, 1, 1)
+        session.commit()
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    ).json()
+    assert detail["patient"]["date_of_birth"] == "1990-01-01"
+
+
+def test_bi4_unknown_date_of_birth_remains_null_never_fabricated(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    private_key, _ = keypair
+    provider, lab, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI4"
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bi4")
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    ).json()
+    assert detail["patient"]["date_of_birth"] is None
+
+
+def test_bi5_no_contact_data_added_to_lab_response(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    private_key, _ = keypair
+    provider, lab, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI5"
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bi5")
+
+    detail = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}", headers=_auth(lab_tech_token)
+    ).json()
+    assert set(detail["patient"].keys()) == {"patient_id", "display_name", "date_of_birth"}
+
+    list_response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders", headers=_auth(lab_tech_token)
+    ).json()
+    for entry in list_response:
+        assert set(entry["patient"].keys()) == {"patient_id", "display_name", "date_of_birth"}
+
+
+def test_bi6_no_standalone_patient_route_exists_for_lab(client: TestClient, keypair) -> None:
+    """A lab-facing caller has no way to fetch Patient identity independent of an order it is
+    already assigned to -- there is no `/organizations/{lab_id}/patients/...` route at all."""
+    private_key, _ = keypair
+    token = make_token(private_key, subject="bi6-probe")
+    response = client.get(
+        f"/exchange/v1/organizations/{uuid.uuid4()}/patients/{uuid.uuid4()}", headers=_auth(token)
+    )
+    assert response.status_code in (404, 405)
+
+
+def test_bi7_unassigned_lab_queue_never_contains_others_patient_identity(
+    client: TestClient, keypair, organizations, catalog, directory, patients
+) -> None:
+    private_key, _ = keypair
+    provider, lab_a, order_id, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BI7"
+    )
+    lab_a_tech_token = _lab_tech_token_for(client, private_key, lab_a, organizations, "bi7a")
+    accept = client.post(
+        f"/exchange/v1/organizations/{lab_a.id}/lab-orders/{order_id}/accept",
+        headers=_auth(lab_a_tech_token),
+    )
+    assert accept.status_code == 200, accept.text
+
+    lab_b, lab_b_tech_token, _identity_id = _setup_lab_tech(
+        client, private_key, organizations, "bi7b"
+    )
+    queue_b = client.get(
+        f"/exchange/v1/organizations/{lab_b.id}/lab-orders", headers=_auth(lab_b_tech_token)
+    ).json()
+    assert not any(o["order_id"] == str(order_id) for o in queue_b)
+    detail_b = client.get(
+        f"/exchange/v1/organizations/{lab_b.id}/lab-orders/{order_id}",
+        headers=_auth(lab_b_tech_token),
+    )
+    assert detail_b.status_code == 404
+    assert detail_b.json() == {"detail": "order not found"}
+
+
+# -- DH-LAB-001 §21/§51: N+1 query-shape qualification (BQ1-BQ2) --------------------------------
+
+
+def _measure_lab_queue_identity_selects(client, lab_id, lab_tech_token, engine) -> int:
+    """Counts only SELECTs against the tables DH-LAB-001 §21 names (`exchange_organizations`,
+    `exchange_patients`, `exchange_patient_references`) -- deliberately excludes
+    `exchange_lab_order_items`'s own pre-existing, unrelated lazy-relationship load (a different,
+    out-of-scope N+1 this ticket does not touch), so this measurement isolates exactly the
+    provider-name/patient-identity batching this ticket adds."""
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, *args) -> None:  # noqa: ARG001
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        resp = client.get(
+            f"/exchange/v1/organizations/{lab_id}/lab-orders", headers=_auth(lab_tech_token)
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+    assert resp.status_code == 200, resp.text
+    identity_tables = ("exchange_organizations", "exchange_patients", "exchange_patient_references")
+    return len(
+        [
+            s
+            for s in statements
+            if s.strip().upper().startswith("SELECT") and any(t in s for t in identity_tables)
+        ]
+    )
+
+
+def test_bq1_same_provider_many_orders_query_count_does_not_scale_with_order_count(
+    client: TestClient, keypair, organizations, catalog, directory, patients, engine
+) -> None:
+    """§21's literal anti-pattern: "for each order: query provider; query patient". With a
+    *single* provider (so distinct-provider-count is fixed at 1 throughout), the query count for
+    the whole listing must not grow linearly as more orders from that same provider are added."""
+    private_key, _ = keypair
+    provider, lab, _order_id, entries, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BQ1", test_count=1
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bq1")
+    clinician_token = make_token(private_key, subject="clinician-BQ1")
+
+    selects_1 = _measure_lab_queue_identity_selects(client, lab.id, lab_tech_token, engine)
+
+    # Add 4 more orders from the SAME provider/patient, all assigned to the same lab.
+    patient_id = _create_patient(client, private_key, patients, provider.id, "BQ1-shared")
+    for i in range(4):
+        entry, _ = catalog.create_entry(code=f"DHEALTH-BQ1-{i}", display_name=f"BQ1 Test {i}")
+        offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        catalog.set_price(
+            offering_id=offering.id,
+            amount=Decimal("1000"),
+            currency="DJF",
+            expected_current_price_id=None,
+        )
+        create_response = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(clinician_token), "Idempotency-Key": _new_key()},
+            json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(entry.id)]},
+        )
+        assert create_response.status_code == 201, create_response.text
+        order_id_n = uuid.UUID(create_response.json()["id"])
+        access_token_n = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders/{order_id_n}/patient-access",
+            headers=_auth(clinician_token),
+        ).json()["access_token"]
+        options = client.get(
+            "/exchange/v1/patient/order/lab-options", headers=_auth(access_token_n)
+        ).json()["options"]
+        matching = next(opt for opt in options if opt["lab"]["id"] == str(lab.id))
+        price_ids_n = [line["current_price_id"] for line in matching["prices"]]
+        selection = client.post(
+            "/exchange/v1/patient/order/selection",
+            headers=_auth(access_token_n),
+            json={"lab_organization_id": str(lab.id), "expected_price_ids": price_ids_n},
+        )
+        assert selection.status_code == 201, selection.text
+
+    selects_5 = _measure_lab_queue_identity_selects(client, lab.id, lab_tech_token, engine)
+
+    list_response = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders", headers=_auth(lab_tech_token)
+    ).json()
+    assert len(list_response) == 5
+
+    # A true per-order N+1 (one provider query + one patient query per row) would have grown
+    # roughly 2 queries per added order (+8 for 4 more orders). A single-provider/single-patient
+    # batch stays flat regardless of order count.
+    assert selects_5 <= selects_1 + 1, (
+        f"expected roughly constant query count for a single provider, got {selects_1} for 1 "
+        f"order vs {selects_5} for 5 orders -- looks like a per-row N+1"
+    )
+
+
+def test_bq2_distinct_providers_query_count_scales_with_provider_count_not_order_count(
+    client: TestClient, keypair, organizations, catalog, directory, patients, engine
+) -> None:
+    """The queue can span multiple distinct ordering providers (§21's own stated shape, unlike
+    Clinic's single-provider order lists). Query count is bounded by *distinct provider count*,
+    never by order count independently: doubling the orders from the SAME two providers must not
+    add any further provider/patient-resolution queries."""
+    private_key, _ = keypair
+    provider_a, lab, order_a1, entries_a, *_rest = _create_selected_order(
+        client, private_key, organizations, catalog, directory, patients, name="BQ2A", test_count=1
+    )
+    lab_tech_token = _lab_tech_token_for(client, private_key, lab, organizations, "bq2")
+    clinician_a_token = make_token(private_key, subject="clinician-BQ2A")
+
+    provider_b, clinician_b_token = _setup_clinician(client, private_key, organizations, "BQ2B")
+    patient_b = _create_patient(client, private_key, patients, provider_b.id, "BQ2B")
+    entry_b, _ = catalog.create_entry(code="DHEALTH-BQ2-B0", display_name="BQ2 B Test")
+    offering_b, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_b.id)
+    catalog.set_price(
+        offering_id=offering_b.id,
+        amount=Decimal("1000"),
+        currency="DJF",
+        expected_current_price_id=None,
+    )
+    create_b = client.post(
+        f"/exchange/v1/organizations/{provider_b.id}/orders",
+        headers={**_auth(clinician_b_token), "Idempotency-Key": _new_key()},
+        json={"patient_reference_id": str(patient_b), "catalog_entry_ids": [str(entry_b.id)]},
+    )
+    assert create_b.status_code == 201, create_b.text
+    order_b1 = uuid.UUID(create_b.json()["id"])
+    access_b1 = client.post(
+        f"/exchange/v1/organizations/{provider_b.id}/orders/{order_b1}/patient-access",
+        headers=_auth(clinician_b_token),
+    ).json()["access_token"]
+    options_b1 = client.get(
+        "/exchange/v1/patient/order/lab-options", headers=_auth(access_b1)
+    ).json()["options"]
+    matching_b1 = next(opt for opt in options_b1 if opt["lab"]["id"] == str(lab.id))
+    price_ids_b1 = [line["current_price_id"] for line in matching_b1["prices"]]
+    selection_b1 = client.post(
+        "/exchange/v1/patient/order/selection",
+        headers=_auth(access_b1),
+        json={"lab_organization_id": str(lab.id), "expected_price_ids": price_ids_b1},
+    )
+    assert selection_b1.status_code == 201, selection_b1.text
+
+    # Two providers, two orders total (one each).
+    list_2 = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders", headers=_auth(lab_tech_token)
+    ).json()
+    assert len(list_2) == 2
+    selects_2_orders_2_providers = _measure_lab_queue_identity_selects(
+        client, lab.id, lab_tech_token, engine
+    )
+
+    # Add one more order from EACH already-existing provider -- order count doubles to 4,
+    # distinct-provider count stays at 2. A fresh patient under each existing provider still
+    # counts as that same provider for the query-grouping this test is proving.
+    patient_a_again = _create_patient(client, private_key, patients, provider_a.id, "BQ2A-again")
+    for provider, clinician_token, patient_id, tag in (
+        (provider_a, clinician_a_token, patient_a_again, "a"),
+        (provider_b, clinician_b_token, patient_b, "b"),
+    ):
+        entry, _ = catalog.create_entry(
+            code=f"DHEALTH-BQ2-{tag}-2", display_name=f"BQ2 {tag} Test 2"
+        )
+        offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        catalog.set_price(
+            offering_id=offering.id,
+            amount=Decimal("1000"),
+            currency="DJF",
+            expected_current_price_id=None,
+        )
+        create_response = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders",
+            headers={**_auth(clinician_token), "Idempotency-Key": _new_key()},
+            json={"patient_reference_id": str(patient_id), "catalog_entry_ids": [str(entry.id)]},
+        )
+        assert create_response.status_code == 201, create_response.text
+        order_id_n = uuid.UUID(create_response.json()["id"])
+        access_token_n = client.post(
+            f"/exchange/v1/organizations/{provider.id}/orders/{order_id_n}/patient-access",
+            headers=_auth(clinician_token),
+        ).json()["access_token"]
+        options_n = client.get(
+            "/exchange/v1/patient/order/lab-options", headers=_auth(access_token_n)
+        ).json()["options"]
+        matching_n = next(opt for opt in options_n if opt["lab"]["id"] == str(lab.id))
+        price_ids_n = [line["current_price_id"] for line in matching_n["prices"]]
+        selection_n = client.post(
+            "/exchange/v1/patient/order/selection",
+            headers=_auth(access_token_n),
+            json={"lab_organization_id": str(lab.id), "expected_price_ids": price_ids_n},
+        )
+        assert selection_n.status_code == 201, selection_n.text
+
+    list_4 = client.get(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders", headers=_auth(lab_tech_token)
+    ).json()
+    assert len(list_4) == 4
+    selects_4_orders_2_providers = _measure_lab_queue_identity_selects(
+        client, lab.id, lab_tech_token, engine
+    )
+
+    # Same 2 distinct providers, twice the orders -- query count must not have grown further.
+    assert selects_4_orders_2_providers <= selects_2_orders_2_providers, (
+        f"expected query count bounded by distinct-provider count (2), got "
+        f"{selects_2_orders_2_providers} for 2 orders/2 providers vs "
+        f"{selects_4_orders_2_providers} for 4 orders/2 providers"
+    )
+
+
+def _lab_tech_token_for(client, private_key, lab, organizations, suffix: str) -> str:
+    identity_id = _bootstrap_identity(client, private_key, f"labtech-{suffix}")
+    _grant_roles(client, private_key, lab.id, identity_id, f"labtech-{suffix}", ["LAB_TECH"])
+    return make_token(private_key, subject=f"labtech-{suffix}")
