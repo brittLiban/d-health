@@ -17229,4 +17229,4 @@ anywhere in this ticket.
 No pull request was created or used for this ticket's work, per its own explicit instruction;
 every change landed as a focused commit directly on `master`.
 
-`NEXT: DH-LAB-005 — Correction + Amendment UX`
+`NEXT: DH-DEMO-001 — Resettable Synthetic Demo Environment`
