@@ -6,18 +6,19 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-18, DH-LAB-003, directly on `master`** (this ticket's own explicit instruction: no
-branch, no PR). Starting point was `master` at `095f7f53b295b854e3430c121de226d037c8b9d0`
-(DH-LAB-002's own final documentation commit). All facts below were re-verified directly against
-the current repository and fresh local test runs on this exact commit — none are carried forward
-from an earlier session's report without re-checking. **DH-CLINIC-004B's own claims (§C/§I) are
-unchanged by this ticket** — the DHealth Lab frontend surface does not prove authentication
-runtime, and is not represented as doing so anywhere below. **Real-PostgreSQL requalification of
-this ticket's own new concurrency logic (template activation) was not run this session** — Docker
-was reachable, but pulling `postgres:16-alpine` was blocked by this sandbox's network egress to
-Docker Hub's CDN (see the DH-LAB-003 entry below for the exact error). The new migration itself
-**was** applied against real PostgreSQL, in push-triggered CI's own disposable database — that
-evidence is real, not simulated; only the two new PG-A1/PG-A2 concurrency tests were not run.
+**2026-09-18, DH-LAB-004, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `619a77b` (DH-LAB-003's own final documentation
+commit). All facts below were re-verified directly against the current repository and fresh local
+test runs on this exact commit — none are carried forward from an earlier session's report without
+re-checking. **DH-CLINIC-004B's own claims (§C/§I) are unchanged by this ticket** — the DHealth Lab
+frontend surface does not prove authentication runtime, and is not represented as doing so anywhere
+below. **Real-PostgreSQL qualification of this ticket's own new concurrency logic (first-write
+template pinning, concurrent batch values, the release-vs-correction fingerprint race) was actually
+run this session** — this session located a native, already-installed PostgreSQL 18 instance inside
+the sandbox (no container image pull required, unlike DH-LAB-002/DH-LAB-003's blocked
+`postgres:16-alpine` pull), migrated a fresh database to head via real `alembic upgrade head`, and
+executed all 4 new PG qualification tests directly, repeated across 50+ total executions with zero
+flakes. See the DH-LAB-004 entry in `PROJECT_STATE.md` for exact commands and evidence.
 
 ## B. Product direction
 
@@ -56,11 +57,16 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   template layer (`LabResultTemplate`/`LabResultTemplateObservation`, ADR-053) plus a batched,
   read-only order-scoped result-entry-plan resolving each `IN_PROGRESS` item's active template
   (DH-LAB-003) — additive to, and never constraining, the existing source-flexible
-  `LabObservation`/`record_observation` model Connect will eventually use. All CI-qualified and
-  CI-PostgreSQL-qualified where CI runs it (SQLite + disposable `postgres:16-alpine`), migration
-  head now `0024_result_templates`, current == heads == CI's `EXPECTED_HEAD` (neither DH-CLINIC-007,
-  DH-LAB-001, nor DH-LAB-002 needed a migration; DH-LAB-003 did, and it applied cleanly against
-  push-triggered CI's own real disposable PostgreSQL — see the DH-LAB-003 entry below). **Not**
+  `LabObservation`/`record_observation` model Connect will eventually use; **DH-LAB-004** closes
+  the native loop with first-write exact template-version pinning (survives later activation
+  changes), a Native controlled batch value endpoint, required-definition-gated completion, a
+  least-privilege release queue, and a release-inspection fingerprint that closes the
+  inspect-then-stale-release race — the raw free-structure observation API now refuses to mutate a
+  template-bound container, failing closed until DH-LAB-005 builds real correction. All
+  CI-qualified and CI-PostgreSQL-qualified where CI runs it (SQLite + disposable
+  `postgres:16-alpine`), migration head now `0025_native_result_binding`, current == heads == CI's
+  `EXPECTED_HEAD`. DH-LAB-004's own new concurrency logic is **additionally** qualified against a
+  real, natively-installed PostgreSQL instance found in this session's sandbox — see §A. **Not**
   real-Keycloak-qualified, not runtime/browser-demonstrated, not production-deployed. Full
   ticket-by-ticket detail: `docs/MVP-1.0.md` §8, `PROJECT_STATE.md`.
 - **DH-IDENTITY-001 — provider-scoped native Patient directory (ADR-051)**: `Patient`
@@ -192,29 +198,31 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   actually completed a redirect/login/PKCE round trip, and no live Caddy routing has been exercised
   end to end, because the full stack (Caddy included) never finished booting in the one qualification
   run attempted. That gap is DH-CLINIC-004B's own open item (§I), not closed by this entry.
-- **DHealth Lab native frontend** (`ui/src/features/lab/`, DH-LAB-001, extended by DH-LAB-002 and
-  DH-LAB-003): authentication (reusing the same shared `ExchangeAuthProvider`/`ExchangeAuthGate`
-  Clinic uses — no second OAuth client), lab-membership eligibility and a capability model gating a
-  not-yet-built releaser surface truthfully, a lab selector for multi-lab users with immediate
-  (render-phase) state clearing on switch, an assigned-order work queue, a safe order-detail panel
-  driven by the lab-safe minimal patient projection (§C), accept/reject with explicit reject
-  confirmation and three-way lost-response recovery (target-reached / still-pending /
-  opposite-conflict), an explicit collection-milestone confirmation (`Enregistrer la collecte`,
-  gated to `ACCEPTED` with no existing milestone) and a start-processing confirmation
-  (`Commencer l'analyse`, gated to `ACCEPTED` with a milestone present) — each with its own
-  four/three-way lost-response recovery and the same generation/tenant-ref race protection as
-  accept/reject — and now (DH-LAB-003) a read-only result-structure preview for `IN_PROGRESS`
-  orders (`Structure des résultats`): the currently active template's observation definitions,
-  displayed truthfully (no fabricated structure when none is configured, a demo warning when the
-  template is synthetic), no value input/complete/release control anywhere in this surface. The
-  plan load shares the panel's own generation/tenant-ref discipline rather than a dedicated
-  mechanism of its own. `LabHomePage`'s own count-request lifecycle remains hardened to the
-  identical discipline DH-LAB-002 established. Built and component/UI-tested only — **same "built
-  but not runtime-proven" boundary as DHealth Clinic above**: no real-Keycloak or real-browser
-  qualification exists for it either. Result entry, release, LIS/Connect integration, and any demo
-  seed data are explicitly **not** part of this surface yet (deferred to DH-LAB-004/DH-DEMO-001).
-  See `DECISIONS.md` ADR-043's 2026-09-18 clarification, ADR-053, and `PROJECT_STATE.md`'s
-  DH-LAB-001/DH-LAB-002/DH-LAB-003 entries.
+- **DHealth Lab native frontend** (`ui/src/features/lab/`, DH-LAB-001, extended by DH-LAB-002,
+  DH-LAB-003, and DH-LAB-004): authentication (reusing the same shared `ExchangeAuthProvider`/
+  `ExchangeAuthGate` Clinic uses — no second OAuth client), a capability model (`canWorkOrders`/
+  `canReleaseResults`) that now drives real navigation — a dual-role user sees Accueil/Ordres/
+  Libération, a releaser-only user sees Accueil/Libération with no route to the `LAB_TECH` queue at
+  all — a lab selector for multi-lab users with immediate (render-phase) state clearing on switch,
+  an assigned-order work queue, a safe order-detail panel driven by the lab-safe minimal patient
+  projection (§C), accept/reject with explicit reject confirmation and three-way lost-response
+  recovery, an explicit collection-milestone confirmation and a start-processing confirmation, each
+  with its own lost-response recovery and generation/tenant-ref race protection. **DH-LAB-004
+  turned DH-LAB-003's read-only result-structure preview into a controlled Native entry form**
+  (`NativeResultEntryForm`): only the pinned/active template's own configured definitions are
+  rendered (never a hardcoded field), an unentered definition is a labeled, explicit-save-only
+  input, an already-entered value is shown read-only (no correction UI yet — DH-LAB-005), and
+  "Terminer la saisie" is gated to every required definition having a value, with its own
+  confirmation. A new "Libération" surface (`LabReleasePage`) gives releaser-only users the real UI
+  DH-LAB-001 could only promise: a least-privilege release queue, a full result inspection, and a
+  release confirmation that carries the exact inspected fingerprint — a stale fingerprint (an
+  intervening correction) forces re-inspection, never a blind retry. Built and component/UI-tested
+  only — **same "built but not runtime-proven" boundary as DHealth Clinic above**: no real-Keycloak
+  or real-browser qualification exists for it either. Correction/amendment UX, LIS/Connect
+  integration, and any demo seed data are explicitly **not** part of this surface yet (deferred to
+  DH-LAB-005/DH-DEMO-001). See `DECISIONS.md` ADR-043's 2026-09-18 clarification, ADR-053 and its
+  DH-LAB-004 addendum, ADR-044's DH-LAB-004 addendum, and `PROJECT_STATE.md`'s
+  DH-LAB-001/DH-LAB-002/DH-LAB-003/DH-LAB-004 entries.
 - Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: no real-Keycloak
   qualification, no manual live/browser demonstration, no production deployment, for any Exchange
   ticket.
@@ -249,11 +257,16 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## F. NOT BUILT
 
-- **DHealth Lab result entry and release UX.** DH-LAB-001 built authentication/queue/accept/reject;
-  DH-LAB-002 added collection-milestone recording and start-processing; DH-LAB-003 added the
-  controlled result-structure template layer plus a read-only preview (§D) — deliberately stopping
-  short of any value-entry UI, which is DH-LAB-004's own scope. No LIS/Connect integration and no
-  demo seed data exist for DHealth Lab yet either (deferred to DH-LAB-005+/DH-DEMO-001).
+- **DHealth Lab correction/amendment UX for Native-template-bound results.** DH-LAB-001 built
+  authentication/queue/accept/reject; DH-LAB-002 added collection-milestone recording and
+  start-processing; DH-LAB-003 added the controlled result-structure template layer; DH-LAB-004
+  (§D) closed the loop end to end — controlled entry, required-gated completion, a least-privilege
+  release queue, and fingerprint-gated release. What DH-LAB-004 deliberately left closed rather
+  than building unsafely: the raw free-structure observation API now refuses to mutate a
+  Native-template-bound container/observation at all (fails closed), so correcting an already-
+  entered controlled value has no supported path yet — that is DH-LAB-005's own scope. No
+  LIS/Connect integration and no demo seed data exist for DHealth Lab yet either (deferred to
+  DH-LAB-005+/DH-DEMO-001).
 - **DHealth Patient** (assisted-digital patient layer) and **DHealth Connect** (EMR/LIS integration
   layer, beyond the OpenMRS/OpenELIS reference track itself): no code of their own exists yet.
 - **Any patient-facing marketplace or pricing surface.** Not built, not scheduled for Launch 1 —

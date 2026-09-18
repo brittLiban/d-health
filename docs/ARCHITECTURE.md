@@ -1042,6 +1042,47 @@ invalidates the plan identically. No result-entry, no result value, no LIS/Conne
 this ticket -- DH-LAB-004 is next, and must pin/validate the exact template version at write time
 (ADR-053 Decision 11).
 
+**2026-09-18 dated note (DH-LAB-004, ADR-053 addendum + ADR-044 addendum):** the value-entry
+mutation now exists. Migration `0025_native_result_binding` adds nullable
+`LabResult.result_template_id`/`LabObservation.template_observation_definition_id` (both `ON
+DELETE RESTRICT`) plus a partial unique index enforcing one effective observation per controlled
+definition per container. `LabResultRepository.record_native_values`'s first write for an item
+locks the owning `LabOffering FOR UPDATE` (the identical lock `activate_template`'s own CAS
+acquires), pins the container to whichever template is active at that locked instant, and the pin
+survives any later activation change -- a controlled conflict (`NoActiveTemplateForOffering`) if
+activation wins the lock first instead. The browser submits only `template_id` and, per value,
+`definition_id` + a value; `source_code`/`display_label`/`result_type`/`numeric_unit` are always
+derived server-side from the pinned template's own definition. Batch replay is idempotent per
+definition (exact value -> safe no-op; different value -> `ObservationValueConflict`, never
+overwritten); every check for a batch resolves before any insert. The raw, free-structure
+`record_observation`/`correct_observation` API now refuses to mutate a Native-template-bound
+container/observation at all (`TemplateBoundContainerRefusesUnstructuredWrite`, proven with a
+genuine red/green discrimination test) -- a non-template-bound container is entirely unaffected.
+`complete_entry` additionally requires every `required=true` pinned-template definition to have a
+value. A new batched `GET .../result-entry-workspace` resolves each item's governing template
+(pinned, even if no longer active, or the offering's current active template for an unstarted
+item) plus entered values, truthfully distinguishing `NATIVE_TEMPLATE`/`LEGACY_OR_EXTERNAL`/
+`UNSTARTED_NO_TEMPLATE`. A new least-privilege `GET /organizations/{lab_id}/release-queue`
+(`LAB_RESULT_RELEASER` only) never broadens the `LAB_TECH` work queue. **The release-inspection
+fingerprint** (`compute_result_fingerprint`, a SHA-256 digest over the canonical sorted set of
+every effective `(item_id, observation_id)` pair -- immutable identities, never raw values) closes
+the race where a releaser inspects a result set, a technician corrects a value, and a stale
+release would otherwise release an unseen set: `POST .../release-results` now requires
+`expected_result_fingerprint`, checked inside the same `LabOrder`-locked transaction before any
+release row is created, refusing with `StaleResultFingerprint` (also proven with a genuine
+red/green discrimination test) on mismatch. Both the first-write-pin-vs-activation race and the
+release-vs-correction race were qualified against a real, natively-installed PostgreSQL instance
+found in this session's sandbox (`tests/integration/test_dhlab004_postgres_qualification.py`,
+executed directly, 50+ repetitions, zero flakes) -- a stronger evidence position than DH-LAB-002/
+DH-LAB-003 reached, both blocked by a Docker-image-pull network limitation this native-Postgres
+path does not depend on. Frontend-side, `NativeResultEntryForm` replaces DH-LAB-003's read-only
+preview (explicit "Enregistrer les valeurs" save, no autosave, saved values shown read-only from
+an authoritative re-read, "Terminer la saisie" gated and confirmed); a new `LabReleasePage` gives
+releaser-only users the release queue/inspection/confirmation UI DH-LAB-001 only had a placeholder
+for, with its own confirmation wording, stale-fingerprint forced-re-inspection handling, and
+lost-response recovery via authoritative re-read. Correction/amendment UX for a Native-template-
+bound result is deliberately not built here -- DH-LAB-005's own scope (ADR-053 Decision 11).
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |

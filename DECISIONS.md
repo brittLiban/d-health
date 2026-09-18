@@ -5080,6 +5080,48 @@ real-PostgreSQL qualification, and full test evidence).
 **Status: this ADR is now RESOLVED**, not OPEN — recorded here rather than editing the header above,
 so the original question/evidence packet remains legible as written at the time it was raised.
 
+### Addendum (2026-09-18, DH-LAB-004): the release-inspection fingerprint closes an inspect-then-stale-release race
+
+This ADR's release mechanism (`LabResultReleaseRepository.release`) is unchanged in shape — same
+lock order, same `LabOrder FOR UPDATE`, same immutable `LabResultRelease` row. DH-LAB-004 adds one
+new precondition inside that same lock, closing a race this ADR's original design left open: a
+releaser inspects a result set, a technician then corrects one value (DH-EX-013), and the
+releaser's now-stale "release" click would otherwise release an observation set they never
+actually saw.
+
+- **`compute_result_fingerprint`**: a SHA-256 digest over the canonical, sorted set of every
+  effective `(lab_order_item_id, lab_observation_id)` pair — immutable observation *identities*,
+  never raw patient values (two observations could coincidentally share a value with different
+  provenance; a correction always mints a new observation id, so any correction between inspection
+  and release necessarily changes the digest). One function, two callers: the lab-side inspection
+  read (`LabResultInspectionResponse.result_fingerprint`) and `release`'s own re-check, so they can
+  never independently drift.
+- **The release endpoint now requires `expected_result_fingerprint`** — the exact value from a
+  `GET .../results` call the releaser must have actually just made. Inside the existing
+  `LabOrder`-locked transaction, `release` recomputes the current fingerprint and compares before
+  creating any release row; a mismatch raises `StaleResultFingerprint` (409) — a controlled
+  conflict, never a silent release of a set the releaser did not inspect. A replay of an *already
+  completed* release is unconditionally safe regardless of the fingerprint passed (the release
+  already happened; the check exists to gate the first, real commit, not to re-litigate history).
+  This is a deliberate, justified breaking change to the release endpoint's request contract — not
+  yet a live production endpoint at the time of this change.
+- **The race is resolved by whichever operation's `LabOrder FOR UPDATE` lock is granted first**,
+  identical serialization discipline to every other concurrent mutation in this module: if a
+  correction wins the lock first, the fingerprint changes and a stale release attempt fails,
+  forcing the releaser to re-inspect; if release wins first, it succeeds against the still-fresh
+  set, and a concurrent correction attempt (now against a `COMPLETED` order) is refused by the
+  pre-existing, unrelated `IN_PROGRESS`-only gate every entry/correction mutation already shares.
+  Verified directly against real PostgreSQL (`test_dhlab004_postgres_qualification.py`'s
+  `test_pgrel_correction_winning_the_lock_invalidates_a_concurrent_stale_release`, 20 repetitions,
+  zero flakes) — both orderings produce an internally coherent, non-split-brain result.
+- **No automatic retry after a stale-fingerprint conflict.** The releaser is shown "Les résultats
+  ont changé depuis votre vérification. Veuillez les examiner à nouveau avant de les libérer." and
+  the UI forces a fresh re-inspection before offering release again — never a blind resubmission of
+  the same stale fingerprint.
+- **`released`/`delivered`/`reviewed` remain three independent concepts, unchanged.** Release does
+  not mark `ResultDelivery` delivered and does not touch `DoctorReview` beyond the existing
+  version-binding this ADR already established.
+
 ---
 
 ## ADR-045 — OPEN: pre-release correction vs. post-release amendment of an entered lab result
@@ -6781,3 +6823,44 @@ push-triggered CI (`alembic upgrade head` succeeded 0022→0023→0024, `current
 0024_result_templates`) -- real-PostgreSQL evidence for the schema itself, even though the
 concurrency tests above were not run against it this session. UI lint/typecheck/test/build clean.
 See `PROJECT_STATE.md`'s DH-LAB-003 entry for exact commands, run evidence, and counts.
+
+### Addendum (2026-09-18, DH-LAB-004): exact template-version pinning at first Native write
+
+Decision 11 above is now implemented, exactly as promised, with one clarification this addendum
+records rather than rewriting the paragraph above:
+
+- **First-write pinning, not per-write resolution.** The first Native value write for an ordered
+  item locks the owning `LabOffering` `FOR UPDATE` (the identical lock `activate_template`'s own
+  compare-and-swap acquires), verifies the caller's named `template_id` is that offering's active
+  template *at that exact locked instant*, and pins the item's `LabResult` container to it
+  (`result_template_id`) permanently. Every later write for the same item must name that identical
+  pinned template — never the offering's currently-active one, which may have since changed. If
+  template activation wins the `LabOffering` lock first, the first write instead sees the target
+  already inactive and refuses with a controlled conflict (`NoActiveTemplateForOffering`), never
+  reinterpreting against whichever template happens to be active by the time it runs.
+- **The pin survives every later template activation change.** `LabObservation` gains
+  `template_observation_definition_id`, resolved against the *pinned* template's own definitions,
+  not the offering's current one — an in-progress or historical entry keeps meaning what it meant
+  when it was written, even after version N+1 activates.
+- **The browser never submits result structure for a Native write**, exactly as promised:
+  `POST .../items/{item_id}/native-result-values` accepts only `template_id` (identity) and, per
+  value, `definition_id` plus `numeric_value`/`text_value`. `source_code`/`display_label`/
+  `result_type`/`numeric_unit`/`source_system`/reference ranges are always derived server-side from
+  the pinned template's own controlled `LabResultTemplateObservation` row.
+- **The existing low-level `LabObservation`/`record_observation`/`correct_observation` API is
+  additionally now refused, but only against a container/observation this ticket's own pinning has
+  already claimed.** Once `LabResult.result_template_id` is set, the raw free-structure write and
+  correct paths both refuse (`TemplateBoundContainerRefusesUnstructuredWrite`) rather than let an
+  unstructured observation land alongside controlled ones, or let a controlled value be corrected
+  into an unbound successor. A non-template-bound container (`result_template_id IS NULL` —
+  every pre-DH-LAB-004 row, and any future Connect-reported container) is entirely unaffected;
+  Decision 8's "untouched, fully source-flexible" promise holds for that case exactly as written.
+  Real template-aware correction is deferred to DH-LAB-005, per Decision 11's own forward note.
+- **Completion additionally requires every `required=true` pinned-template definition to have an
+  effective value**, checked by `template_observation_definition_id` identity, never `source_code`
+  string matching. Legacy (non-template-bound) completion semantics are unchanged.
+
+No column, constraint, or check added by this addendum retroactively touches a pre-DH-LAB-004 row
+— both new columns (`LabResult.result_template_id`, `LabObservation.
+template_observation_definition_id`) are nullable, and migration `0025_native_result_binding`
+backfills nothing.

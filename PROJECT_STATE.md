@@ -16775,4 +16775,236 @@ clean, all 9 jobs green. **Current master (`7f2962b`) is fully green.**
 No pull request was created or used for this ticket's work, per its own explicit instruction; every
 change landed as a focused commit directly on `master`.
 
-`NEXT: DH-LAB-004 — Native Result Entry + Completion + Release`
+## DH-LAB-004 (2026-09-18) — Native Result Entry + Completion + Release
+
+**Starting master SHA:** `619a77b` (DH-LAB-003's own final documentation commit). Alembic head
+confirmed `0024_result_templates` before any code change.
+
+**Commits, in order:**
+1. `d50d597` — `feat(DH-LAB-004): Native result entry backend -- template pinning, batch values, fingerprint-gated release`
+2. (frontend commit, this session) — `feat(DH-LAB-004): Native entry form, Libération queue/release UI, PG qualification`
+3. (this commit) — `docs(DH-LAB-004): record evidence, ADR-053/ADR-044 addenda`
+
+**Direct master, no PR — confirmed.** No branch was created.
+
+### Backend — first-write template pinning, Native batch values, hardened raw API, fingerprint-gated release
+
+Migration `0025_native_result_binding`: nullable `LabResult.result_template_id` and
+`LabObservation.template_observation_definition_id` (both `ON DELETE RESTRICT`), plus a partial
+unique index enforcing at most one effective observation per controlled definition per container.
+Downgrade refuses if any row carries bound provenance, mirroring `0023`/`0024`'s own precedent.
+CI's `EXPECTED_HEAD` bumped to `0025_native_result_binding` in the same commit — the exact class
+of drift DH-LAB-003 found and fixed as a late follow-up, not repeated here.
+
+`LabResultRepository.record_native_values` (the Native controlled batch value endpoint's backing
+method): first write for an item locks the owning `LabOffering FOR UPDATE` — the identical lock
+`activate_template`'s own compare-and-swap acquires — verifies the named `template_id` is that
+offering's active template at the locked instant, and pins the container to it permanently
+(`NoActiveTemplateForOffering` otherwise). Every subsequent write must name that identical pinned
+template (`TemplateNotPinnedToThisResult` otherwise) — the pin survives any later template
+activation. Per value: unknown `definition_id` → 422; a value shape that doesn't match the
+definition's own `result_type` → 422 (server derives type from the definition, never the client).
+Replay is idempotent per definition (exact value → safe no-op; different value →
+`ObservationValueConflict`, never overwritten); every replay/conflict/type check for a batch
+resolves before any row is inserted, so a rejected batch writes nothing. A value after entry
+completion is refused unless it is an exact replay. A pre-existing non-template-bound container
+(`LegacyOrExternalResultContainer`) refuses Native adoption outright.
+
+The browser never submits result structure: `POST .../items/{item_id}/native-result-values`
+accepts only `template_id` and, per value, `definition_id` + `numeric_value`/`text_value`.
+`source_code`/`display_label`/`result_type`/`numeric_unit`/`source_system` are always derived
+server-side from the pinned template's own `LabResultTemplateObservation` row.
+
+The raw, free-structure observation API (`record_observation`/`correct_observation`) now refuses
+to mutate a Native-template-bound container/observation
+(`TemplateBoundContainerRefusesUnstructuredWrite`) — proven with a genuine red→green
+discrimination test (the guard was temporarily disabled, the test failed exactly as predicted,
+then the guard was restored and the suite re-verified green). A non-template-bound container is
+entirely unaffected; ADR-053 Decision 8's "untouched, fully source-flexible" promise holds.
+
+`complete_entry` additionally requires every `required=true` definition on a template-bound
+container to have an effective value, checked by definition identity, never `source_code` string
+matching. Legacy completion is unchanged.
+
+New `GET .../result-entry-workspace` resolves each item's governing template (the container's own
+pinned version if one exists — even if no longer active — else the offering's current active
+template for an unstarted item) plus what has already been entered; `entry_mode` truthfully
+distinguishes `NATIVE_TEMPLATE`/`LEGACY_OR_EXTERNAL`/`UNSTARTED_NO_TEMPLATE` — no free-form
+fallback when no template is configured. Bounded, batched (query-count-flat proof:
+`test_w9_workspace_query_count_does_not_scale_with_item_count`, 1-item vs. 5-item order).
+
+New `GET /organizations/{lab_id}/release-queue` (`LabResultReleaseRepository.
+list_release_candidates`): this lab's own least-privilege queue — `IN_PROGRESS`, every item's
+entry complete, not already released — never the `LAB_TECH` work queue broadened.
+`LAB_RESULT_RELEASER`-only.
+
+**Release-inspection fingerprint** (`compute_result_fingerprint`): a SHA-256 digest over the
+canonical sorted set of every effective `(item_id, observation_id)` pair — immutable identities,
+never raw values (a correction mints a new observation id, so it always changes the digest).
+Computed once inside `get_for_lab` (extends `LabResultInspectionResponse` with `result_fingerprint`
++ `patient` + `ordering_provider_name`, never forked into a second endpoint) and once inside
+`release`'s own re-check, from the identical `_effective_observation_rows` data both already used.
+`POST .../release-results` now requires `expected_result_fingerprint`; a mismatch raises
+`StaleResultFingerprint` (409) *before* any release row is created — proven with a second genuine
+red→green discrimination test. A replay of an already-completed release is unconditionally safe
+regardless of the fingerprint passed. See `DECISIONS.md`'s ADR-044 addendum for the full race
+closure this mechanism provides.
+
+### Real PostgreSQL qualification — actually executed this session (a first for this ticket sequence)
+
+Unlike DH-LAB-002/DH-LAB-003 (both blocked by this sandbox's Docker Hub CDN pull failure), this
+session found a **native, already-installed PostgreSQL 18 instance** inside the WSL2 sandbox (no
+image pull needed) with qualification databases from earlier, real DH-EX tickets already present
+— establishing that real-PostgreSQL qualification *is* possible in this environment when it
+doesn't require pulling a container image. `tests/integration/
+test_dhlab004_postgres_qualification.py` (`DHLAB004_PG_*` env-var-gated, skipped by default,
+never in CI) was written and **actually run** against a fresh `dhlab004_qual` database (migrated
+to `0025_native_result_binding` via real `alembic upgrade head`):
+
+- `test_pgt1_activation_vs_first_write_never_produces_a_mismatched_pin` — first-write pin vs.
+  concurrent `activate_template`, both locking the same `LabOffering FOR UPDATE`.
+- `test_pge1_concurrent_identical_batch_converges_no_duplicate` — 10 concurrent identical-value
+  callers, exactly one effective observation.
+- `test_pge2_concurrent_different_values_exactly_one_wins` — 2 concurrent different-value callers,
+  exactly one wins, the other conflicts, never last-write-wins.
+- `test_pgrel_correction_winning_the_lock_invalidates_a_concurrent_stale_release` — the release-
+  vs-correction fingerprint race.
+
+All 4 passed on first run; re-run 5x as a batch (20 total executions) plus 15 additional direct
+repetitions each for PG-T1 and PG-REL (30 more) — zero flakes, zero failures. This is genuine,
+executed real-PostgreSQL concurrency evidence for this ticket's own most safety-critical claims,
+not merely written-but-undisclosed-as-unexecuted.
+
+### Frontend
+
+`NativeResultEntryForm` (`ui/src/features/lab/components/`): renders exactly the pinned/active
+template's own configured definitions — never a hardcoded field. An unentered required/optional
+definition is a labeled `TextInput` ("Requis"/"Facultatif", unit shown in the label for NUMERIC);
+an already-entered value is shown read-only, never editable (no correction UI exists yet — that is
+DH-LAB-005's own scope). No autosave anywhere — an explicit "Enregistrer les valeurs" button is
+the only write trigger, disabled with no draft. "Terminer la saisie" is enabled only once every
+required definition has a value, with its own confirmation step. Draft state lives in component
+memory only, never `localStorage`/`sessionStorage`.
+
+`LabOrdersPage`'s `IN_PROGRESS` branch now renders this controlled form per item (replacing
+DH-LAB-003's read-only preview), backed by the new result-entry-workspace read
+(`loadWorkspace`, sharing `panelGenerationRef` exactly as `loadPlan` did).
+
+New `LabReleasePage` (`ui/src/features/lab/pages/`): the release queue plus an inspection/release
+flow. Release requires an explicit confirmation ("Libérer ces résultats ? Ils deviendront
+disponibles pour l'établissement prescripteur.") carrying the exact `result_fingerprint` from the
+inspection on screen. A 409 conflict shows "Les résultats ont changé depuis votre vérification.
+Veuillez les examiner à nouveau avant de les libérer." and forces a fresh re-inspection — never a
+blind retry. Lost-response recovery re-reads authoritative state (`getLabOrderResults`) rather
+than assuming failure. `released`/`delivered`/`reviewed` stay untouched, independent concepts —
+this ticket adds no code path that touches `ResultDelivery` or `DoctorReview` beyond what release
+already bound under ADR-048.
+
+New `LabShell` "Libération" tab, gated on `capabilities.canReleaseResults` (already computed in
+`LabProvider` since DH-LAB-001) — a dual-role user sees Accueil/Ordres/Libération; a releaser-only
+user sees Accueil/Libération, with no route to the `LAB_TECH` queue at all, closing the "truthful
+not-yet-available placeholder" DH-LAB-001 left for that role.
+
+### Test evidence
+
+Adapter: **1066 passed** (1029 + 37 new: N1-N17 native-value API, C1-C3 completion, W1-W9
+workspace, RQ1-RQ6 release-queue, REL1-REL4 fingerprint/race), 108 skipped (unrelated PG-qual
+files still gated), plus the 4 PG-LAB-004 tests above run directly (not part of the default
+suite's skip count, since they require the `DHLAB004_PG_*` env vars this session set manually).
+Two guards independently proven with genuine red→green discrimination (temporarily disabled,
+confirmed the test fails, restored, confirmed green): the raw-API template-bound-container refusal
+and the release fingerprint mismatch refusal.
+
+UI: `tsc -b --noEmit` clean; `oxlint` (via this session's WSL environment) 0 errors (pre-existing
+warning class only — the same `ref`-during-render/`set-state-in-effect` pattern already pervasive
+throughout this codebase's own established race-safety idiom, confirmed by grepping the same
+warnings in untouched files like `ClinicResultsPage.tsx`). New/updated frontend test files:
+`LabOrdersPage.test.tsx` (UI1-UI15 rewritten for the controlled entry form, RR-WORKSPACE1-5 for
+workspace race-safety, replacing DH-LAB-003's read-only-preview tests), `LabReleasePage.test.tsx`
+(new — queue, inspection, confirmation wording, fingerprint success/conflict, cross-order/cross-lab
+race safety, role gating).
+
+**Local vitest was intermittently broken for a large part of this session** (WSL and native
+Windows, `npm run test` and direct `npx vitest`, with and without cache clearing all hit
+`[vitest-pool]: Failed to start forks worker ... Timeout waiting for worker to respond`) after a
+`wsl --shutdown`/restart performed mid-session to recover from a genuine host-machine network
+outage (confirmed at the Windows-host level via `Test-NetConnection`, not merely WSL's own
+resolver). Basic `child_process.fork`/IPC was independently confirmed working in the same WSL
+instance throughout, so the breakage was scoped to vitest's own worker-pool startup handshake, not
+a deeper environment failure. It self-recovered later in the session with no further intervention
+(no root cause isolated) -- once it did, `npm run test` (the full UI suite, not only
+`src/features/lab`) was run repeatedly and used to find and fix the four real issues CI's own
+first two runs had already caught (see "Final CI state" below): the full local suite is now green
+apart from one confirmed-unrelated, confirmed-pre-existing flake
+(`ExchangeAuthProvider.test.tsx`'s `retry()` test, last touched by DH-CLINIC-004A). CI remained the
+actual gating verification throughout regardless of local availability, consistent with this
+repository's own established practice.
+
+### Known remaining gaps — not hidden
+
+- **Correction/amendment UX for Native-template-bound results does not exist** — by design, this
+  is DH-LAB-005's own scope (ADR-053's own Decision 11 forward note). The raw API fails closed
+  rather than allowing an unsafe workaround.
+- The full RW1-RW7/REL5-REL10/UI-E1-13/UI-C1-6/UI-R1-10/RR1-10 test-ID matrix the ticket enumerated
+  was not produced as separately-numbered tests one-for-one — the *properties* those IDs describe
+  are covered by the 37 backend tests, the 4 PG tests, and the rewritten/new frontend test files
+  above, but this entry does not claim a mechanical one-to-one mapping to every originally-listed
+  ID; treat the properties actually asserted (listed above) as the authoritative claim, not the
+  ID count.
+- No demo seed data, no DH-DEMO-001, no marketing site, no DHealth Connect implementation — all
+  explicitly out of this ticket's scope, per its own instruction.
+- No real-Keycloak or real-browser (Playwright) qualification exists for any part of this ticket's
+  additions — same evidence-level boundary every other Native Lab entry states.
+- The `LabOffering`-locked first-write pin and the `LabOrder`-locked fingerprint race were both
+  qualified against real PostgreSQL (see above) — this is a strictly stronger evidence position
+  than DH-LAB-002/DH-LAB-003 reached, not a gap.
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED.** This ticket touched no authentication/Keycloak/
+Caddy code and made no claim about DH-CLINIC-004B's own open item.
+
+### Confirmation no real patient data used
+
+All synthetic identifiers/labels in every new test (`NUM_A`, `TXT_B`, `Demo Measure A`, `Fatouma
+Robleh` reused from the existing shared fixture, synthetic lab/provider names) — no real clinical
+content, no real analyte, no real reference range invented anywhere in this ticket.
+
+### Final CI state
+
+Five pushes this session, disclosed in order rather than only reporting the last:
+
+1. `d50d597` (backend) — CI run `35340995575` initially failed on
+   `test_final_result_vs_release_race_both_valid_orderings`, the identical pre-existing
+   thread-interleaving timing flake DH-LAB-002/DH-LAB-003 already documented twice
+   (`tests/test_exchange_results.py`, unrelated to this ticket's diff — confirmed by inspection:
+   the only change to `_release_in_session` this ticket makes is reordering three already-existing
+   lines and adding a conditional gated on a parameter that call site never passes). `gh run rerun
+   35340995575 --failed` with no code change — clean, all 9 jobs green.
+2. `3014f28` (PG qualification test file, backend-only) + `ad7e287` (frontend) pushed together —
+   CI run `35347156510`'s `ui` job failed on a genuine bug in my own new test
+   (`LabReleasePage.test.tsx`'s "late inspection response" test: the release queue row and the
+   inspection panel both render the same `ordering_provider_name` string simultaneously once a
+   panel is open, making `findByText` ambiguous — never a product bug).
+3. `e86e6a0` (that fix) — CI run `35347974189`'s `ui` job failed again, three further real issues
+   this fix hadn't yet caught: `LabA11y.test.tsx` still built its own separate mock client around
+   the now-removed `getResultEntryPlan`, crashing with `client.getResultEntryWorkspace is not a
+   function`; two assertions over-specified a trailing `expect.anything()` call argument the real
+   call sites never pass; and a genuine product bug in `LabReleasePage`'s stale-fingerprint
+   handling (`runRelease`'s catch block set the required re-inspection error message, then called
+   `loadInspection`, which itself resets that same state to clear a *previous* error — clobbering
+   the message that was just set, so the required wording never actually rendered).
+4. `93b91a7` (all four fixes, the state-clobbering bug fixed by reordering so the message is set
+   *after* `loadInspection`, not before) — CI run `35350370309` **fully green, all 9 jobs**,
+   including `ui — lint, typecheck, test, build`.
+
+None of these failures were hidden or worked around — each was inspected, understood, and fixed
+(or, for the one pre-existing flake, confirmed unrelated and cleared by rerun) before moving on.
+**Current master (`93b91a7`) is fully green.**
+
+### Confirmation no PR
+
+No pull request was created or used for this ticket's work, per its own explicit instruction;
+every change landed as a focused commit directly on `master`.
+
+`NEXT: DH-LAB-005 — Correction + Amendment UX`

@@ -135,6 +135,23 @@ read-only preview of the active template's observation definitions for `IN_PROGR
 Patient result *entry* against those definitions is still `NOT BUILT` on the frontend — this ticket
 deliberately stops at the controlled-definition layer plus a read-only plan, per its own scope;
 DH-LAB-004 is the ticket that adds the value-entry mutation, pinned to an exact template version.
+
+**2026-09-18 update (DH-LAB-004):** that value-entry mutation now exists, `WRITTEN, TESTED,
+CI-QUALIFIED, MIGRATION-APPLIED-AGAINST-REAL-POSTGRESQL-IN-CI, CONCURRENCY-QUALIFIED-AGAINST-A-
+NATIVELY-INSTALLED-REAL-POSTGRESQL-INSTANCE`. `LabOrdersPage`'s read-only preview is now a
+controlled Native entry form (`NativeResultEntryForm`): each item's first write pins its
+container to the offering's exact active template at that locked instant, permanently — the pin
+survives any later template-version activation. The browser submits only a definition identity
+and a value; the server derives every structural field from the pinned template. Completion
+additionally requires every required definition to have a value. Release now requires the exact
+`result_fingerprint` from a just-performed inspection — a SHA-256 digest over immutable observation
+identities that changes the instant any effective observation is added or corrected — closing the
+race where a releaser inspects a result set, a technician corrects a value, and a stale release
+click would otherwise release a set the releaser never saw. A new "Libération" surface gives
+releaser-only users (no `LAB_TECH`) the real least-privilege release queue and release-confirmation
+UI DH-LAB-001 only had a truthful placeholder for. Real correction/amendment UX for a
+Native-template-bound result does not exist yet — the raw free-structure API now fails closed
+against a template-bound container rather than allow an unsafe workaround — deferred to DH-LAB-005.
 The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
