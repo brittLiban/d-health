@@ -15814,9 +15814,13 @@ Also added two test gaps an independent review flagged: a legacy order's confirm
 response for a since-switched-away version never touches the newly-opened version's own controls
 (RR12).
 
-**One more finding, surfaced by a second independent review pass after commit 6-12's fix had
-already landed and been pushed — fixed in the same follow-up commit as items 6-12, not a separate
-push:**
+**One more finding, surfaced by a second independent review pass after commit `eb9307f` (items 6-12
+above) had already landed and been pushed — fixed in a second, separate follow-up commit
+(`6bf571c`), not folded into `eb9307f`:**
+
+For traceability, this ticket's full commit sequence is: `e62dc0e` (backend queue), `f06737d`
+(client/types), `a9069b9` (page rewrite), `f4fbed8` (docs), `eb9307f` (fixes 1-12), `6bf571c` (fix
+13 below).
 
 13. **The provider-switch reset cleared `panel`/`disposition`/`submitState` but never `queueState`
     itself**, and `loadQueue`'s own `setQueueState` only ever sets `loading: true` without clearing
@@ -15856,16 +15860,20 @@ push:**
   pre-existing `test_dhex014a_postgres_qualification.py`/`test_dhex014b_postgres_qualification.py`
   (PG-R1/PG-R3, 14/14 passed) re-run against the same database to reconfirm on the current schema. A
   matching CI step was added mirroring the DH-CLINIC-006 precedent.
-- UI: the rewritten `ClinicResultsPage.test.tsx`, after the post-push fix commit (items 6-13 above,
-  plus the three new test-gap cases: UI-V6, RR12, RR13) — **25 passed** (was 22 before that commit).
-  Full clinic-feature suite plus `exchangeClient.test.ts` together — **78 passed** across 4 files (0
-  failed), after fixing the two pre-existing regression suites broken by the mock-client contract
-  gap (see "Errors found" #5). Full project suite (all files) — **315 passed** across 27 files (0
-  failed), with 3 unrelated files dropped from the first pass by this sandbox's own known,
-  pre-existing WSL2/`/mnt/c` vitest worker-pool flakiness (`vitest-pool-runner: Timeout waiting for
-  worker to respond`, not a test assertion failure); all 3 re-run individually and passed cleanly
-  (30/30) — none touch this ticket's files. This full-suite number was re-verified after item 13's
-  fix landed, not carried forward from before it. `tsc -b --noEmit`: clean. `npm run build` + bundle
+- UI: the rewritten `ClinicResultsPage.test.tsx`, after both post-push fix commits (items 6-13
+  above, plus the three new test-gap cases: UI-V6, RR12, RR13) — **25 passed** (was 22 before
+  `eb9307f`). The four suites this ticket's files touch (`ClinicResultsPage.test.tsx`,
+  `exchangeClient.test.ts`, `ClinicApp.test.tsx`, `ClinicA11y.test.tsx`) — **78 passed** across 4
+  files (0 failed), after fixing the two pre-existing regression suites broken by the mock-client
+  contract gap (see "Errors found" #5). Full project suite (all 33 files): CI's own run for
+  `6bf571c` (run `35303990818`, **success**, all 9 jobs including "adapter — ruff + pytest" green)
+  is the authoritative count — **468 passed across 33 test files, 0 failed**, read from that run's
+  own job log (one more test than the prior `eb9307f` run's 467/33, matching the single new RR13
+  case). A local full-suite re-run in this sandbox's WSL2/`/mnt/c` environment undercounted both of
+  these — `vitest-pool-runner: Timeout waiting for worker to respond` crashed more workers than a
+  truncated terminal view initially showed, a known, pre-existing flakiness class in this sandbox,
+  not a test failure; CI itself has no such flakiness and is treated as ground truth here rather
+  than chasing an exact local reproduction. `tsc -b --noEmit`: clean. `npm run build` + bundle
   secret scan: clean. `npm run lint` (oxlint): 0 errors, 12 warnings — the same established,
   previously-disclosed `react(refs)`-during-render/`set-state-in-effect` heuristic quirks this
   codebase already accepted for this exact file's own prior version and for `LabRoutingStep.tsx`'s
