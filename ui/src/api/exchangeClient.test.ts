@@ -1049,4 +1049,57 @@ describe('ExchangeClient', () => {
       'Content-Type': 'application/json',
     })
   })
+
+  // DH-DEMO-001 D16: proves the REAL ExchangeClient -- not a test double implementing its
+  // interface, as every LabOrdersPage.test.tsx case above does -- correctly builds the request
+  // and parses the response at the actual `fetch` network boundary, using a response shaped
+  // exactly like what `adapter/src/daher_adapter/exchange/demo_seed.py`'s `seed_baseline` creates
+  // (PROVIDER_ORG_NAME/LAB_ORG_NAME/CATALOG_DISPLAY_NAME there, mirrored as literal strings here).
+  // A mismatch between those two files -- the seed script's own naming drifting from what a
+  // native UI screen actually renders -- would fail this test without ever booting a container.
+  it('DH-DEMO-001 D16: listLabOrders renders demo-seed-shaped data through the real fetch boundary', async () => {
+    const demoSeedOrder = {
+      order_id: 'demo-order-1',
+      status: 'SELECTED',
+      selected_at: '2026-09-18T08:00:00Z',
+      updated_at: '2026-09-18T08:00:00Z',
+      patient_display_name: 'Amina Warsame',
+      patient: {
+        patient_id: '22222222-2222-4222-8222-222222222222',
+        display_name: 'Amina Warsame',
+        date_of_birth: '1990-01-01',
+      },
+      ordering_provider_name: 'Clinique Démo DHealth',
+      requested_tests: [
+        {
+          catalog_code_snapshot: 'DEMO-A',
+          catalog_display_name_snapshot: 'Analyse de démonstration A',
+          selected_price_amount: null,
+          selected_price_currency: null,
+        },
+      ],
+      collection_recorded_at: null,
+    }
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([demoSeedOrder]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    const client = new ExchangeClient()
+    const orders = await client.listLabOrders('lab-demo', { token: 'demo-token' })
+
+    expect(orders).toHaveLength(1)
+    expect(orders[0].ordering_provider_name).toBe('Clinique Démo DHealth')
+    expect(orders[0].requested_tests[0].catalog_display_name_snapshot).toBe(
+      'Analyse de démonstration A',
+    )
+    expect(orders[0].patient.display_name).toBe('Amina Warsame')
+
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe('/exchange/v1/organizations/lab-demo/lab-orders')
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer demo-token' })
+  })
 })
