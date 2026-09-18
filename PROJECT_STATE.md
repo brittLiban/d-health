@@ -16100,6 +16100,17 @@ logs are the authoritative final-state full-suite counts (not the locally-crashe
 review). **Adapter — 985 passed, 106 skipped, 0 failed**, matching the fresh local adapter run cited
 above exactly.
 
+**One CI-runner timing flake encountered and confirmed unrelated, not a regression:** the docs-only
+push of this evidence citation itself (commit `a0c6b37`, touching only this file) triggered run
+`35314946716`, whose `adapter — ruff + pytest` job failed once on
+`test_final_result_vs_release_race_both_valid_orderings` (`tests/test_exchange_results.py`) —
+a pre-existing DH-EX-014A/CLINIC-007-era test asserting both thread-interleaving orderings occur
+across 20 repetitions on a shared runner; it observed only one ordering that one run. This ticket
+never touched `tests/test_exchange_results.py` (confirmed: `git diff e8021f5..HEAD --name-only`
+does not list it), so this could not be a ticket-caused failure by construction. Re-ran via
+`gh run rerun 35314946716 --failed` with no code change — passed, confirming the flake rather than
+masking a real regression with a blind retry.
+
 **Qualification (§67).** `git diff --check` across all three commits: clean. No secrets in the diff
 (grepped for secret/`.env`/credential-named files: none). No migration was needed or added —
 `EXPECTED_HEAD` unchanged at `0023_provider_lab_routes`, confirmed by the fact that every
