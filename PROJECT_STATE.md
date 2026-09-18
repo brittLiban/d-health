@@ -17356,11 +17356,35 @@ username-only summary, never a password). Every script resolves its own repo roo
 `docker-compose.native-demo.yml --env-file demo/native/demo.env config -q`. A new job,
 `native-demo-boot`, is the only job in this entire workflow that runs `docker compose ... up`
 against real images: `scripts/demo/up.sh`, `status.sh`, three real Caddy-proxied smoke tests
-(Keycloak realm discovery, Exchange API 401-not-500/502, UI HTML), a repeated `reset.sh` (D2/D3),
-and a mandatory D4 negative control exercising **both** independent refusal facts (a wrong
-database name, and a blank `ADAPTER_DEMO_ENVIRONMENT`) with an assertion on the printed `REFUSED`
-reason string, not merely a non-zero exit code — so a future regression that fails for the wrong
-reason still fails this check. Teardown (`down.sh -v`) runs `if: always()`.
+(Keycloak realm discovery, Exchange API 401-not-500/502, UI HTML), a check that seed reached a
+live Keycloak (asserts `exchange_organizations`/`exchange_organization_memberships` row counts,
+reusing the adapter's own `Settings`/`build_engine` rather than a separate psql path — the only
+way to distinguish "seed ran" from "seed silently skipped membership grants"), a repeated
+`reset.sh` (**D2 only** — an earlier draft of this entry mislabeled this "D2/D3"; two `reset.sh`
+calls with nothing between them exercise repeatability, not "survives workflow mutation," which
+D3 actually means and which the real-PostgreSQL test above already covers), the same
+organization/membership count check re-asserted after the double reset (proving baseline survives
+reset, not just that reset exits 0), and a mandatory D4 negative control exercising **both**
+independent refusal facts (a wrong database name, and a blank `ADAPTER_DEMO_ENVIRONMENT`) with an
+assertion on the printed `REFUSED` reason string, not merely a non-zero exit code — so a future
+regression that fails for the wrong reason still fails this check. Teardown (`down.sh -v`) runs
+`if: always()`.
+
+**Two genuine defects found and fixed by `advisor()` review before this push, neither exercised
+by any local test (this sandbox cannot boot the stack):**
+- `scripts/demo/reset.sh` called `docker compose up --no-deps keycloak-demo-users` to re-converge
+  the demo Keycloak users on every reset — but plain `up -d` returns exit 0 as soon as the
+  container is *started*, regardless of what the container's own entrypoint does, so `set -e`
+  would never have caught a broken reconcile. Fixed to `run --rm --no-deps`, which propagates the
+  container's real exit code.
+- `demo_seed.py`'s Keycloak-membership-grant branch treated a *partial* set of
+  `DEMO_KEYCLOAK_ADMIN_URL`/`_USER`/`_PASSWORD`/`EXCHANGE_OIDC_ISSUER` identically to all four
+  being absent (the deliberate, documented unit-test bypass) — silently skipping membership
+  grants either way. A future compose edit that dropped exactly one of those four would have
+  produced a fully green `up.sh` with three working logins and zero roles anywhere. Fixed to
+  raise loudly on a partial set, leaving the all-absent case as the only silent path. Re-run
+  against the real PostgreSQL instance after this fix: both `test_demo_seed_postgres.py` tests
+  pass clean across 4 more executions (8 total across this ticket's development).
 
 ### Frontend — D16
 

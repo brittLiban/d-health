@@ -2471,10 +2471,48 @@ jobs:
         run: |
           curl -fsk https://app.localhost/ | grep -qi '<html'
 
-      - name: Reset is repeatable (D2) and survives workflow mutation (D3)
+      - name: Seed reached a live Keycloak (organizations + memberships actually exist)
+        run: |
+          # A green up.sh only proves the containers are healthy -- it does not prove seed_baseline
+          # actually reached Keycloak rather than silently skipping membership grants (its own
+          # intentional unit-test-only bypass; see demo_seed.py's own guard against a *partial*
+          # set of DEMO_KEYCLOAK_ADMIN_* vars, which is never intentional). Reusing the adapter's
+          # own already-qualified Settings/build_engine rather than wrangling a separate psql
+          # password/connection here.
+          docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env \
+            exec -T adapter python -c "
+          from sqlalchemy import text
+          from daher_adapter.config import Settings
+          from daher_adapter.database import build_engine
+          engine = build_engine(Settings.from_env())
+          with engine.connect() as conn:
+              orgs = conn.execute(text('SELECT count(*) FROM exchange_organizations')).scalar_one()
+              mems = conn.execute(text('SELECT count(*) FROM exchange_organization_memberships')).scalar_one()
+              assert orgs == 2, f'expected 2 organizations (clinic + lab), got {orgs}'
+              assert mems == 3, f'expected 3 memberships (clinician/lab-tech/releaser), got {mems}'
+              print(f'OK: {orgs} organizations, {mems} memberships')
+          "
+
+      - name: Reset is repeatable (D2)
         run: |
           ./scripts/demo/reset.sh
           ./scripts/demo/reset.sh
+
+      - name: Reset preserved baseline (organizations + memberships still exist)
+        run: |
+          docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env \
+            exec -T adapter python -c "
+          from sqlalchemy import text
+          from daher_adapter.config import Settings
+          from daher_adapter.database import build_engine
+          engine = build_engine(Settings.from_env())
+          with engine.connect() as conn:
+              orgs = conn.execute(text('SELECT count(*) FROM exchange_organizations')).scalar_one()
+              mems = conn.execute(text('SELECT count(*) FROM exchange_organization_memberships')).scalar_one()
+              assert orgs == 2, f'expected 2 organizations after reset, got {orgs}'
+              assert mems == 3, f'expected 3 memberships after reset, got {mems}'
+              print(f'OK: {orgs} organizations, {mems} memberships')
+          "
 
       - name: Reset safety refuses a non-demo target (D4, mandatory negative control)
         run: |

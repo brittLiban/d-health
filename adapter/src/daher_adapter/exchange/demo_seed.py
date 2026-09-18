@@ -316,7 +316,19 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
     admin_user = os.environ.get("DEMO_KEYCLOAK_ADMIN_USER", "").strip()
     admin_password = os.environ.get("DEMO_KEYCLOAK_ADMIN_PASSWORD", "").strip()
     issuer = os.environ.get("EXCHANGE_OIDC_ISSUER", "").strip()
-    if keycloak_base_url and admin_user and admin_password and issuer:
+    keycloak_vars = (keycloak_base_url, admin_user, admin_password, issuer)
+    if any(keycloak_vars) and not all(keycloak_vars):
+        # Fail loudly, never warn-and-continue: a *partial* set of these four is a real
+        # misconfiguration (e.g. a future compose edit dropping one of them), never the
+        # intentional unit-test bypass below, which requires all four to be absent. Silently
+        # skipping membership grants here would boot a demo whose three logins work but hold no
+        # role anywhere -- a green `up.sh` with an unusable golden journey.
+        raise RuntimeError(
+            "demo_seed: DEMO_KEYCLOAK_ADMIN_URL/DEMO_KEYCLOAK_ADMIN_USER/"
+            "DEMO_KEYCLOAK_ADMIN_PASSWORD/EXCHANGE_OIDC_ISSUER must be either all set or all "
+            "absent -- got a partial set, which is never intentional"
+        )
+    if all(keycloak_vars):
         clinician_identity = _demo_user_identity(
             identities,
             issuer=issuer,

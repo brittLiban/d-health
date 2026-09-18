@@ -22,8 +22,10 @@ echo "Resetting the DHealth Native Demo to its deterministic baseline..."
 # Re-converges the three demo Keycloak accounts first, including clearing any brute-force
 # lockout a mistyped password left behind -- otherwise "reset" would restore every database fact
 # but could leave a demo login still locked out, which is not a full reset from an operator's
-# point of view.
-"${COMPOSE[@]}" up --no-deps keycloak-demo-users
+# point of view. `run --rm`, never `up`: `up -d` returns 0 as soon as the container is started,
+# regardless of its own exit code, which would let `set -e` silently miss a broken reconcile;
+# `run` propagates the container's real exit code.
+"${COMPOSE[@]}" run --rm --no-deps keycloak-demo-users
 
 "${COMPOSE[@]}" exec -T adapter python -m daher_adapter.exchange.demo_seed reset
 echo "Done."
