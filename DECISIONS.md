@@ -5286,6 +5286,21 @@ post-release amendment as a whole remain **OPEN**, recorded here rather than edi
 above, so the original question/evidence packet remains legible as written at the time it was
 raised.
 
+**2026-09-18 dated addendum (DH-LAB-005).** Questions 4–5 (post-release amendment) and the general
+amendment *architecture* were separately resolved by ADR-048 Model 3 / DH-EX-014B, independent of
+this ticket. What DH-LAB-005 adds is narrower: a **Native controlled** counterpart to this ADR's
+own pre-release correction (`correct_native_value`, both pre-release and inside a
+DH-EX-014B amendment) for the specific case DH-LAB-004 deliberately left closed — a
+template-bound observation, whose raw `correct_observation`/amendment-`correct_observation`
+endpoints both now refuse outright (`TemplateBoundContainerRefusesUnstructuredWrite`, the amendment
+side newly hardened this ticket to match the pre-release side DH-LAB-004 already hardened). The
+Native path derives every structural field server-side from the predecessor's own pinned template
+definition instead of accepting it from the browser — a stricter, not looser, version of this
+ADR's own "immutable supersession chain, no reason field" decision. **No correction-reason field of
+any kind was added anywhere in this ticket, on either path** — the decision this ADR already made
+(Decision packet, "no reason field") is preserved unchanged, not merely left alone by omission. See
+`PROJECT_STATE.md`'s DH-LAB-005 entry for full implementation record.
+
 ---
 
 ## ADR-046 — ACCEPTED (architectural requirement only): orderable diagnostic service and returned observation cardinality
@@ -6174,6 +6189,34 @@ clinician recorded follow-up as necessary, nothing about scheduling, contact, or
 queue endpoint, the rewritten `ClinicResultsPage.tsx`, real-PostgreSQL PG-R2 qualification, and full
 evidence).
 
+### Dated addendum (2026-09-18, DH-LAB-005) — amendment release gains the identical fingerprint gate the original release already had
+
+**Status:** addendum, not a revision — the RECOMMENDED/ACCEPTED packets above stand unchanged. This
+closes a genuine safety gap DH-EX-014B's own implementation left open: `release_amendment` had no
+mechanism analogous to DH-LAB-004's original `release()` fingerprint check, so a releaser could
+release an amendment whose proposed effective set had changed since they last inspected it — the
+exact "release a set the releaser never saw" failure ADR-044/DH-LAB-004 already closed for Version
+1, left open for Version 2+.
+
+`AmendmentInspectionRecord` now carries `result_fingerprint` — computed by the identical
+`compute_result_fingerprint` algorithm DH-LAB-004 already established (never a second
+implementation), over the amendment's proposed effective set while `PREPARING`, or its own
+immutable manifest once `RELEASED`. `release_amendment` now requires
+`expected_result_fingerprint`; the check happens inside the existing `LabOrder FOR UPDATE` lock,
+after the amendment's own existing missing-count/lineage checks but before any release-version row
+is created, raising the already-existing `StaleResultFingerprint` (never a new exception) on
+mismatch. Replay of an already-`RELEASED` amendment stays unconditionally safe regardless of the
+fingerprint given, matching `release()`'s own established replay discipline exactly. This ticket
+also added, reusing DH-LAB-004's own least-privilege-queue convention, a dedicated
+`GET /organizations/{lab_id}/amendment-release-queue` (`LAB_RESULT_RELEASER` only, never lists an
+amendment with zero revisions) and a lab-facing `GET .../release-versions/{release_version_id}`
+exact-content read mirroring the provider-facing one this ADR's own DH-EX-014A/014B sections
+already established.
+
+**Implementation record:** `PROJECT_STATE.md`'s DH-LAB-005 entry (real-PostgreSQL qualification of
+the amendment-correction-vs-amendment-release and two-releasers-racing-the-same-amendment races,
+and full evidence).
+
 ## ADR-049 — ACCEPTED / IMPLEMENTED / CI-QUALIFIED (2026-09-16, DH-CLINIC-003C): Option A — a backend-owned durable `LabOrderIntent` is the sole cross-reload recovery mechanism for native Clinic lab ordering
 
 **Date raised:** 2026-09-15/16 (DH-CLINIC-003B's own "Human Decision Gate: Cross-Reload Exact
@@ -6864,3 +6907,17 @@ No column, constraint, or check added by this addendum retroactively touches a p
 — both new columns (`LabResult.result_template_id`, `LabObservation.
 template_observation_definition_id`) are nullable, and migration `0025_native_result_binding`
 backfills nothing.
+
+### Addendum (2026-09-18, DH-LAB-005): the pinning promise above now also holds across a correction
+
+"Real template-aware correction is deferred to DH-LAB-005" (immediately above) is now implemented,
+and the pin it deferred is unchanged by it: a correction's successor observation preserves the
+identical `lab_result_id` and the container's own pinned `result_template_id` — never re-derived,
+never changed, even if a newer template version has since activated between the original entry and
+the correction. `correct_native_value` (both the pre-release and the amendment-scoped copy)
+derives the successor's structural fields from the predecessor's own
+`template_observation_definition_id`, resolved against that same pinned template, exactly the way
+the original write already did — a correction is not a second opportunity to reinterpret which
+template governs an item. No schema change was needed for this addendum; it is a property of the
+existing pinned columns, exercised by a new code path. See `PROJECT_STATE.md`'s DH-LAB-005 entry
+for full evidence.

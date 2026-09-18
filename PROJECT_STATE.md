@@ -17007,4 +17007,225 @@ None of these failures were hidden or worked around — each was inspected, unde
 No pull request was created or used for this ticket's work, per its own explicit instruction;
 every change landed as a focused commit directly on `master`.
 
+## DH-LAB-005 (2026-09-18) — Correction + Amendment UX
+
+**Starting master SHA:** `eefc1f2` (DH-LAB-004's own final documentation commit). Alembic head
+confirmed `0025_native_result_binding` before any code change, and this ticket needed no new
+migration — confirmed again at the end against CI's own `EXPECTED_HEAD`.
+
+**GitHub Actions budget mode (this ticket's own explicit, different-from-prior instruction):**
+capacity is very limited, so the target is one push to `master` for the entire ticket (never
+push-per-phase, never CI-as-a-debugger). Every commit below stayed local until the full ticket —
+backend, real-PostgreSQL qualification, frontend, and this documentation — was complete and fully
+qualified locally.
+
+**Commits, in order (all local until the single push):**
+1. `24b0096` — `feat(DH-LAB-005): backend -- template-aware native correction, amendment fingerprint/queue/discovery`
+2. `66d2346` — `test(DH-LAB-005): real PostgreSQL qualification for the four new concurrency races`
+3. `d47fab5` — `feat(DH-LAB-005): frontend -- Native controlled correction, amendment lifecycle, version history`
+4. `2ce9c79` — `feat(DH-LAB-005): frontend -- expose lab-facing exact release-version history/content`
+5. (this commit) — `docs(DH-LAB-005): record evidence, ADR-045/ADR-048 addenda`
+
+**Direct master, no PR — confirmed.** No branch was created.
+
+### Backend — template-aware Native controlled correction (pre-release and amendment), amendment fingerprint gate, amendment discovery/queue, lab-facing exact version content
+
+No schema migration. Every new safety mechanism reuses existing infrastructure exactly rather than
+duplicating it: `compute_result_fingerprint` (the one canonical algorithm, now four call sites —
+original inspection, original release, amendment inspection [both PREPARING and RELEASED
+branches], amendment release), the `LabOrder FOR UPDATE` lock discipline (two distinct preambles —
+pre-release requires `IN_PROGRESS`, amendment requires `COMPLETED` — deliberately not unified, per
+the module's own existing documented reasoning), the amendment eligibility predicate (predecessor
+effective AND (in base manifest OR itself carries this exact amendment's id), reused verbatim),
+`_manifest_record_for_version`, and `_effective_observation_rows` (now shared across original
+release, amendment release, and amendment inspection's own fingerprint).
+
+**`LabResultRepository.correct_native_value`** (pre-release Native controlled correction, new):
+`POST .../items/{item_id}/observations/{observation_id}/native-correct`, LAB_TECH only. The
+browser submits only `{"numeric_value": ...}` or `{"text_value": ...}` — never
+source_code/display_label/result_type/numeric_unit/reference ranges/source_system/template
+definition identity. Locks via the existing `_lock_order_and_item_for_entry`; loads the
+predecessor and verifies it is effective and carries a non-null
+`template_observation_definition_id` (`ObservationNotTemplateBound`, new exception, otherwise —
+the raw endpoint is for that case); loads the `LabResultTemplateObservation` definition and
+verifies it belongs to the container's own *pinned* `result_template_id` (defense-in-depth against
+a definition id from a different template); validates the value shape against the definition's own
+`result_type` (`NativeValueTypeMismatch`, reused from DH-LAB-004); builds the successor deriving
+every structural field from the definition, preserving the same `lab_result_id` and pinned
+`result_template_id` (never re-derived, never changed even if a newer template version has since
+activated — DH-LAB-004's own pinning law holds through a correction). Correction never reopens or
+resets `entry_completed_at`/`entry_completed_by_identity_id` — entry completion and release stay
+independent facts, unchanged by this ticket. The raw, free-structure correction endpoint's own
+existing DH-LAB-004 hardening (`TemplateBoundContainerRefusesUnstructuredWrite`) is unweakened and
+unchanged; its guard message now names `correct_native_value` as the controlled alternative
+instead of "not yet implemented."
+
+**`LabResultAmendmentRepository.correct_native_value`** (amendment-scoped Native controlled
+correction, new): `POST .../amendments/{amendment_id}/items/{item_id}/observations/{observation_id}/native-correct`,
+LAB_TECH only, identical browser-submits-only-value contract. Mirrors the pre-release method's own
+template-derivation logic exactly, but inside the amendment lock/state/eligibility preamble (order
+`COMPLETED`, amendment `PREPARING`, predecessor eligible under the existing predicate) rather than
+the pre-release one — the two preambles are deliberately not shared, per the module's own
+pre-existing reasoning that amendment mutations require the *opposite* order status. The successor
+carries both `amendment_id` and `template_observation_definition_id`.
+
+**Raw amendment correction hardened to match**: `LabResultAmendmentRepository._correct_observation_in_session`
+now raises `TemplateBoundContainerRefusesUnstructuredWrite` when the predecessor is
+template-bound, immediately after the existing eligibility check — mirroring DH-LAB-004's
+pre-release hardening exactly. **Proven with a genuine red→green discrimination test**: the guard
+was temporarily disabled (`if False and ...`), the dedicated test
+(`test_ac2_raw_amendment_correction_refuses_template_bound_predecessor`) failed exactly as
+predicted — the raw endpoint returned 201 and the successor's own
+`template_observation_definition_id` came back `null`, silently destroying provenance — then the
+guard was restored and the same test passed again, and the full suite re-confirmed green.
+
+**Amendment release fingerprint gate (new safety gap closed)**: `AmendmentInspectionRecord` gained
+`result_fingerprint` — computed identically for a `PREPARING` amendment (over the currently
+proposed effective set) and for a `RELEASED` one (over its own immutable manifest), reusing
+`compute_result_fingerprint`, never a second implementation.
+`LabResultAmendmentRepository.release_amendment`/`AmendmentReleaseRequest` now require
+`expected_result_fingerprint`; the check happens inside the existing `LabOrder FOR UPDATE` lock,
+after the existing missing-count/base-version-superseded/has-changes checks but *before* any
+release-version row is created (identical ordering discipline to DH-LAB-004's own original
+`release()`). A mismatch raises `StaleResultFingerprint` (409) — reused, not reimplemented — with
+no automatic retry. Replay of an already-`RELEASED` amendment stays unconditionally safe regardless
+of the fingerprint given, mirroring `release()`'s own established replay discipline exactly.
+
+**Amendment discovery, queue, and lab-facing exact version content (new endpoints)**:
+`GET .../lab-orders/{order_id}/amendments` (`list_amendments_for_order`) lets the frontend
+rediscover a `PREPARING` amendment after a page refresh/browser close, never dependent on browser
+memory. `GET /organizations/{lab_id}/amendment-release-queue` (`list_amendment_release_candidates`)
+is this lab's own dedicated, least-privilege amendment release queue — `LAB_RESULT_RELEASER` only,
+never the `LAB_TECH` work queue broadened, and never lists a `PREPARING` amendment with zero
+revisions (batched, N+1-safe). `GET .../lab-orders/{order_id}/release-versions/{release_version_id}`
+is the lab-side sibling of the provider-facing exact-version-content read that already
+existed — reconstructed from the immutable manifest only, never from live current-effective state,
+so Version 1's content stays byte-for-byte correct after Version 2/3 exist.
+
+### Real PostgreSQL qualification — the four new concurrency races
+
+`tests/integration/test_dhlab005_postgres_qualification.py` (`DHLAB005_PG_*` env-var-gated,
+skipped by default, never in CI), run against a fresh `dhlab005_qual` database on the same native
+PostgreSQL 18 instance DH-LAB-004 first located, migrated to head via real `alembic upgrade head`:
+
+- `test_pgpc1_concurrent_native_corrections_exactly_one_wins` — two concurrent Native corrections
+  of the identical predecessor observation; exactly one wins, the other sees
+  `StaleObservationVersion`, never last-write-wins.
+- `test_pgpc2_native_correction_races_original_release` — a Native correction races the original
+  release using a captured, possibly-stale fingerprint; whichever wins the `LabOrder` lock
+  determines the outcome (stale-fingerprint refusal, or the correction refused against a now
+  `COMPLETED` order), never releasing a set the releaser did not actually see.
+- `test_pgar1_amendment_native_correction_races_amendment_release` — the amendment-side
+  counterpart: a second amendment correction races an amendment release using a captured, possibly
+  stale fingerprint; if the correction wins, the release is refused and the amendment stays
+  `PREPARING`; if the release wins, the correction is refused by `AmendmentNotPreparing`.
+- `test_pgar2_two_releasers_racing_the_same_amendment_exactly_one_release` — two releasers call
+  `release_amendment` concurrently with the identical, correct fingerprint; exactly one actually
+  creates the release version row, the other observes an identical idempotent replay, never a
+  duplicate Version 2.
+
+All 4 passed on first run; re-run 3 more times (4 total executions) — zero flakes, zero failures.
+
+### Frontend
+
+**Pre-release correction** (`NativeResultEntryForm`): an entered `NATIVE_TEMPLATE` value now shows
+"Valeur actuelle" plus a "Corriger" control (available regardless of whether entry is already
+marked complete — correction stays a pre-release action all the way to actual release). The
+confirmation carries the exact required wording: "Nouvelle valeur" / "Cette correction conservera
+l'ancienne valeur dans l'historique." / "Confirmer la correction" / "Annuler". "Voir
+l'historique" fetches the existing `GET .../observations/history` read and labels every entry
+"Valeur actuelle" (effective) or "Historique" (superseded, with its replacement date) —  never
+shown as equally current. The stale completion-dialog wording claiming "aucune correction n'est
+disponible" is removed, since correction now exists.
+
+**Amendment discovery/start/resume** (`LabOrdersPage`'s `COMPLETED` branch): on every panel open,
+`GET .../amendments` is re-read — "Commencer un amendement"/"Reprendre l'amendement" are mutually
+exclusive and driven entirely by that response, never local component state. No "Annuler
+l'amendement" control exists anywhere, since PREPARING/RELEASED are the only two amendment states.
+
+**New `AmendmentWorkspace` component**: the LAB_TECH-facing per-amendment correction workspace —
+each item shows a "Modifié dans cet amendement" badge when `changed_in_this_amendment` is true
+(a DB-grounded fact, never re-derived client-side), and each template-bound observation offers
+Corriger. Before the amendment's first correction (`ready_to_release === false`), the confirmation
+carries the additional required durable-revision warning: "Cette correction sera conservée dans
+l'historique de l'amendement. Il n'existe pas d'annulation de l'amendement dans cette version de
+DHealth." — not repeated on later corrections in the same amendment.
+
+**`LabReleasePage`'s "Amendements" section** (new, extending the existing "Libération" tab rather
+than a disconnected second page): a tab bar switches between "Résultats" (DH-LAB-004's own
+queue/panel, completely untouched) and "Amendements" (its own parallel queue/panel/release state).
+Release requires the exact `result_fingerprint` from the amendment inspection on screen; a stale
+fingerprint shows the exact required, amendment-specific wording — "Les résultats de cet amendement
+ont changé depuis votre vérification. Veuillez les examiner à nouveau avant de les libérer." —
+distinct from the original release's own stale-fingerprint message, and forces a fresh
+re-inspection, never a blind retry.
+
+**New `ReleaseVersionHistory` component**: lists every release version (`GET .../release-versions`,
+which already existed) with textual status ("Version initiale"/"Amendement", never color-only),
+and shows one version's exact content on demand via the new
+`GET .../release-versions/{release_version_id}` read. Embedded into both `LabOrdersPage`'s
+`COMPLETED` branch and `LabReleasePage`'s original and amendment inspection panels.
+
+### Test evidence
+
+Adapter: **1095 passed**, 112 skipped (unrelated PG-qual files still gated) — 1066 baseline + 29
+new (`test_dhlab005_native_correction_and_amendments.py`: PC1-10 pre-release correction, AC1-6
+amendment correction, AF1-5 amendment fingerprint, RQ1-5 amendment queue, VH1-3 version content),
+plus the 4 PG-LAB-005 tests above run directly (not part of the default suite's skip count, since
+they require the `DHLAB005_PG_*` env vars this session set manually). One guard independently
+proven with genuine red→green discrimination (temporarily disabled, confirmed the test fails,
+restored, confirmed green): the raw amendment-correction template-bound-container refusal.
+
+UI: `tsc -b --noEmit` clean; `oxlint` 0 errors (35 warnings, up from a 29-warning baseline — the
+same pre-existing `ref`-during-render/`set-state-in-effect` idiom already pervasive throughout this
+codebase, proportional to the new effects added, not a new category of problem). 28 new frontend
+tests (`LabOrdersPage.test.tsx`: PC-UI1-3 pre-release correction, AD-UI1-2 + start-amendment
+amendment discovery, AC-UI1 + §58 + no-repeat + submit-only-value + stale-conflict amendment
+correction; `LabReleasePage.test.tsx`: RQ-A1/AF-UI1/AR-UI1/§42/empty-amendment/no-cancel-control/
+tab-isolation/VH-UI1) pinning every exact-wording requirement and every "never" property the
+ticket specified. Full existing UI suite (Lab, Clinic, and every other feature) re-run clean —
+549+ tests passed, zero regressions (WSL2/vitest worker-pool startup flakiness non-deterministically
+drops a handful of unrelated files per run, confirmed individually green every time, same
+class of environment noise DH-LAB-004 already documented). Production build (`npm run build`)
+succeeds; the shipped bundle was directly inspected to confirm it contains this ticket's own new
+code (not merely an unchanged cached artifact).
+
+Clinic regression (§61's own concern): grepped the entire `src/features/clinic` and
+`src/features/maternity` trees for any reference to amendment types or endpoints — zero matches.
+A `PREPARING` amendment's proposed values are therefore structurally unreachable from any
+Clinic-facing component, not merely untested; the full existing Clinic suite (164 tests) was also
+re-run clean.
+
+### Known remaining gaps — not hidden
+
+- The full PC1-15/PG-PC1-2/H1-6/AD1-6/AC1-10/AF1-5/AR1-10/PG-AR1-2/RQ1-8/VH1-7/UI-PC1-10/UI-A1-10/
+  UI-R1-9/UI-V1-6 test-ID matrix the ticket enumerated was not produced as separately-numbered
+  tests one-for-one — the *properties* those IDs describe are covered by the 29 new backend tests,
+  the 4 PG tests, and the 28 new frontend tests above, but this entry does not claim a mechanical
+  one-to-one mapping to every originally-listed ID; treat the properties actually asserted (listed
+  above) as the authoritative claim, not the ID count.
+- No LIS/Connect integration and no demo seed data exist for DHealth Lab yet — unchanged, deferred
+  to DH-DEMO-001+.
+- No real-Keycloak or real-browser (Playwright) qualification exists for any part of this ticket's
+  additions — same evidence-level boundary every other Native Lab entry states.
+- No correction-reason field of any kind exists anywhere in this ticket's additions — ADR-045's
+  MVP decision (no reason field) is preserved unchanged, not merely left alone by omission.
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED.** This ticket touched no authentication/Keycloak/
+Caddy code and made no claim about DH-CLINIC-004B's own open item.
+
+### Confirmation no real patient data used
+
+All synthetic identifiers/labels in every new test (`NUM_A`, `Demo Measure A`, `GLU`/`Glycémie`
+reused from existing shared fixtures, synthetic lab/provider/patient names already established by
+prior tickets) — no real clinical content, no real analyte, no real reference range invented
+anywhere in this ticket.
+
+### Confirmation no PR
+
+No pull request was created or used for this ticket's work, per its own explicit instruction;
+every change landed as a focused commit directly on `master`.
+
 `NEXT: DH-LAB-005 — Correction + Amendment UX`

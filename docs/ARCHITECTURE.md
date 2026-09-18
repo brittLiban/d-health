@@ -1083,6 +1083,38 @@ for, with its own confirmation wording, stale-fingerprint forced-re-inspection h
 lost-response recovery via authoritative re-read. Correction/amendment UX for a Native-template-
 bound result is deliberately not built here -- DH-LAB-005's own scope (ADR-053 Decision 11).
 
+**2026-09-18 dated note (DH-LAB-005, ADR-045 addendum + ADR-048 addendum):** the correction/
+amendment gap above is now closed, reusing existing infrastructure exactly rather than duplicating
+it. `LabResultRepository.correct_native_value` (pre-release) and
+`LabResultAmendmentRepository.correct_native_value` (amendment-scoped) are the Native controlled
+counterparts of the existing raw `correct_observation` methods: the browser submits only the new
+value, and every structural field -- including the pinned `result_template_id`, unchanged by the
+correction -- is derived server-side from the predecessor's own
+`template_observation_definition_id`. No new migration: both new methods reuse the DH-LAB-004
+schema unchanged. The raw amendment `correct_observation` is newly hardened to match the raw
+pre-release one DH-LAB-004 already hardened (`TemplateBoundContainerRefusesUnstructuredWrite`,
+proven with a second genuine red/green discrimination test on the amendment side). **Amendment
+release gains the identical fingerprint gate the original release already had**:
+`AmendmentInspectionRecord.result_fingerprint` and `release_amendment`'s new
+`expected_result_fingerprint` reuse `compute_result_fingerprint` -- one algorithm, now four call
+sites -- checked inside the same `LabOrder`-locked transaction, before any release-version row is
+created, raising the already-existing `StaleResultFingerprint` on mismatch (no new exception). A
+new least-privilege `GET /organizations/{lab_id}/amendment-release-queue` mirrors the existing
+release queue's own convention exactly, never listing a `PREPARING` amendment with zero revisions.
+A new `GET .../amendments` lets the frontend rediscover a `PREPARING` amendment after a page
+refresh, and a new lab-facing `GET .../release-versions/{release_version_id}` mirrors the
+provider-facing exact-version-content read that already existed, reconstructed from the immutable
+manifest only. All four new concurrency races (concurrent Native corrections, correction-vs-
+release, amendment-correction-vs-amendment-release, two-releasers-racing-one-amendment) were
+qualified against the same native PostgreSQL instance DH-LAB-004 first located, run clean 4x in a
+row. Frontend-side, `NativeResultEntryForm` gains a Corriger control and correction-history
+display; a new `AmendmentWorkspace` component is the per-amendment correction workspace; a new
+`ReleaseVersionHistory` component exposes every version's exact content on demand; `LabOrdersPage`'s
+`COMPLETED` branch and `LabReleasePage`'s "Libération" tab (extended with an "Amendements" section,
+never a second page) both drive amendment discovery/start/resume/release entirely from server
+reads, never local memory. LIS/Connect integration and demo seed data remain deferred to
+DH-DEMO-001+.
+
 **Component reuse, from the DH-PIVOT-001 audit (evidence: adapter/src/daher_adapter/):**
 
 | Component | Verdict |

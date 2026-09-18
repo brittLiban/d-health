@@ -152,6 +152,24 @@ releaser-only users (no `LAB_TECH`) the real least-privilege release queue and r
 UI DH-LAB-001 only had a truthful placeholder for. Real correction/amendment UX for a
 Native-template-bound result does not exist yet — the raw free-structure API now fails closed
 against a template-bound container rather than allow an unsafe workaround — deferred to DH-LAB-005.
+
+**2026-09-18 update (DH-LAB-005):** that correction/amendment UX now exists, `WRITTEN, TESTED,
+CI-QUALIFIED, CONCURRENCY-QUALIFIED-AGAINST-A-NATIVELY-INSTALLED-REAL-POSTGRESQL-INSTANCE`. A
+Native controlled correction endpoint (browser submits only the new value; every structural field,
+including the pinned template context, is derived server-side from the predecessor's own template
+definition) closes the gap both pre-release and inside a post-release amendment. The full
+amendment lifecycle — start, controlled correction, fingerprint-gated release, a least-privilege
+amendment release queue, lab-facing exact per-version content — reuses DH-EX-014B's existing
+`LabResultAmendment`/`LabResultReleaseVersion` machinery rather than inventing a parallel one; the
+amendment release fingerprint gate mirrors DH-LAB-004's own original-release gate exactly, closing
+the identical inspect-then-stale-release race on the amendment side. No new `LabOrderStatus` or
+amendment status exists — an order stays `COMPLETED` after an amendment release, and PREPARING/
+RELEASED remain the only two amendment states, with no "cancel" state of any kind. This is
+explicitly **not** an "Edit Result" feature: every historical observation, release version, and
+review remains independently reconstructable, no value is ever mutated in place, and no result set
+is ever released without the releaser having actually inspected its exact fingerprint.
+LIS/Connect integration and demo seed data remain deferred to DH-DEMO-001+.
+
 The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result
