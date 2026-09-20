@@ -390,6 +390,29 @@ describe('PatientAccessHandoff — lost revoke response (LR4/LR5, §48)', () => 
     expect(screen.getByRole('button', { name: 'Révoquer et recréer' })).toBeInTheDocument()
   })
 
+  it('an ambiguous revoke whose metadata re-read also failed says exactly that, claiming no more', async () => {
+    // The sub-case LR5's fixture does not reach: the server could not be re-read at all, so
+    // whether the revoke committed is genuinely unknown. Claiming "l'accès est toujours actif"
+    // here would assert a fact the code does not have.
+    const client = makeClient({
+      getPatientAccessMetadata: vi
+        .fn()
+        .mockResolvedValueOnce(ACTIVE)
+        .mockRejectedValue(new ExchangeApiError(0, 'NETWORK_ERROR', 'boom')),
+      revokePatientAccess: vi.fn().mockRejectedValue(new ExchangeApiError(0, 'NETWORK_ERROR', 'boom')),
+    })
+    renderHandoff(client)
+    await screen.findByText(/Un accès patient est déjà actif/i)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Révoquer' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Révoquer' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/l'état de l'accès n'a pas pu être relu/i)
+    expect(alert.textContent).not.toMatch(/toujours actif/i)
+    expect(client.revokePatientAccess).toHaveBeenCalledTimes(1)
+  })
+
   it('a successful 204 revoke is a success, not an ambiguous outcome', async () => {
     // Guards the real bug this ticket fixed in ExchangeClient: parsing an empty 204 body as JSON
     // threw, which `isAmbiguousExchangeError` classified as ambiguous — so every *successful*

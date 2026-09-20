@@ -247,8 +247,16 @@ export function PatientAccessHandoff({
         ...previous,
         busy: false,
         confirmingRevoke: false,
+        // Two genuinely different sub-cases, and the wording must not claim more than is known:
+        // `metadata` non-null means the server was reached and still reports the grant active;
+        // `null` means the re-read itself failed, so whether the revoke committed is simply
+        // unknown. Saying "l'accès est toujours actif" in that second case would assert a fact
+        // this code does not have.
         error:
-          "La révocation n'a pas pu être confirmée et l'accès est toujours actif. Réessayez.",
+          metadata === null
+            ? "La révocation n'a pas pu être confirmée et l'état de l'accès n'a pas pu être " +
+              'relu. Réessayez.'
+            : "La révocation n'a pas pu être confirmée et l'accès est toujours actif. Réessayez.",
       }))
       return false
     }

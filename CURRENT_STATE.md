@@ -1765,7 +1765,8 @@ that access and produces a locally-generated QR plus a printable sheet for patie
 smartphone. Backend: a provider-authorized patient-access metadata read and a server-owned
 `result_status` projection that reverts to awaiting-review when an amendment version is released.
 Patients see status only — never a result value, range, price, internal identifier, or clinician
-identity. 18 new adapter tests (1104 → 1122 passed) and 92 new frontend tests, with 17 negative
+identity. 18 new adapter tests (1104 → 1122 passed) and 92 new frontend tests (684 passed across
+all 46 UI test files, measured in batches), with 18 negative
 controls actually executed; three real bugs found and fixed (naive `expires_at` on SQLite read-back,
 a 204 parsed as an ambiguous failure so every successful revoke looked lost, and a false "Lien
 copié." when the Clipboard API is absent). No migration — Alembic head unchanged at

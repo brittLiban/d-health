@@ -17642,7 +17642,7 @@ two responses' expiries, not by review.
 | Suite | Before | After | New |
 |---|---|---|---|
 | adapter `pytest -q` | 1104 passed, 118 skipped | **1122 passed, 118 skipped** | 18 |
-| UI `vitest` | 415 passed | see note below | 92 |
+| UI `vitest`, complete (batched) | 592 (derived, see note) | **684 passed, 46/46 files** | 92 |
 
 New adapter tests (`tests/test_dhpatient001_patient_status.py`): PS1-PS9 and PM1-PM6 as specified,
 plus four adjacent cases the numbered list does not name — an amendment merely *prepared* keeps
@@ -17660,20 +17660,30 @@ that the patient surface imports no Keycloak/auth layer, touches no browser stor
 no `dangerouslySetInnerHTML`), print-stylesheet structure, and five `ExchangeClient` tests including
 the real-204 path.
 
-**Note on the UI suite count, stated plainly rather than rounded off.** Locally, `vitest` cannot
-reliably run this suite to completion on this machine: workers fail to start with
-`[vitest-pool-runner]: Timeout waiting for worker to respond` on the `/mnt/c` filesystem, and the
-affected files are reported as *unhandled errors* while the run still **exits 0**. This is
-**pre-existing and environmental, not introduced here** — the measured baseline showed the same
-thing (27 files reported + 11 such errors = the 38 test files then on disk; after this ticket, 33
-reported + 13 errors = the 46 now on disk, the arithmetic closing exactly in both cases). Reported
-totals therefore vary run to run locally (553, 501, and 479 were all observed). **Every new test
-file was run individually and deterministically green**, and CI's Linux runner is the authoritative
-count. Worth a future ticket, not fixed here: a suite that loses whole files and still exits 0 is a
-CI weakness, but changing vitest's pool configuration is outside this ticket's scope and would touch
-every other suite.
+**Note on the UI suite count, stated plainly rather than rounded off — and on a pre-existing CI
+weakness found while measuring it.** A single whole-suite `npm run test` on this machine **cannot be
+trusted as a count**: vitest workers fail to start with `[vitest-pool-runner]: Timeout waiting for
+worker to respond` on the `/mnt/c` filesystem, the affected files are reported as *unhandled errors*
+rather than failures, and **the run still exits 0**. Three consecutive whole-suite runs reported
+553, 501, and 479 tests.
 
-### Negative controls — 17 executed, each observed failing for the right reason
+This is **pre-existing and environmental, not introduced by this ticket**, and the arithmetic proves
+it in both directions: the baseline run reported 27 files + 11 such errors = the 38 test files then
+on disk; a post-change run reported 33 + 13 = the 46 now on disk. Nothing was silently dropped from
+collection — whole files simply lost their worker.
+
+**The authoritative local figures above were therefore obtained by running all 46 files in eight
+small batches**, every batch green: 684 tests across 46/46 files. The "before" column is derived
+arithmetic (684 − 92 new = 592), not a separately re-measured baseline — labelled as derived rather
+than presented as a measurement, because the baseline run that produced "415" was itself one of the
+incomplete ones.
+
+**Worth its own future ticket, not fixed here:** a test command that loses whole files and still
+exits 0 is a real CI weakness — on a slow or loaded runner, CI could report success having skipped
+files. Changing vitest's pool configuration would affect every suite in the repository, which is
+outside this ticket's scope and not a change to make as a side effect of a patient-UI ticket.
+
+### Negative controls — 18 executed, each observed failing for the right reason
 
 Not "control-tested" as a phrase; each property was deliberately broken on the working tree, the
 specific test(s) observed going red, and the change reverted.

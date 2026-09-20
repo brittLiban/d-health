@@ -13,8 +13,13 @@ added the **first DHealth Patient frontend** (`ui/src/features/patient/`) plus a
 patient handoff (QR + printable sheet + revoke/rotate), a provider-authorized patient-access
 metadata read, and a server-owned patient follow-up projection. **No migration** — Alembic head
 stays `0025_native_result_binding`, confirmed against CI's own `EXPECTED_HEAD`. Evidence level:
-**CI/unit-test only.** 18 new adapter tests and 92 new frontend tests, all measured by running the
-suites on this commit, plus **17 negative controls actually executed** (each claimed property
+**unit tests plus the CI-equivalent checks runnable locally** — the remote CI run this ticket's
+single push triggers is reported in the session handoff, not claimed here, since these words were
+written before that push existed. 18 new adapter tests (1104 → **1122 passed**, 118 skipped) and 92
+new frontend tests (**684 passed across all 46 files**, measured in eight small batches — a single
+whole-suite `vitest` run is not a reliable count on this machine, and the `PROJECT_STATE.md` entry
+explains why, along with the pre-existing CI weakness that measurement exposed), plus **18 negative
+controls actually executed** (each claimed property
 deliberately broken, the specific test observed going red for the specific reason, then reverted).
 **Three real bugs were found and fixed during this ticket** — see §C. **Not proven:** no real
 browser rendered this patient screen, no real phone scanned one of these QR codes, no printer
@@ -245,9 +250,10 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   that version's own `DoctorReview`, so a version-2 amendment release correctly reverts the
   patient's view to `AWAITING_CLINICIAN_REVIEW` instead of presenting a disposition recorded about
   superseded content. A grandfathered `COMPLETED`-without-release order uses its one honest unbound
-  review row; no release version is ever fabricated for it. **CI/unit-qualified** (18 adapter tests,
+  review row; no release version is ever fabricated for it. **Unit-qualified** (18 adapter tests,
   incl. the mandated amendment regression and a no-result-value assertion against the serialized
-  JSON string rather than only a field list) with **7 backend negative controls executed**. No
+  JSON string rather than only a field list) with **7 backend negative controls executed**; the
+  remote CI run for this work is reported in the DH-PATIENT-001 session handoff, not asserted here. No
   migration; Alembic head unchanged at `0025_native_result_binding`. One real bug found and fixed:
   `GrantRecord` returned naive datetimes on SQLite read-back, which would have serialized an
   offset-less `expires_at` a browser parses as local time. See `PROJECT_STATE.md`'s DH-PATIENT-001
