@@ -6,6 +6,38 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-20, DH-MVP-POLISH-001, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `50a7eac` (DH-PATIENT-001's own final commit), verified
+against `origin/master` by a fresh `git fetch` rather than trusted from the prompt. This ticket made
+the native surfaces **one authenticated staff application** (`ui/src/features/staff/`): the
+Clinic/Lab application switch is gone, `/me` is loaded once for the whole application instead of once
+per product, and which workflows a person sees derives from their active organization and roles in it.
+It also introduced the central design-token layer, self-hosted typefaces (no font CDN at runtime), a
+workflow relay derived from real order state, a two-gesture review confirmation, an honest
+unsaved-value indicator in result entry, and the patient surface restyled to the same design language
+at its own density. **No backend route, no schema change, no migration** — Alembic head stays
+`0025_native_result_binding`. The adapter was not edited at all; its suites were run as a regression
+check and match the previous baseline exactly (**1122 passed, 118 skipped**). Evidence level: **unit
+tests, static analysis, and the CI-equivalent checks runnable locally** — the remote CI run this
+ticket's single push triggers is reported in the session handoff, not claimed here, since these words
+were written before that push existed. **787 frontend tests across all 51 test files**, measured by
+reconciling a whole-suite run (which reported only 24 files and left 27 workers unstarted, a known
+flake of this 9p-mounted checkout) against the 27 remaining files run by name in three batches —
+24 + 27 = 51 on disk, 421 + 366 = 787. **11 negative controls actually executed** (each claimed
+property deliberately broken, the specific test observed going red for the specific reason, then
+reverted); one of them did not fire on first attempt and was rewritten until it did. **Eleven bugs were
+found and fixed during this ticket** — including a pre-existing one (21 CSS custom properties
+referenced and defined nowhere, so "muted" labels had been rendering at full strength), a
+working-looking `Se reconnecter` button that could not have reconnected anything, an axe suite that
+had been auditing the wrong surface, and this ticket's own review tests passing green over a submit
+path that threw before it ran. See `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry for all eleven.
+**Not proven:** no real browser rendered any of this, at any width, on any device; no font was
+observed loading; no focus ring or contrast ratio was measured; no E2E ran (no live stack, and
+`typecheck:e2e` — which does pass locally — is not part of CI); and the organization `<select>` on
+which this ticket's whole premise rests has never been used by a person who belongs to two
+facilities. jsdom cannot measure layout or resolve a cascade of custom properties, which is exactly
+why the token guards are source scans.
+
 **2026-09-20, DH-PATIENT-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `a5992bd` (DH-DEMO-001's own final commit), verified
 against `origin/master` by a fresh `git fetch` rather than trusted from the prompt. This ticket
@@ -261,7 +293,11 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
-- **DHealth Clinic native frontend** (`ui/src/features/clinic/`): patient registration/search
+- **DHealth Clinic native frontend** (`ui/src/features/clinic/`) **[no longer a separate
+  application — updated 2026-09-20, DH-MVP-POLISH-001: these pages are now sections of the one staff
+  application (bullet below, ADR-054). `ClinicApp`/`ClinicShell` are deleted and `ClinicProvider` no
+  longer fetches `/me`; everything this bullet claims about behaviour still holds, reached through
+  `Patients`/`Ordres`/`Résultats` rather than through a product the user opens.]**: patient registration/search
   against the native Patient directory (DH-IDENTITY-001, §C), diagnostic order creation against the
   Exchange catalog using the directory entry's `primary_patient_reference_id` compatibility bridge,
   durable
@@ -272,7 +308,11 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   actually completed a redirect/login/PKCE round trip, and no live Caddy routing has been exercised
   end to end, because the full stack (Caddy included) never finished booting in the one qualification
   run attempted. That gap is DH-CLINIC-004B's own open item (§I), not closed by this entry.
-- **DHealth Lab native frontend** (`ui/src/features/lab/`, DH-LAB-001, extended by DH-LAB-002,
+- **DHealth Lab native frontend** (`ui/src/features/lab/`) **[no longer a separate application —
+  updated 2026-09-20, DH-MVP-POLISH-001: same as Clinic above. `LabApp`/`LabShell` are deleted and the
+  `canWorkOrders`/`canReleaseResults` capability model described below is now derived once, from the
+  active membership, by `WorkspaceProvider` — the release/entry authority separation it encodes is
+  unchanged and still covered by a negative control.]** (DH-LAB-001, extended by DH-LAB-002,
   DH-LAB-003, DH-LAB-004, and DH-LAB-005): authentication (reusing the same shared
   `ExchangeAuthProvider`/`ExchangeAuthGate` Clinic uses — no second OAuth client), a capability
   model (`canWorkOrders`/`canReleaseResults`) that now drives real navigation — a dual-role user
@@ -324,6 +364,22 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   layout. No SMS/WhatsApp/email/voice transport was added; `ResultDelivery` is untouched and
   viewing a status page deliberately does **not** mark it `DELIVERED`. See `docs/ARCHITECTURE.md`
   §19 and `PROJECT_STATE.md`'s DH-PATIENT-001 entry.
+- **One authenticated DHealth staff application** (`ui/src/features/staff/`, DH-MVP-POLISH-001) —
+  supersedes the separate `ClinicApp`/`LabApp` shells and the application-switch buttons that reached
+  them. `StaffApp` loads `/me` **once** for the whole application; the active organization plus the
+  user's roles in it decide which of `Aujourd'hui / Patients / Ordres / Résultats` is available and
+  what each contains, so a person with memberships in a clinic and a laboratory switches
+  *establishment*, not product. `ClinicProvider`/`LabProvider` survive as projections of that one
+  session and fetch nothing, which is why the existing Clinic and Lab page tests remained meaningful
+  rather than being rewritten to match new code. Frontend capability derivation is **usability, not
+  security** — each of the five capabilities is documented against the backend gate that actually
+  enforces it, and the server refuses regardless of what the browser rendered. An organization switch
+  discards the org-scoped subtree by `key`, so a late response from one organization cannot render
+  under another. There is deliberately **no `Réglages` item**: see §I. Built and component/UI-tested
+  only — **same "built but not runtime-proven" boundary as every native surface above**: no real
+  browser has rendered this shell, no real person has used the establishment selector, no E2E has run,
+  and no font has been observed loading. See `DECISIONS.md` ADR-054, `docs/ARCHITECTURE.md` §20,
+  `docs/UI-002-DESIGN-LANGUAGE.md`, and `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry.
 - **Native demo environment** (DH-DEMO-001, `docker-compose.native-demo.yml`,
   `scripts/demo/*.sh`, `adapter/src/daher_adapter/exchange/demo_seed.py`): a dedicated Compose
   project running the real Keycloak/adapter/DHealth-UI/Caddy code paths, deliberately never
@@ -427,7 +483,33 @@ No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
 
-**NEXT: DH-MVP-POLISH-001 — Unified Product Polish + Operational UX.** With DH-PATIENT-001 the
+**NEXT: DH-MVP-ADMIN-001 — Facility Setup + Administration.** DH-MVP-POLISH-001 made the native
+surfaces one authenticated staff application whose visible workflow derives from the active
+organization and the user's roles in it (ADR-054, `docs/ARCHITECTURE.md` §20). That exposes the next
+gap plainly: **nothing in the product can create or administer any of the facts it now depends on.**
+An organization, a membership, a role grant, a provider-lab route, a lab offering, a result template
+— every one is created today by a platform administrator through the API or a seeding script, and the
+staff application has no `Réglages` navigation item at all, deliberately, because there is no screen
+to put behind it. The next ticket should build that: organization profile, member and role
+administration within a facility, provider-lab route visibility, and whatever offering/template
+administration the laboratory side needs, each gated on the authority the backend already enforces
+(`ORG_ADMIN` is a real role in the enum and currently has **no** frontend at all). It should not
+re-open the workflow architecture, and it should not invent a role, a permission, or an
+administrative concept the backend does not already model — if a screen needs one, that is a backend
+decision to raise, not a frontend assumption to make.
+
+**What the MVP still must not be claimed to do**, regardless of the above: no SMS/WhatsApp
+notification, no detailed patient result delivery, no national MPI, no full EMR, no full LIS, no
+Connect integration, no clinical decision support. And "functionally complete" is not
+"runtime-proven": see §A and §D for what has and has not been observed running. DH-MVP-POLISH-001
+adds a further honest limit of its own — **no part of the new design has been seen in a real
+browser**, so every claim about it is about intent and about behaviour under jsdom.
+
+**[Superseded 2026-09-20, DH-MVP-POLISH-001 — the paragraph that stood here proposed
+DH-MVP-POLISH-001 itself and is preserved below as the brief it was written as, since the ticket it
+describes is now done and its scope is worth comparing against what actually landed.]**
+
+~~**NEXT: DH-MVP-POLISH-001 — Unified Product Polish + Operational UX.**~~ With DH-PATIENT-001 the
 native MVP's functional layer is complete end to end: a clinic identifies/registers a patient,
 orders diagnostics, assigns a configured laboratory; the lab receives, accepts, records collection
 and processing, enters controlled results, and releases them under separate authorization;
@@ -440,12 +522,11 @@ dashboards, empty/loading/error states, responsive layout, French wording consis
 presentation, forms, confirmation patterns, branding, accessibility, workflow speed, first-use
 clarity, and support/error recovery. Administrative onboarding UX, security hardening,
 operations/monitoring, backup/restore qualification, DHealth Connect, and any marketing site are
-each separate later evaluations, explicitly **not** part of that ticket.
-
-**What the MVP still must not be claimed to do**, regardless of the above: no SMS/WhatsApp
-notification, no detailed patient result delivery, no national MPI, no full EMR, no full LIS, no
-Connect integration, no clinical decision support. And "functionally complete" is not
-"runtime-proven": see §A and §D for what has and has not been observed running.
+each separate later evaluations, explicitly **not** part of that ticket. **[Delivered, with two
+deliberate deviations recorded in ADR-054: "home dashboards" became one `Aujourd'hui` section rather
+than a dashboard per product, and "DHealth Clinic / DHealth Lab / DHealth Patient feel like one
+product" was achieved by making Clinic and Lab stop being separate applications at all rather than by
+styling two applications alike.]**
 
 **DH-CLINIC-004B remains open — incomplete, not closed.** Realm/client reconciliation is now
 real-Keycloak-runtime-qualified (§C), and a genuine deployment-breaking defect (VARCHAR(255) realm
@@ -456,6 +537,19 @@ healthy within CI's wait window, blocking Caddy. Needed to close this ticket: a 
 capacity (self-hosted or a larger GitHub-hosted runner) — not a different test design — then a
 successful Case A run through the full Playwright suite, then Case B (upgrade path), then the
 idempotent-repeat check. See `PROJECT_STATE.md`'s DH-CLINIC-004B entry for full evidence.
+
+**[Added 2026-09-20, DH-MVP-POLISH-001 — part of that suite is now written against controls that no
+longer exist, and this is stated rather than quietly left to fail.]** E2E-11 navigated directly to a
+per-product native app and clicked between `DHealth Clinique (Natif)` and `DHealth Laboratoire
+(Natif)`. Those two buttons are gone: there is one staff application and one `Ouvrir l'application
+DHealth` control (ADR-054). The spec was rewritten to `page.goto('/?app=maternity')` followed by that
+one click, which still exercises the invariant it was written for — the connector's `check-sso` must
+stay silent — by a simpler path. **That rewrite is written, not verified**: `npm run typecheck:e2e`
+passes locally (and is not part of CI), and the click target is reachable with no OpenMRS session
+because the connector shell has no auth gate, but no Playwright run has executed it. Any other step
+in that suite assuming two separately navigable native applications should be re-derived against
+ADR-054's URL table before it is trusted. **None of this closes DH-CLINIC-004B**, which still needs
+exactly what the paragraph above says it needs.
 
 **DH-IDENTITY-001 — native patient identity/directory contract — is implemented** (§C), and did not
 touch, did not runtime-qualify, and does not change DH-CLINIC-004B's own open item above in any way.

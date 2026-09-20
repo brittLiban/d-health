@@ -7013,3 +7013,116 @@ the original write already did — a correction is not a second opportunity to r
 template governs an item. No schema change was needed for this addendum; it is a property of the
 existing pinned columns, exercised by a new code path. See `PROJECT_STATE.md`'s DH-LAB-005 entry
 for full evidence.
+
+---
+
+## ADR-054 — ACCEPTED / IMPLEMENTED (2026-09-20, DH-MVP-POLISH-001): one authenticated staff application; visible workflow derives from active organization and roles, not from a product the user picks
+
+**Date raised:** 2026-09-20, DH-MVP-POLISH-001 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
+DH-MVP-POLISH-001.
+
+**Why this needed a decision, not just an implementation.** The native surfaces had grown as two
+products -- `ClinicApp` and `LabApp`, reached through application-switching buttons in the reference
+connector's header -- each with its own provider component, each calling `/me` for itself. That
+shape asked the user to know in advance which product their role belonged to, and it made the same
+question ("what may this person do?") answerable in two places that could disagree. Collapsing it
+changes routing, session lifetime, and what the frontend's permission checks mean, so the choices
+are recorded rather than left implicit in a diff.
+
+### Decisions
+
+1. **One staff application, one session.** `StaffApp` -> `WorkspaceProvider` -> `StaffWorkspace` is
+   the only authenticated native surface. `/me` is fetched exactly once for the whole application;
+   `ClinicProvider` and `LabProvider` remain as *projections* of that one workspace context (no
+   `client` prop, no fetch of their own) so the existing page tests keep their meaning. A second
+   `/me` fetch anywhere under the staff tree is a regression, and US3 fails on it.
+2. **Capabilities derive from the active membership, and are usability only.** `canViewPatients`,
+   `canCreateOrders`, `canReviewResults`, `canWorkLabOrders`, `canReleaseResults` are computed from
+   the active organization's type, status and roles, each mapped to the backend gate that actually
+   enforces it (`_require_clinician`, `_require_lab_tech`, `_require_lab_tech_or_releaser`, and the
+   `LAB_RESULT_RELEASER` check in `authorization.py`). Hiding a control is a courtesy; the server
+   remains the only authority. ADR-044's separation of entry from release authority is unchanged:
+   `LAB_TECH` alone never sees release, and NC-B fails if it is granted.
+3. **Nav renders only what exists.** `Aujourd'hui / Patients / Ordres / Résultats`. There is no
+   `Réglages` item, because facility setup and administration are DH-MVP-ADMIN-001's subject and a
+   nav entry leading to "Bientôt" is a promise the build cannot keep. When that ticket lands, the
+   item appears with the screen behind it.
+4. **An organization switch discards the org-scoped subtree rather than reconciling it.** The
+   active organization's id is the `key` of the content subtree, so every org-scoped async surface
+   is invalidated at once and a late response from organization A cannot render under B. This is a
+   deliberate trade: it also discards unsaved in-subtree state on a switch, which is the safe
+   direction. Pending-mutation maps are held *above* the keyed subtree so they survive. OS1 asserts
+   on a heading, not a data row -- a row is cleared by the page's own effect either way, so a
+   row-based assertion passes even with the `key` removed and proves nothing.
+5. **Surfaces and their URLs.** Three surfaces exist, and two spellings are aliases:
+
+   | URL | Surface | Notes |
+   | --- | --- | --- |
+   | `/` | staff | The default changed from the connector to the staff application. |
+   | `/?app=staff` | staff | Canonical. |
+   | `/?app=clinic` | staff | Alias, kept so existing links and bookmarks resolve. |
+   | `/?app=lab` | staff | Alias, as above. Neither is a separate surface any more. |
+   | `/?app=maternity` | reference connector | OpenMRS/maternity track, preserved. |
+   | `/patient#<token>` | patient | Returns before any OIDC provider is constructed. |
+
+   `clinic` and `lab` are *aliases*, not surfaces: they resolve to the one staff application, which
+   then derives what to show from memberships. Nothing in the staff application reads them.
+6. **Connector -> staff is one-directional by design.** The preserved connector header offers one
+   button (`Ouvrir l'application DHealth`). There is no staff -> connector control: a staff user who
+   needs the maternity connector reaches it by URL. Adding a visible route back would put the
+   reference-connector track inside the staff product's navigation, which ADR-042/043 keep separate.
+   Leaving the connector is not a logout -- unmounting the Exchange auth provider drops in-memory
+   token state and must never call Keycloak's end-session endpoint.
+7. **The token layer is shared with the preserved connector, and that has a consequence.**
+   Retargeting `--color-primary` changes the connector's colour too, because the connector's
+   stylesheets resolve the same tokens. That is accepted deliberately: one product, one palette. A
+   future ticket that wants the connector to diverge must scope its own tokens rather than
+   reintroduce literal hex values.
+8. **Colour carries workflow responsibility, never clinical meaning.** petrol = a step is complete
+   or under way; brass = something is still owed; clay = stopped, refused or superseded; ink =
+   recorded fact. The `--color-success-*`/`--color-danger-*` names survive as historical aliases and
+   mean "workflow step confirmed"/"workflow stopped". Consequences applied in this ticket: a patient
+   surface follow-up marker moved off clay onto brass (clay beside a sentence about someone's own
+   analysis reads as alarm about the result, which no DHealth surface may imply), and no value is
+   ever coloured by its magnitude. That last point was verified rather than assumed: the only render
+   site of `reference_range_low`/`reference_range_high` in the application styles the value cell with an
+   unconditional `fontWeight`, and no component anywhere derives a colour, class or style from
+   `numeric_value`.
+9. **A corrected result is named, and its ordinal is demoted rather than erased.** Queue rows read
+   `Rectificatif`; the version history, the relay's technical reference and the review restatement
+   keep `version N`. `is_amendment` is `version_number > 1` server-side, so a first release still
+   reads `Version 1` in a queue. The number is how a record is matched to the backend and discussed
+   with a laboratory by telephone; it is demoted, never dropped.
+10. **A review disposition takes two gestures and no modal.** The confirm control is always visible
+    and inert until a disposition is chosen, and the sentence above it restates the disposition, the
+    patient and the version on screen, bound by `aria-describedby`. A modal was rejected: someone
+    working a queue dismisses the twentieth confirmation without reading it, which protects nobody.
+    The restatement follows the version actually displayed, not the one the queue pointed at, and
+    switching versions clears any chosen disposition.
+11. **Typed result values are never persisted, and the UI says what that costs.** No autosave, and
+    no draft in `localStorage`, `sessionStorage`, `IndexedDB`, cookies or the URL. Two events lose a
+    draft and the per-field marker names both: a refresh, and a *failed* token refresh -- which sets
+    auth status `error`, at which point `ExchangeAuthGate` renders its own notice in place of the
+    tree below it and the entry form unmounts, before any redirect. A *successful* silent refresh
+    loses nothing, which is the ordinary case for a token expiring while the panel sits open. The
+    failure path cannot be bridged without persisting clinical values outside the component, so it
+    is stated rather than papered over.
+12. **The relay derives from real order state and invents nothing.** No node names a person: the
+    backend models release and review authority as organization roles, so naming an individual as
+    holding the release would be fabrication, and the node type has no field for a person at all. A
+    fact the API does not date is shown undated rather than borrowing a nearby timestamp.
+    `COMPLETED` implies released, because `release_lab_order_results` is the only supported
+    transition into it. Six pairs are never collapsed: selected/accepted, entry-complete/released,
+    released/reviewed, release/amendment, refused/cancelled, and analysis-under-way/
+    results-available.
+
+### Consequences
+
+- `ClinicApp`, `ClinicShell`, `LabApp` and `LabShell` are deleted. Their test coverage was
+  *rewritten onto the new surface*, not dropped: `ClinicApp.test.tsx` -> `StaffApp.provider.test.tsx`
+  and `LabApp.test.tsx` -> `StaffApp.laboratory.test.tsx`.
+- No migration. Expected head remains `0025_native_result_binding`; nothing in this ticket touched
+  the adapter's schema.
+- DH-CLINIC-004B's E2E paths that navigated *directly* to a per-product native app no longer exist
+  as written. They are superseded, not closed: see `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry for
+  which spec steps were rewritten and which remain unproven without a live stack.

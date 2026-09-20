@@ -1683,3 +1683,84 @@ is not, because `ExchangeSecurityAuditEvent.actor_identity_id` is a real FK to
 `exchange_identities` and a patient has no identity there — recording one would mean fabricating an
 actor, which this repository refuses to do (see `exchange/patient_access.py`'s own docstring). If
 patient-read auditing is wanted, it needs an actor model designed for it, not a false row.
+
+---
+
+## 20. One staff application (DH-MVP-POLISH-001) — added 2026-09-20
+
+§19 described three native applications. There are now three *surfaces* but only two authenticated
+ones, because Clinic and Lab stopped being separate applications. ADR-054 records the decision; this
+section records the shape.
+
+```
+                       ┌─ /patient#access=…  ──────────────  PatientApp        (no OIDC, §19)
+                       │
+   App.tsx ── surface ─┼─ /  ·  ?app=staff  ─────────────┐
+   (?app, normalized)  │      ?app=clinic  (alias)       ├─  ExchangeAuthProvider
+                       │      ?app=lab     (alias)       │        └─ ExchangeAuthGate
+                       │                                 │              └─ StaffApp
+                       └─ ?app=maternity ───────  AppShell (OpenMRS connector, ADR-042)
+                                                    └─ "Ouvrir l'application DHealth" ─┘
+                                                       (one-directional, by design)
+
+   StaffApp
+     └─ WorkspaceProvider ──────────── GET /exchange/v1/me   ← fetched ONCE, for everything
+          │   organizations · activeOrganization · capabilities · generation
+          ▼
+        StaffWorkspace
+          │  masthead (identity, roles, active-establishment select)
+          │  nav: Aujourd'hui · Patients · Ordres · Résultats
+          │  pending-mutation maps  ← held ABOVE the keyed subtree, so they survive a switch
+          ▼
+        <div key={activeOrganization.organization_id}>   ← an org switch DISCARDS this subtree
+          └─ ClinicProvider / LabProvider   ← projections of the workspace, they fetch nothing
+               └─ the existing Clinic and Lab pages, unchanged
+```
+
+**Why the providers stayed.** `ClinicProvider` and `LabProvider` each used to call `/me` for
+themselves, so the same question — what may this person do? — had two answers that could disagree,
+and a user in both a clinic and a laboratory paid for the session twice. They are now adapters over
+the one workspace context: no `client` prop, no fetch, and they map the workspace's states onto the
+vocabularies their pages already speak (`no_organizations` → `no_clinics` / `no_labs`). Keeping them
+preserved the existing Clinic and Lab page tests as *tests of behaviour* rather than forcing a
+rewrite that would have re-asserted whatever the new code happened to do.
+
+**Capabilities are a projection of the active membership, not a permission system.** Five booleans —
+`canViewPatients`, `canCreateOrders`, `canReviewResults`, `canWorkLabOrders`, `canReleaseResults` —
+derived from the active organization's type, status and roles. Each is documented against the backend
+gate that actually enforces the same thing (`_require_clinician`, `_require_lab_tech`,
+`_require_lab_tech_or_releaser`, and the `LAB_RESULT_RELEASER` check in `authorization.py`). Hiding
+a control the server would refuse is a courtesy to the user, never a security boundary; the server
+refuses regardless of what the browser rendered. ADR-044 stands: entry authority and release
+authority are separate, so `LAB_TECH` alone never sees a release control.
+
+**Why an organization switch remounts instead of refetching.** Every org-scoped surface — queues,
+patient lists, order detail, in-flight mutations — would otherwise need its own invalidation, and one
+forgotten `if (organizationId !== current) return` is a late response from organization A rendering
+under organization B's heading. The active organization's id is therefore the `key` of the content
+subtree: React discards the whole thing, and no stale response has a component to land in. The cost
+is that unsaved in-subtree state dies on a switch, which is the safe direction for a wrong-facility
+hazard. Pending-mutation maps live above the keyed boundary because they are about the person's
+intent, not the organization's data.
+
+**Nav renders only what exists.** There is no `Réglages` item: facility setup and administration are
+DH-MVP-ADMIN-001's subject, and an item that leads to "Bientôt" teaches users that this product's
+navigation cannot be trusted. It appears when the screen behind it does.
+
+**The reference connector keeps its own shell, and shares the token layer.** `?app=maternity` renders
+the OpenMRS `AppShell` exactly as before, with one header button into the staff application. There is
+no control back: a staff user who needs the connector uses the URL, because putting the
+reference-connector track inside the staff product's navigation would undo the separation ADR-042/043
+exist to maintain. Leaving the connector is not a logout — unmounting the Exchange auth provider
+drops in-memory token state and never calls Keycloak's end-session endpoint. Both shells resolve the
+same `--color-*` tokens, so retargeting the product's primary colour retargets the connector's too;
+that is accepted (one product, one palette) and noted so a future divergence is a deliberate act
+rather than a surprise.
+
+**Session lifetime and typed values.** A successful silent token refresh does not remount anything,
+so a technician's typed-but-unsaved result values survive a token expiring while the panel is open. A
+*failed* refresh sets auth status `error`, at which point `ExchangeAuthGate` renders its own notice
+instead of the tree below it and the entry form unmounts with the drafts in it — before any redirect.
+That path cannot be bridged without persisting clinical values outside the component, which
+`docs/MVP-1.0.md` and this ticket both forbid, so the per-field marker names both losing events
+instead of implying the work is safe.

@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DH-PATIENT-001,
-> 2026-09-20 — this parenthetical read "DH-MVP-001 and DH-DOC-001" until then and had gone stale;
-> always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-POLISH-001,
+> 2026-09-20 — this parenthetical has now gone stale twice, first reading "DH-MVP-001 and
+> DH-DOC-001" and then "DH-PATIENT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -14014,8 +14014,8 @@ This ticket delivers the native Clinic surface without breaking, modifying, or r
 
 2. **Native Clinic Application Shell & State (`ui/src/features/clinic/`):**
    - [`ui/src/features/clinic/ClinicContext.ts`](ui/src/features/clinic/ClinicContext.ts) & [`ClinicProvider.tsx`](ui/src/features/clinic/ClinicProvider.tsx): Provider organization context with automatic identity bootstrap via `/me`. Enforces Finding F-08: filters strictly for active provider organizations with active clinician roles (`organization_type === 'PROVIDER'`, `organization_status === 'ACTIVE'`, `membership_status === 'ACTIVE'`, `roles.includes('CLINICIAN')`). Truthful states for `loading`, `ready`, `unauthenticated`, `no_clinics`, and `error` without mock fallback.
-   - [`ui/src/features/clinic/ClinicShell.tsx`](ui/src/features/clinic/ClinicShell.tsx) & [`ClinicShell.module.css`](ui/src/features/clinic/ClinicShell.module.css): French-first responsive navigation with accessible tabs (`Accueil`, `Patients`, `Ordres de laboratoire`, `Résultats`), active clinic selector badge, and app mode switcher.
-   - [`ui/src/features/clinic/ClinicApp.tsx`](ui/src/features/clinic/ClinicApp.tsx): Top-level Clinic application component managing active navigation tabs.
+   - `ui/src/features/clinic/ClinicShell.tsx` & `ClinicShell.module.css`: French-first responsive navigation with accessible tabs (`Accueil`, `Patients`, `Ordres de laboratoire`, `Résultats`), active clinic selector badge, and app mode switcher. **[Files deleted 2026-09-20, DH-MVP-POLISH-001 — the app-mode switcher and the per-product shell were replaced by one staff shell (`ui/src/features/staff/StaffShell.tsx`); these two link targets were delinked to plain code spans because they no longer resolve, and the sentence is left as the accurate history of what DH-CLINIC-002 built. See ADR-054.]**
+   - `ui/src/features/clinic/ClinicApp.tsx`: Top-level Clinic application component managing active navigation tabs. **[File deleted 2026-09-20, DH-MVP-POLISH-001 — superseded by `ui/src/features/staff/StaffApp.tsx`; its test file was rewritten onto the new surface as `StaffApp.provider.test.tsx` rather than dropped.]**
 
 3. **Clinic Pages:**
    - [`ui/src/features/clinic/pages/ClinicHomePage.tsx`](ui/src/features/clinic/pages/ClinicHomePage.tsx): Summary cards for *Ordres actifs* (pending, accepted, in-progress), *Résultats disponibles* (completed), and *À revoir* (truthful navigation to results tab). Avoids N+1 query storms by deriving counts directly from provider orders list.
@@ -17787,3 +17787,224 @@ Every change landed as focused commits directly on `master`, per this ticket's o
 instruction. No branch and no pull request were created.
 
 `NEXT: DH-MVP-POLISH-001 — Unified Product Polish + Operational UX`
+
+---
+
+## DH-MVP-POLISH-001 — Unified Product Polish + Operational UX · 2026-09-20 · directly on `master`
+
+**What this closes.** The native MVP's *functional* layer was complete after DH-PATIENT-001: a clinic
+registers a patient, orders diagnostics, routes to a configured laboratory; the lab accepts, records
+collection and processing, enters controlled results, and releases them under separate authority;
+corrections are versioned immutably; a clinician reviews an exact version and records a follow-up
+disposition; a patient can reach a status view. What did not exist was a *product*. Staff chose
+between two applications called DHealth Clinic and DHealth Lab through switching buttons in the
+reference connector's header, each application loaded `/me` for itself, and 21 CSS custom properties
+were referenced across the feature stylesheets and defined nowhere. This ticket makes it one
+authenticated staff application whose visible workflow derives from the active organization and the
+user's roles in it.
+
+It is a frontend and documentation ticket. **No backend route, no schema change, no migration** —
+Alembic head stays `0025_native_result_binding`, re-verified against `adapter/migrations/versions/`
+and CI's own `EXPECTED_HEAD`. The adapter was not edited at all; its suites were run as a regression
+check, not because anything in them was touched.
+
+### Starting state, verified rather than trusted
+
+- `HEAD == origin/master == 50a7eac`, worktree clean, re-verified by `git fetch` rather than taken
+  from the prompt.
+- Migration head `0025_native_result_binding`, re-verified on disk.
+- Backend role gates read from source rather than assumed, because the whole capability layer is
+  derived from them: `_require_clinician` (which covers patient-reference binding, order creation
+  *and* doctor review), `_require_lab_tech`, `_require_lab_tech_or_releaser`, and the
+  `LAB_RESULT_RELEASER` check in `authorization.py`. The role enum is `ORG_ADMIN`, `CLINICIAN`,
+  `LAB_TECH`, `LAB_RESULT_RELEASER` — there is no "clinic admin" or "release manager" to project.
+- `release_lab_order_results` confirmed as the only supported transition from `IN_PROGRESS` to
+  `COMPLETED`, which is why the relay treats `COMPLETED` as implying released.
+
+### What landed, in seven commits
+
+1. **`8482b4d` — central design tokens and self-hosted typefaces.** A two-layer token system in
+   `ui/src/index.css`: `--dh-*` is the raw palette and the only place literal colour appears;
+   everything else is semantic and points at it. This also fixed a pre-existing defect found while
+   orienting, not introduced by this ticket: **21 custom properties were referenced and never
+   defined**, and a `var()` that resolves to nothing invalidates its whole declaration — so "muted"
+   labels had been rendering at full-strength ink and sized text at whatever it inherited. Nothing
+   failed; the UI was simply never the one the stylesheets described. Typefaces (IBM Plex Sans, Source
+   Serif 4, IBM Plex Mono) are self-hosted via `@fontsource`, subset to latin + latin-ext, imported in
+   `main.tsx`. No runtime request to Google Fonts or any font CDN.
+2. **`9bc3e26` — one staff application, one session, capability-derived nav.** `StaffApp` →
+   `WorkspaceProvider` → `StaffWorkspace`, one `/me` for everything, capabilities derived from the
+   active membership, nav of exactly four items. `ClinicProvider`/`LabProvider` became projections of
+   the workspace. `ClinicApp`, `ClinicShell`, `LabApp`, `LabShell` deleted; their tests *rewritten
+   onto the new surface* (`StaffApp.provider.test.tsx`, `StaffApp.laboratory.test.tsx`), not dropped.
+3. **`7264998` — the relay, a two-gesture review, and honest unsaved state.** `WorkflowRelay` +
+   `relayNodes`, the review subject restatement bound by `aria-describedby`, and a per-field
+   unsaved-value marker in the native result entry form.
+4. **`959236d` — demote the version ordinal, and say what a draft really costs.** Four corrections,
+   each to something subtly untrue; see below.
+5. **`1f4c053` — the patient surface as the Assisté density.** `Patient.module.css` moved onto the
+   token layer, 18px base, 56px touch targets, 14px card radius, and one substantive change: the
+   follow-up marker moved off clay onto brass.
+6. **`e9cde24` — an axe suite fixed after it was caught auditing the wrong surface.** Bug 11 above;
+   its own commit because it is a fix to this ticket, not part of any feature in it.
+7. **This commit — documentation.** ADR-054, `docs/ARCHITECTURE.md` §20, `docs/UI-002-DESIGN-LANGUAGE.md`,
+   a dated note in `docs/MVP-1.0.md`, and this entry.
+
+### Bugs found and fixed during the ticket
+
+Listed because each was a defect in *this ticket's own* work or a pre-existing one it exposed, and a
+report that only lists features is not a report.
+
+1. **21 undefined CSS custom properties** (pre-existing). Described above.
+2. **A working-looking reconnect button.** `Se reconnecter` on the workspace's error screen was wired
+   to `reload()`, which re-issues `/me`, receives the same 401, and returns to the same screen —
+   nothing propagates a `/me` 401 up to `ExchangeAuthGate`. Fixed by threading `onReauthenticate` from
+   `auth.login` and rendering the button **only** when that handler exists. A test asserts its absence
+   when unwired, so the dead-control shape cannot come back silently.
+3. **A 401 reported as "no establishment is attached to your account."** A falsehood that would send
+   someone with an expired token to an administrator. `unauthenticated` now has its own branch.
+4. **The relay claimed release was still owed on a `COMPLETED` order**, when release is the only way to
+   reach `COMPLETED`. Fixed with a released-but-undated branch that makes no review claim.
+5. **`setGeneration` inside another setter's updater.** React may invoke an updater twice, which would
+   double-count the generation. Fixed by deciding before either setter runs.
+6. **A stale error survived a successful reload** on the client-identity-change path.
+7. **Invalid HTML**: a `<div>` passed as `EmptyState` children renders inside a `<p>`.
+8. **The relay skipped the analysis step before `IN_PROGRESS`** while always showing release as owed,
+   so an accepted order read "accepté ✓ → libération attendue".
+9. **The review restatement trailed off for a pre-versioning result**, reading identically to a
+   versioned one whose version simply went unmentioned.
+10. **This ticket's own review tests were green over a path that never ran.** The review mutations were
+    bare `vi.fn()`s returning `undefined`, so the page's `call.then(...)` threw an unhandled
+    `TypeError` inside the click handler while `toHaveBeenCalledWith` still passed. Found by reading
+    vitest's "unhandled errors" section instead of only its pass count.
+11. **An axe suite auditing the wrong surface, four failures and one vacuous pass.** `App.a11y.test.tsx`
+    audits the reference connector's screens through `render(<App />)`. Flipping the bare `/` default to
+    the staff application broke four of the five outright — and the fifth *passed*, running axe over the
+    staff auth gate while claiming to cover the patient search screen, which is worse than a failure
+    because it reports coverage that does not exist. Fixed by naming `initialApp="maternity"` in all
+    five and resetting `?app` in `beforeEach`. This one is the argument for the file-count
+    reconciliation above: it stayed hidden through every earlier batch because this file's vitest
+    worker kept failing to start, and a pass count alone cannot distinguish "green" from "never ran".
+
+### Negative controls actually executed
+
+Each property was deliberately broken, the specific test observed going red for the specific reason,
+and the change reverted. Every one had a clean unpatched baseline first.
+
+- **NC-A** — a second `/me` fetch added to `ClinicProvider` → `FAIL … US3: loads the session exactly
+  once for the whole application`.
+- **NC-B** — `LAB_TECH` granted release authority → `FAIL … technician who cannot release results`.
+- **NC-C** — `key={activeOrganization.organization_id}` removed → `FAIL … OS1: unmounts the previous
+  content subtree rather than reconciling it in place`. **This one did not fire on the first attempt**,
+  and the reason is worth keeping: OS1 originally asserted on a data row, which the page's own effect
+  clears on an organization change whether or not the subtree was discarded. Rewritten to assert on the
+  page *heading*, which React reconciles in place unless the subtree is genuinely thrown away.
+- **Six token/typeface controls** from commit 1 (a deleted definition, a re-added literal hex, a
+  Google Fonts URL, and so on).
+- **Two more in commit 5**: deleting `--radius-lg` from `:root` still fails the undefined-property scan
+  (proving the file-local-declaration relaxation did not make that guard vacuous), and restoring the
+  drifted `#0f5c4a` fails the new literal-colour scan.
+
+### Test groups delivered
+
+US1–US12 (unified shell and session), OS1–OS6 (organization-switch safety), RT1–RT6 (routing and
+surfaces), RL1–RL8 plus RL4b/RL4c (the relay), RV1–RV9 (the review two-step), RE1–RE6 (unsaved result
+values), RX1–RX8 (corrections and amendments), plus the Clinic, Lab and Patient regression suites and
+the pre-existing axe suites.
+
+### Superseded, not closed: DH-CLINIC-004B E2E paths
+
+`ui/e2e/specs/03-session-lifecycle.spec.ts`'s E2E-11 navigated directly to a per-product native app
+and clicked between `DHealth Clinique (Natif)` and `DHealth Laboratoire (Natif)`. Those controls no
+longer exist. The spec was rewritten to `page.goto('/?app=maternity')` followed by a click on
+`Ouvrir l'application DHealth`, which still exercises the invariant it was written for (the connector's
+`check-sso` must stay silent) by a different and simpler path. **This rewrite is written, not verified:**
+there is no live stack on this machine, and `typecheck:e2e` is not part of CI. What *was* verified
+locally is that `npm run typecheck:e2e` passes, and that the click target is reachable without an
+OpenMRS session — the connector shell has no auth gate, and `App.test.tsx` clicks that same button
+under jsdom with no session mocked. Any other DH-CLINIC-004B step that assumed two separately
+navigable native apps should be treated as superseded and re-derived against ADR-054's URL table, not
+as passing.
+
+### Evidence level
+
+**Unit tests, static analysis, and the CI-equivalent checks runnable on this machine.** No remote CI
+run is claimed here: these words were written before this ticket's single push existed. No live stack,
+no real Keycloak, no browser.
+
+- **UI: 787 tests across all 51 test files, all passing.** Reconciled rather than reported: a
+  whole-suite `npx vitest run` on this machine printed `Test Files 24 passed (24) · Tests 421 passed
+  (421) · Errors 27` — **27 of 51 files never started a worker at all** (`[vitest-pool]: Failed to
+  start forks worker … Timeout waiting for worker to respond`, a known flake of this 9p-mounted
+  checkout, not a property of the code). Those 27 were then run by name in three batches of nine:
+  188 + 86 + 92 = 366 tests, all green. 24 + 27 = 51 files on disk, and 421 + 366 = 787 tests, so
+  the arithmetic closes and no file is unaccounted for. **This reconciliation is the only reason a
+  real regression was caught** — see `App.a11y.test.tsx` in the bug list.
+- **UI typecheck**: `tsc -b --noEmit` clean.
+- **UI e2e typecheck**: `tsc -p e2e/tsconfig.json` clean. Worth stating because CI does **not** run
+  this, so a broken spec would otherwise be invisible until someone ran Playwright.
+- **UI lint**: `oxlint` — 0 errors, 40 warnings. The warning count was measured against a stashed
+  working tree rather than assumed: `HEAD` reports the same 40, so this ticket's later commits added
+  none. The warnings are all the same `set-state-in-effect` heuristic on fetch-on-mount effects that
+  a dozen pre-existing files also trip; none is an error and CI does not fail on them.
+- **Adapter, untouched but run as a regression check**: `ruff check` clean, `ruff format --check`
+  clean (152 files), `pytest -q` **1122 passed, 118 skipped** — the DH-PATIENT-001 baseline exactly.
+- **Migration head** `0025_native_result_binding`, as the ticket required. No `0026` was created,
+  and nothing in this ticket needed one.
+- **CI-equivalent static checks run locally**: `.env` untracked; the narrow tracked-secret scan finds
+  nothing; **every relative link in all 28 tracked markdown documents resolves** — this one caught
+  three real breaks, links in `PROJECT_STATE.md` pointing at `ClinicShell.tsx`, `ClinicShell.module.css`
+  and `ClinicApp.tsx`, files this ticket deleted. CI would have failed on them. They are now plain code
+  spans with a dated note, so the history stays accurate without a dangling link.
+- **Vitest's failure signalling was verified, not assumed.** An earlier measurement appeared to show
+  `vitest run` exiting 0 with failing tests, which would have meant CI's test step proved nothing.
+  That reading was an artifact of `$?` never reaching the inner shell through `wsl -d Ubuntu bash -lc
+  '…'`: a `false` control also reported 0. Re-measured with a script file, the same harness reports
+  `control-false=1`, `vitest-with-a-failing-test=1`, `vitest-all-green=0`. So vitest exits non-zero on
+  a **failing assertion**, and CI's `npm run test` catches that. **What was not measured is the case
+  that prompted the question**: vitest's exit code when workers fail to *start*, which is the shape
+  seen here 27 times and the one CI would need to catch to avoid reporting green over a suite half of
+  which never ran. Forcing that failure deliberately was not attempted. Recorded because the false
+  reading was alarming, because the unmeasured half is the half that matters, and because the next
+  person measuring exit codes through that wrapper will hit the same behaviour.
+- **Build**: `npm run build` clean, and its `postbuild` secret scan reports
+  `No secrets found across 28 built file(s)`. The self-hosting claim is checked at the bundle level and
+  not only in source: 12 `.woff2` files are emitted as local hashed assets, and the built CSS and JS
+  contain **zero** references to `fonts.googleapis.com` or `fonts.gstatic.com` — in fact no absolute
+  `http(s)` URL at all in the built stylesheet.
+
+### What is NOT proven
+
+- **No real browser rendered any of this.** No width was measured, no font was seen to load, no
+  focus ring was observed, no contrast was sampled. jsdom cannot measure layout or resolve a cascade
+  of custom properties, and the token guards are deliberately *source scans* for that reason.
+- **No E2E run.** No live stack, no real Keycloak, no real organization switch against a real `/me`.
+- **The organization `<select>` has never been used by a person who belongs to two facilities**, which
+  is the one interaction this ticket's whole premise rests on.
+- **No accessibility audit beyond axe under jsdom**, which checks a subset of rules on a DOM with no
+  layout: it cannot see a focus order that makes no sense or a target too small to hit.
+- **Three of this ticket's own ARIA constructs were never axe-audited *in page context*.** The relay
+  disclosure (`aria-controls` naming an element that does not exist while collapsed, plus a `<th>`
+  carrying only visually-hidden text) and the review restatement (`aria-describedby` on the confirm
+  button) are audited either not at all or only as isolated components — `ClinicA11y.test.tsx` renders
+  the pages but does not open the disclosure or choose a disposition, and `WorkflowRelay.test.tsx`
+  audits the relay on its own. The constructs are deliberate and each has a stated reason, but "axe is
+  clean" does not currently cover them where they actually appear.
+- **No performance measurement.** "Faster than what it replaces" (Law 3) remains a validated target,
+  not a claim.
+- **No real-patient pilot on either track**, unchanged.
+
+### Confirmation no real patient data used
+
+Every name, identifier, test name and result value in this ticket's code, fixtures and tests is
+synthetic ("Clinique de la Paix", "Laboratoire Central", "Fatouma Robleh", "Demo Measure A",
+`SENTINEL-*`). No clinical content, analyte, reference range or interpretation was invented; this
+ticket adds no clinical decision surface, and colour was deliberately moved *away* from anything that
+could read as clinical interpretation.
+
+### Confirmation no branch, no PR
+
+Every change landed as focused commits directly on `master`, per this ticket's own explicit
+instruction. No branch and no pull request were created.
+
+`NEXT: DH-MVP-ADMIN-001 — Facility Setup + Administration`

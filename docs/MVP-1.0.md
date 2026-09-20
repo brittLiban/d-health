@@ -703,3 +703,32 @@ exact-version reads are manifest-backed. SQLite unit/API tests (136 passed) and 
 qualification (33 passed across 6 test suites, migration 0018->0019 upgrade/downgrade clean, and
 both downgrade guards verified) pass. Real Keycloak qualification, manual live/browser demonstration,
 and production deployment remain unrun, and the Exchange is not pilot-ready by this note.
+
+**DH-MVP-POLISH-001 update (2026-09-20): "DHealth Clinic" and "DHealth Lab" are product *names*, not
+separate applications.** §3's product family still describes them as distinct software, and until
+this ticket the frontend agreed: `ClinicApp` and `LabApp` were separate React applications, reached
+through two application-switching buttons, each loading `/me` for itself. They are now one
+authenticated staff application (`ui/src/features/staff/`). Which workflows a person sees is derived
+from their active organization and their roles in it, so a clinician sees ordering and review, a
+technician sees the work queue, someone with both memberships switches establishment rather than
+switching product, and nobody is asked to know in advance which product their role belongs to. The
+names remain accurate as descriptions of the two halves of the workflow and of who each serves; they
+no longer describe two things to install, open, or log into. `?app=clinic` and `?app=lab` survive as
+URL aliases onto the one application. Full shape: `docs/ARCHITECTURE.md` §20; decisions and their
+consequences: ADR-054.
+
+Three things this note does **not** claim. The maternity/reference-connector track is untouched and
+still reached at `?app=maternity` (ADR-042/043), deliberately outside the staff product's navigation.
+No facility-setup or administration surface exists yet — there is no `Réglages` navigation item,
+because DH-MVP-ADMIN-001 owns that and a navigation entry leading to "Bientôt" is worse than its
+absence. And nothing here changes §6's laws or §13's boundaries: colour in this product carries
+workflow responsibility (a step is complete, something is owed, this stopped) and never clinical
+interpretation, no result value is coloured by its magnitude, and no clinical value — typed, drafted,
+released, or amended — is persisted to `localStorage`, `sessionStorage`, `IndexedDB`, a cookie, or a
+URL on any surface. The consequence of that last rule is stated in the UI rather than hidden: a typed
+result value is lost by a page refresh and by a *failed* token refresh, and the field says so.
+
+This ticket added no backend route, no schema change, and no migration (head remains
+`0025_native_result_binding`). It is a frontend and documentation ticket. Real Keycloak qualification,
+a live browser walkthrough, and any real-patient pilot remain unrun on this track, and nothing in
+this note makes the Exchange pilot-ready.

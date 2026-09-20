@@ -221,7 +221,11 @@ export function providerRelayNodes({
     nodes.push({
       id: 'released',
       // Entry completed is not released, so this stays owed until a release
-      // version exists — even when the order already reads COMPLETED.
+      // version exists. It no longer says "even when the order already reads
+      // COMPLETED": that was this builder's own bug, and the branch above now
+      // returns early for COMPLETED because release is the only way to reach it.
+      // This node is therefore only ever reached for an order that has genuinely
+      // not been released.
       label: 'Libération des résultats attendue',
       organizationName: assignment?.lab_organization_name ?? null,
       at: null,
