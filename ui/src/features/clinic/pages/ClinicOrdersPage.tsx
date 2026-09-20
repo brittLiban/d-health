@@ -15,6 +15,7 @@ import {
   type StatusTone,
 } from '../../../design-system'
 import { LabRoutingStep } from '../components/LabRoutingStep'
+import { PatientAccessHandoff } from '../components/PatientAccessHandoff'
 import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
 
@@ -138,6 +139,44 @@ export function ClinicOrdersPage() {
     setRoutingState({ orderId: null, order: null, loading: false, error: null })
   }
 
+  // DH-PATIENT-001 §11/§57: the patient handoff panel opens against one specific order and needs
+  // that order's full item list (the list row carries only `item_count`), so opening it fetches
+  // the order first -- the same shape, and the same stale-response discipline, as the routing
+  // panel above: `handoffState.orderId` is the identity check, so a late response for an order
+  // the clinician has since closed or switched away from is discarded rather than rendered under
+  // a different patient (§49).
+  const [handoffState, setHandoffState] = useState<{
+    orderId: string | null
+    order: LabOrder | null
+    loading: boolean
+    error: string | null
+  }>({ orderId: null, order: null, loading: false, error: null })
+
+  const handleOpenHandoff = (orderId: string) => {
+    if (!activeProvider) return
+    const targetProvider = activeProvider.organization_id
+    setRoutingState({ orderId: null, order: null, loading: false, error: null })
+    setHandoffState({ orderId, order: null, loading: true, error: null })
+    client
+      .getOrder(targetProvider, orderId)
+      .then((order) => {
+        setHandoffState((prev) =>
+          prev.orderId === orderId ? { orderId, order, loading: false, error: null } : prev,
+        )
+      })
+      .catch(() => {
+        setHandoffState((prev) =>
+          prev.orderId === orderId
+            ? { orderId, order: null, loading: false, error: 'Impossible de charger cet ordre.' }
+            : prev,
+        )
+      })
+  }
+
+  const handleCloseHandoff = () => {
+    setHandoffState({ orderId: null, order: null, loading: false, error: null })
+  }
+
   const handleAssigned = (orderId: string, assignment: LabAssignmentSummary) => {
     setOrdersState((prev) => ({
       ...prev,
@@ -249,7 +288,23 @@ export function ClinicOrdersPage() {
                       </td>
                       <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
                         {order.lab_assignment ? (
-                          order.lab_assignment.lab_organization_name
+                          <div style={{ display: 'grid', gap: 'var(--space-1)' }}>
+                            <span>{order.lab_assignment.lab_organization_name}</span>
+                            {/*
+                              DH-PATIENT-001 §7/CH1/CH2: offered only once a laboratory is
+                              assigned. Before that the Exchange would issue a LAB_SELECTION
+                              (marketplace-capable) grant, which this launch flow never hands to a
+                              patient -- so the control simply does not exist in that state.
+                            */}
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => handleOpenHandoff(order.id)}
+                              aria-label={`Suivi patient pour ${order.patient.display_name?.trim() || 'Nom non renseigné'}`}
+                            >
+                              Suivi patient
+                            </Button>
+                          </div>
                         ) : order.status === 'AWAITING_LAB_SELECTION' ? (
                           <div style={{ display: 'grid', gap: 'var(--space-1)' }}>
                             <span style={{ color: 'var(--color-neutral-600)' }}>Non attribué</span>
@@ -292,6 +347,39 @@ export function ClinicOrdersPage() {
               </table>
             </div>
           </Card>
+
+          {handoffState.orderId ? (
+            <div>
+              <div style={{ marginBottom: 'var(--space-3)' }}>
+                <Button type="button" variant="secondary" onClick={handleCloseHandoff}>
+                  Fermer
+                </Button>
+              </div>
+              {handoffState.loading ? (
+                <LoadingSkeleton label="Chargement de l'ordre…" />
+              ) : handoffState.error ? (
+                <ErrorState
+                  code="NETWORK_ERROR"
+                  onRetry={() => handleOpenHandoff(handoffState.orderId as string)}
+                />
+              ) : handoffState.order && activeProvider ? (
+                (() => {
+                  const handoffOrder = handoffState.order
+                  return (
+                    <PatientAccessHandoff
+                      key={handoffOrder.id}
+                      client={client}
+                      providerId={activeProvider.organization_id}
+                      orderId={handoffOrder.id}
+                      providerName={activeProvider.organization_name}
+                      items={handoffOrder.items}
+                      labName={handoffOrder.lab_assignment?.lab_organization_name ?? null}
+                    />
+                  )
+                })()
+              ) : null}
+            </div>
+          ) : null}
 
           {routingState.orderId ? (
             <div>

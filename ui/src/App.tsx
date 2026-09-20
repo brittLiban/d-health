@@ -6,6 +6,7 @@ import { ExchangeAuthGate, ExchangeAuthProvider, useExchangeAuth } from './featu
 import { ClinicApp } from './features/clinic/ClinicApp'
 import { LabApp } from './features/lab/LabApp'
 import { MaternityBoardPage } from './features/maternity/MaternityBoardPage'
+import { PatientApp } from './features/patient/PatientApp'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
 import { PatientWorkspace } from './features/patients/PatientWorkspace'
 
@@ -25,7 +26,7 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 export interface AppProps {
-  initialApp?: 'maternity' | 'clinic' | 'lab'
+  initialApp?: 'maternity' | 'clinic' | 'lab' | 'patient'
 }
 
 /**
@@ -63,12 +64,13 @@ function NativeLab({ onSwitchApp }: { onSwitchApp: () => void }) {
 }
 
 function App({ initialApp = 'maternity' }: AppProps = {}) {
-  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic' | 'lab'>(() => {
+  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic' | 'lab' | 'patient'>(() => {
     if (typeof window !== 'undefined' && window.location?.search) {
       const params = new URLSearchParams(window.location.search)
       const requested = params.get('app')
       if (requested === 'clinic') return 'clinic'
       if (requested === 'lab') return 'lab'
+      if (requested === 'patient') return 'patient'
     }
     return initialApp
   })
@@ -87,6 +89,16 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
     void logoutLocalSessions().finally(() => {
       navigateToKeycloakEndSession()
     })
+  }
+
+  // DHealth Patient (DH-PATIENT-001 §20/§21). This branch comes FIRST and returns before any
+  // `ExchangeAuthProvider`/`ExchangeAuthGate` is constructed: a patient must never be redirected
+  // to Keycloak, never need an account, and never be gated on an OIDC session (AC2). The
+  // credential is the order-scoped `PatientAccessGrant` in the URL fragment, nothing else.
+  // Clinic and Lab below keep their authentication exactly as it was -- this branch adds a third
+  // surface, it does not weaken the other two.
+  if (activeApp === 'patient') {
+    return <PatientApp />
   }
 
   // Native DHealth Clinic surface (DH-CLINIC-001/004A). Authenticates against

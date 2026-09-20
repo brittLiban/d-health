@@ -787,3 +787,101 @@ export type ExchangeErrorCode =
   | 'VALIDATION_ERROR'
   | 'SERVER_ERROR'
   | 'NETWORK_ERROR'
+
+/**
+ * DH-PATIENT-001 §5/§7/§58: the provider-side patient-access surface.
+ *
+ * `PatientAccessIssueOutcome.access_token` is the **raw opaque bearer secret**, returned exactly
+ * once by the issuance endpoint and unrecoverable from the backend afterward by design (§10). It
+ * must never be persisted in browser storage, written into a query string or path, logged, or
+ * rendered as visible text -- see `features/patient/patientAccessUrl.ts` for the one legitimate
+ * transport (a URL fragment) and `PatientAccessHandoff` for the one legitimate rendering (a
+ * locally-generated QR code).
+ */
+export type PatientAccessMode = 'LAB_SELECTION' | 'ORDER_READ'
+
+export interface PatientAccessIssueOutcome {
+  access_token: string
+  expires_at: string
+  access_mode: PatientAccessMode
+}
+
+/**
+ * DH-PATIENT-001 §9: metadata only. `expires_at`/`access_mode` are `null` whenever `active` is
+ * `false` -- an expired or revoked grant discloses no expiry instant. There is deliberately no
+ * field here from which the raw token could be reconstructed.
+ */
+export interface PatientAccessMetadata {
+  active: boolean
+  expires_at: string | null
+  access_mode: PatientAccessMode | null
+}
+
+/**
+ * DH-PATIENT-001 §26/§27: the server-owned patient result/follow-up projection. The frontend
+ * never derives this by combining order status, release existence, and review disposition -- it
+ * renders exactly what the Exchange says, and has no code path that could compute it otherwise.
+ */
+export type PatientResultStatus =
+  | 'NOT_READY'
+  | 'AWAITING_CLINICIAN_REVIEW'
+  | 'NO_FOLLOW_UP_REQUIRED'
+  | 'FOLLOW_UP_REQUIRED'
+
+export interface PatientOrderTest {
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+}
+
+/**
+ * The patient-visible selection receipt, typed exactly as the Exchange serializes it (DH-EX-005 /
+ * DH-EX-010) -- including the price fields that belong to the *preserved* patient-marketplace
+ * flow, which for a provider-assigned order are always `null`/empty (`assignment_source:
+ * 'PROVIDER'`).
+ *
+ * DH-PATIENT-001 deliberately types the real wire shape rather than a convenient subset: a type
+ * that pretended these fields did not exist would be a lie about the response, and would make a
+ * future accidental render of one a *type-checked* operation. The launch patient UI instead
+ * narrows this through `toPatientLab()`, which is the one function allowed to decide what a
+ * patient sees (§34: name, public address, public phone -- never a price, never an internal id).
+ */
+export interface PatientOrderSelection {
+  lab_organization_id: string
+  lab_organization_name: string
+  public_address: string | null
+  latitude: string | null
+  longitude: string | null
+  public_phone: string | null
+  selected_at: string
+  assignment_source: 'PROVIDER' | 'PATIENT'
+  items: {
+    catalog_code_snapshot: string
+    catalog_display_name_snapshot: string
+    selected_price_amount: string
+    selected_price_currency: string
+  }[]
+  total_amount: string | null
+  currency: string | null
+}
+
+/**
+ * DH-PATIENT-001 §34: the narrowed laboratory projection the patient surface actually renders.
+ */
+export interface PatientOrderLab {
+  lab_organization_name: string
+  public_address: string | null
+  public_phone: string | null
+}
+
+/**
+ * DH-PATIENT-001 §30/§36: status only, never result content. No numeric value, text value,
+ * reference range, source code, observation, release manifest, or reviewer identity exists on
+ * this type -- and the backend regression tests assert the same against the serialized JSON.
+ */
+export interface PatientOrder {
+  status: LabOrderStatus
+  requested_tests: PatientOrderTest[]
+  ordering_provider_name: string
+  selection: PatientOrderSelection | null
+  result_status: PatientResultStatus
+}

@@ -1102,4 +1102,97 @@ describe('ExchangeClient', () => {
     expect(url).toBe('/exchange/v1/organizations/lab-demo/lab-orders')
     expect(init?.headers).toMatchObject({ Authorization: 'Bearer demo-token' })
   })
+
+  // -- DH-PATIENT-001: provider-side patient-access surface -------------------------------------
+
+  it("getPatientAccessMetadata sends GET .../orders/{id}/patient-access and returns metadata only", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          active: true,
+          expires_at: "2026-09-27T14:00:00Z",
+          access_mode: "ORDER_READ",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    const client = new ExchangeClient()
+    const metadata = await client.getPatientAccessMetadata("prov-1", "ord-1", { token: "tok-1" })
+
+    expect(metadata).toEqual({
+      active: true,
+      expires_at: "2026-09-27T14:00:00Z",
+      access_mode: "ORDER_READ",
+    })
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe("/exchange/v1/organizations/prov-1/orders/ord-1/patient-access")
+    expect(init?.method).toBe("GET")
+    expect(init?.headers).toMatchObject({ Authorization: "Bearer tok-1" })
+  })
+
+  it("issuePatientAccess POSTs to the same path and returns the one-time raw token", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "raw-token-value",
+          expires_at: "2026-09-27T14:00:00Z",
+          access_mode: "ORDER_READ",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    )
+
+    const client = new ExchangeClient()
+    const issued = await client.issuePatientAccess("prov-1", "ord-1", { token: "tok-1" })
+
+    expect(issued.access_token).toBe("raw-token-value")
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe("/exchange/v1/organizations/prov-1/orders/ord-1/patient-access")
+    expect(init?.method).toBe("POST")
+    // The credential must never be carried in the request URL, only in the response body.
+    expect(String(url)).not.toContain("raw-token-value")
+  })
+
+  it("revokePatientAccess resolves on a real 204 with an empty body", async () => {
+    // The bug this guards: `requestWithResponse` calls `response.json()` on every ok response, so
+    // a genuinely empty 204 threw a raw SyntaxError that `isAmbiguousExchangeError` classified as
+    // ambiguous -- making every *successful* revoke look like a lost response to the caller. This
+    // asserts against a real empty-bodied 204 Response, not a mock that returns {}.
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const client = new ExchangeClient()
+    await expect(
+      client.revokePatientAccess("prov-1", "ord-1", { token: "tok-1" }),
+    ).resolves.toBeUndefined()
+
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe("/exchange/v1/organizations/prov-1/orders/ord-1/patient-access")
+    expect(init?.method).toBe("DELETE")
+  })
+
+  it("revokePatientAccess maps an error status to a typed ExchangeApiError, not a parse error", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "order not found" }), { status: 404 }),
+    )
+
+    const client = new ExchangeClient()
+    const error = await client.revokePatientAccess("prov-1", "ord-1").catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ExchangeApiError)
+    expect((error as ExchangeApiError).code).toBe("NOT_FOUND")
+    expect((error as ExchangeApiError).detail).toBe("order not found")
+    expect(isDefinitiveExchangeError(error)).toBe(true)
+  })
+
+  it("a network failure during revoke is ambiguous, which is what drives the metadata re-read", async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValueOnce(new TypeError("Failed to fetch"))
+
+    const client = new ExchangeClient()
+    const error = await client.revokePatientAccess("prov-1", "ord-1").catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ExchangeApiError)
+    expect((error as ExchangeApiError).code).toBe("NETWORK_ERROR")
+    expect(isAmbiguousExchangeError(error)).toBe(true)
+  })
 })

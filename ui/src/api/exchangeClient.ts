@@ -48,6 +48,8 @@ import type {
   LabWorkflowOrder,
   NativeCorrectionRequest,
   NativeResultValueBatchResponse,
+  PatientAccessIssueOutcome,
+  PatientAccessMetadata,
   PatientCreateOutcome,
   PatientCreateRequest,
   PatientDirectoryEntry,
@@ -163,6 +165,20 @@ function parseFastApiDetail(data: unknown, fallback: string): string {
   return fallback
 }
 
+/**
+ * HTTP status -> `ExchangeErrorCode`. Extracted to module scope by DH-PATIENT-001 so the
+ * JSON-body and no-content request paths share exactly one mapping rather than two copies that
+ * could quietly drift apart.
+ */
+function mapStatusToExchangeErrorCode(status: number): ExchangeErrorCode {
+  if (status === 400 || status === 422) return 'VALIDATION_ERROR'
+  if (status === 401) return 'UNAUTHORIZED'
+  if (status === 403) return 'FORBIDDEN'
+  if (status === 404) return 'NOT_FOUND'
+  if (status === 409) return 'CONFLICT'
+  return 'SERVER_ERROR'
+}
+
 export class ExchangeClient {
   private readonly baseUrl: string
   private readonly getAuthToken?: () => string | null | Promise<string | null>
@@ -237,22 +253,11 @@ export class ExchangeClient {
       // Body not json, retain statusText
     }
 
-    let code: ExchangeErrorCode = 'SERVER_ERROR'
-    if (response.status === 400 || response.status === 422) {
-      code = 'VALIDATION_ERROR'
-    } else if (response.status === 401) {
-      code = 'UNAUTHORIZED'
-    } else if (response.status === 403) {
-      code = 'FORBIDDEN'
-    } else if (response.status === 404) {
-      code = 'NOT_FOUND'
-    } else if (response.status === 409) {
-      code = 'CONFLICT'
-    } else if (response.status >= 500) {
-      code = 'SERVER_ERROR'
-    }
-
-    throw new ExchangeApiError(response.status, code, errorDetail)
+    throw new ExchangeApiError(
+      response.status,
+      mapStatusToExchangeErrorCode(response.status),
+      errorDetail,
+    )
   }
 
   private async request<T>(
@@ -262,6 +267,58 @@ export class ExchangeClient {
   ): Promise<T> {
     const { data } = await this.requestWithResponse<T>(path, options, customToken)
     return data
+  }
+
+  /**
+   * DH-PATIENT-001: the sibling of `requestWithResponse` for endpoints that legitimately answer
+   * `204 No Content` -- the Exchange's `DELETE .../patient-access` being the first one this client
+   * calls.
+   *
+   * It exists because `requestWithResponse` unconditionally `await response.json()`s a successful
+   * response. A 204 has an empty body, so that parse throws a raw `SyntaxError` -- not an
+   * `ExchangeApiError` -- which `isAmbiguousExchangeError` then classifies as *ambiguous*. The
+   * concrete consequence without this method: every **successful** revoke would look like a lost
+   * response and drive the caller into DH-PATIENT-001 §48's ambiguity-recovery path, telling the
+   * clinician their revoke may not have committed when it definitely did. Error handling below is
+   * otherwise identical to `requestWithResponse`, deliberately sharing its status-to-code mapping
+   * rather than duplicating a second, driftable copy.
+   */
+  private async requestNoContent(
+    path: string,
+    options: RequestInit = {},
+    customToken?: string,
+  ): Promise<void> {
+    const url = `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+    const headers = await this.buildHeaders(customToken)
+
+    let response: Response
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: {
+          ...headers,
+          ...(options.headers as Record<string, string> | undefined),
+        },
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Connexion au serveur DHealth Exchange impossible.'
+      throw new ExchangeApiError(0, 'NETWORK_ERROR', message)
+    }
+
+    if (response.ok) {
+      return
+    }
+
+    let errorDetail = response.statusText || 'Erreur du serveur DHealth Exchange.'
+    try {
+      const body = await response.json()
+      errorDetail = parseFastApiDetail(body, errorDetail)
+    } catch {
+      // Body not json, retain statusText
+    }
+
+    throw new ExchangeApiError(response.status, mapStatusToExchangeErrorCode(response.status), errorDetail)
   }
 
   /**
@@ -1324,6 +1381,60 @@ export class ExchangeClient {
     return this.request<LabReleaseVersionContent>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}`,
       { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/patient-access
+   * DH-PATIENT-001 §8/§9: is a patient access link currently outstanding for this order?
+   * Metadata only -- the raw bearer secret is never retrievable after issuance (§10), so a `true`
+   * here means "a link exists somewhere in the patient's possession", never "the link can be
+   * shown again".
+   */
+  async getPatientAccessMetadata(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientAccessMetadata> {
+    return this.request<PatientAccessMetadata>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/patient-access`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/orders/{order_id}/patient-access
+   * DH-EX-005/DH-PATIENT-001 §12: issues a new order-scoped grant. The returned `access_token` is
+   * the raw secret in its **only** appearance anywhere in this system -- hold it in component
+   * memory, render it only as a QR/fragment URL, never store or log it.
+   */
+  async issuePatientAccess(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientAccessIssueOutcome> {
+    return this.request<PatientAccessIssueOutcome>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/patient-access`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * DELETE /exchange/v1/organizations/{provider_id}/orders/{order_id}/patient-access
+   * DH-EX-005/DH-PATIENT-001 §19: revokes the outstanding grant. Idempotent server-side (revoking
+   * an order with no active grant is a safe no-op, not an error).
+   */
+  async revokePatientAccess(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    await this.requestNoContent(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/patient-access`,
+      { method: 'DELETE', signal: options.signal },
       options.token,
     )
   }

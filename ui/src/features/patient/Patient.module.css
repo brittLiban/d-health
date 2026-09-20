@@ -1,0 +1,157 @@
+/*
+ * DH-PATIENT-001 §32/§51/§53: DHealth Patient is deliberately the simplest surface in this
+ * product -- no sidebar, no dashboard, no tables, one column at every width.
+ *
+ * Mobile-first and literally so: the base rules below are the phone layout, and the only media
+ * query widens type on larger screens. Nothing here sets a fixed pixel width, a `min-width`, or a
+ * horizontal scroll container, which is what keeps the 320px case free of horizontal scrolling
+ * (§51). Layout was not measured in a real browser for this ticket -- see the handoff's own
+ * statement of what was and was not proven.
+ */
+
+.screen {
+  min-height: 100vh;
+  background: #f7f7f5;
+  color: #1a1a1a;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.card {
+  width: 100%;
+  max-width: 34rem;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px 16px 28px;
+  box-sizing: border-box;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.brand {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #0f5c4a;
+  margin: 0 0 4px;
+}
+
+.title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 20px;
+  color: #444;
+}
+
+/*
+ * The one thing a patient must be able to read across a room, unprompted, without zooming.
+ * `word-break` matters here because French status sentences are long and the narrowest supported
+ * width is 320px.
+ */
+.headline {
+  font-size: 1.6rem;
+  line-height: 1.25;
+  font-weight: 700;
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.statusBlock {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 18px 0 6px;
+  border-top: 1px solid #e6e6e2;
+  border-bottom: 1px solid #e6e6e2;
+  margin-bottom: 20px;
+}
+
+/* §52: a shape, not only a colour -- the marker is meaningful without colour perception. */
+.marker {
+  font-size: 1.6rem;
+  line-height: 1.25;
+  flex: 0 0 auto;
+}
+
+.markerWaiting { color: #7a6a00; }
+.markerActive { color: #0b5aa8; }
+.markerDone { color: #1c6b3f; }
+.markerAttention { color: #9a3412; }
+.markerStopped { color: #7a1f1f; }
+
+.detail {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  color: #333;
+}
+
+.section {
+  margin-top: 22px;
+}
+
+.sectionTitle {
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-transform: none;
+  margin: 0 0 8px;
+  color: #555;
+}
+
+.list {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+
+.labName {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.labLine {
+  font-size: 1rem;
+  margin: 4px 0 0;
+  color: #444;
+}
+
+.message {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.retry {
+  margin-top: 18px;
+  font-size: 1.05rem;
+  padding: 14px 18px;
+  /* §51: a comfortably large touch target, not a desktop-sized control. */
+  min-height: 48px;
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #0f5c4a;
+  background: #0f5c4a;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.footNote {
+  margin-top: 26px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #666;
+}
+
+@media (min-width: 30rem) {
+  .card {
+    padding: 28px 28px 32px;
+  }
+
+  .headline {
+    font-size: 1.9rem;
+  }
+}

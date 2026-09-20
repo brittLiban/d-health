@@ -72,3 +72,37 @@ input {
   white-space: nowrap;
   border: 0;
 }
+
+/* DH-PATIENT-001 §17: the printable patient handoff.
+
+   This block is global rather than a CSS module because what it has to hide — the Clinic
+   sidebar, the app header, navigation, and every button — is mounted far above the component
+   that owns the sheet (`PatientAccessHandoff`), and a module-scoped selector cannot reach an
+   ancestor it does not render.
+
+   `visibility` rather than `display: none` is deliberate: hiding an ancestor with `display`
+   would also remove the printable subtree nested inside it. `visibility: hidden` is inherited
+   but re-overridable, so the sheet can be made visible again inside an otherwise hidden tree,
+   which is exactly the shape required here. The sheet is then lifted to the top-left of the page
+   so it prints on its own, not in whatever position the Clinic layout happened to leave it. */
+@media print {
+  #root * {
+    visibility: hidden;
+  }
+
+  [data-print-root],
+  [data-print-root] * {
+    visibility: visible;
+  }
+
+  [data-print-root] {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    box-shadow: none;
+  }
+}
