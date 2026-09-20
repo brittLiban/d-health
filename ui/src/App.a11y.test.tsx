@@ -14,15 +14,26 @@ vi.mock('./api/client', () => ({
 const mockedSearch = vi.mocked(searchPatients)
 const mockedBoard = vi.mocked(getMaternityBoardVisits)
 
+/**
+ * These five audit the reference connector's own screens. They name the surface
+ * explicitly (DH-MVP-POLISH-001): the bare `/` default is now the staff
+ * application, so `render(<App />)` audits the wrong tree — four of these failed
+ * outright on it and the fifth passed *vacuously*, running axe over the staff
+ * auth gate while claiming to cover the patient search screen.
+ *
+ * The `?app` reset matters for the same reason it does in `App.test.tsx`: a query
+ * string left behind by an earlier test would silently decide the surface here.
+ */
 describe('accessibility', () => {
   beforeEach(() => {
+    window.history.replaceState({}, '', '/')
     mockedSearch.mockReset()
     mockedBoard.mockReset()
     mockedBoard.mockResolvedValue({ visits: [], truncated: false })
   })
 
   it('the empty search screen has no detectable axe violations', async () => {
-    const { container } = render(<App />)
+    const { container } = render(<App initialApp="maternity" />)
     expect(await axe(container)).toHaveNoViolations()
   })
 
@@ -31,7 +42,7 @@ describe('accessibility', () => {
       { uuid: 'u1', display: 'Verification Test', identifiers: [{ identifier: '10001MJ' }] },
     ])
     const user = userEvent.setup()
-    const { container } = render(<App />)
+    const { container } = render(<App initialApp="maternity" />)
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
     await screen.findByText('Verification Test')
@@ -41,7 +52,7 @@ describe('accessibility', () => {
   it('the patient workspace screen has no detectable axe violations', async () => {
     mockedSearch.mockResolvedValue([{ uuid: 'u1', display: 'Verification Test' }])
     const user = userEvent.setup()
-    const { container } = render(<App />)
+    const { container } = render(<App initialApp="maternity" />)
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
     await user.click(await screen.findByRole('button', { name: 'Ouvrir le dossier' }))
@@ -50,7 +61,7 @@ describe('accessibility', () => {
 
   it('the empty maternity board has no detectable axe violations', async () => {
     const user = userEvent.setup()
-    const { container } = render(<App />)
+    const { container } = render(<App initialApp="maternity" />)
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
     await screen.findByText('Aucune patiente actuellement admise en maternité.')
     expect(await axe(container)).toHaveNoViolations()
@@ -71,7 +82,7 @@ describe('accessibility', () => {
       truncated: false,
     })
     const user = userEvent.setup()
-    const { container } = render(<App />)
+    const { container } = render(<App initialApp="maternity" />)
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
     await screen.findByText('Amina Warsame')
     expect(await axe(container)).toHaveNoViolations()
