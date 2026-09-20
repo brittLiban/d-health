@@ -11,7 +11,7 @@ import type {
   LabWorkflowPatientIdentity,
   ResultEntryWorkspace,
 } from '../../../api/exchangeTypes'
-import { LabApp } from '../LabApp'
+import { StaffApp } from '../../staff/StaffApp'
 
 const me: ExchangeMeResponse = {
   identity_id: 'identity-1',
@@ -273,7 +273,7 @@ describe('LabOrdersPage', () => {
 
   it('Q1/Q2/Q4/Q5: an assigned order renders with patient name primary, provider, and tests', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
     expect(screen.getByText('Clinique de la Paix')).toBeInTheDocument()
@@ -282,20 +282,20 @@ describe('LabOrdersPage', () => {
 
   it('Q3: date of birth is rendered when known', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(await screen.findByText(/Né\(e\) le/)).toBeInTheDocument()
   })
 
   it('Q6: the technical order reference is present but secondary, never the primary label', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await screen.findByText('Fatouma Robleh')
     expect(screen.getByText(/Référence de l'ordre/)).toBeInTheDocument()
   })
 
   it('Q7: no marketplace price is shown in the work queue', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await screen.findByText('Fatouma Robleh')
     expect(screen.queryByText(/DJF/)).not.toBeInTheDocument()
     expect(screen.queryByText('1000')).not.toBeInTheDocument()
@@ -311,7 +311,7 @@ describe('LabOrdersPage', () => {
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status })]),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(await screen.findByText(expected)).toBeInTheDocument()
   })
 
@@ -320,7 +320,7 @@ describe('LabOrdersPage', () => {
   it('A1/A2: a SELECTED order exposes both Accept and Reject controls', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByRole('button', { name: "Accepter l'ordre" })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: "Refuser l'ordre" })).toBeInTheDocument()
@@ -330,7 +330,7 @@ describe('LabOrdersPage', () => {
     const acceptLabOrder = vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' }))
     const client = makeClient({ acceptLabOrder, getLabOrder: makeGetLabOrderRecheckMock('ACCEPTED') })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
     await waitFor(() => expect(acceptLabOrder).toHaveBeenCalledWith('lab-a', 'order-a'))
@@ -340,7 +340,7 @@ describe('LabOrdersPage', () => {
     const rejectLabOrder = vi.fn().mockResolvedValue(makeOrder({ status: 'REJECTED' }))
     const client = makeClient({ rejectLabOrder, getLabOrder: makeGetLabOrderRecheckMock('REJECTED') })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
 
@@ -358,7 +358,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: makeGetLabOrderRecheckMock('ACCEPTED'),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
 
@@ -374,7 +374,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: makeGetLabOrderRecheckMock('REJECTED'),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer le refus' }))
@@ -389,7 +389,7 @@ describe('LabOrdersPage', () => {
       acceptLabOrder: vi.fn().mockResolvedValue(makeOrder({ order_id: 'order-DIFFERENT', status: 'ACCEPTED' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
     expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
@@ -400,7 +400,7 @@ describe('LabOrdersPage', () => {
       rejectLabOrder: vi.fn().mockResolvedValue(makeOrder({ order_id: 'order-DIFFERENT', status: 'REJECTED' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer le refus' }))
@@ -415,7 +415,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: makeGetLabOrderRecheckMock('ACCEPTED'),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
 
@@ -429,7 +429,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: makeGetLabOrderRecheckMock('REJECTED'),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer le refus' }))
@@ -446,7 +446,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
 
@@ -460,7 +460,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: makeGetLabOrderRecheckMock('REJECTED'),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" }))
 
@@ -482,9 +482,9 @@ describe('LabOrdersPage', () => {
           : Promise.resolve([makeOrder({ order_id: 'order-b', patient: makePatient({ display_name: 'Patient Lab B' }) })]),
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await userEvent.setup().selectOptions(select, 'lab-b')
     await screen.findByText('Patient Lab B')
 
@@ -507,10 +507,10 @@ describe('LabOrdersPage', () => {
           : labBQueue.promise,
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await screen.findByText('Patient Lab A')
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await userEvent.setup().selectOptions(select, 'lab-b')
 
     await waitFor(() => expect(screen.queryByText('Patient Lab A')).not.toBeInTheDocument())
@@ -535,7 +535,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     const examineButtons = await screen.findAllByRole('button', { name: /^Examiner/ })
     await user.click(examineButtons[0]) // opens order-a, stalls
@@ -575,7 +575,7 @@ describe('LabOrdersPage', () => {
       acceptLabOrder: vi.fn(() => acceptA.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Accepter l'ordre" })) // stalls on acceptA
@@ -619,7 +619,7 @@ describe('LabOrdersPage', () => {
       rejectLabOrder: vi.fn(() => rejectA.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
@@ -642,7 +642,7 @@ describe('LabOrdersPage', () => {
   it('RR7: a response arriving after unmount produces no error and no state update', async () => {
     const queue = deferred<LabWorkflowOrder[]>()
     const client = makeClient({ listLabOrders: vi.fn().mockReturnValue(queue.promise) })
-    const { unmount } = render(<LabApp client={client} initialTab="orders" />)
+    const { unmount } = render(<StaffApp client={client} initialSection="orders" />)
     unmount()
     await act(async () => {
       queue.resolve([makeOrder()])
@@ -654,7 +654,7 @@ describe('LabOrdersPage', () => {
     const client = makeClient({
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ order_id: 'order-WRONG' })),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Impossible de vérifier de manière sûre cet ordre.')).toBeInTheDocument()
@@ -667,7 +667,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByRole('button', { name: 'Enregistrer la collecte' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
@@ -675,7 +675,7 @@ describe('LabOrdersPage', () => {
 
   it('CUI2: a SELECTED order does not show any collection mutation control', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('button', { name: "Accepter l'ordre" })
     expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).not.toBeInTheDocument()
@@ -690,7 +690,7 @@ describe('LabOrdersPage', () => {
         makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: null }),
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     // §49: truthful "not recorded," never a false claim collection did not happen. ("En cours"
     // itself is ambiguous -- it also labels the filter tab -- so wait on this unique text instead.
@@ -708,7 +708,7 @@ describe('LabOrdersPage', () => {
         makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Collecte enregistrée')).toBeInTheDocument()
   })
@@ -721,7 +721,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
 
@@ -742,7 +742,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
@@ -759,7 +759,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn().mockResolvedValue(makeCollectionResponse({ order_id: 'order-DIFFERENT' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
@@ -772,7 +772,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await screen.findByText(/Enregistrer la collecte \?/)
@@ -787,7 +787,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('button', { name: 'Enregistrer la collecte' })
     expect(screen.queryByRole('button', { name: "Commencer l'analyse" })).not.toBeInTheDocument()
@@ -802,7 +802,7 @@ describe('LabOrdersPage', () => {
         makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T10:42:00Z' }),
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByRole('button', { name: "Commencer l'analyse" })).toBeInTheDocument()
   })
@@ -819,7 +819,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
 
@@ -841,7 +841,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' }))
@@ -864,7 +864,7 @@ describe('LabOrdersPage', () => {
         .mockResolvedValue(makeOrder({ order_id: 'order-DIFFERENT', status: 'IN_PROGRESS' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' }))
@@ -885,7 +885,7 @@ describe('LabOrdersPage', () => {
         makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T10:42:00Z' }),
       ),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Saisie des résultats')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Libérer/i })).not.toBeInTheDocument()
@@ -901,7 +901,7 @@ describe('LabOrdersPage', () => {
     })
     client.getLabOrder = makeGetLabOrderRecheckWithCollection('ACCEPTED', '2026-09-18T10:42:00Z')
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
@@ -921,7 +921,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('timeout')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
@@ -950,7 +950,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('conflict')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
@@ -976,7 +976,7 @@ describe('LabOrdersPage', () => {
       initialCollectionRecordedAt: '2026-09-18T10:42:00Z',
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' }))
@@ -1000,7 +1000,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('timeout')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' }))
@@ -1031,7 +1031,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('timeout')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' }))
@@ -1064,7 +1064,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn(() => collectA.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
@@ -1111,7 +1111,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('network lost')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
@@ -1160,7 +1160,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder: vi.fn(() => startA.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
@@ -1226,7 +1226,7 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder: vi.fn().mockRejectedValue(new Error('network lost')),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
@@ -1272,13 +1272,13 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn(() => collectStall.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // stalls
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await user.selectOptions(select, 'lab-b')
     await screen.findByText('Patient Lab B')
 
@@ -1317,13 +1317,13 @@ describe('LabOrdersPage', () => {
       startProcessingLabOrder: vi.fn(() => startStall.promise),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
     await user.click(await screen.findByRole('button', { name: 'Commencer' })) // stalls
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await user.selectOptions(select, 'lab-b')
     await screen.findByText('Patient Lab B')
 
@@ -1343,7 +1343,7 @@ describe('LabOrdersPage', () => {
       recordLabOrderCollection: vi.fn(() => collectStall.promise),
     })
     const user = userEvent.setup()
-    const { unmount } = render(<LabApp client={client} initialTab="orders" />)
+    const { unmount } = render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' })) // stalls
@@ -1414,7 +1414,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
       getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Saisie des résultats')
 
@@ -1474,7 +1474,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
       getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
 
     expect(await screen.findByLabelText(/Numeric Measure \(Requis\) — mg\/dL/)).toBeInTheDocument()
@@ -1486,7 +1486,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     const input = await screen.findByLabelText(/Demo Measure A \(Requis\) — demo-unit/)
     expect(input).toBeInTheDocument()
@@ -1498,7 +1498,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Saisie des résultats')
     // ("Référence de l'ordre" is a pre-existing, unrelated label -- match the clinical-range
@@ -1529,7 +1529,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
       getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
       await screen.findByText(
@@ -1582,7 +1582,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
       getResultEntryWorkspace: vi.fn().mockResolvedValue(workspace),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('7.2000 demo-unit')).toBeInTheDocument()
     expect(screen.queryByLabelText(/Demo Measure A/)).not.toBeInTheDocument()
@@ -1593,7 +1593,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
       await screen.findByText(/Configuration de démonstration — ne pas utiliser pour des soins réels\./),
@@ -1605,7 +1605,7 @@ describe('LabOrdersPage', () => {
       listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Saisie des résultats')
     expect(screen.getAllByText('Fatouma Robleh').length).toBeGreaterThan(0)
@@ -1617,7 +1617,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     const saveButton = await screen.findByRole('button', { name: 'Enregistrer les valeurs' })
     expect(saveButton).toBeDisabled()
@@ -1648,7 +1648,7 @@ describe('LabOrdersPage', () => {
       recordNativeResultValues,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
     await user.click(await screen.findByRole('button', { name: 'Enregistrer les valeurs' }))
@@ -1668,7 +1668,7 @@ describe('LabOrdersPage', () => {
       completeResultEntry,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     const completeButton = await screen.findByRole('button', { name: 'Terminer la saisie' })
     expect(completeButton).toBeDisabled()
@@ -1718,7 +1718,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
@@ -1757,7 +1757,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient A" }))
     await user.click(await screen.findByRole('button', { name: "Examiner l'ordre de Patient B" }))
@@ -1801,11 +1801,11 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await user.selectOptions(select, 'lab-b')
     // Switching labs closes the panel entirely (LAB-001 §12) -- reopen lab B's own order.
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
@@ -1826,7 +1826,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
       getResultEntryWorkspace: vi.fn(() => workspaceStall.promise),
     })
-    const { unmount } = render(<LabApp client={client} initialTab="orders" />)
+    const { unmount } = render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     unmount()
     await act(async () => {
@@ -1843,7 +1843,7 @@ describe('LabOrdersPage', () => {
         .fn()
         .mockResolvedValue(makeResultEntryWorkspace({ order_id: 'order-WRONG' })),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
       await screen.findByText('Impossible de vérifier de manière sûre cet ordre.'),
@@ -1854,7 +1854,7 @@ describe('LabOrdersPage', () => {
 
   it('§11: a releaser-only user sees a truthful "not yet available" message, never a fabricated queue', async () => {
     const client = makeClient({ getMe: vi.fn().mockResolvedValue(meReleaserOnly) })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(
       await screen.findByText(
         'Les fonctions de validation/libération des résultats seront disponibles dans la prochaine étape.',
@@ -1866,9 +1866,13 @@ describe('LabOrdersPage', () => {
     const client = makeClient({
       getMe: vi.fn().mockResolvedValue({ ...me, memberships: [] }),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(
-      await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
+      // One neutral statement for both organization types now: the account holds
+      // no usable membership, which is the true and complete fact. Naming a
+      // laboratory specifically would have been wrong for a clinician, and
+      // naming a clinic wrong for a technician.
+      await screen.findByText("Aucun établissement actif n'est rattaché à votre compte"),
     ).toBeInTheDocument()
   })
 
@@ -1879,9 +1883,13 @@ describe('LabOrdersPage', () => {
         memberships: [{ ...me.memberships[0], membership_status: 'REVOKED' }],
       }),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(
-      await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
+      // One neutral statement for both organization types now: the account holds
+      // no usable membership, which is the true and complete fact. Naming a
+      // laboratory specifically would have been wrong for a clinician, and
+      // naming a clinic wrong for a technician.
+      await screen.findByText("Aucun établissement actif n'est rattaché à votre compte"),
     ).toBeInTheDocument()
   })
 
@@ -1892,9 +1900,13 @@ describe('LabOrdersPage', () => {
         memberships: [{ ...me.memberships[0], organization_status: 'SUSPENDED' }],
       }),
     })
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     expect(
-      await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
+      // One neutral statement for both organization types now: the account holds
+      // no usable membership, which is the true and complete fact. Naming a
+      // laboratory specifically would have been wrong for a clinician, and
+      // naming a clinic wrong for a technician.
+      await screen.findByText("Aucun établissement actif n'est rattaché à votre compte"),
     ).toBeInTheDocument()
   })
 
@@ -1923,7 +1935,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Valeur actuelle')).toBeInTheDocument()
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
@@ -1959,7 +1971,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
     await user.type(screen.getByLabelText('Nouvelle valeur'), '12.5')
@@ -2044,7 +2056,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Voir l'historique" }))
     // The label ("Historique"/"Valeur actuelle") is bolded via a nested <strong>, so a plain
@@ -2069,7 +2081,7 @@ describe('LabOrdersPage', () => {
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'COMPLETED' })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByRole('button', { name: 'Commencer un amendement' })).toBeInTheDocument()
     expect(screen.queryByText(/Reprendre l'amendement/)).not.toBeInTheDocument()
@@ -2086,7 +2098,7 @@ describe('LabOrdersPage', () => {
       getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Amendement en cours (n°1)')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Commencer un amendement' })).not.toBeInTheDocument()
@@ -2107,7 +2119,7 @@ describe('LabOrdersPage', () => {
       getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection()),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Commencer un amendement' }))
     expect(
@@ -2133,7 +2145,7 @@ describe('LabOrdersPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Modifié dans cet amendement')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Corriger' })).toBeInTheDocument()
@@ -2149,7 +2161,7 @@ describe('LabOrdersPage', () => {
       getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: false })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
     expect(
@@ -2170,7 +2182,7 @@ describe('LabOrdersPage', () => {
       getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: true })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
     expect(
@@ -2193,7 +2205,7 @@ describe('LabOrdersPage', () => {
       correctAmendmentNativeObservation,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
     await user.type(screen.getByLabelText('Nouvelle valeur'), '99.9')
@@ -2225,7 +2237,7 @@ describe('LabOrdersPage', () => {
       correctAmendmentNativeObservation,
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Corriger' }))
     await user.type(screen.getByLabelText('Nouvelle valeur'), '99.9')

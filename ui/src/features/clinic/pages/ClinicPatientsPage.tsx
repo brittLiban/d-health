@@ -29,7 +29,7 @@ import {
 import { LabRoutingStep } from '../components/LabRoutingStep'
 import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
-import type { PendingOrderMutation, PendingPatientCreation } from '../ClinicApp'
+import type { PendingOrderMutation, PendingPatientCreation } from '../../staff/StaffWorkspace'
 import {
   clearStoredPendingPatient,
   canReadPendingPatientStorage,

@@ -1,0 +1,276 @@
+/* DH-MVP-POLISH-001 — the one staff shell.
+ *
+ * Replaces ClinicShell and LabShell. The masthead states the product and who is
+ * signed in where; it never states which "application" you are in, because there
+ * is only one. Every colour, size and radius comes from the token layer in
+ * src/index.css. */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* Skip link — visible only once focused, so a keyboard user can reach the
+   content without walking the whole navigation on every section change. */
+.skipLink {
+  position: absolute;
+  left: var(--space-3);
+  top: -100px;
+  z-index: 10;
+  padding: var(--space-2) var(--space-4);
+  min-height: var(--touch-target-min);
+  display: inline-flex;
+  align-items: center;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transition: top 120ms ease-out;
+}
+
+.skipLink:focus {
+  top: var(--space-3);
+}
+
+/* ── Masthead ───────────────────────────────────────────────────────────── */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+.brandMark {
+  flex-shrink: 0;
+}
+
+/* The identity band: which establishment the next request will carry, and as
+   whom. It sits in the masthead rather than in a menu because acting under the
+   wrong organization is the mistake this product most needs to prevent. */
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--color-border);
+  min-width: 0;
+}
+
+.organization {
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.organizationKind {
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-subtle);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.switcher {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.switcherLabel {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+}
+
+.select {
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-3);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.person {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: right;
+}
+
+.personName {
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+}
+
+.personRoles {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+}
+
+.logoutButton {
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-4);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.logoutButton:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* ── Body ───────────────────────────────────────────────────────────────── */
+
+.body {
+  flex-grow: 1;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-3);
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+}
+
+.navList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.item {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  text-align: left;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* The active section is marked by weight, a tinted ground and a petrol edge
+   rather than by colour alone, so it survives a monochrome screen and does not
+   rely on hue to carry the only signal. */
+.active {
+  background: var(--color-primary-tint);
+  border-color: var(--color-primary-tint);
+  box-shadow: inset 3px 0 0 var(--color-primary);
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.main {
+  min-width: 0;
+  padding: var(--space-5);
+}
+
+/* ── Narrow screens ─────────────────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+  .masthead {
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
+
+  .identity {
+    padding-left: 0;
+    border-left: none;
+    flex-basis: 100%;
+  }
+
+  .actions {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .person {
+    text-align: left;
+  }
+
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The rail becomes a scrolling row of sections above the content. There are at
+     most four, so this stays a row and never a hamburger: hiding navigation
+     behind a menu costs a tap on every single section change. */
+  .nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .navList {
+    flex-direction: row;
+    gap: var(--space-2);
+  }
+
+  .item {
+    white-space: nowrap;
+    padding: 0 var(--space-4);
+  }
+
+  .active {
+    box-shadow: inset 0 -3px 0 var(--color-primary);
+  }
+
+  .main {
+    padding: var(--space-4);
+  }
+}

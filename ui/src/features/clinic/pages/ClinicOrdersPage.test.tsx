@@ -9,7 +9,7 @@ import type {
   PatientIdentitySummary,
   ProviderEligibleLab,
 } from '../../../api/exchangeTypes'
-import { ClinicApp } from '../ClinicApp'
+import { StaffApp } from '../../staff/StaffApp'
 
 const me: ExchangeMeResponse = {
   identity_id: 'identity-1',
@@ -94,7 +94,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
 describe('ClinicOrdersPage', () => {
   it('OU1/OU5: renders the patient name as the primary identity, never the reference UUID as a column', async () => {
     const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
     expect(screen.queryByText('Réf. Patient')).not.toBeInTheDocument()
@@ -103,7 +103,7 @@ describe('ClinicOrdersPage', () => {
 
   it('OU2/OU3: shows DOB and contact when known', async () => {
     const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Né(e) le 2 juin 1988')).toBeInTheDocument()
     expect(screen.getByText('Téléphone : +25377100001')).toBeInTheDocument()
@@ -111,7 +111,7 @@ describe('ClinicOrdersPage', () => {
 
   it('OU4: the order technical reference remains available, as a secondary column', async () => {
     const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
     expect(screen.getByText("Référence de l'ordre")).toBeInTheDocument()
@@ -126,7 +126,7 @@ describe('ClinicOrdersPage', () => {
         }),
       ]),
     })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
     expect(
@@ -143,7 +143,7 @@ describe('ClinicOrdersPage', () => {
         makeOrder({ id: 'order-d', patient: patientD }),
       ]),
     })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findAllByText('Fatouma Robleh')).toHaveLength(2)
     const rows = document.querySelectorAll('[data-patient-id]')
@@ -153,7 +153,7 @@ describe('ClinicOrdersPage', () => {
 
   it('falls back to a truthful empty state with no orders', async () => {
     const client = makeClient({ listOrders: vi.fn().mockResolvedValue([]) })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Aucun ordre de laboratoire')).toBeInTheDocument()
   })
@@ -171,7 +171,7 @@ describe('ClinicOrdersPage', () => {
         }),
       ]),
     })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Laboratoire Central')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Choisir un laboratoire/ })).not.toBeInTheDocument()
@@ -179,7 +179,7 @@ describe('ClinicOrdersPage', () => {
 
   it('OP2/§36: an unassigned order shows "Non attribué" with a routing action', async () => {
     const client = makeClient({ listOrders: vi.fn().mockResolvedValue([makeOrder()]) })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     expect(await screen.findByText('Non attribué')).toBeInTheDocument()
     expect(
@@ -191,7 +191,7 @@ describe('ClinicOrdersPage', () => {
     const client = makeClient({
       listOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'REJECTED' })]),
     })
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await screen.findByText('Fatouma Robleh')
     expect(screen.queryByRole('button', { name: /Choisir un laboratoire/ })).not.toBeInTheDocument()
@@ -224,7 +224,7 @@ describe('ClinicOrdersPage', () => {
       assignLab,
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="orders" />)
+    render(<StaffApp client={client} initialSection="orders" />)
 
     await user.click(
       await screen.findByRole('button', { name: 'Choisir un laboratoire pour Fatouma Robleh' }),

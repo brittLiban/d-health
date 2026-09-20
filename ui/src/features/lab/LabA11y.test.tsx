@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { axe } from 'jest-axe'
-import { LabApp } from './LabApp'
+import { StaffApp } from '../staff/StaffApp'
 import type { ExchangeClient } from '../../api/exchangeClient'
 
 describe('Lab Accessibility', () => {
@@ -72,27 +72,27 @@ describe('Lab Accessibility', () => {
   })
 
   it('Lab home view has no detectable axe violations', async () => {
-    const { container } = render(<LabApp client={mockClient} initialTab="home" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="today" />)
     await screen.findByRole('heading', { name: 'Accueil Laboratoire' })
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Lab orders queue view has no detectable axe violations', async () => {
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     await screen.findByRole('heading', { name: 'Ordres de laboratoire' })
     await screen.findByText('Amina Hassan')
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Lab order detail panel has no detectable axe violations', async () => {
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('button', { name: "Accepter l'ordre" })
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Lab reject confirmation step has no detectable axe violations', async () => {
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Refuser l'ordre" }))
@@ -108,7 +108,7 @@ describe('Lab Accessibility', () => {
       listLabOrders: vi.fn().mockResolvedValue([{ ...sampleOrders[0], status: 'ACCEPTED' }]),
       getLabOrder: vi.fn().mockResolvedValue({ ...sampleOrders[0], status: 'ACCEPTED' }),
     } as unknown as ExchangeClient
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
@@ -127,7 +127,7 @@ describe('Lab Accessibility', () => {
       listLabOrders: vi.fn().mockResolvedValue([acceptedWithCollection]),
       getLabOrder: vi.fn().mockResolvedValue(acceptedWithCollection),
     } as unknown as ExchangeClient
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Commencer l'analyse" }))
@@ -176,7 +176,7 @@ describe('Lab Accessibility', () => {
         ],
       }),
     } as unknown as ExchangeClient
-    const { container } = render(<LabApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Saisie des résultats')
     await screen.findByLabelText(/Demo Measure A/)

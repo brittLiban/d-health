@@ -1,164 +1,77 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import {
-  ExchangeApiError,
-  ExchangeClient,
-  exchangeClient as defaultExchangeClient,
-} from '../../api/exchangeClient'
-import type { ExchangeIdentity, ExchangeMembershipSummary } from '../../api/exchangeTypes'
-import { LabContext, type LabAuthStatus, type LabCapabilities } from './LabContext'
+import { useMemo, type ReactNode } from 'react'
+import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
+import { useOptionalWorkspace } from '../workspace/WorkspaceContext'
+import { LabContext, type LabAuthStatus, type LabContextValue } from './LabContext'
 
 export interface LabProviderProps {
   children: ReactNode
-  client?: ExchangeClient
 }
 
-// DH-LAB-001 §9: eligibility is ACTIVE org + ACTIVE membership + LAB org type + at least one of
-// the two lab roles -- never requiring both (§9's own explicit instruction).
-function isEligibleLabMembership(m: ExchangeMembershipSummary): boolean {
-  return (
-    m.organization_type === 'LAB' &&
-    m.organization_status === 'ACTIVE' &&
-    m.membership_status === 'ACTIVE' &&
-    (m.roles.includes('LAB_TECH') || m.roles.includes('LAB_RESULT_RELEASER'))
-  )
-}
+/**
+ * DH-MVP-POLISH-001 — a projection of the staff workspace, not a session of its
+ * own. The provider-side twin of `ClinicProvider`; see that file for why both
+ * stopped loading `/me` themselves.
+ *
+ * `canWorkOrders` and `canReleaseResults` come straight from the workspace's
+ * capability derivation, which reads the *active* membership's roles. ADR-044
+ * keeps result entry and result release as separate authorities, so a LAB_TECH
+ * who does not also hold LAB_RESULT_RELEASER records values and cannot release
+ * them — here as at the server.
+ */
+export function LabProvider({ children }: LabProviderProps) {
+  const workspace = useOptionalWorkspace()
 
-function capabilitiesFor(m: ExchangeMembershipSummary | null): LabCapabilities {
-  return {
-    canWorkOrders: m !== null && m.roles.includes('LAB_TECH'),
-    canReleaseResults: m !== null && m.roles.includes('LAB_RESULT_RELEASER'),
-  }
-}
-
-export function LabProvider({ children, client = defaultExchangeClient }: LabProviderProps) {
-  const [status, setStatus] = useState<LabAuthStatus>('loading')
-  const [user, setUser] = useState<ExchangeIdentity | null>(null)
-  const [availableLabs, setAvailableLabs] = useState<ExchangeMembershipSummary[]>([])
-  const [activeLabId, setActiveLabIdState] = useState<string | null>(null)
-  const [error, setError] = useState<ExchangeApiError | null>(null)
-
-  const reload = useCallback(async () => {
-    setStatus('loading')
-    setError(null)
-
-    try {
-      const meResponse = await client.getMe()
-      setUser({
-        identity_id: meResponse.identity_id,
-        issuer: meResponse.issuer,
-        subject: meResponse.subject,
-        display_name: meResponse.display_name,
-        email: meResponse.email,
-        platform_admin: meResponse.platform_admin,
-      })
-
-      const validLabs = meResponse.memberships.filter(isEligibleLabMembership)
-      setAvailableLabs(validLabs)
-
-      if (validLabs.length === 0) {
-        setStatus('no_labs')
-        setActiveLabIdState(null)
-      } else {
-        setStatus('ready')
-        setActiveLabIdState((current) => {
-          if (current && validLabs.some((l) => l.organization_id === current)) {
-            return current
-          }
-          return validLabs[0].organization_id
-        })
-      }
-    } catch (err) {
-      if (err instanceof ExchangeApiError) {
-        setError(err)
-        setStatus(err.status === 401 ? 'unauthenticated' : 'error')
-      } else {
-        const fallbackError = new ExchangeApiError(
-          0,
-          'NETWORK_ERROR',
-          err instanceof Error ? err.message : 'Erreur inattendue.',
-        )
-        setError(fallbackError)
-        setStatus('error')
-      }
-    }
-  }, [client])
-
-  useEffect(() => {
-    let isMounted = true
-
-    client
-      .getMe()
-      .then((meResponse) => {
-        if (!isMounted) return
-        setUser({
-          identity_id: meResponse.identity_id,
-          issuer: meResponse.issuer,
-          subject: meResponse.subject,
-          display_name: meResponse.display_name,
-          email: meResponse.email,
-          platform_admin: meResponse.platform_admin,
-        })
-
-        const validLabs = meResponse.memberships.filter(isEligibleLabMembership)
-        setAvailableLabs(validLabs)
-
-        if (validLabs.length === 0) {
-          setStatus('no_labs')
-          setActiveLabIdState(null)
-        } else {
-          setStatus('ready')
-          setActiveLabIdState((current) => {
-            if (current && validLabs.some((l) => l.organization_id === current)) {
-              return current
-            }
-            return validLabs[0].organization_id
-          })
-        }
-      })
-      .catch((err) => {
-        if (!isMounted) return
-        if (err instanceof ExchangeApiError) {
-          setError(err)
-          setStatus(err.status === 401 ? 'unauthenticated' : 'error')
-        } else {
-          const fallbackError = new ExchangeApiError(
-            0,
-            'NETWORK_ERROR',
-            err instanceof Error ? err.message : 'Erreur inattendue.',
-          )
-          setError(fallbackError)
-          setStatus('error')
-        }
-      })
-
-    return () => {
-      isMounted = false
-    }
-  }, [client])
-
-  const activeLab = availableLabs.find((l) => l.organization_id === activeLabId) ?? null
-
-  const handleSelectLabId = (id: string) => {
-    if (availableLabs.some((l) => l.organization_id === id)) {
-      setActiveLabIdState(id)
-    }
+  if (!workspace) {
+    throw new Error(
+      'LabProvider projects the staff workspace and must be rendered inside a ' +
+        'WorkspaceProvider. It does not load a session of its own.',
+    )
   }
 
-  return (
-    <LabContext.Provider
-      value={{
-        status,
-        user,
-        activeLab,
-        availableLabs,
-        capabilities: capabilitiesFor(activeLab),
-        error,
-        client,
-        setActiveLabId: handleSelectLabId,
-        reload,
-      }}
-    >
-      {children}
-    </LabContext.Provider>
-  )
+  const value = useMemo<LabContextValue>(() => {
+    const availableLabs = workspace.organizations.filter(
+      (m: ExchangeMembershipSummary) => m.organization_type === 'LAB',
+    )
+
+    const activeLab =
+      workspace.activeOrganization?.organization_type === 'LAB'
+        ? workspace.activeOrganization
+        : null
+
+    let status: LabAuthStatus
+    switch (workspace.status) {
+      case 'loading':
+        status = 'loading'
+        break
+      case 'unauthenticated':
+        status = 'unauthenticated'
+        break
+      case 'error':
+        status = 'error'
+        break
+      case 'no_organizations':
+        status = 'no_labs'
+        break
+      case 'ready':
+        status = activeLab ? 'ready' : 'no_labs'
+        break
+    }
+
+    return {
+      status,
+      user: workspace.user,
+      activeLab,
+      availableLabs,
+      capabilities: {
+        canWorkOrders: workspace.capabilities.canWorkLabOrders,
+        canReleaseResults: workspace.capabilities.canReleaseResults,
+      },
+      error: workspace.error,
+      client: workspace.client,
+      setActiveLabId: workspace.setActiveOrganizationId,
+      reload: workspace.reload,
+    }
+  }, [workspace])
+
+  return <LabContext.Provider value={value}>{children}</LabContext.Provider>
 }

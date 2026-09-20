@@ -7,7 +7,7 @@ import type {
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
 } from '../../../api/exchangeTypes'
-import { LabApp } from '../LabApp'
+import { StaffApp } from '../../staff/StaffApp'
 
 const meWithTwoLabs: ExchangeMeResponse = {
   identity_id: 'identity-1',
@@ -87,10 +87,10 @@ describe('LabHomePage', () => {
       ),
     } as unknown as ExchangeClient
 
-    render(<LabApp client={client} initialTab="home" />)
+    render(<StaffApp client={client} initialSection="today" />)
     await screen.findByRole('heading', { name: 'Accueil Laboratoire' })
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await userEvent.setup().selectOptions(select, 'lab-b')
 
     // Lab B's own counts: 1 accepted, 0 new -- wait for them before A's stale response arrives.

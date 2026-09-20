@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ExchangeApiError, type ExchangeClient } from '../../../api/exchangeClient'
@@ -10,7 +10,10 @@ import type {
   LabWorkflowPatientIdentity,
   ReleaseQueue,
 } from '../../../api/exchangeTypes'
-import { LabApp } from '../LabApp'
+import { StaffApp } from '../../staff/StaffApp'
+import { renderWithWorkspace } from '../../../test/renderWithWorkspace'
+import { LabProvider } from '../LabContext'
+import { LabReleasePage } from './LabReleasePage'
 
 const meDualRole: ExchangeMeResponse = {
   identity_id: 'identity-1',
@@ -273,22 +276,46 @@ function deferred<T>(): Deferred<T> {
 describe('LabReleasePage', () => {
   it('RQ1: a dual-role user sees the Libération tab and the release queue', async () => {
     const client = makeClient()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     expect(await screen.findByText('Libération des résultats')).toBeInTheDocument()
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
   })
 
   it('RQ5: a releaser-only user reaches the release queue with no LAB_TECH queue access', async () => {
     const client = makeClient({ getMe: vi.fn().mockResolvedValue(meReleaserOnly) })
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     expect(await screen.findByText('Fatouma Robleh')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Ordres' })).not.toBeInTheDocument()
   })
 
-  it('a LAB_TECH-only user sees no Libération tab and the page itself refuses access', async () => {
+  // The original single test asserted both halves at once: no section in the
+  // shell, and a refusal from the page. Those are now two separate facts, because
+  // the shell no longer renders a section a membership cannot use — so the page
+  // cannot be reached through it to be observed refusing. Both halves are still
+  // covered, deliberately split rather than dropped: the second is the one that
+  // would matter if the shell ever stopped filtering.
+  it('ADR-044: a LAB_TECH-only user is offered no Résultats section at all', async () => {
     const client = makeClient({ getMe: vi.fn().mockResolvedValue(meTechOnly) })
-    render(<LabApp client={client} initialTab="release" />)
-    expect(screen.queryByRole('button', { name: 'Libération' })).not.toBeInTheDocument()
+    render(<StaffApp client={client} initialSection="results" />)
+
+    const nav = within(await screen.findByRole('navigation', { name: 'Navigation principale' }))
+    expect(nav.queryByRole('button', { name: 'Résultats' })).not.toBeInTheDocument()
+    // And the release surface itself is nowhere on screen.
+    expect(screen.queryByRole('heading', { name: 'Libération des résultats' })).not.toBeInTheDocument()
+  })
+
+  it('ADR-044: the release page refuses a LAB_TECH-only user even when reached directly', async () => {
+    // Mounted past the navigation on purpose. Hiding the section is a usability
+    // measure, not the protection; the page states its own refusal, and the
+    // server refuses the request regardless of either.
+    const client = makeClient({ getMe: vi.fn().mockResolvedValue(meTechOnly) })
+    renderWithWorkspace(
+      <LabProvider>
+        <LabReleasePage />
+      </LabProvider>,
+      { client },
+    )
+
     expect(
       await screen.findByText("Vous n'êtes pas autorisé(e) à libérer des résultats pour ce laboratoire."),
     ).toBeInTheDocument()
@@ -297,7 +324,7 @@ describe('LabReleasePage', () => {
   it('REL1: inspecting an order shows patient, provider, and every effective observation', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Clinique de la Paix')).toBeInTheDocument()
     expect(await screen.findByText(/Glycémie : 5.4000 mmol\/L/)).toBeInTheDocument()
@@ -306,7 +333,7 @@ describe('LabReleasePage', () => {
   it('UI-R1: the release confirmation dialog carries the exact required wording', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Libérer les résultats' }))
     expect(
@@ -326,7 +353,7 @@ describe('LabReleasePage', () => {
     })
     const client = makeClient({ releaseLabOrderResults })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Libérer les résultats' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
@@ -348,7 +375,7 @@ describe('LabReleasePage', () => {
       .mockResolvedValueOnce(makeInspection({ result_fingerprint: 'fingerprint-2' }))
     const client = makeClient({ releaseLabOrderResults, getLabOrderResults })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Libérer les résultats' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
@@ -375,7 +402,7 @@ describe('LabReleasePage', () => {
       }),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Libérer les résultats' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la libération' }))
@@ -418,14 +445,14 @@ describe('LabReleasePage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     // The panel's own inspection read uses `makeClient()`'s default `getLabOrderResults`
     // (`makeInspection()`, ordering_provider_name "Clinique de la Paix") -- unambiguous against
     // this queue row's own distinct "Queue Row Provider" text.
     await screen.findByText('Clinique de la Paix')
 
-    const select = await screen.findByLabelText('Sélectionner le laboratoire')
+    const select = await screen.findByLabelText('Établissement actif')
     await user.selectOptions(select, 'lab-b')
 
     expect(screen.queryByText('Clinique de la Paix')).not.toBeInTheDocument()
@@ -462,7 +489,7 @@ describe('LabReleasePage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(
       await screen.findByRole('button', { name: 'Examiner les résultats de Patient A' }),
@@ -484,7 +511,7 @@ describe('LabReleasePage', () => {
     const client = makeClient({
       getLabOrderResults: vi.fn().mockResolvedValue(makeInspection({ order_id: 'order-WRONG' })),
     })
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
       await screen.findByText('Impossible de vérifier de manière sûre cet ordre.'),
@@ -495,7 +522,7 @@ describe('LabReleasePage', () => {
     const client = makeClient({
       getLabOrderResults: vi.fn().mockResolvedValue(makeInspection({ all_items_entry_complete: false })),
     })
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
       await screen.findByText(
@@ -510,7 +537,7 @@ describe('LabReleasePage', () => {
   it('RQ-A1: the Amendements tab loads the amendment release queue', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     expect(await screen.findByText('Amendment Queue Provider')).toBeInTheDocument()
     expect(screen.getByText(/Amendement n°1/)).toBeInTheDocument()
@@ -519,7 +546,7 @@ describe('LabReleasePage', () => {
   it('AF-UI1: opening an amendment shows its items, "Modifié dans cet amendement", and status textually', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(await screen.findByText('Modifié dans cet amendement')).toBeInTheDocument()
@@ -537,7 +564,7 @@ describe('LabReleasePage', () => {
     })
     const client = makeClient({ releaseLabOrderAmendment })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Libérer l'amendement" }))
@@ -563,7 +590,7 @@ describe('LabReleasePage', () => {
       .mockResolvedValueOnce(makeAmendmentInspection({ result_fingerprint: 'amend-fingerprint-2' }))
     const client = makeClient({ releaseLabOrderAmendment, getLabOrderAmendment })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Libérer l'amendement" }))
@@ -584,7 +611,7 @@ describe('LabReleasePage', () => {
       getLabOrderAmendment: vi.fn().mockResolvedValue(makeAmendmentInspection({ ready_to_release: false })),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     expect(
@@ -596,7 +623,7 @@ describe('LabReleasePage', () => {
   it('no "Annuler l\'amendement" control exists anywhere in the Amendements section', async () => {
     const client = makeClient()
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('tab', { name: 'Amendements' }))
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('Modifié dans cet amendement')
@@ -610,7 +637,7 @@ describe('LabReleasePage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: "Voir l'historique des versions" }))
     expect(
@@ -627,7 +654,7 @@ describe('LabReleasePage', () => {
     const getAmendmentReleaseQueue = vi.fn().mockResolvedValue(makeAmendmentQueue())
     const client = makeClient({ getReleaseQueue, getAmendmentReleaseQueue })
     const user = userEvent.setup()
-    render(<LabApp client={client} initialTab="release" />)
+    render(<StaffApp client={client} initialSection="results" />)
     await screen.findByText('Fatouma Robleh')
     expect(getAmendmentReleaseQueue).not.toHaveBeenCalled()
 

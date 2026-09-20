@@ -12,7 +12,7 @@ import type {
   ProviderResultReviewQueueEntry,
   ProviderResultReviewQueueResponse,
 } from '../../../api/exchangeTypes'
-import { ClinicApp } from '../ClinicApp'
+import { StaffApp } from '../../staff/StaffApp'
 
 const me: ExchangeMeResponse = {
   identity_id: 'identity-1',
@@ -221,7 +221,7 @@ describe('ClinicResultsPage', () => {
     const client = makeClient({
       listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     expect(await screen.findByText('Résultats à examiner (1)')).toBeInTheDocument()
     // DH-CLINIC-005 RS6 parity: two orders for the same patient must stay distinguishable before
@@ -235,7 +235,7 @@ describe('ClinicResultsPage', () => {
         makeQueueEntry({ review_id: 'r1', review_status: 'NO_FOLLOW_UP_REQUIRED', reviewed_at: '2026-09-17T10:00:00Z' }),
       ]),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     expect(await screen.findByText('Résultats à examiner (0)')).toBeInTheDocument()
     expect(screen.getByText('Historique (1)')).toBeInTheDocument()
@@ -256,7 +256,7 @@ describe('ClinicResultsPage', () => {
         ]),
       ),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
@@ -276,7 +276,7 @@ describe('ClinicResultsPage', () => {
         ]),
       ),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     expect(
       await screen.findByText('Résultat historique — aucune version de libération enregistrée'),
@@ -290,7 +290,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
@@ -343,7 +343,7 @@ describe('ClinicResultsPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('0.9')
@@ -361,7 +361,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent({ release_version_id: 'rel-mismatched' })),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
@@ -379,7 +379,7 @@ describe('ClinicResultsPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
@@ -405,7 +405,7 @@ describe('ClinicResultsPage', () => {
       getOrderResults: vi.fn().mockResolvedValue(makeLegacyResults()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
@@ -435,7 +435,7 @@ describe('ClinicResultsPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -456,7 +456,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 
@@ -473,7 +473,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -494,7 +494,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -513,7 +513,7 @@ describe('ClinicResultsPage', () => {
       reviewReleaseVersionNoFollowUp: vi.fn().mockResolvedValue(makeReviewResponse()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -557,7 +557,7 @@ describe('ClinicResultsPage', () => {
       }),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -586,7 +586,7 @@ describe('ClinicResultsPage', () => {
         .mockRejectedValue(new ExchangeApiError(409, 'CONFLICT', 'already finalized')),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -610,7 +610,7 @@ describe('ClinicResultsPage', () => {
       reviewReleaseVersionNoFollowUp: vi.fn().mockRejectedValue(new Error('network timeout')),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -631,7 +631,7 @@ describe('ClinicResultsPage', () => {
         .mockResolvedValue(makeReviewResponse({ status: 'FOLLOW_UP_REQUIRED' })),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -655,7 +655,7 @@ describe('ClinicResultsPage', () => {
         ]),
       ),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
@@ -699,7 +699,7 @@ describe('ClinicResultsPage', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByText('0.9') // v2 content loaded first
@@ -734,9 +734,9 @@ describe('ClinicResultsPage', () => {
             ),
       ),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
-    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    const providerSelect = await screen.findByLabelText("Établissement actif")
     await userEvent.setup().selectOptions(providerSelect, 'provider-b')
     await waitFor(() => expect(providerSelect).toHaveValue('provider-b'))
     await screen.findByText('Patient Provider B')
@@ -767,11 +767,11 @@ describe('ClinicResultsPage', () => {
           : providerBQueue.promise,
       ),
     })
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await screen.findByText('Patient Provider A')
 
-    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    const providerSelect = await screen.findByLabelText("Établissement actif")
     await userEvent.setup().selectOptions(providerSelect, 'provider-b')
 
     // Provider B's own fetch is still unresolved at this point -- provider A's entries must
@@ -787,7 +787,7 @@ describe('ClinicResultsPage', () => {
   it('RR11: a response arriving after unmount produces no error and no state update', async () => {
     const queue = deferred<ProviderResultReviewQueueResponse>()
     const client = makeClient({ listResultReviews: vi.fn().mockReturnValue(queue.promise) })
-    const { unmount } = render(<ClinicApp client={client} initialTab="results" />)
+    const { unmount } = render(<StaffApp client={client} initialSection="results" />)
 
     unmount()
 
@@ -841,7 +841,7 @@ describe('ClinicResultsPage', () => {
       reviewReleaseVersionNoFollowUp: vi.fn().mockReturnValue(mutationV1.promise),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await screen.findByRole('radiogroup', { name: 'Décision de revue' })
@@ -871,7 +871,7 @@ describe('ClinicResultsPage', () => {
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="results" />)
+    render(<StaffApp client={client} initialSection="results" />)
 
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
 

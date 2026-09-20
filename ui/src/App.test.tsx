@@ -42,6 +42,11 @@ const mockedBoard = vi.mocked(getMaternityBoardVisits)
 
 describe('App', () => {
   beforeEach(() => {
+    // jsdom keeps one window for the whole file, and the surface is chosen from
+    // `?app` before the `initialApp` prop is consulted. Without this reset, a test
+    // that sets the query string would silently decide the surface for every test
+    // after it.
+    window.history.replaceState({}, '', '/')
     mockedSearch.mockReset()
     mockedBoard.mockReset()
     mockedBoard.mockResolvedValue({ visits: [], truncated: false })
@@ -88,7 +93,7 @@ describe('App', () => {
       { uuid: 'u1', display: 'Verification Test', identifiers: [{ identifier: '10001MJ' }] },
     ])
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
 
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
@@ -101,7 +106,7 @@ describe('App', () => {
   it('returns to search from the workspace without losing the "Patients" context', async () => {
     mockedSearch.mockResolvedValue([{ uuid: 'u1', display: 'Verification Test' }])
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
 
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Test')
     await user.click(screen.getByRole('button', { name: 'Rechercher' }))
@@ -113,7 +118,7 @@ describe('App', () => {
 
   it('shows an honest "not yet available" screen for an unbuilt nav item, not a broken one', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
     // Scoped to the sidebar nav landmark specifically -- DH-LAB-001 added a second, unrelated
     // "DHealth Laboratoire (Natif)" header button that also matches a loose /Laboratoire/
     // name search; this placeholder sidebar item (still unbuilt in the reference-connector
@@ -125,7 +130,7 @@ describe('App', () => {
 
   it('Maternité opens the real board, not the "Bientôt" placeholder', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
     expect(await screen.findByText('Patientes actuellement admises')).toBeInTheDocument()
     expect(screen.queryByText("Cet écran n'est pas encore disponible")).not.toBeInTheDocument()
@@ -146,7 +151,7 @@ describe('App', () => {
       truncated: false,
     })
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
     await user.click(await screen.findByRole('button', { name: 'Ouvrir le dossier' }))
 
@@ -169,7 +174,7 @@ describe('App', () => {
       truncated: false,
     })
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
     await waitFor(() => expect(mockedBoard).toHaveBeenCalledTimes(1))
     await user.click(await screen.findByRole('button', { name: 'Ouvrir le dossier' }))
@@ -179,62 +184,87 @@ describe('App', () => {
     await waitFor(() => expect(mockedBoard).toHaveBeenCalledTimes(2))
   })
 
-  it('can switch to native DHealth Clinic and back to Maternity connector', async () => {
-    const user = userEvent.setup()
+  // ── RT: which URL reaches which surface ────────────────────────────────────
+  //
+  // DH-MVP-POLISH-001 §25. There used to be two authenticated surfaces and a
+  // default of "maternity"; a person had to know which product their role
+  // belonged to before they could open it. There is now one staff application,
+  // and it is the default.
+
+  it('RT1: bare "/" mounts the staff application, the normal Native experience', async () => {
+    render(<App />)
+    expect(
+      await screen.findByRole('navigation', { name: 'Navigation principale' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByRole('banner', { name: 'Session et établissement actif' })).toBeInTheDocument()
+    // Not the connector.
+    expect(screen.queryByLabelText('Rechercher un patient')).not.toBeInTheDocument()
+  })
+
+  it('RT2: "?app=clinic" still resolves, as an alias of the one staff application', async () => {
+    // Kept working on purpose: the Playwright specs open `/?app=clinic` and real
+    // bookmarks exist. The alias names a distinction the product no longer makes,
+    // so it resolves rather than 404s, but it is not a separate application.
+    window.history.replaceState({}, '', '/?app=clinic')
     render(<App />)
 
-    // Initial view is OpenMRS patient search
+    expect(await screen.findByRole('banner', { name: 'Session et établissement actif' })).toBeInTheDocument()
+    expect(screen.queryByText('DHEALTH CLINIQUE')).not.toBeInTheDocument()
+  })
+
+  it('RT3: "?app=lab" resolves to that same staff application, not a Lab product', async () => {
+    // The shared fixture holds a PROVIDER-only membership. Under two applications
+    // this URL produced a dead end and a "no labs" message; now it lands the same
+    // person in the workspace their membership actually unlocks.
+    window.history.replaceState({}, '', '/?app=lab')
+    render(<App />)
+
+    expect(await screen.findByRole('banner', { name: 'Session et établissement actif' })).toBeInTheDocument()
+    expect(screen.queryByText(/Aucun laboratoire actif/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('navigation', { name: 'Navigation DHealth Laboratoire' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('RT4: "?app=maternity" reaches the preserved reference connector', async () => {
+    window.history.replaceState({}, '', '/?app=maternity')
+    render(<App />)
+
+    expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
+  })
+
+  it('RT5: the connector offers one link to the staff application, and no per-role choice', async () => {
+    const user = userEvent.setup()
+    render(<App initialApp="maternity" />)
     expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
 
-    // Switch to native Clinic
-    await user.click(screen.getByRole('button', { name: 'Basculer vers DHealth Clinique' }))
-    expect(await screen.findByText('DHEALTH CLINIQUE')).toBeInTheDocument()
-    expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
-
-    // Switch back to Maternity connector
-    await user.click(screen.getByRole('button', { name: 'Passer au connecteur Maternité' }))
-    expect(await screen.findByLabelText('Rechercher un patient')).toBeInTheDocument()
-  })
-
-  it('mounts native Clinic directly when initialApp="clinic"', async () => {
-    render(<App initialApp="clinic" />)
-    expect(await screen.findByText('DHEALTH CLINIQUE')).toBeInTheDocument()
-    expect(screen.getByRole('navigation', { name: 'Navigation DHealth Clinique' })).toBeInTheDocument()
-  })
-
-  // DH-LAB-001 §6: '?app=lab' mounts native Lab the same way '?app=clinic' mounts native Clinic.
-  // The shared beforeEach's `/exchange/v1/me` fixture has a PROVIDER-only membership, so this also
-  // proves §13's truthful no-labs state renders rather than a blank page -- the nav landmark below
-  // is what actually proves the Lab shell mounted at all.
-  it('mounts native Lab directly when initialApp="lab"', async () => {
-    render(<App initialApp="lab" />)
+    // Was two buttons, "DHealth Clinique (Natif)" and "DHealth Laboratoire
+    // (Natif)", which required knowing your own role to pick correctly.
     expect(
-      await screen.findByRole('navigation', { name: 'Navigation DHealth Laboratoire' }),
-    ).toBeInTheDocument()
-    expect(
-      await screen.findByText("Aucun laboratoire actif n'est associé à votre compte."),
-    ).toBeInTheDocument()
+      screen.queryByRole('button', { name: 'Basculer vers DHealth Laboratoire' }),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: "Ouvrir l'application DHealth" }))
+    expect(await screen.findByRole('banner', { name: 'Session et établissement actif' })).toBeInTheDocument()
   })
 
-  // DH-LAB-001 §7: switching apps unmounts the ExchangeAuthProvider's in-memory token state only --
-  // it must never itself call Keycloak's logout endpoint. Mirrors the identical Clinic-side test
-  // above (LabApp has no Lab-side auth code of its own to diverge from Clinic's).
-  it('switching from Lab to Clinic does not call Exchange logout', async () => {
+  it('RT6: leaving the connector for the staff application never calls Exchange logout', async () => {
+    // DH-LAB-001 §7/§16, preserved in the direction that still exists. Moving
+    // between tracks drops only the in-memory token state of the unmounted
+    // provider; it must never terminate the Keycloak session.
     const user = userEvent.setup()
-    render(<App initialApp="lab" />)
-    await screen.findByRole('navigation', { name: 'Navigation DHealth Laboratoire' })
-    const instance = getLatestKeycloakInstance()
+    render(<App initialApp="maternity" />)
 
-    await user.click(screen.getByRole('button', { name: 'Passer à DHealth Clinique' }))
-    await screen.findByText('DHEALTH CLINIQUE')
+    await user.click(screen.getByRole('button', { name: "Ouvrir l'application DHealth" }))
+    await screen.findByRole('banner', { name: 'Session et établissement actif' })
 
-    expect(instance?.logout).not.toHaveBeenCalled()
+    expect(getLatestKeycloakInstance()?.logout).not.toHaveBeenCalled()
   })
 
   // §28: staying on the reference-connector app must never initialize the
   // native Exchange auth layer — no Keycloak instance, no OIDC round trip.
   it('never constructs a Keycloak session while only the Maternity connector is used', async () => {
-    render(<App />)
+    render(<App initialApp="maternity" />)
     expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /Maternité/ }))
@@ -246,10 +276,10 @@ describe('App', () => {
   // §15/§16: Clinic logout must terminate the Exchange session specifically —
   // never the connector's OpenMRS/OpenELIS sessions — and switching apps must
   // never be conflated with logging out of either.
-  it('Clinic logout calls the Exchange session logout, not OpenMRS/OpenELIS', async () => {
+  it('staff logout calls the Exchange session logout, not OpenMRS/OpenELIS', async () => {
     const user = userEvent.setup()
     render(<App initialApp="clinic" />)
-    await screen.findByText('DHEALTH CLINIQUE')
+    await screen.findByRole('banner', { name: 'Session et établissement actif' })
 
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockClear()
@@ -271,22 +301,9 @@ describe('App', () => {
     ).toBe(false)
   })
 
-  it('switching from Clinic back to Maternity does not call Exchange logout', async () => {
-    const user = userEvent.setup()
-    render(<App />)
-    await user.click(screen.getByRole('button', { name: 'Basculer vers DHealth Clinique' }))
-    await screen.findByText('DHEALTH CLINIQUE')
-    const instance = getLatestKeycloakInstance()
-
-    await user.click(screen.getByRole('button', { name: 'Passer au connecteur Maternité' }))
-    await screen.findByLabelText('Rechercher un patient')
-
-    expect(instance?.logout).not.toHaveBeenCalled()
-  })
-
   it('Maternity connector logout still performs its own OpenMRS/OpenELIS session teardown', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    render(<App initialApp="maternity" />)
     expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
 
     const fetchMock = vi.mocked(fetch)

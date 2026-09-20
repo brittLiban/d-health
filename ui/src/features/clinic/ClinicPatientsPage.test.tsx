@@ -24,7 +24,7 @@ import {
   getStoredPendingOrder,
   setStoredPendingOrder,
 } from './pendingOrderStorage'
-import { ClinicApp } from './ClinicApp'
+import { StaffApp } from '../staff/StaffApp'
 
 const mockCatalogTests: CatalogEntry[] = [
   {
@@ -318,7 +318,7 @@ describe('Clinic native patient workflow', () => {
 
     render(
       <StrictMode>
-        <ClinicApp client={client} initialTab="patients" />
+        <StaffApp client={client} initialSection="patients" />
       </StrictMode>,
     )
 
@@ -330,7 +330,7 @@ describe('Clinic native patient workflow', () => {
     const listPromise = new Promise<PatientDirectoryEntry[]>((resolve) => { resolveList = resolve })
     const client = makeClient({ listPatients: vi.fn().mockReturnValue(listPromise) })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     expect(await screen.findByText('Chargement des patients…')).toBeInTheDocument()
 
     resolveList([patientEntryWithName, patientEntryWithoutName])
@@ -355,7 +355,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: get,
     })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
@@ -390,7 +390,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: get,
     })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
@@ -414,7 +414,7 @@ describe('Clinic native patient workflow', () => {
     const search = vi.fn().mockResolvedValue([patientEntryWithName])
     const client = makeClient({ listPatients: list, searchPatients: search })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     await screen.findByText('Aucun patient trouvé')
     await user.type(screen.getByLabelText('Rechercher un patient'), 'Synthétique')
@@ -435,7 +435,7 @@ describe('Clinic native patient workflow', () => {
     })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
@@ -444,7 +444,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')).toBeInTheDocument()
     expect(screen.queryByText('raw transport detail')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Accueil' }))
+    await user.click(screen.getByRole('button', { name: "Aujourd'hui" }))
     await screen.findByRole('heading', { name: 'Accueil Clinique' })
     await user.click(screen.getByRole('button', { name: 'Patients' }))
     await screen.findByRole('heading', { name: 'Nouveau patient' })
@@ -469,7 +469,7 @@ describe('Clinic native patient workflow', () => {
     })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Nom saisi')
@@ -518,7 +518,7 @@ describe('Clinic native patient workflow', () => {
         .mockResolvedValueOnce(patientEntryWithName)
       const client = makeClient({ createPatientWithOutcome: bind, getPatient: get })
       const user = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
       await screen.findByText('Aucun patient trouvé')
       await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
       await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
@@ -550,7 +550,7 @@ describe('Clinic native patient workflow', () => {
     const client = makeClient({ createPatientWithOutcome: bind })
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
@@ -575,7 +575,7 @@ describe('Clinic native patient workflow', () => {
       return originalGetItem.call(this, key)
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
@@ -598,7 +598,7 @@ describe('Clinic native patient workflow', () => {
       return originalGetItem.call(this, key)
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
@@ -611,7 +611,7 @@ describe('Clinic native patient workflow', () => {
     const bind = vi.fn()
     const client = makeClient({ createPatientWithOutcome: bind })
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
@@ -627,7 +627,7 @@ describe('Clinic native patient workflow', () => {
     })
     localStorage.setItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a', rawCorrupted)
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
 
     expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
@@ -643,7 +643,7 @@ describe('Clinic native patient workflow', () => {
     const rawInvalidJson = '{not valid json'
     localStorage.setItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a', rawInvalidJson)
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
 
     expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
@@ -658,7 +658,7 @@ describe('Clinic native patient workflow', () => {
         new ExchangeApiError(500, 'SERVER_ERROR', 'Traceback: secret database details'),
       ),
     })
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     expect(await screen.findByText('Erreur du serveur')).toBeInTheDocument()
     expect(screen.queryByText(/Traceback|secret database details/)).not.toBeInTheDocument()
@@ -681,9 +681,9 @@ describe('Clinic native patient workflow', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
-    await user.selectOptions(await screen.findByLabelText("Sélectionner l'établissement"), 'provider-b')
+    await user.selectOptions(await screen.findByLabelText("Établissement actif"), 'provider-b')
     expect(await screen.findByText('Nom non renseigné')).toBeInTheDocument()
     await act(async () => {
       resolveA([patientEntryWithName])
@@ -706,13 +706,13 @@ describe('Clinic native patient workflow', () => {
       ),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     await screen.findByText('Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Ouvrir' }))
     expect(await screen.findByRole('heading', { name: 'Patient Synthétique' })).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByLabelText("Sélectionner l'établissement"), 'provider-b')
+    await user.selectOptions(screen.getByLabelText("Établissement actif"), 'provider-b')
     expect(await screen.findByText('Nom non renseigné')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Patient Synthétique' })).not.toBeInTheDocument()
   })
@@ -741,7 +741,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(authoritativeReplayPatientEntry),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
@@ -749,7 +749,7 @@ describe('Clinic native patient workflow', () => {
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')
 
-    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+    const providerSelect = screen.getByLabelText("Établissement actif")
     await user.selectOptions(providerSelect, 'provider-b')
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
@@ -785,13 +785,13 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const user = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
-    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+    const providerSelect = screen.getByLabelText("Établissement actif")
     await user.selectOptions(providerSelect, 'provider-b')
     await waitFor(() => expect(providerSelect).toHaveValue('provider-b'))
 
@@ -819,7 +819,7 @@ describe('Clinic native patient workflow', () => {
     })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
 
@@ -846,7 +846,7 @@ describe('Clinic native patient workflow', () => {
     })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Tentative Definitive')
@@ -882,7 +882,7 @@ describe('Clinic native patient workflow', () => {
     const client = makeClient({ createPatientWithOutcome: bind })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Secret PHI')
@@ -921,7 +921,7 @@ describe('Clinic native patient workflow', () => {
     })
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
 
     // Banner indicates unresolved attempt
@@ -962,7 +962,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(matchingPatientEntry),
     })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     // Automatically reconciled and opened
     expect(await screen.findByRole('heading', { name: 'Patient Déjà Sauvegardé' })).toBeInTheDocument()
@@ -986,7 +986,7 @@ describe('Clinic native patient workflow', () => {
       getPatientReference: vi.fn(),
     })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     // Automatically reconciled and opened via the idempotency-key lookup, never getPatientReference
     expect(await screen.findByRole('heading', { name: patientWithName.display_name! })).toBeInTheDocument()
@@ -1007,7 +1007,7 @@ describe('Clinic native patient workflow', () => {
     const client = makeClient()
     const user = userEvent.setup()
 
-    render(<ClinicApp client={client} initialTab="patients" onLogout={onLogout} />)
+    render(<StaffApp client={client} initialSection="patients" onLogout={onLogout} />)
     await screen.findByText('Aucun patient trouvé')
 
     await user.click(screen.getByRole('button', { name: 'Se déconnecter' }))
@@ -1030,7 +1030,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount1 } = render(
-      <ClinicApp client={clientUser1} initialTab="patients" />,
+      <StaffApp client={clientUser1} initialSection="patients" />,
     )
     expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
@@ -1043,7 +1043,7 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount2 } = render(
-      <ClinicApp client={clientUser2} initialTab="patients" />,
+      <StaffApp client={clientUser2} initialSection="patients" />,
     )
     await screen.findByText('Aucun patient trouvé')
     expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
@@ -1064,10 +1064,10 @@ describe('Clinic native patient workflow', () => {
       getPatient: vi.fn().mockResolvedValue(patientEntryWithName),
     })
     const { unmount: unmount3 } = render(
-      <ClinicApp client={clientWithBothProviders} initialTab="patients" />,
+      <StaffApp client={clientWithBothProviders} initialSection="patients" />,
     )
     const userEventObj = userEvent.setup()
-    const providerSelect = await screen.findByLabelText("Sélectionner l'établissement")
+    const providerSelect = await screen.findByLabelText("Établissement actif")
     await userEventObj.selectOptions(providerSelect, 'provider-b')
     await screen.findByText('Aucun patient trouvé')
     expect(screen.queryByText(/Tentative non confirmée/)).not.toBeInTheDocument()
@@ -1076,7 +1076,7 @@ describe('Clinic native patient workflow', () => {
 
     // 4. User 1 logs back in with Provider A: can resume and complete creation with exact same UUID
     render(
-      <ClinicApp client={clientUser1} initialTab="patients" />,
+      <StaffApp client={clientUser1} initialSection="patients" />,
     )
     expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
     await userEventObj.click(screen.getByRole('button', { name: 'Reprendre' }))
@@ -1143,7 +1143,7 @@ describe('Clinic native patient workflow', () => {
       listPatientOrders: listOrders,
     })
 
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEvent.setup().click(openButtons[0])
 
@@ -1211,7 +1211,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     // Open patient
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -1317,7 +1317,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1372,7 +1372,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1416,7 +1416,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1449,7 +1449,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     // Open patient 1
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -1470,7 +1470,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeInTheDocument()
 
     // Switch provider: clears patient workspace
-    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+    const providerSelect = screen.getByLabelText("Établissement actif")
     await userEventObj.selectOptions(providerSelect, 'provider-b')
 
     expect(screen.queryByRole('heading', { level: 2, name: patientWithoutName.local_reference })).not.toBeInTheDocument()
@@ -1491,7 +1491,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1562,7 +1562,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1623,7 +1623,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     // Open patient 1 on Provider A
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -1647,7 +1647,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeInTheDocument()
 
     // Switch to Provider B
-    const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+    const providerSelect = screen.getByLabelText("Établissement actif")
     await userEventObj.selectOptions(providerSelect, 'provider-b')
     expect(providerSelect).toHaveValue('provider-b')
 
@@ -1700,7 +1700,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1743,7 +1743,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1779,7 +1779,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1837,7 +1837,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1931,7 +1931,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -1982,7 +1982,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2017,7 +2017,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2064,7 +2064,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2100,7 +2100,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2134,7 +2134,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2196,7 +2196,7 @@ describe('Clinic native patient workflow', () => {
     })
 
     const userEventObj = userEvent.setup()
-    render(<ClinicApp client={client} initialTab="patients" />)
+    render(<StaffApp client={client} initialSection="patients" />)
 
     const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
     await userEventObj.click(openButtons[0])
@@ -2272,7 +2272,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2339,7 +2339,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2429,7 +2429,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2465,7 +2465,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2532,7 +2532,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       // 1-2. Open Patient A -- kicks off the (still-pending) intent lookup for A, proving
       // reconciliation begins.
@@ -2623,7 +2623,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       // Open Patient A -- her reconciliation begins.
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -2690,7 +2690,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       // Open the Provider-A patient -- kicks off the (still-pending) intent lookup for A.
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -2698,7 +2698,7 @@ describe('Clinic native patient workflow', () => {
       await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
 
       // Switch to Provider B before A's lookup resolves, and open B's own (unrelated) patient.
-      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      const providerSelect = screen.getByLabelText("Établissement actif")
       await userEventObj.selectOptions(providerSelect, 'provider-b')
       expect(await screen.findByText('Patients trouvés')).toBeInTheDocument()
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -2776,7 +2776,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2784,7 +2784,7 @@ describe('Clinic native patient workflow', () => {
         expect(getOrderIntentByIdempotencyKey).toHaveBeenCalledWith('provider-a', keyA),
       )
 
-      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      const providerSelect = screen.getByLabelText("Établissement actif")
       await userEventObj.selectOptions(providerSelect, 'provider-b')
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtonsB[0])
@@ -2843,7 +2843,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -2929,7 +2929,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       // Open Patient A -- the mismatch resolves and A becomes fail-closed.
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
@@ -2968,7 +2968,7 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
@@ -3002,7 +3002,7 @@ describe('Clinic native patient workflow', () => {
         })
 
         const userEventObj = userEvent.setup()
-        render(<ClinicApp client={client} initialTab="patients" />)
+        render(<StaffApp client={client} initialSection="patients" />)
 
         const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
         await userEventObj.click(openButtons[0])
@@ -3056,14 +3056,14 @@ describe('Clinic native patient workflow', () => {
       })
 
       const userEventObj = userEvent.setup()
-      render(<ClinicApp client={client} initialTab="patients" />)
+      render(<StaffApp client={client} initialSection="patients" />)
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
       await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
       expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
 
-      const providerSelect = screen.getByLabelText("Sélectionner l'établissement")
+      const providerSelect = screen.getByLabelText("Établissement actif")
       await userEventObj.selectOptions(providerSelect, 'provider-b')
       const openButtonsB = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtonsB[0])

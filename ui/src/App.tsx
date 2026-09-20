@@ -3,18 +3,21 @@ import type { OpenMrsPatient } from './api/types'
 import { AppShell, EmptyState, Navigation, type NavItem } from './design-system'
 import { logoutLocalSessions, navigateToKeycloakEndSession } from './features/auth/logout'
 import { ExchangeAuthGate, ExchangeAuthProvider, useExchangeAuth } from './features/auth/exchange'
-import { ClinicApp } from './features/clinic/ClinicApp'
-import { LabApp } from './features/lab/LabApp'
 import { MaternityBoardPage } from './features/maternity/MaternityBoardPage'
 import { PatientApp } from './features/patient/PatientApp'
 import { PatientSearchPage } from './features/patients/PatientSearchPage'
 import { PatientWorkspace } from './features/patients/PatientWorkspace'
+import { StaffApp } from './features/staff/StaffApp'
 
-// French-first navigation, per the shell in this ticket's brief. "Patients"
-// and "Maternité" are functional; everything else is visible but honestly
-// marked "Bientôt" rather than pretending to work
+// French-first navigation for the reference-connector track. "Patients" and
+// "Maternité" are functional; everything else is visible but honestly marked
+// "Bientôt" rather than pretending to work
 // (docs/UI-001-CLINICAL-UX.md §1: hiding is a UX convenience, not security;
 // the same principle applies to feature availability).
+//
+// This list belongs to the preserved OpenMRS connector, not to the DHealth staff
+// application. The staff navigation is derived from real authority and renders
+// only sections that work — see features/staff/staffSections.ts.
 const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Tableau de bord', available: false },
   { id: 'patients', label: 'Patients', available: true },
@@ -25,54 +28,74 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'results', label: 'Résultats', available: false },
 ]
 
+/**
+ * The three surfaces this bundle serves.
+ *
+ * `staff` is the single authenticated DHealth application (DH-MVP-POLISH-001).
+ * It replaces what used to be two separate surfaces, `clinic` and `lab`: there
+ * is no longer an application to choose, only an establishment to have active.
+ * `maternity` is the preserved OpenMRS/OpenELIS reference connector, a distinct
+ * track that keeps its own shell and its own realm. `patient` is the
+ * order-scoped, unauthenticated patient status page.
+ */
+export type AppSurfaceId = 'staff' | 'maternity' | 'patient'
+
+/**
+ * `clinic` and `lab` are accepted and both resolve to `staff`.
+ *
+ * They are kept as aliases rather than removed because real URLs exist: the
+ * Playwright specs open `/?app=clinic`, and anyone who bookmarked either surface
+ * should land in the application rather than on a blank page. They name a
+ * distinction the product no longer makes, so nothing new should use them.
+ */
+export type AppSurfaceAlias = AppSurfaceId | 'clinic' | 'lab'
+
+function normalizeSurface(requested: string | null | undefined): AppSurfaceId | null {
+  switch (requested) {
+    case 'staff':
+    case 'clinic':
+    case 'lab':
+      return 'staff'
+    case 'maternity':
+      return 'maternity'
+    case 'patient':
+      return 'patient'
+    default:
+      return null
+  }
+}
+
 export interface AppProps {
-  initialApp?: 'maternity' | 'clinic' | 'lab' | 'patient'
+  initialApp?: AppSurfaceAlias
 }
 
 /**
- * Consumes the shared native-auth layer and hands ClinicApp an already-
- * authenticated ExchangeClient — Clinic itself owns no OAuth/OIDC (§9/AC7).
- * Native logout terminates the Exchange Keycloak session specifically
- * (auth.logout), never the reference-connector's OpenMRS/OpenELIS sessions.
+ * Consumes the shared native-auth layer and hands the staff application an
+ * already-authenticated ExchangeClient — the staff app itself owns no OAuth/OIDC
+ * (§9/AC7). Native logout terminates the Exchange Keycloak session specifically
+ * (auth.logout), never the reference connector's OpenMRS/OpenELIS sessions.
+ *
+ * `appLabel` is the product, not a sub-application: the gate no longer has a
+ * "DHealth Clinique" or "DHealth Laboratoire" to name, because a person's
+ * memberships are not known until after they have signed in.
  */
-function NativeClinic({ onSwitchApp }: { onSwitchApp: () => void }) {
+function NativeStaff() {
   const auth = useExchangeAuth()
   return (
-    <ExchangeAuthGate auth={auth} appLabel="DHealth Clinique">
-      {auth.client ? (
-        <ClinicApp client={auth.client} onLogout={auth.logout} onSwitchApp={onSwitchApp} />
-      ) : null}
+    <ExchangeAuthGate auth={auth} appLabel="DHealth">
+      {auth.client ? <StaffApp client={auth.client} onLogout={auth.logout} /> : null}
     </ExchangeAuthGate>
   )
 }
 
-/**
- * Native DHealth Lab surface (DH-LAB-001). Same shared native-auth layer as NativeClinic above --
- * a fresh `ExchangeAuthProvider` instance, wrapped exactly as ADR-050 Decision 6 anticipated
- * ("wrap it in its own ExchangeAuthProvider and ExchangeAuthGate, exactly as App.tsx does for
- * Clinic"). Native Lab owns no OAuth/OIDC code of its own.
- */
-function NativeLab({ onSwitchApp }: { onSwitchApp: () => void }) {
-  const auth = useExchangeAuth()
-  return (
-    <ExchangeAuthGate auth={auth} appLabel="DHealth Laboratoire">
-      {auth.client ? (
-        <LabApp client={auth.client} onLogout={auth.logout} onSwitchApp={onSwitchApp} />
-      ) : null}
-    </ExchangeAuthGate>
-  )
-}
-
-function App({ initialApp = 'maternity' }: AppProps = {}) {
-  const [activeApp, setActiveApp] = useState<'maternity' | 'clinic' | 'lab' | 'patient'>(() => {
+function App({ initialApp = 'staff' }: AppProps = {}) {
+  const [activeApp, setActiveApp] = useState<AppSurfaceId>(() => {
     if (typeof window !== 'undefined' && window.location?.search) {
       const params = new URLSearchParams(window.location.search)
-      const requested = params.get('app')
-      if (requested === 'clinic') return 'clinic'
-      if (requested === 'lab') return 'lab'
-      if (requested === 'patient') return 'patient'
+      const requested = normalizeSurface(params.get('app'))
+      if (requested) return requested
     }
-    return initialApp
+    return normalizeSurface(initialApp) ?? 'staff'
   })
   const [activeNavId, setActiveNavId] = useState('patients')
   const [selectedPatient, setSelectedPatient] = useState<OpenMrsPatient | null>(null)
@@ -95,32 +118,18 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
   // `ExchangeAuthProvider`/`ExchangeAuthGate` is constructed: a patient must never be redirected
   // to Keycloak, never need an account, and never be gated on an OIDC session (AC2). The
   // credential is the order-scoped `PatientAccessGrant` in the URL fragment, nothing else.
-  // Clinic and Lab below keep their authentication exactly as it was -- this branch adds a third
-  // surface, it does not weaken the other two.
   if (activeApp === 'patient') {
     return <PatientApp />
   }
 
-  // Native DHealth Clinic surface (DH-CLINIC-001/004A). Authenticates against
-  // the dhealth-exchange realm, never the reference-connector's daher realm —
-  // ADR-050, ADR-049. Switching back to the connector app is NOT the same
-  // operation as logging out of Clinic (§16): unmounting ExchangeAuthProvider
-  // below simply drops its in-memory token state; it must never itself call
-  // Keycloak's logout endpoint.
-  if (activeApp === 'clinic') {
+  // The single authenticated DHealth staff application, and the default surface
+  // of this bundle (DH-MVP-POLISH-001 §25). Authenticates against the
+  // dhealth-exchange realm, never the reference connector's daher realm —
+  // ADR-050, ADR-049.
+  if (activeApp === 'staff') {
     return (
       <ExchangeAuthProvider>
-        <NativeClinic onSwitchApp={() => setActiveApp('maternity')} />
-      </ExchangeAuthProvider>
-    )
-  }
-
-  // Native DHealth Lab surface (DH-LAB-001) -- same §7 SSO-session-survives-app-switch law as
-  // Clinic above: unmounting this ExchangeAuthProvider drops only its in-memory token state.
-  if (activeApp === 'lab') {
-    return (
-      <ExchangeAuthProvider>
-        <NativeLab onSwitchApp={() => setActiveApp('clinic')} />
+        <NativeStaff />
       </ExchangeAuthProvider>
     )
   }
@@ -162,40 +171,31 @@ function App({ initialApp = 'maternity' }: AppProps = {}) {
       navigation={<Navigation items={NAV_ITEMS} activeId={activeNavId} onSelect={handleSelectNav} />}
       onLogout={handleLogout}
       headerActions={
-        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          <button
-            type="button"
-            onClick={() => setActiveApp('clinic')}
-            aria-label="Basculer vers DHealth Clinique"
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--color-primary-contrast)',
-              color: 'var(--color-primary-contrast)',
-              borderRadius: '4px',
-              padding: 'var(--space-1) var(--space-3)',
-              cursor: 'pointer',
-              fontSize: '0.9rem',
-            }}
-          >
-            DHealth Clinique (Natif)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveApp('lab')}
-            aria-label="Basculer vers DHealth Laboratoire"
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--color-primary-contrast)',
-              color: 'var(--color-primary-contrast)',
-              borderRadius: '4px',
-              padding: 'var(--space-1) var(--space-3)',
-              cursor: 'pointer',
-              fontSize: '0.9rem',
-            }}
-          >
-            DHealth Laboratoire (Natif)
-          </button>
-        </div>
+        // One link, to one application. This used to be two buttons, "DHealth
+        // Clinique (Natif)" and "DHealth Laboratoire (Natif)", which asked the
+        // user to know in advance which product their role belonged to. There is
+        // now a single staff application that works that out from their
+        // memberships. Leaving the connector is not a logout: unmounting the
+        // Exchange auth provider drops only in-memory token state and must never
+        // call Keycloak's end-session endpoint (§16/§7).
+        <button
+          type="button"
+          onClick={() => setActiveApp('staff')}
+          aria-label="Ouvrir l'application DHealth"
+          style={{
+            background: 'transparent',
+            border: '1px solid var(--color-primary-contrast)',
+            color: 'var(--color-primary-contrast)',
+            borderRadius: 'var(--radius-sm)',
+            minHeight: 'var(--touch-target-min)',
+            padding: '0 var(--space-3)',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            fontSize: 'var(--font-size-base)',
+          }}
+        >
+          Application DHealth
+        </button>
       }
     >
       {content}

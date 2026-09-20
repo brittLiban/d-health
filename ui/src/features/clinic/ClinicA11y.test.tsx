@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { axe } from 'jest-axe'
-import { ClinicApp } from './ClinicApp'
+import { StaffApp } from '../staff/StaffApp'
 import type { ExchangeClient } from '../../api/exchangeClient'
 
 describe('Clinic Accessibility', () => {
@@ -109,26 +109,26 @@ describe('Clinic Accessibility', () => {
   })
 
   it('Clinic home view has no detectable axe violations', async () => {
-    const { container } = render(<ClinicApp client={mockClient} initialTab="home" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="today" />)
     await screen.findByRole('heading', { name: 'Accueil Clinique' })
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Clinic orders view has no detectable axe violations', async () => {
-    const { container } = render(<ClinicApp client={mockClient} initialTab="orders" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="orders" />)
     await screen.findByRole('heading', { name: 'Ordres de laboratoire' })
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Clinic patients view has no detectable axe violations', async () => {
-    const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="patients" />)
     await screen.findByRole('heading', { name: 'Patients' })
     await screen.findByText('Aucun patient trouvé')
     expect(await axe(container)).toHaveNoViolations()
   })
 
   it('Clinic patient creation form has no detectable axe violations', async () => {
-    const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Nouveau patient' }))
     await screen.findByRole('heading', { name: 'Nouveau patient' })
@@ -148,7 +148,7 @@ describe('Clinic Accessibility', () => {
         created_at: new Date().toISOString(),
       },
     ])
-    const { container } = render(<ClinicApp client={mockClient} initialTab="patients" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="patients" />)
     await screen.findByText('Patient Synthétique')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Ouvrir' }))
     await screen.findByRole('heading', { name: 'Patient Synthétique' })
@@ -156,7 +156,7 @@ describe('Clinic Accessibility', () => {
   })
 
   it('Clinic results view has no detectable axe violations', async () => {
-    const { container } = render(<ClinicApp client={mockClient} initialTab="results" />)
+    const { container } = render(<StaffApp client={mockClient} initialSection="results" />)
     await screen.findByRole('heading', { name: 'Résultats de laboratoire' })
     expect(await axe(container)).toHaveNoViolations()
   })

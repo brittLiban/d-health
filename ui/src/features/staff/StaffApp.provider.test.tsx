@@ -1,10 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { ClinicApp } from './ClinicApp'
+import { StaffApp } from './StaffApp'
 import { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
+import { sectionButton } from '../../test/renderWithWorkspace'
 
-describe('ClinicApp', () => {
+describe('the staff application at a provider organization', () => {
   let mockClient: ExchangeClient
 
   const sampleMe = {
@@ -155,7 +156,7 @@ describe('ClinicApp', () => {
   })
 
   it('renders home page with truthful order and result counts derived from Exchange API', async () => {
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
     expect(await screen.findByRole('heading', { name: 'Accueil Clinique' })).toBeInTheDocument()
     expect(await screen.findAllByText('1')).toHaveLength(2) // 1 active order, 1 completed order
@@ -166,9 +167,9 @@ describe('ClinicApp', () => {
 
   it('DH-CLINIC-005: navigates to "Ordres de laboratoire" and renders the orders table with human patient identity, never a raw reference token', async () => {
     const user = userEvent.setup()
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    await user.click(screen.getByRole('button', { name: 'Ordres de laboratoire' }))
+    await user.click(await sectionButton('Ordres'))
     expect(await screen.findByRole('heading', { name: 'Ordres de laboratoire' })).toBeInTheDocument()
 
     // The server-resolved Patient directory identity is the primary column now -- a raw
@@ -182,9 +183,9 @@ describe('ClinicApp', () => {
 
   it('navigates to the native Patients workflow', async () => {
     const user = userEvent.setup()
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    await user.click(screen.getByRole('button', { name: 'Patients' }))
+    await user.click(await sectionButton('Patients'))
     expect(await screen.findByRole('heading', { name: 'Patients' })).toBeInTheDocument()
     expect(screen.getByLabelText('Rechercher un patient')).toBeInTheDocument()
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
@@ -192,9 +193,9 @@ describe('ClinicApp', () => {
 
   it('navigates to "Résultats" and allows inspecting released observations for a completed order', async () => {
     const user = userEvent.setup()
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    await user.click(screen.getByRole('button', { name: 'Résultats' }))
+    await user.click(await sectionButton('Résultats'))
     expect(await screen.findByRole('heading', { name: 'Résultats de laboratoire' })).toBeInTheDocument()
 
     // Open the pending review queue entry for the completed order
@@ -208,31 +209,51 @@ describe('ClinicApp', () => {
     expect(screen.getByText('À examiner')).toBeInTheDocument()
   })
 
-  it('renders truthful unauthenticated state on 401 without mock fallback', async () => {
+  it('reports an expired session as an expired session, not as an empty account', async () => {
+    // Was "renders truthful unauthenticated state on 401". Same requirement, new
+    // wording: the shell no longer has a "DHealth Clinique" to name, and telling
+    // someone whose token expired that no establishment is attached to their
+    // account would send them to an administrator to fix a problem they do not
+    // have.
     vi.mocked(mockClient.getMe).mockRejectedValueOnce(
       new ExchangeApiError(401, 'UNAUTHORIZED', 'credentials missing or invalid'),
     )
 
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    expect(await screen.findByText('Session non authentifiée')).toBeInTheDocument()
+    expect(await screen.findByText('Votre session a expiré')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Se reconnecter' })).toBeInTheDocument()
     expect(
-      screen.getByText("Veuillez vous connecter pour accéder à l'application DHealth Clinique."),
-    ).toBeInTheDocument()
+      screen.queryByText("Aucun établissement actif n'est rattaché à votre compte"),
+    ).not.toBeInTheDocument()
   })
 
-  it('renders truthful empty state when clinician holds no active provider memberships', async () => {
+  it('states truthfully that no establishment is attached when the account holds none', async () => {
     vi.mocked(mockClient.getMe).mockResolvedValueOnce({
       ...sampleMe,
       memberships: [],
     })
 
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    expect(await screen.findByText('Aucune organisation clinique active')).toBeInTheDocument()
+    expect(
+      await screen.findByText("Aucun établissement actif n'est rattaché à votre compte"),
+    ).toBeInTheDocument()
   })
 
-  it('renders truthful empty state when user holds only LAB memberships or lacks CLINICIAN role', async () => {
+  it('opens the laboratory workspace for an account whose only usable membership is a laboratory', async () => {
+    // This supersedes "renders truthful empty state when user holds only LAB
+    // memberships". Under two separate applications, opening Clinic with only a
+    // laboratory membership was a dead end, and the honest thing to show was an
+    // empty state. There is one application now, so the same account simply lands
+    // in the workspace its membership actually unlocks — the empty state would now
+    // be the false answer.
+    //
+    // The ORG_ADMIN-only provider membership is still correctly excluded: it
+    // carries no clinical authority the server would honour, so it is not offered.
+    // The laboratory workspace reads the laboratory queue, which this provider-
+    // shaped client had no reason to stub until now.
+    vi.mocked(mockClient).listLabOrders = vi.fn().mockResolvedValue([])
     vi.mocked(mockClient.getMe).mockResolvedValueOnce({
       ...sampleMe,
       memberships: [
@@ -255,9 +276,18 @@ describe('ClinicApp', () => {
       ],
     })
 
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
-    expect(await screen.findByText('Aucune organisation clinique active')).toBeInTheDocument()
+    const masthead = within(await screen.findByRole('banner', { name: 'Session et établissement actif' }))
+    expect(masthead.getByText('Laboratoire Central')).toBeInTheDocument()
+    expect(masthead.getByText("Laboratoire d'analyses")).toBeInTheDocument()
+
+    // The excluded provider membership is not offered anywhere, so it cannot be
+    // selected and acted under.
+    expect(screen.queryByText('Clinique B')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("Aucun établissement actif n'est rattaché à votre compte"),
+    ).not.toBeInTheDocument()
   })
 
   it('renders recoverable ErrorState when Exchange API network call fails', async () => {
@@ -265,7 +295,7 @@ describe('ClinicApp', () => {
       new ExchangeApiError(0, 'NETWORK_ERROR', 'Échec de connexion réseau'),
     )
 
-    render(<ClinicApp client={mockClient} />)
+    render(<StaffApp client={mockClient} />)
 
     expect(await screen.findByText('Connexion impossible')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Réessayer' })).toBeInTheDocument()

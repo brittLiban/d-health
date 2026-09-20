@@ -9,10 +9,10 @@ import {
   LoadingSkeleton,
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
-import type { ClinicTabId } from '../ClinicShell'
+import type { StaffSectionId } from '../../staff/staffSections'
 
 interface ClinicHomePageProps {
-  onNavigate: (tabId: ClinicTabId) => void
+  onNavigate: (section: StaffSectionId) => void
 }
 
 export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
