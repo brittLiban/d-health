@@ -12,6 +12,8 @@ export interface StaffAppProps {
   client?: ExchangeClient
   initialSection?: StaffSectionId
   onLogout?: () => void
+  /** Starts a real sign-in; see `StaffWorkspaceProps.onReauthenticate`. */
+  onReauthenticate?: () => void
 }
 
 /**
@@ -27,10 +29,19 @@ export interface StaffAppProps {
  * there is exactly one place that loads `/me` and exactly one place that decides
  * what a membership unlocks.
  */
-export function StaffApp({ client, initialSection, onLogout }: StaffAppProps) {
+export function StaffApp({
+  client,
+  initialSection,
+  onLogout,
+  onReauthenticate,
+}: StaffAppProps) {
   return (
     <WorkspaceProvider client={client}>
-      <StaffWorkspace initialSection={initialSection} onLogout={onLogout} />
+      <StaffWorkspace
+        initialSection={initialSection}
+        onLogout={onLogout}
+        onReauthenticate={onReauthenticate}
+      />
     </WorkspaceProvider>
   )
 }

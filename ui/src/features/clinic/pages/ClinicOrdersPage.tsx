@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import type {
   LabAssignmentSummary,
   LabOrder,
@@ -18,6 +18,8 @@ import { LabRoutingStep } from '../components/LabRoutingStep'
 import { PatientAccessHandoff } from '../components/PatientAccessHandoff'
 import { PatientIdentity } from '../components/PatientIdentity'
 import { useClinic } from '../ClinicContext'
+import { WorkflowRelay } from '../../staff/WorkflowRelay'
+import { providerRelayNodes } from '../../staff/relayNodes'
 
 function mapOrderStatusTone(status: LabOrderStatus): StatusTone {
   switch (status) {
@@ -102,6 +104,7 @@ export function ClinicOrdersPage() {
   }, [client, activeProvider, authStatus])
 
   const { orders, loading, error } = ordersState
+  const [openRelayOrderId, setOpenRelayOrderId] = useState<string | null>(null)
 
   // DH-CLINIC-006 §37: an AWAITING_LAB_SELECTION order is routable directly from this page --
   // closes the recovery path for an interrupted wizard/reload/failed assignment/navigation-away,
@@ -262,12 +265,15 @@ export function ClinicOrdersPage() {
                     <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, textAlign: 'right' }}>
                       Référence de l'ordre
                     </th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600 }}>
+                      <span className="visually-hidden">Parcours de l'ordre</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {orders.map((order) => (
+                    <Fragment key={order.id}>
                     <tr
-                      key={order.id}
                       style={{
                         borderBottom: '1px solid var(--color-neutral-100)',
                         background:
@@ -341,7 +347,55 @@ export function ClinicOrdersPage() {
                       >
                         {order.id.slice(0, 8)}…
                       </td>
+                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+                        {/* The relay answers the question a clinician actually has about a
+                            row in this table: where is this, and who owes the next step.
+                            It is a disclosure rather than always-open because the table is
+                            a queue — a scanning surface — and six dated facts per row would
+                            drown it. */}
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          aria-expanded={openRelayOrderId === order.id}
+                          aria-controls={'relay-' + order.id}
+                          onClick={() =>
+                            setOpenRelayOrderId((current) => (current === order.id ? null : order.id))
+                          }
+                          aria-label={
+                            (openRelayOrderId === order.id ? 'Masquer' : 'Afficher') +
+                            ` le parcours de l'ordre de ${order.patient.display_name?.trim() || 'Nom non renseigné'}`
+                          }
+                        >
+                          Parcours
+                        </Button>
+                      </td>
                     </tr>
+                    {openRelayOrderId === order.id ? (
+                      <tr id={'relay-' + order.id}>
+                        <td
+                          colSpan={7}
+                          style={{
+                            padding: 'var(--space-4) var(--space-5) var(--space-5)',
+                            background: 'var(--color-surface-alt)',
+                            borderBottom: '1px solid var(--color-border)',
+                          }}
+                        >
+                          {/* Built from the fields this listing already carries -- no extra
+                              request, and no fact claimed that the response does not hold.
+                              The release-version list is not loaded here, so a released
+                              order reports its release undated and the relay makes no claim
+                              about review. */}
+                          <WorkflowRelay
+                            label={`Parcours de l'ordre de ${order.patient.display_name?.trim() || 'Nom non renseigné'}`}
+                            nodes={providerRelayNodes({
+                              order,
+                              providerOrganizationName: activeProvider?.organization_name ?? null,
+                            })}
+                          />
+                        </td>
+                      </tr>
+                    ) : null}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

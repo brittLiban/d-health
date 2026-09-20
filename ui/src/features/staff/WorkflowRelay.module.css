@@ -1,0 +1,160 @@
+/* DH-MVP-POLISH-001 — the relay.
+ *
+ * A vertical spine of dated facts. Each node's state is drawn with a marker shape
+ * and a ground as well as a colour, and the component renders the state as a word
+ * too, so nothing here depends on hue. Colour means workflow responsibility:
+ * petrol for recorded, brass for owed, clay for stopped. It never means a result
+ * is good or bad. */
+
+.relay {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+/* The spine, drawn behind the markers and stopping at the last node. */
+.node:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 18px;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-border);
+}
+
+.node:last-child {
+  padding-bottom: 0;
+}
+
+.marker {
+  position: relative;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  border: 2px solid var(--color-border-strong);
+}
+
+/* Filled: the fact is recorded. */
+.done .marker {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+/* Ringed and larger: this is where the order stands now. */
+.current .marker {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  margin-left: -2px;
+  background: var(--color-surface);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-tint);
+}
+
+/* Hollow with a warm edge: owed, not yet recorded. */
+.awaiting .marker {
+  background: var(--color-waiting-bg);
+  border-color: var(--color-waiting-border);
+}
+
+/* Squared off: this branch went no further. A different shape, not just a
+   different colour, so the break is visible without hue. */
+.stopped .marker {
+  border-radius: 2px;
+  background: var(--color-stopped-bg);
+  border-color: var(--color-stopped);
+}
+
+.body {
+  min-width: 0;
+}
+
+.label {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+}
+
+.state {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-subtle);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+}
+
+.done .state {
+  color: var(--color-success-text);
+  background: var(--color-success-bg);
+  border-color: var(--color-success-bg);
+}
+
+.current .state {
+  color: var(--color-primary);
+  background: var(--color-primary-tint);
+  border-color: var(--color-primary-tint);
+}
+
+.awaiting .state {
+  color: var(--color-waiting);
+  background: var(--color-waiting-bg);
+  border-color: var(--color-waiting-border);
+}
+
+.stopped .state {
+  color: var(--color-stopped);
+  background: var(--color-stopped-bg);
+  border-color: var(--color-stopped-border);
+}
+
+.organization {
+  margin: 2px 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.moment {
+  margin: 2px 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Deliberately plain rather than a warning: an undated step is a property of the
+   data, not a problem with this record. */
+.undated {
+  margin: 2px 0 0;
+  font-size: var(--font-size-sm);
+  font-style: italic;
+  color: var(--color-text-subtle);
+}
+
+.detail {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+}

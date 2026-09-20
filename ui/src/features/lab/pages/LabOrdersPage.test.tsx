@@ -2250,4 +2250,98 @@ describe('LabOrdersPage', () => {
     ).toBeInTheDocument()
     await waitFor(() => expect(getLabOrderAmendment).toHaveBeenCalledTimes(2))
   })
+
+  /**
+   * DH-MVP-POLISH-001 — RE1–RE6, typed is not recorded.
+   *
+   * There is no autosave here and there must not be: a half-typed haemoglobin must
+   * never reach the exchange. The cost of that choice is that a technician can
+   * believe they have recorded a value they have only typed, so the interface has to
+   * say which values are still only typed — and tell the truth about what a refresh
+   * costs, because these drafts live in component memory alone and are never
+   * persisted to browser storage.
+   */
+  describe('unsaved result values', () => {
+    async function openEntry() {
+      const client = makeClient({
+        listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+        getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      })
+      const user = userEvent.setup()
+      render(<StaffApp client={client} initialSection="orders" />)
+      await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+      await screen.findByRole('button', { name: 'Enregistrer les valeurs' })
+      return { client, user }
+    }
+
+    it('RE1: says nothing while no value has been typed', async () => {
+      await openEntry()
+      expect(screen.queryByText(/Non enregistré/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/pas encore enregistrée/)).not.toBeInTheDocument()
+    })
+
+    it('RE2: marks the specific field that holds an unsaved value', async () => {
+      // Field by field, rather than one banner at the foot of a long panel: the
+      // technician needs to know *which* measure is not recorded.
+      const { user } = await openEntry()
+      await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+
+      expect(screen.getByText(/Non enregistré/)).toBeInTheDocument()
+    })
+
+    it('RE3: warns that a refresh discards the value, which is true', async () => {
+      // Clinical values are deliberately never written to localStorage,
+      // sessionStorage or IndexedDB, so this is a real consequence and not a scare.
+      const { user } = await openEntry()
+      await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+
+      expect(screen.getByText(/perdue si vous actualisez la page/)).toBeInTheDocument()
+    })
+
+    it('RE4: counts the unsaved values as a status, not as an error', async () => {
+      const { user } = await openEntry()
+      await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+
+      const statuses = screen.getAllByRole('status')
+      expect(
+        statuses.some((node) =>
+          /n’est pas encore enregistrée|ne sont pas encore enregistrées/.test(node.textContent ?? ''),
+        ),
+      ).toBe(true)
+
+      // Nothing has gone wrong; there is simply work not yet committed. Scoped to
+      // this message rather than the whole panel, which has its own error slots.
+      for (const alert of screen.queryAllByRole('alert')) {
+        expect(alert.textContent ?? '').not.toMatch(/pas encore enregistrée/)
+      }
+    })
+
+    it('RE5: stops marking a field once its value is cleared again', async () => {
+      const { user } = await openEntry()
+      const input = await screen.findByLabelText(/Demo Measure A/)
+
+      await user.type(input, '7.2')
+      expect(screen.getByText(/Non enregistré/)).toBeInTheDocument()
+
+      await user.clear(input)
+      expect(screen.queryByText(/Non enregistré/)).not.toBeInTheDocument()
+    })
+
+    it('RE6: persists no typed clinical value to browser storage', async () => {
+      // The indicator exists precisely because nothing is saved anywhere yet. If a
+      // draft ever reached storage, this ticket's PHI constraint would be broken and
+      // the warning above would also be a lie.
+      const { user } = await openEntry()
+      await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
+
+      const stored = [
+        ...Object.keys(window.localStorage),
+        ...Object.keys(window.sessionStorage),
+      ].map((key) => (window.localStorage.getItem(key) ?? '') + (window.sessionStorage.getItem(key) ?? ''))
+
+      for (const value of stored) {
+        expect(value).not.toContain('7.2')
+      }
+    })
+  })
 })

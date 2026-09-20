@@ -325,23 +325,47 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
               </div>
             )
           }
+          const draft = drafts[definition.definition_id] ?? ''
+          const unsaved = draft.trim() !== ''
           return (
-            <TextInput
-              key={definition.definition_id}
-              label={`${definition.display_label} (${definition.required ? 'Requis' : 'Facultatif'})${
-                definition.result_type === 'NUMERIC' && definition.numeric_unit
-                  ? ` — ${definition.numeric_unit}`
-                  : ''
-              }`}
-              inputMode={definition.result_type === 'NUMERIC' ? 'decimal' : 'text'}
-              required={definition.required}
-              aria-required={definition.required}
-              disabled={saveState.submitting || item.entry_completed}
-              value={drafts[definition.definition_id] ?? ''}
-              onChange={(e) =>
-                setDrafts((prev) => ({ ...prev, [definition.definition_id]: e.target.value }))
-              }
-            />
+            <div key={definition.definition_id} style={{ display: 'grid', gap: 'var(--space-1)' }}>
+              <TextInput
+                label={`${definition.display_label} (${definition.required ? 'Requis' : 'Facultatif'})${
+                  definition.result_type === 'NUMERIC' && definition.numeric_unit
+                    ? ` — ${definition.numeric_unit}`
+                    : ''
+                }`}
+                inputMode={definition.result_type === 'NUMERIC' ? 'decimal' : 'text'}
+                required={definition.required}
+                aria-required={definition.required}
+                disabled={saveState.submitting || item.entry_completed}
+                value={draft}
+                onChange={(e) =>
+                  setDrafts((prev) => ({ ...prev, [definition.definition_id]: e.target.value }))
+                }
+              />
+              {/* DH-MVP-POLISH-001 — a typed value is not a recorded value.
+                  There is no autosave here, deliberately: a half-typed
+                  haemoglobin must never reach the exchange. The cost of that
+                  choice is that a technician can believe they have recorded
+                  something they have only typed, so each field that holds an
+                  unsaved value says so, field by field, rather than relying on a
+                  single banner at the bottom of a long panel.
+                  These values live in this component's memory only — never
+                  localStorage, sessionStorage or IndexedDB — so the warning also
+                  tells the truth about what a refresh costs. */}
+              {unsaved ? (
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: 'var(--font-size-xs)',
+                    color: 'var(--color-waiting)',
+                  }}
+                >
+                  Non enregistré — cette valeur sera perdue si vous actualisez la page.
+                </p>
+              ) : null}
+            </div>
           )
         })}
       </div>
@@ -399,6 +423,20 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
             </div>
           ) : null}
         </div>
+      ) : null}
+
+      {!item.entry_completed && pendingDrafts.length > 0 ? (
+        // The count, so the state of the whole panel is answerable without
+        // scrolling every field. `role="status"` rather than an alert: nothing has
+        // gone wrong, there is simply work not yet committed.
+        <p
+          role="status"
+          style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-waiting)' }}
+        >
+          {pendingDrafts.length === 1
+            ? '1 valeur saisie n’est pas encore enregistrée.'
+            : `${pendingDrafts.length} valeurs saisies ne sont pas encore enregistrées.`}
+        </p>
       ) : null}
 
       {!item.entry_completed ? (

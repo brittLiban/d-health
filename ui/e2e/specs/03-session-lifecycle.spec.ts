@@ -30,7 +30,7 @@ test.describe('session lifecycle against the real Keycloak session (E2E-8..E2E-1
     await page.waitForTimeout((lifespan + 5) * 1000)
 
     const ordersResponse = page.waitForResponse((r) => r.url().includes('/exchange/v1/organizations/'))
-    await page.getByRole('button', { name: 'Ordres de laboratoire' }).first().click()
+    await page.getByRole('button', { name: 'Ordres', exact: true }).first().click()
     const response = await ordersResponse
     expect(response.status()).toBe(200)
     await expect(page.getByText('Ordres de laboratoire', { exact: true })).toBeVisible({
@@ -66,7 +66,7 @@ test.describe('session lifecycle against the real Keycloak session (E2E-8..E2E-1
     // returning null (never a stale token), and ExchangeAuthProvider reports
     // status 'error' with a truthful re-authenticate message.
     await page.waitForTimeout((lifespan + 5) * 1000)
-    await page.getByRole('button', { name: 'Ordres de laboratoire' }).first().click()
+    await page.getByRole('button', { name: 'Ordres', exact: true }).first().click()
 
     await expect(
       page.getByText(/session .* a expiré|Connexion impossible|Session .* terminée/i),
@@ -86,7 +86,7 @@ test.describe('session lifecycle against the real Keycloak session (E2E-8..E2E-1
       if (frame === page.mainFrame()) navigations.push(frame.url())
     })
 
-    // ClinicShell.tsx's real "Se déconnecter" button -- wired by App.tsx to
+    // StaffShell.tsx's real "Se déconnecter" button -- wired by App.tsx to
     // auth.logout (Exchange-only), never to
     // logoutLocalSessions/navigateToKeycloakEndSession (that pair belongs to
     // the separate Maternity/reference-connector shell's own logout button).
@@ -112,19 +112,23 @@ test.describe('session lifecycle against the real Keycloak session (E2E-8..E2E-1
     await loginViaRealKeycloak(page, state.clinicianA.email, state.clinicianA.password)
     await expect(page.getByText('Accueil Clinique')).toBeVisible({ timeout: 20_000 })
 
-    // App.tsx: ClinicShell's "Mode Maternité (OpenMRS)" button only unmounts
-    // ExchangeAuthProvider (onSwitchApp) — it must never call
-    // keycloak.logout(). Re-entering Clinic via the Maternity shell's own
-    // "DHealth Clinique (Natif)" button must reuse the still-live Keycloak
-    // session through check-sso, silently, with no second visible redirect
-    // to the login form.
+    // Leaving the staff application must never call keycloak.logout() — it only
+    // unmounts ExchangeAuthProvider, dropping in-memory token state. Re-entering
+    // it must then reuse the still-live Keycloak session through check-sso,
+    // silently, with no second visible redirect to the login form.
+    //
+    // DH-MVP-POLISH-001 changed how the round trip is driven, not what it proves.
+    // The staff shell no longer carries a "Mode Maternité (OpenMRS)" button: the
+    // reference connector is a separate track, reached by URL, and is deliberately
+    // absent from the staff navigation. The connector's own header still offers
+    // one link back into the single staff application.
     let sawSecondLoginRedirect = false
     page.on('request', (req) => {
       if (req.url().includes('/protocol/openid-connect/auth')) sawSecondLoginRedirect = true
     })
 
-    await page.getByRole('button', { name: 'Mode Maternité (OpenMRS)' }).click()
-    await page.getByRole('button', { name: 'DHealth Clinique (Natif)' }).click()
+    await page.goto('/?app=maternity')
+    await page.getByRole('button', { name: "Ouvrir l'application DHealth" }).click()
     await expect(page.getByText('Accueil Clinique')).toBeVisible({ timeout: 20_000 })
 
     expect(sawSecondLoginRedirect).toBe(false)

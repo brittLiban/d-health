@@ -37,6 +37,16 @@ export interface PendingOrderMutation {
 export interface StaffWorkspaceProps {
   initialSection?: StaffSectionId
   onLogout?: () => void
+  /**
+   * Starts a real sign-in. Supplied by `App.tsx` from the auth layer, because a
+   * 401 on `/me` does not travel back up to `ExchangeAuthGate` on its own —
+   * retrying the request would simply fail again.
+   *
+   * When it is absent there is deliberately no button. Offering "Se reconnecter"
+   * with nothing behind it would be a control that looks like it works and does
+   * not, which is the one thing this surface must never do.
+   */
+  onReauthenticate?: () => void
 }
 
 /** Narrows an exchange error onto the shared design-system error catalogue. */
@@ -84,7 +94,11 @@ function errorCodeForDisplay(error: ExchangeApiError | null): ErrorCode {
  * establishment's pending work into another's view, and switching away and back
  * recovers it instead of silently losing the ability to reconcile.
  */
-export function StaffWorkspace({ initialSection, onLogout }: StaffWorkspaceProps) {
+export function StaffWorkspace({
+  initialSection,
+  onLogout,
+  onReauthenticate,
+}: StaffWorkspaceProps) {
   const workspace = useWorkspace()
   const { status, activeOrganization, capabilities, error, reload } = workspace
 
@@ -149,35 +163,37 @@ export function StaffWorkspace({ initialSection, onLogout }: StaffWorkspaceProps
       <div style={{ padding: 'var(--space-5)' }}>
         {/* The shared catalogue's own wording, reached through the same
             component every other surface uses. `UNAUTHORIZED`/`FORBIDDEN` cannot
-            arrive here — a 401 resolves to the `unauthenticated` status above —
-            so the remaining exchange codes map onto it directly, and anything
+            arrive here — a 401 becomes the `unauthenticated` status handled just
+            below — so the remaining exchange codes map onto it directly, and anything
             unrecognised is reported as a server failure rather than guessed at. */}
         <ErrorState code={errorCodeForDisplay(error)} onRetry={() => void reload()} />
       </div>
     )
   }
 
-  // A 401 is its own situation and must not be described as an empty account.
-  // Authentication itself belongs to the gate above this component's parent
-  // (`ExchangeAuthGate`), so this does not offer a second sign-in — it states
-  // truthfully what happened and lets the person retry, which is what re-drives
-  // the gate. Telling someone whose token merely expired that no establishment is
-  // attached to their account would be false, and would send them to an
-  // administrator to fix a problem they do not have.
+  // A 401 is its own situation and must not be described as an empty account:
+  // telling someone whose token merely expired that no establishment is attached
+  // to their account would send them to an administrator to fix a problem they do
+  // not have.
+  //
+  // Retrying the request is *not* the remedy here, and this is why the button is
+  // conditional. A 401 from `/me` does not travel back up to `ExchangeAuthGate`,
+  // so calling `reload()` would re-issue the same request, receive the same 401
+  // and return to this screen — a control that appears to work and does not. The
+  // only thing that helps is a real sign-in, which belongs to the auth layer and
+  // arrives here as `onReauthenticate`. Without it, the honest answer is the
+  // sentence alone.
   if (status === 'unauthenticated') {
     return (
       <div style={{ padding: 'var(--space-5)' }}>
         <EmptyState
           title="Votre session a expiré"
           action={
-            <Button
-              variant="primary"
-              onClick={() => {
-                void reload()
-              }}
-            >
-              Se reconnecter
-            </Button>
+            onReauthenticate ? (
+              <Button variant="primary" onClick={onReauthenticate}>
+                Se reconnecter
+              </Button>
+            ) : undefined
           }
         >
           Reconnectez-vous pour reprendre votre travail.

@@ -219,10 +219,16 @@ describe('the staff application at a provider organization', () => {
       new ExchangeApiError(401, 'UNAUTHORIZED', 'credentials missing or invalid'),
     )
 
-    render(<StaffApp client={mockClient} />)
+    const onReauthenticate = vi.fn()
+    render(<StaffApp client={mockClient} onReauthenticate={onReauthenticate} />)
 
     expect(await screen.findByText('Votre session a expiré')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Se reconnecter' })).toBeInTheDocument()
+
+    // The button must actually start a sign-in. Re-requesting the session would
+    // only produce the same 401, so a control wired to a retry would look like it
+    // works and would not.
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Se reconnecter' }))
+    expect(onReauthenticate).toHaveBeenCalledTimes(1)
     expect(
       screen.queryByText("Aucun établissement actif n'est rattaché à votre compte"),
     ).not.toBeInTheDocument()

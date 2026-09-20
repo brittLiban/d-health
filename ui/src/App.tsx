@@ -83,7 +83,13 @@ function NativeStaff() {
   const auth = useExchangeAuth()
   return (
     <ExchangeAuthGate auth={auth} appLabel="DHealth">
-      {auth.client ? <StaffApp client={auth.client} onLogout={auth.logout} /> : null}
+      {auth.client ? (
+        <StaffApp
+          client={auth.client}
+          onLogout={auth.logout}
+          onReauthenticate={auth.login}
+        />
+      ) : null}
     </ExchangeAuthGate>
   )
 }

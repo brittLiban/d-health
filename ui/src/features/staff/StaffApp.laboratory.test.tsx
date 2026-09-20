@@ -182,9 +182,10 @@ describe('the staff application at a laboratory organization', () => {
     })
     render(<StaffApp client={client} initialSection="today" />)
 
-    await waitFor(() =>
-      expect(screen.getByText('Votre session a expiré')).toBeInTheDocument(),
-    )
-    expect(screen.getByRole('button', { name: 'Se reconnecter' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Votre session a expiré')).toBeInTheDocument())
+
+    // No sign-in handler was supplied here, so no button is offered. An
+    // unwired "Se reconnecter" would be a promise the screen cannot keep.
+    expect(screen.queryByRole('button', { name: 'Se reconnecter' })).not.toBeInTheDocument()
   })
 })

@@ -260,7 +260,10 @@ describe('ClinicResultsPage', () => {
 
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
-    expect(screen.getByText(/^Version 2 — Amendée$/)).toBeInTheDocument()
+    // DH-MVP-POLISH-001: a corrected result is named "Rectificatif" rather than
+    // leaving the clinician to infer supersession from a version number — and the
+    // number is kept alongside it, not erased.
+    expect(screen.getByText('Rectificatif (version 2)')).toBeInTheDocument()
   })
 
   it('UI-Q4: a legacy unversioned entry is labelled truthfully, never a fabricated version', async () => {
@@ -659,7 +662,10 @@ describe('ClinicResultsPage', () => {
 
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
-    expect(screen.getByText(/^Version 2 — Amendée$/)).toBeInTheDocument()
+    // DH-MVP-POLISH-001: a corrected result is named "Rectificatif" rather than
+    // leaving the clinician to infer supersession from a version number — and the
+    // number is kept alongside it, not erased.
+    expect(screen.getByText('Rectificatif (version 2)')).toBeInTheDocument()
   })
 
   it('RR9: a stale version-switch response must never render after a newer version was opened', async () => {
@@ -705,14 +711,14 @@ describe('ClinicResultsPage', () => {
     await screen.findByText('0.9') // v2 content loaded first
 
     await user.click(screen.getByRole('tab', { name: /^Version 1/ })) // starts loading v1, stalls
-    await user.click(screen.getByRole('tab', { name: /^Version 2/ })) // switches back to v2 before v1 resolves
+    await user.click(screen.getByRole('tab', { name: /version 2/i })) // switches back to v2 before v1 resolves
 
     await act(async () => {
       v1.resolve(makeVersionContent({ release_version_id: 'rel-v1', results: [] }))
       await Promise.resolve()
     })
 
-    expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: /version 2/i })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText('0.9')).toBeInTheDocument()
   })
 
@@ -848,9 +854,9 @@ describe('ClinicResultsPage', () => {
     await user.click(screen.getByLabelText('Aucun suivi requis'))
     await user.click(screen.getByRole('button', { name: 'Confirmer la revue' })) // stalls
 
-    await user.click(screen.getByRole('tab', { name: /^Version 2/ })) // switch away before it resolves
+    await user.click(screen.getByRole('tab', { name: /version 2/i })) // switch away before it resolves
     await waitFor(() =>
-      expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true'),
+      expect(screen.getByRole('tab', { name: /version 2/i })).toHaveAttribute('aria-selected', 'true'),
     )
 
     await act(async () => {
@@ -859,7 +865,7 @@ describe('ClinicResultsPage', () => {
     })
 
     // Version 2's own controls remain untouched by Version 1's late-arriving mutation response.
-    expect(screen.getByRole('tab', { name: /^Version 2/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: /version 2/i })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByRole('radiogroup', { name: 'Décision de revue' })).toBeInTheDocument()
     expect(screen.queryByText(/Revue enregistrée/)).not.toBeInTheDocument()
   })
@@ -879,5 +885,197 @@ describe('ClinicResultsPage', () => {
     const banner = banners[banners.length - 1]
     const value = await screen.findByText('0.9')
     expect(banner.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+/**
+ * DH-MVP-POLISH-001 — RV1–RV8 and RX1–RX4.
+ *
+ * A review records a durable clinical disposition, so it must not be reachable by
+ * one stray click — and it must not become a dialog either. A clinician working
+ * through a queue of results dismisses the twentieth modal without reading it,
+ * which protects nobody. Two gestures, the second stating its own subject.
+ */
+describe('recording a review disposition', () => {
+  async function openReview(overrides: Partial<ExchangeClient> = {}) {
+    const client = makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+      getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+      ...overrides,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="results" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByRole('radiogroup', { name: 'Décision de revue' })
+    return { client, user }
+  }
+
+  it('RV1: cannot be recorded in a single gesture', async () => {
+    const { client, user } = await openReview()
+
+    // The confirm control exists so the consequence is visible, and is inert until
+    // a disposition has been chosen. Clicking it first records nothing.
+    const confirm = screen.getByRole('button', { name: 'Confirmer la revue' })
+    expect(confirm).toBeDisabled()
+    await user.click(confirm)
+
+    expect(client.reviewReleaseVersionNoFollowUp).not.toHaveBeenCalled()
+    expect(client.reviewReleaseVersionFollowUp).not.toHaveBeenCalled()
+  })
+
+  it('RV2: is not a modal — the results stay on screen while the decision is made', async () => {
+    const { user } = await openReview()
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    // Nothing is covered or trapped: the values under review remain readable, which
+    // is the point of refusing a dialog here.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getAllByText(/Glycémie/).length).toBeGreaterThan(0)
+  })
+
+  it('RV3: restates the decision, the patient and the version before committing', async () => {
+    const { user } = await openReview()
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    const restatement = screen.getByText(/Vous allez enregistrer/)
+    expect(restatement).toHaveTextContent('Aucun suivi requis')
+    expect(restatement).toHaveTextContent('Fatouma Robleh')
+    expect(restatement).toHaveTextContent('version 1')
+  })
+
+  it('RV4: ties that restatement to the confirm control for screen readers', async () => {
+    // Announced as part of pressing the button, rather than left for a sighted
+    // reader to happen to notice beside it.
+    const { user } = await openReview()
+    await user.click(screen.getByLabelText('Suivi requis'))
+
+    const confirm = screen.getByRole('button', { name: 'Confirmer la revue' })
+    const describedBy = confirm.getAttribute('aria-describedby')
+    expect(describedBy).toBe('review-subject-restatement')
+    expect(document.getElementById(describedBy!)).toHaveTextContent('Vous allez enregistrer')
+  })
+
+  it('RV5: follows the chosen disposition, and changing the choice changes what is stated', async () => {
+    const { user } = await openReview()
+
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    expect(screen.getByText(/Vous allez enregistrer/)).toHaveTextContent('Aucun suivi requis')
+
+    await user.click(screen.getByLabelText('Suivi requis'))
+    const restatement = screen.getByText(/Vous allez enregistrer/)
+    expect(restatement).toHaveTextContent('Suivi requis')
+    expect(restatement).not.toHaveTextContent('Aucun suivi requis')
+  })
+
+  it('RV6: records the disposition that was actually restated', async () => {
+    const { client, user } = await openReview()
+
+    await user.click(screen.getByLabelText('Suivi requis'))
+    expect(screen.getByText(/Vous allez enregistrer/)).toHaveTextContent('Suivi requis')
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    await waitFor(() => expect(client.reviewReleaseVersionFollowUp).toHaveBeenCalledTimes(1))
+    expect(client.reviewReleaseVersionNoFollowUp).not.toHaveBeenCalled()
+  })
+
+  it('RV7: never reinterprets "no follow-up" as "everything is normal"', async () => {
+    // Clinically false, and the one phrase this surface must never produce.
+    const { user } = await openReview()
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    expect(document.body.textContent).not.toMatch(/tout est normal/i)
+    expect(document.body.textContent).not.toMatch(/résultats? normaux/i)
+    expect(document.body.textContent).not.toMatch(/rien d'anormal/i)
+  })
+
+  it('RV8: states that the decision is durable before it is taken', async () => {
+    const { user } = await openReview()
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    // The page's own immutability wording, matched on its distinctive clause so
+    // this does not become a brittle copy of the whole sentence.
+    expect(screen.getByText(/ne peut actuellement pas être modifiée/)).toBeInTheDocument()
+  })
+
+  it('RX1: names a corrected result "Rectificatif" and keeps its version number', async () => {
+    // Version identity is demoted, never erased: it is how this record is discussed
+    // with the laboratory and how it matches the backend's own version_number.
+    const { user } = await openReview({
+      // The queue entry, the version history and the fetched content must all name
+      // the same released version, or the page's own identity guard correctly
+      // rejects the content as belonging to a different version.
+      listResultReviews: vi
+        .fn()
+        .mockResolvedValue(
+          makeQueueResponse([
+            makeQueueEntry({ release_version_id: 'rel-v2', release_version_number: 2, is_amendment: true }),
+          ]),
+        ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-18T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi
+        .fn()
+        .mockResolvedValue(
+          makeVersionContent({ release_version_number: 2, is_amendment: true, release_version_id: 'rel-v2' }),
+        ),
+    })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    const restatement = screen.getByText(/Vous allez enregistrer/)
+    expect(restatement).toHaveTextContent('rectificatif')
+    expect(restatement).toHaveTextContent('version 2')
+  })
+
+  it('RX2: does not present a correction as merely a higher version number', async () => {
+    const { user } = await openReview({
+      // The queue entry, the version history and the fetched content must all name
+      // the same released version, or the page's own identity guard correctly
+      // rejects the content as belonging to a different version.
+      listResultReviews: vi
+        .fn()
+        .mockResolvedValue(
+          makeQueueResponse([
+            makeQueueEntry({ release_version_id: 'rel-v2', release_version_number: 2, is_amendment: true }),
+          ]),
+        ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-18T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi
+        .fn()
+        .mockResolvedValue(
+          makeVersionContent({ release_version_number: 2, is_amendment: true, release_version_id: 'rel-v2' }),
+        ),
+    })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    // The old wording made the clinician infer supersession from arithmetic.
+    expect(document.body.textContent).not.toMatch(/Version 2 — Amendée/)
   })
 })

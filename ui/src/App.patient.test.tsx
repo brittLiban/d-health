@@ -96,23 +96,22 @@ describe('App routing — DHealth Patient (§20/§21)', () => {
    * neither surface renders its application content without an established session, and neither
    * falls through to the unauthenticated patient surface.
    */
-  it('AC25/§71: Clinic remains gated — the patient branch did not weaken the auth gate', async () => {
-    window.history.replaceState(null, '', '/?app=clinic')
-    render(<App />)
+  // DH-MVP-POLISH-001: `?app=clinic` and `?app=lab` are now aliases of the one
+  // staff application rather than two surfaces, and the gate names the product
+  // instead of a sub-application — it cannot honestly claim to be "DHealth
+  // Clinique" while refusing someone whose memberships it has not yet read. The
+  // invariant is unchanged and is asserted for every route that reaches the staff
+  // application: gated, and never falling through to the patient surface.
+  for (const route of ['/?app=staff', '/?app=clinic', '/?app=lab', '/']) {
+    it('AC25/§71: the staff application stays gated at ' + route, async () => {
+      window.history.replaceState(null, '', route)
+      render(<App />)
 
-    await screen.findByRole('alert')
-    expect(document.body.textContent).toMatch(/DHealth Clinique/i)
-    expect(screen.queryByText('Votre analyse')).not.toBeInTheDocument()
-  })
-
-  it('AC25/§71: Lab remains gated', async () => {
-    window.history.replaceState(null, '', '/?app=lab')
-    render(<App />)
-
-    await screen.findByRole('alert')
-    expect(document.body.textContent).toMatch(/DHealth Laboratoire/i)
-    expect(screen.queryByText('Votre analyse')).not.toBeInTheDocument()
-  })
+      await screen.findByRole('alert')
+      expect(document.body.textContent).toMatch(/DHealth/i)
+      expect(screen.queryByText('Votre analyse')).not.toBeInTheDocument()
+    })
+  }
 
   it('an unknown ?app value does not fall through to the unauthenticated patient surface', async () => {
     window.history.replaceState(null, '', '/?app=nonsense')

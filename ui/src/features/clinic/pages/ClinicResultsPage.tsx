@@ -42,8 +42,21 @@ function reviewStatusTone(status: string | null | undefined): 'neutral' | 'succe
   return 'neutral'
 }
 
+/**
+ * DH-MVP-POLISH-001 — what a corrected result is called.
+ *
+ * "Version 2 — Amendée" made the clinician do the arithmetic: it says a number
+ * and leaves them to work out that an earlier result they may have acted on has
+ * been superseded. "Rectificatif" says the thing itself.
+ *
+ * Version identity is deliberately not erased, only demoted. It is how this
+ * record is discussed with a laboratory over the phone and how it is matched to
+ * the backend's own `version_number`, so the number stays — in parentheses here,
+ * and on its own under the detailed history — rather than being dropped in
+ * favour of a friendlier word.
+ */
 function formatVersionLabel(versionNumber: number, isAmendment: boolean): string {
-  return isAmendment ? `Version ${versionNumber} — Amendée` : `Version ${versionNumber}`
+  return isAmendment ? `Rectificatif (version ${versionNumber})` : `Version ${versionNumber}`
 }
 
 function formatDateTime(value: string): string {
@@ -923,11 +936,62 @@ export function ClinicResultsPage() {
                                 </p>
                               ) : null}
 
+                              {/* DH-MVP-POLISH-001 — two gestures, and no modal.
+                                  A review records a durable clinical disposition, so it must
+                                  not be reachable by one stray click. It is not: the
+                                  disposition must be chosen first, and until it is, the
+                                  confirm control below is inert. That is the whole
+                                  protection — deliberately not a dialog, because a clinician
+                                  reviewing a queue of results would dismiss the twentieth
+                                  one without reading it, which protects nobody.
+                                  What the second gesture adds is a restatement of its own
+                                  subject: which decision, about which patient, on which
+                                  released version. It is tied to the button with
+                                  `aria-describedby`, so it is announced as part of pressing
+                                  it rather than being left for a sighted reader to notice. */}
+                              {disposition ? (
+                                <p
+                                  id="review-subject-restatement"
+                                  style={{
+                                    margin: 0,
+                                    padding: 'var(--space-3)',
+                                    fontSize: 'var(--font-size-sm)',
+                                    color: 'var(--color-text)',
+                                    background: 'var(--color-surface-alt)',
+                                    border: '1px solid var(--color-border)',
+                                    borderRadius: 'var(--radius-sm)',
+                                  }}
+                                >
+                                  Vous allez enregistrer{' '}
+                                  <strong>
+                                    {disposition === 'FOLLOW_UP_REQUIRED'
+                                      ? 'Suivi requis'
+                                      : 'Aucun suivi requis'}
+                                  </strong>{' '}
+                                  pour{' '}
+                                  <strong>
+                                    {displayedContent?.patient.display_name?.trim() ||
+                                      'Nom non renseigné'}
+                                  </strong>
+                                  {/* The clinician-facing word is "rectificatif"; the version
+                                      number is kept, as a precise reference rather than a label. */}
+                                  {typeof displayedContent?.release_version_number === 'number'
+                                    ? displayedContent.is_amendment
+                                      ? `, rectificatif (version ${displayedContent.release_version_number})`
+                                      : `, version ${displayedContent.release_version_number}`
+                                    : ''}
+                                  .
+                                </p>
+                              ) : null}
+
                               <div>
                                 <Button
                                   type="button"
                                   onClick={handleSubmitReview}
                                   disabled={!disposition || submitState.submitting}
+                                  aria-describedby={
+                                    disposition ? 'review-subject-restatement' : undefined
+                                  }
                                 >
                                   {submitState.submitting ? 'Enregistrement…' : 'Confirmer la revue'}
                                 </Button>
