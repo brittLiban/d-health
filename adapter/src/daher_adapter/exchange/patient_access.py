@@ -258,6 +258,32 @@ class PatientAccessGrantRepository:
         session.flush()
         return "revoked", grant.id
 
+    def get_active_for_order(self, lab_order_id: uuid.UUID) -> GrantRecord | None:
+        """DH-PATIENT-001: the metadata read a clinician needs to answer "is a patient access link
+        already outstanding for this order?" -- and nothing more. Returns ``None`` for an order
+        with no grant at all, for a revoked grant, and for an expired-but-not-yet-revoked one:
+        expiry is evaluated as a *read-time* predicate, never by mutating ``revoked_at`` as a side
+        effect of being asked (the caller is a GET; retiring a grant is issuance's own job, inside
+        its own lock -- see ``_issue_in_session``).
+
+        One order, one indexed lookup, no N+1 and no lock: ``PatientAccessGrant``'s partial unique
+        index over ``(lab_order_id) WHERE revoked_at IS NULL`` already guarantees at most one
+        unrevoked row per order, so the single-row read below cannot silently drop a second live
+        grant. The returned ``GrantRecord`` deliberately carries no ``token_hash`` -- that field
+        exists on the ORM row and on no record type this module hands out."""
+        with self._sessions() as session:
+            grant = session.scalar(
+                select(PatientAccessGrant).where(
+                    PatientAccessGrant.lab_order_id == lab_order_id,
+                    PatientAccessGrant.revoked_at.is_(None),
+                )
+            )
+            if grant is None:
+                return None
+            if _aware(grant.expires_at) <= utc_now():
+                return None
+            return _to_record(grant)
+
     def validate_token(self, raw_token: str) -> GrantRecord | None:
         """Returns the grant if ``raw_token`` resolves to a currently valid (unexpired,
         unrevoked) grant, else ``None`` -- every failure mode (unknown token, expired, revoked,
@@ -282,11 +308,19 @@ def _hash_token(raw_token: str) -> str:
 
 
 def _to_record(grant: PatientAccessGrant) -> GrantRecord:
+    """DH-PATIENT-001: every timestamp leaves this module timezone-aware, normalized through
+    ``_aware`` exactly like the comparisons above already are. Without this, a record read back on
+    SQLite carries naive datetimes, and ``PatientAccessMetadataResponse.expires_at`` would then
+    serialize as ``2026-09-27T07:46:44`` with no offset -- which a browser parses as *local* time,
+    silently shifting a clinician-visible expiry by the timezone offset (the issuance response,
+    whose value never round-trips through the database, correctly emits ``...Z``; the two must
+    agree).
+    Lossless: every value this module writes is already UTC."""
     return GrantRecord(
         id=grant.id,
         lab_order_id=grant.lab_order_id,
-        issued_at=grant.issued_at,
-        expires_at=grant.expires_at,
-        revoked_at=grant.revoked_at,
+        issued_at=_aware(grant.issued_at),
+        expires_at=_aware(grant.expires_at),
+        revoked_at=None if grant.revoked_at is None else _aware(grant.revoked_at),
         access_mode=PatientAccessMode(grant.access_mode),
     )

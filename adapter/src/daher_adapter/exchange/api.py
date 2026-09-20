@@ -982,6 +982,27 @@ class PatientAccessIssueResponse(BaseModel):
     access_mode: Literal["LAB_SELECTION", "ORDER_READ"]
 
 
+class PatientAccessMetadataResponse(BaseModel):
+    """DH-PATIENT-001 §8/§9: the provider-authorized answer to "is a patient access link already
+    outstanding for this order?" -- deliberately metadata only.
+
+    Never carries the raw bearer token (which exists exactly once, in
+    ``PatientAccessIssueResponse``, and is unrecoverable afterward by design -- §10), never the
+    persisted ``token_hash``, never the grant's own UUID (no caller needs to address a grant by id:
+    every provider-side patient-access operation is keyed by ``(provider_id, order_id)``), and
+    never any patient result content. An expired grant is reported as ``active=false`` with
+    ``expires_at``/``access_mode`` both ``null`` -- reporting an inactive grant's own expiry
+    instant would leak a fact about a credential that no longer authorizes anything, and the
+    clinician's only truthful next action in that state is identical to the no-grant-at-all state
+    (issue a new one)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool
+    expires_at: datetime | None
+    access_mode: Literal["LAB_SELECTION", "ORDER_READ"] | None
+
+
 class PatientOrderItemResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1027,10 +1048,37 @@ class PatientSelectionReceiptResponse(BaseModel):
     currency: str | None
 
 
+PatientResultStatus = Literal[
+    "NOT_READY",
+    "AWAITING_CLINICIAN_REVIEW",
+    "NO_FOLLOW_UP_REQUIRED",
+    "FOLLOW_UP_REQUIRED",
+]
+"""DH-PATIENT-001 §26/§27: a server-owned projection of "where is this order's result in the
+provider's own review obligation?", expressed as one closed enum so no frontend ever has to infer
+it by combining order status, release existence, and review disposition itself (the exact
+inference §26 forbids).
+
+``NOT_READY``: no released result version exists for this order, and it is not a grandfathered
+``COMPLETED``-without-release order either -- nothing is available to the provider yet.
+``AWAITING_CLINICIAN_REVIEW``: a result is available to the provider, and the review obligation for
+the *latest* released version is still ``PENDING``.
+``NO_FOLLOW_UP_REQUIRED``/``FOLLOW_UP_REQUIRED``: the clinician's recorded disposition on the
+latest released version, verbatim from ``DoctorReview`` -- never a restatement, ranking, or
+interpretation of any result value (``docs/MVP-1.0.md`` §13)."""
+
+
 class PatientOrderResponse(BaseModel):
     """The patient-facing order view -- deliberately excludes every internal identifier
     (`PatientReference`/`PractitionerReference`/`ExchangeIdentity`/membership/audit ids), contact
-    data, and any result value. `selection` is `None` before a lab is chosen."""
+    data, and any result value. `selection` is `None` before a lab is chosen.
+
+    DH-PATIENT-001: ``result_status`` is the one addition this ticket makes to this response, and
+    it deliberately carries no result content of any kind -- see ``PatientResultStatus``. Nothing
+    here names a numeric value, a text value, a reference range, an observation, a source code, a
+    release manifest, or the identity of the reviewing clinician; that exclusion is asserted
+    against the *serialized JSON* by this ticket's own regression tests, not only against the
+    field list above."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1038,6 +1086,7 @@ class PatientOrderResponse(BaseModel):
     requested_tests: list[PatientOrderItemResponse]
     ordering_provider_name: str
     selection: PatientSelectionReceiptResponse | None
+    result_status: PatientResultStatus
 
 
 class PatientSelectionRequest(BaseModel):
@@ -4012,7 +4061,93 @@ def build_exchange_router(
             ) from error
         return None
 
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/patient-access",
+        response_model=PatientAccessMetadataResponse,
+    )
+    def get_patient_access_metadata(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientAccessMetadataResponse:
+        """DH-PATIENT-001 §8: the same ``CLINICIAN``-for-the-owning-provider boundary as issuance
+        and revocation above -- deliberately not a weaker one just because this route only reads.
+        ``_existing_order_for_provider_or_404`` is what anti-enumerates: another provider's real
+        order id is indistinguishable here from one that does not exist.
+
+        A pure read (§46): no lock, no ``revoked_at`` write for a grant observed to have expired,
+        exactly one indexed grant lookup for exactly one order."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_clinician(principal, provider_id)
+        _existing_order_for_provider_or_404(order_id, provider_id)
+
+        grant = patient_access.get_active_for_order(order_id)
+        if grant is None:
+            return PatientAccessMetadataResponse(active=False, expires_at=None, access_mode=None)
+        return PatientAccessMetadataResponse(
+            active=True,
+            expires_at=grant.expires_at,
+            access_mode=grant.access_mode.value,
+        )
+
     # -- DH-EX-005: patient API -- order-scoped by the bearer grant alone, never a path/body id ----
+
+    def _patient_result_status(order) -> PatientResultStatus:  # noqa: ANN001 -- LabOrderRecord
+        """DH-PATIENT-001 §26-§29: resolve the patient-visible result/follow-up status from the
+        order's *latest* released version and that version's own review obligation.
+
+        **Why the latest released version, not the latest review (§28).** A version-2 amendment
+        release creates a brand-new ``PENDING`` ``DoctorReview`` bound to version 2 and never
+        touches version 1's own terminal review row (see ``LabResultAmendmentRepository.
+        _release_amendment_in_session``). Reading "the latest version, then that version's review"
+        is therefore what makes an amendment correctly *revert* the patient's view to
+        ``AWAITING_CLINICIAN_REVIEW`` -- continuing to show version 1's disposition would present a
+        clinician judgement about superseded content as though it applied to the current result.
+        An amendment merely *in preparation* has released no version yet, so the patient keeps
+        seeing version 1's real disposition until version 2 is actually released -- the correct
+        behavior, and the reason this reads released versions rather than amendment episodes.
+
+        **Legacy/grandfathered orders (§29).** A ``COMPLETED`` order with no ``LabResultRelease``
+        predates DH-EX-012's explicit release step (ADR-044's grandfather rule) and has no release
+        version to bind a review to -- and none is ever fabricated here. Its one honest, unbound
+        ``DoctorReview`` row is used verbatim instead, which is exactly the "existing legacy
+        DoctorReview semantics where available" §29 requires.
+
+        **Fail-conservative branch.** Every order created through ``LabOrderRepository`` gets a
+        ``PENDING`` ``DoctorReview`` row at creation time, so "a released version exists but its
+        review row does not" is unreachable through any supported path in this codebase. It is
+        still handled, and handled as ``AWAITING_CLINICIAN_REVIEW`` rather than as a terminal
+        disposition or as ``NOT_READY``: it is the only value that asserts nothing false about a
+        clinician who may never have seen this content (``NOT_READY`` would deny a result that
+        demonstrably was released; either terminal value would invent a disposition nobody
+        recorded)."""
+        latest_version = releases.get_latest_release_version(order.id)
+        if latest_version is None:
+            if order.status != LabOrderStatus.COMPLETED.value:
+                return "NOT_READY"
+            # Grandfathered COMPLETED-without-release: the one unbound legacy review row.
+            try:
+                legacy_review = reviews.get_for_order(order.id)
+            except ReviewNotFound:
+                return "AWAITING_CLINICIAN_REVIEW"
+            return _map_review_status(legacy_review.status)
+
+        version_review = reviews.get_for_release_version(latest_version.id)
+        if version_review is None:
+            return "AWAITING_CLINICIAN_REVIEW"
+        return _map_review_status(version_review.status)
+
+    def _map_review_status(review_status: str) -> PatientResultStatus:
+        """``DoctorReview.status`` -> patient projection, one-to-one and nothing else. An
+        unrecognized value (only reachable if a future status were added to the model without
+        revisiting this ticket) fails conservative rather than guessing which of the two terminal
+        dispositions it resembles."""
+        if review_status == DoctorReviewStatus.NO_FOLLOW_UP_REQUIRED.value:
+            return "NO_FOLLOW_UP_REQUIRED"
+        if review_status == DoctorReviewStatus.FOLLOW_UP_REQUIRED.value:
+            return "FOLLOW_UP_REQUIRED"
+        return "AWAITING_CLINICIAN_REVIEW"
 
     def _patient_order_response(lab_order_id: uuid.UUID) -> PatientOrderResponse:
         order = orders.get(lab_order_id)
@@ -4079,6 +4214,7 @@ def build_exchange_router(
             ],
             ordering_provider_name=provider.name,
             selection=selection_response,
+            result_status=_patient_result_status(order),
         )
 
     @router.get("/patient/order", response_model=PatientOrderResponse)
