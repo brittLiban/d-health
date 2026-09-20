@@ -1,34 +1,166 @@
-:root {
-  --color-bg: #f4f6f5;
-  --color-surface: #ffffff;
-  --color-border: #d3dbd8;
-  --color-text: #1a2622;
-  --color-text-muted: #4b5a55;
-  --color-primary: #0b5e57;
-  --color-primary-hover: #094e48;
-  --color-primary-contrast: #ffffff;
-  --color-danger: #8a1f2b;
-  --color-danger-bg: #fbe9ea;
-  --color-warning-bg: #fff4e0;
-  --color-warning-text: #6b4a05;
-  --color-success-bg: #e6f4ea;
-  --color-success-text: #1e5631;
-  --color-focus-ring: #1a73e8;
+/* ==========================================================================
+   DHealth design tokens — the single source of visual truth
+   ==========================================================================
 
+   DH-MVP-POLISH-001. Every colour, type size, spacing step, radius and target
+   size used anywhere in this application resolves here. Components reference
+   semantic tokens; they must not hard-code hex values.
+
+   ── Colour carries workflow responsibility, never clinical meaning ──
+
+   This is a product law, not a style preference. Nothing in this palette may be
+   read as an interpretation of a patient's result:
+
+     petrol   a step of the workflow is complete, or this is the primary action
+     brass    someone still owes this record an action
+     clay     this record stopped, was refused, or was superseded
+     ink      recorded fact, neutral
+
+   A haemoglobin value is never rendered in clay because it is low, and a panel
+   is never rendered in petrol because it is unremarkable. The application
+   records and routes; it does not interpret. The `--color-success-*` and
+   `--color-danger-*` aliases below are historical NAMES kept so existing
+   stylesheets keep resolving — their meaning is "workflow step confirmed" and
+   "workflow stopped", not "healthy" and "dangerous".
+
+   ── Two layers ──
+
+   `--dh-*` is the raw palette: the only place literal colour values appear.
+   Everything else is semantic and points at the raw layer, so retargeting the
+   product's colour is a change in one block rather than in 60 stylesheets. */
+
+:root {
+  /* Raw palette ----------------------------------------------------------- */
+  --dh-bone: #f6f4ef;
+  --dh-bone-sunk: #f0ede6;
+  --dh-surface: #ffffff;
+
+  --dh-ink: #14201f;
+  --dh-ink-2: #45524f;
+  --dh-ink-3: #5e6b69;
+  --dh-ink-4: #6d7a77;
+  --dh-ink-800: #26322f;
+
+  --dh-hairline: #dfdad1;
+  --dh-hairline-soft: #e8e3da;
+  --dh-hairline-strong: #c9c2b6;
+
+  --dh-petrol: #0b4f4a;
+  --dh-petrol-deep: #073b37;
+  --dh-petrol-tint: #e7f0ee;
+
+  --dh-brass: #8a5e10;
+  --dh-brass-tint: #fbf6ec;
+  --dh-brass-border: #e4d3ae;
+
+  --dh-clay: #9a3412;
+  --dh-clay-tint: #f7e7e0;
+  --dh-clay-border: #ddbba9;
+
+  /* Surfaces and text ----------------------------------------------------- */
+  --color-bg: var(--dh-bone);
+  --color-surface: var(--dh-surface);
+  --color-surface-alt: var(--dh-bone);
+  --color-surface-hover: var(--dh-bone-sunk);
+  --color-border: var(--dh-hairline);
+  --color-border-soft: var(--dh-hairline-soft);
+  --color-border-strong: var(--dh-hairline-strong);
+  --color-text: var(--dh-ink);
+  --color-text-muted: var(--dh-ink-2);
+  --color-text-subtle: var(--dh-ink-3);
+
+  /* Warm neutral scale. Used by stylesheets written before this token layer
+     existed; kept as a scale so they keep resolving, mapped onto the warm
+     greys of the new palette rather than the cold greys they assumed. */
+  --color-neutral-100: var(--dh-bone-sunk);
+  --color-neutral-200: var(--dh-hairline);
+  --color-neutral-300: var(--dh-hairline-strong);
+  --color-neutral-500: var(--dh-ink-4);
+  --color-neutral-600: var(--dh-ink-3);
+  --color-neutral-700: var(--dh-ink-2);
+  --color-neutral-800: var(--dh-ink-800);
+  --color-neutral-900: var(--dh-ink);
+
+  /* Primary action -------------------------------------------------------- */
+  --color-primary: var(--dh-petrol);
+  --color-primary-hover: var(--dh-petrol-deep);
+  --color-primary-600: var(--dh-petrol-deep);
+  --color-primary-contrast: var(--dh-surface);
+  --color-primary-tint: var(--dh-petrol-tint);
+
+  /* Workflow state. See the header: these describe where a record is in the
+     relay, never what a clinical value means. */
+  --color-success: var(--dh-petrol);
+  --color-success-700: var(--dh-petrol-deep);
+  --color-success-bg: var(--dh-petrol-tint);
+  --color-success-border: var(--dh-petrol-tint);
+  --color-success-text: var(--dh-petrol-deep);
+
+  --color-waiting: var(--dh-brass);
+  --color-waiting-bg: var(--dh-brass-tint);
+  --color-waiting-border: var(--dh-brass-border);
+  --color-warning-bg: var(--dh-brass-tint);
+  --color-warning-text: var(--dh-brass);
+
+  --color-stopped: var(--dh-clay);
+  --color-stopped-bg: var(--dh-clay-tint);
+  --color-stopped-border: var(--dh-clay-border);
+  --color-danger: var(--dh-clay);
+  --color-danger-bg: var(--dh-clay-tint);
+
+  /* Focus. Ink rather than a hue: it sits on the page background thanks to the
+     outline offset, so one ring reads clearly against bone, white and a filled
+     petrol control alike — and being neutral it cannot be mistaken for a state. */
+  --color-focus-ring: var(--dh-ink);
+
+  /* Spacing — 4px base ---------------------------------------------------- */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+  --space-7: 3rem;
 
-  --radius-sm: 4px;
-  --radius-md: 8px;
+  /* Radii — 6px on controls, 10px on surfaces, 14px on patient-facing cards */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
 
-  --font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Type ------------------------------------------------------------------
+     Self-hosted through @fontsource and imported in `main.tsx`. No font is
+     fetched from Google Fonts or any third-party CDN at runtime: a clinic on a
+     degraded connection must not wait on a font host, and a request to one
+     would leak which application is in use. Every stack keeps a real fallback
+     so text stays legible before the face loads or if it fails to. */
+  --font-family-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-family-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-family-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-family: var(--font-family-sans);
 
-  /* Tablet-friendly minimum touch target (§19 of docs/UI-001-CLINICAL-UX.md). */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.9375rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* Density --------------------------------------------------------------
+     Registre for queues, Focus for consequential single-subject decisions,
+     Simple for the patient surface. One language, three densities. */
+  --row-height-registre: 56px;
+  --measure-focus: 45rem;
+
+  /* Tablet-friendly minimum touch target (§19 of docs/UI-001-CLINICAL-UX.md).
+     The comfortable size is the floor on patient-facing and gloved-hand
+     surfaces, where 44px has proven too tight in the field. */
   --touch-target-min: 44px;
+  --touch-target-comfortable: 56px;
 }
 
 * {
@@ -46,6 +178,31 @@ body {
   font-family: var(--font-family);
   color: var(--color-text);
   background: var(--color-bg);
+}
+
+
+/* The display face carries identity and page-level headings; the UI face carries
+   everything operational. Element selectors only, so any component that already
+   states its own family keeps winning on specificity. */
+h1,
+h2 {
+  font-family: var(--font-family-serif);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
+}
+
+/* Identifiers, fingerprints, version numbers and other technical references:
+   a monospaced face with unambiguous digits, because these get read aloud and
+   compared character by character. */
+.technical-reference {
+  font-family: var(--font-family-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Queue and measurement columns must align digit-over-digit so a technician can
+   scan a column rather than read every row. */
+.tabular-numbers {
+  font-variant-numeric: tabular-nums;
 }
 
 button,
