@@ -51,12 +51,32 @@ function reviewStatusTone(status: string | null | undefined): 'neutral' | 'succe
  *
  * Version identity is deliberately not erased, only demoted. It is how this
  * record is discussed with a laboratory over the phone and how it is matched to
- * the backend's own `version_number`, so the number stays — in parentheses here,
- * and on its own under the detailed history — rather than being dropped in
- * favour of a friendlier word.
+ * the backend's own `version_number`, so the number stays — in the version
+ * history and the order relay — rather than being dropped in favour of a
+ * friendlier word.
+ *
+ * This form, with the number, belongs where the record is being studied: the
+ * version tabs of the detail panel. Queue rows use `formatQueueVersionLabel`.
  */
 function formatVersionLabel(versionNumber: number, isAmendment: boolean): string {
   return isAmendment ? `Rectificatif (version ${versionNumber})` : `Version ${versionNumber}`
+}
+
+/**
+ * The queue form of the same label: the word alone, no ordinal.
+ *
+ * A queue row is scanned, not studied. What it has to carry is that this result
+ * supersedes one the clinician may already have acted on — which is the word
+ * "Rectificatif", not its number. The number is one gesture away, in the
+ * version history and the relay, where the record is being read rather than
+ * triaged.
+ *
+ * `is_amendment` is `version_number > 1` on the backend, so a first release
+ * still reads "Version 1" here. That is version identity without the
+ * arithmetic this split exists to remove.
+ */
+function formatQueueVersionLabel(versionNumber: number, isAmendment: boolean): string {
+  return isAmendment ? 'Rectificatif' : formatVersionLabel(versionNumber, isAmendment)
 }
 
 function formatDateTime(value: string): string {
@@ -642,7 +662,7 @@ export function ClinicResultsPage() {
                           <span>
                             {entry.legacy_unversioned
                               ? 'Résultat historique — aucune version de libération enregistrée'
-                              : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
+                              : formatQueueVersionLabel(entry.release_version_number as number, entry.is_amendment)}
                           </span>
                           {entry.released_at ? <> · Libéré le {formatDateTime(entry.released_at)}</> : null}
                         </p>
@@ -693,7 +713,7 @@ export function ClinicResultsPage() {
                           <span>
                             {entry.legacy_unversioned
                               ? 'Résultat historique'
-                              : formatVersionLabel(entry.release_version_number as number, entry.is_amendment)}
+                              : formatQueueVersionLabel(entry.release_version_number as number, entry.is_amendment)}
                           </span>
                           {entry.reviewed_at ? <> · Revu le {formatDateTime(entry.reviewed_at)}</> : null}
                         </p>
@@ -974,12 +994,16 @@ export function ClinicResultsPage() {
                                       'Nom non renseigné'}
                                   </strong>
                                   {/* The clinician-facing word is "rectificatif"; the version
-                                      number is kept, as a precise reference rather than a label. */}
+                                      number is kept, as a precise reference rather than a label.
+                                      A legacy order released before versioning existed has no
+                                      number to name, and the sentence says so rather than
+                                      trailing off — an absent version is a fact about the
+                                      record, not something to leave the reader to notice. */}
                                   {typeof displayedContent?.release_version_number === 'number'
                                     ? displayedContent.is_amendment
                                       ? `, rectificatif (version ${displayedContent.release_version_number})`
                                       : `, version ${displayedContent.release_version_number}`
-                                    : ''}
+                                    : ' (résultat non versionné)'}
                                   .
                                 </p>
                               ) : null}

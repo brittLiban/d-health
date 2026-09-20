@@ -2289,13 +2289,21 @@ describe('LabOrdersPage', () => {
       expect(screen.getByText(/Non enregistré/)).toBeInTheDocument()
     })
 
-    it('RE3: warns that a refresh discards the value, which is true', async () => {
+    it('RE3: warns about both things that actually discard the value', async () => {
       // Clinical values are deliberately never written to localStorage,
       // sessionStorage or IndexedDB, so this is a real consequence and not a scare.
+      //
+      // Two events lose a draft, and the marker names both. A refresh. And a failed
+      // token refresh: ExchangeAuthProvider sets status `error`, ExchangeAuthGate
+      // renders its own notice in place of the tree below it, and this component
+      // unmounts. A *successful* silent refresh loses nothing, so the sentence says
+      // "expire" rather than claiming any session event costs the work.
       const { user } = await openEntry()
       await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2')
 
-      expect(screen.getByText(/perdue si vous actualisez la page/)).toBeInTheDocument()
+      const marker = screen.getByText(/Non enregistré/)
+      expect(marker).toHaveTextContent(/perdue si vous actualisez la page/)
+      expect(marker).toHaveTextContent(/votre session expire/)
     })
 
     it('RE4: counts the unsaved values as a status, not as an error', async () => {

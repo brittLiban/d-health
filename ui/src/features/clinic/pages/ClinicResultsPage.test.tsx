@@ -261,9 +261,11 @@ describe('ClinicResultsPage', () => {
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
     // DH-MVP-POLISH-001: a corrected result is named "Rectificatif" rather than
-    // leaving the clinician to infer supersession from a version number — and the
-    // number is kept alongside it, not erased.
-    expect(screen.getByText('Rectificatif (version 2)')).toBeInTheDocument()
+    // leaving the clinician to infer supersession from a version number. In a queue
+    // row the word stands alone — the ordinal belongs to the version history and the
+    // order relay, where the record is read rather than triaged.
+    expect(screen.getByText('Rectificatif')).toBeInTheDocument()
+    expect(screen.queryByText(/Rectificatif \(version/)).not.toBeInTheDocument()
   })
 
   it('UI-Q4: a legacy unversioned entry is labelled truthfully, never a fabricated version', async () => {
@@ -663,9 +665,11 @@ describe('ClinicResultsPage', () => {
     expect(await screen.findByText('Résultats à examiner (2)')).toBeInTheDocument()
     expect(screen.getByText(/^Version 1$/)).toBeInTheDocument()
     // DH-MVP-POLISH-001: a corrected result is named "Rectificatif" rather than
-    // leaving the clinician to infer supersession from a version number — and the
-    // number is kept alongside it, not erased.
-    expect(screen.getByText('Rectificatif (version 2)')).toBeInTheDocument()
+    // leaving the clinician to infer supersession from a version number. In a queue
+    // row the word stands alone — the ordinal belongs to the version history and the
+    // order relay, where the record is read rather than triaged.
+    expect(screen.getByText('Rectificatif')).toBeInTheDocument()
+    expect(screen.queryByText(/Rectificatif \(version/)).not.toBeInTheDocument()
   })
 
   it('RR9: a stale version-switch response must never render after a newer version was opened', async () => {
@@ -902,6 +906,49 @@ describe('recording a review disposition', () => {
       listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
       getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
       getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+      // These must return a promise, as the real client does. A bare `vi.fn()`
+      // returns undefined, and the page's own `call.then(...)` then throws an
+      // unhandled TypeError inside the click handler: the assertion on
+      // `toHaveBeenCalledWith` still passes, so the test reads green while the
+      // submit path it is supposedly exercising never ran past its first line.
+      // Each resolves with the version it was actually called for, so the page's
+      // response-identity check sees a coherent answer rather than a fixed one.
+      reviewReleaseVersionNoFollowUp: vi.fn((_provider: string, orderId: string, versionId: string) =>
+        Promise.resolve(
+          makeReviewResponse({
+            order_id: orderId,
+            release_version_id: versionId,
+            status: 'NO_FOLLOW_UP_REQUIRED',
+          }),
+        ),
+      ),
+      reviewReleaseVersionFollowUp: vi.fn((_provider: string, orderId: string, versionId: string) =>
+        Promise.resolve(
+          makeReviewResponse({
+            order_id: orderId,
+            release_version_id: versionId,
+            status: 'FOLLOW_UP_REQUIRED',
+          }),
+        ),
+      ),
+      reviewLegacyOrderNoFollowUp: vi.fn((_provider: string, orderId: string) =>
+        Promise.resolve(
+          makeReviewResponse({
+            order_id: orderId,
+            release_version_id: null,
+            status: 'NO_FOLLOW_UP_REQUIRED',
+          }),
+        ),
+      ),
+      reviewLegacyOrderFollowUp: vi.fn((_provider: string, orderId: string) =>
+        Promise.resolve(
+          makeReviewResponse({
+            order_id: orderId,
+            release_version_id: null,
+            status: 'FOLLOW_UP_REQUIRED',
+          }),
+        ),
+      ),
       ...overrides,
     })
     const user = userEvent.setup()
@@ -1077,5 +1124,187 @@ describe('recording a review disposition', () => {
 
     // The old wording made the clinician infer supersession from arithmetic.
     expect(document.body.textContent).not.toMatch(/Version 2 — Amendée/)
+  })
+
+  /**
+   * One order with two released versions, both still awaiting review — a lab that
+   * corrected a result before the doctor got to the first one.
+   *
+   * Every fixture below names the same two version ids as the history does. The
+   * page's identity guard refuses content that belongs to a version other than the
+   * selected one, so fixtures that disagree fail for the wrong reason.
+   */
+  async function openAmendedReview() {
+    const versions = [
+      {
+        release_version_id: 'rel-v1',
+        release_version_number: 1,
+        is_amendment: false,
+        released_at: '2026-09-17T09:30:00Z',
+        review_status: 'PENDING' as const,
+        reviewed_at: null,
+        reviewed_by_practitioner_reference_id: null,
+      },
+      {
+        release_version_id: 'rel-v2',
+        release_version_number: 2,
+        is_amendment: true,
+        released_at: '2026-09-18T09:30:00Z',
+        review_status: 'PENDING' as const,
+        reviewed_at: null,
+        reviewed_by_practitioner_reference_id: null,
+      },
+    ]
+    return openReview({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            release_version_id: 'rel-v2',
+            release_version_number: 2,
+            is_amendment: true,
+            released_at: '2026-09-18T09:30:00Z',
+          }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a', { versions })),
+      getReleaseVersion: vi
+        .fn()
+        .mockImplementation((_provider: string, _orderId: string, versionId: string) =>
+          Promise.resolve(
+            versionId === 'rel-v1'
+              ? makeVersionContent({
+                  release_version_id: 'rel-v1',
+                  release_version_number: 1,
+                  is_amendment: false,
+                })
+              : makeVersionContent({
+                  release_version_id: 'rel-v2',
+                  release_version_number: 2,
+                  is_amendment: true,
+                }),
+          ),
+        ),
+    })
+  }
+
+  it('RX3: keeps the version number in the history, which is where it was demoted to', async () => {
+    await openAmendedReview()
+
+    // The queue row said "Rectificatif" alone. The history is the other half of that
+    // decision: this is where the ordinal has to survive, because it is how the record
+    // is matched to the backend and discussed with the laboratory by telephone.
+    const history = screen.getByRole('tab', { name: /^Rectificatif \(version 2\)/ })
+    expect(history).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /^Version 1/ })).toBeInTheDocument()
+  })
+
+  it('RX4: does not hide the superseded version once a rectificatif exists', async () => {
+    const { user } = await openAmendedReview()
+
+    // A corrected result does not erase what an earlier decision may have been made
+    // on. The first version stays reachable, not merely mentioned — and which one is
+    // on screen is exposed to assistive technology, not carried by background colour.
+    const rectificatif = screen.getByRole('tab', { name: /^Rectificatif \(version 2\)/ })
+    expect(rectificatif).toHaveAttribute('aria-selected', 'true')
+
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: /^Version 1/ })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      )
+    })
+    expect(screen.getByRole('tab', { name: /^Rectificatif \(version 2\)/ })).toHaveAttribute(
+      'aria-selected',
+      'false',
+    )
+  })
+
+  it('RX5: a disposition chosen for one version is not carried onto another', async () => {
+    const { user } = await openAmendedReview()
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    expect(screen.getByLabelText('Aucun suivi requis')).toBeChecked()
+
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+
+    // Switching what is on screen must not leave a decision armed against it. The
+    // clinician chose for the rectificatif; nothing is pre-selected for version 1.
+    await waitFor(() => {
+      expect(screen.getByLabelText('Aucun suivi requis')).not.toBeChecked()
+    })
+    expect(screen.getByLabelText('Suivi requis')).not.toBeChecked()
+    expect(screen.getByRole('button', { name: 'Confirmer la revue' })).toBeDisabled()
+  })
+
+  it('RX6: the restatement names the version on screen, not the one the queue pointed at', async () => {
+    const { user } = await openAmendedReview()
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('Aucun suivi requis')).not.toBeChecked()
+    })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    // The queue entry was the rectificatif. The clinician navigated away from it, so
+    // the sentence they confirm must say version 1 and must not say rectificatif.
+    const restatement = screen.getByText(/Vous allez enregistrer/)
+    expect(restatement).toHaveTextContent('version 1')
+    expect(restatement).not.toHaveTextContent('rectificatif')
+  })
+
+  it('RX7: records the disposition against the version being displayed', async () => {
+    const { client, user } = await openAmendedReview()
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('Aucun suivi requis')).not.toBeChecked()
+    })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+    await user.click(screen.getByRole('button', { name: 'Confirmer la revue' }))
+
+    // The whole point of the version-specific route: a decision read off version 1
+    // must not be written onto the rectificatif.
+    await waitFor(() => {
+      expect(client.reviewReleaseVersionNoFollowUp).toHaveBeenCalledWith(
+        'provider-a',
+        'order-a',
+        'rel-v1',
+      )
+    })
+  })
+
+  it('RV9: states the absence of a version for a pre-versioning result', async () => {
+    // A legacy order released before versioning existed has no number to name. The
+    // sentence has to account for that rather than stopping after the patient's
+    // name, which would read the same as a versioned result whose version was simply
+    // not mentioned.
+    const { user } = await openReview({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            order_id: 'order-legacy',
+            release_version_id: null,
+            release_version_number: null,
+            is_amendment: false,
+            legacy_unversioned: true,
+          }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-legacy', { versions: [] })),
+      getOrderResults: vi.fn().mockResolvedValue(makeLegacyResults()),
+    })
+    await user.click(screen.getByLabelText('Aucun suivi requis'))
+
+    const restatement = screen.getByText(/Vous allez enregistrer/)
+    expect(restatement).toHaveTextContent('non versionné')
+    expect(restatement).not.toHaveTextContent(/version \d/)
+  })
+
+  it('RX8: says a result is corrected in words, never by colour alone', async () => {
+    await openAmendedReview()
+
+    // COLOR MUST NOT REPRESENT CLINICAL INTERPRETATION, and it must not be the only
+    // carrier of workflow meaning either: strip every style and "Rectificatif" is
+    // still legible as text.
+    const history = screen.getByRole('tab', { name: /^Rectificatif \(version 2\)/ })
+    expect(history.textContent).toMatch(/Rectificatif/)
   })
 })

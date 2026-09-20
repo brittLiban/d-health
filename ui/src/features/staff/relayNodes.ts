@@ -151,6 +151,19 @@ export function providerRelayNodes({
       at: null,
       state: 'done',
     })
+  } else {
+    // Not under way yet. Release is always shown as owed below, so omitting this
+    // step made an accepted order read "accepté ✓ → libération attendue", as though
+    // the analysis itself had been skipped. An awaiting node claims nothing that has
+    // not happened; it states a step the order structurally still owes, undated and
+    // unattributed to any person, exactly like the release node under it.
+    nodes.push({
+      id: 'analysis',
+      label: 'Analyse attendue',
+      organizationName: assignment?.lab_organization_name ?? null,
+      at: null,
+      state: 'awaiting',
+    })
   }
 
   // Newest released version last, so the relay ends on the current obligation.

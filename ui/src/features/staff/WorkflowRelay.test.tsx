@@ -104,6 +104,19 @@ describe('the relay, derived from real order state', () => {
     expect(byId(inProgress, 'released').label).toMatch(/Libération .* attendue/i)
   })
 
+  it('RL4c: shows an accepted order still owing its analysis, not a skipped step', () => {
+    // Release is always shown as owed until a version exists. Leaving the analysis
+    // step out until IN_PROGRESS therefore made an accepted order read "accepté ✓ →
+    // libération attendue", which invites the reading that analysis was skipped.
+    const accepted = nodesFor({ order: order({ status: 'ACCEPTED' }), releaseVersions: [] })
+    const ids = accepted.map((n) => n.id)
+
+    expect(ids.indexOf('analysis')).toBeGreaterThan(ids.indexOf('accepted'))
+    expect(ids.indexOf('released')).toBeGreaterThan(ids.indexOf('analysis'))
+    expect(byId(accepted, 'analysis')).toMatchObject({ state: 'awaiting', at: null })
+    expect(byId(accepted, 'released').state).toBe('awaiting')
+  })
+
   it('RL4b: treats COMPLETED as released, because release is the only way to reach it', () => {
     // `release_lab_order_results` is the sole supported transition from
     // IN_PROGRESS to COMPLETED, so claiming release was still awaited here would be

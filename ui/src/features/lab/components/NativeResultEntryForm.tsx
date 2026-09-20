@@ -353,7 +353,18 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
                   single banner at the bottom of a long panel.
                   These values live in this component's memory only — never
                   localStorage, sessionStorage or IndexedDB — so the warning also
-                  tells the truth about what a refresh costs. */}
+                  tells the truth about what loses them.
+
+                  Two things do. A refresh, obviously. And a failed token refresh:
+                  ExchangeAuthProvider's `onAuthRefreshError` sets status `error`,
+                  ExchangeAuthGate then renders its own notice instead of the tree
+                  below it, and this component unmounts with the drafts in it. A
+                  *successful* silent refresh costs nothing — the tree never
+                  unmounts, which is the ordinary case for a token expiring while
+                  the panel sits open. The failure path cannot be bridged without
+                  persisting clinical values outside this component, which is
+                  exactly what is forbidden, so the marker names it instead of
+                  pretending otherwise. */}
               {unsaved ? (
                 <p
                   style={{
@@ -362,7 +373,8 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
                     color: 'var(--color-waiting)',
                   }}
                 >
-                  Non enregistré — cette valeur sera perdue si vous actualisez la page.
+                  Non enregistré — cette valeur sera perdue si vous actualisez la page ou si
+                  votre session expire.
                 </p>
               ) : null}
             </div>
