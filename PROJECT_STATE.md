@@ -3,8 +3,10 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-001 and
-> DH-DOC-001) — that is where current handoff state and the active backlog live, not the header
+> describes. **The newest ticket entries are at the end of this file** (currently DH-PATIENT-001,
+> 2026-09-20 — this parenthetical read "DH-MVP-001 and DH-DOC-001" until then and had gone stale;
+> always read the *last* entry rather than trusting this list) — that is where current handoff state
+> and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
 > below remain accurate, unmodified history for the maternity/reference-connector track's own state
@@ -17473,3 +17475,305 @@ No pull request was created or used for this ticket's work, per its own explicit
 every change landed as a focused commit directly on `master`.
 
 `NEXT: DH-DEMO-001's own forward sequence, item 1 — Native runtime/browser golden-journey qualification (the native-demo-boot CI job triggered by this ticket's push is the first step; a real browser walkthrough of the full Clinic→Exchange→Lab loop has not yet been attempted).`
+
+---
+
+## DH-PATIENT-001 — Assisted-Digital Patient Status + Print/QR Handoff · 2026-09-20 · directly on `master`
+
+**What this closes.** `docs/MVP-1.0.md` §4's golden journey ends with "patient receives an
+appropriate status/follow-up communication", and §8's last row read **NOT BUILT**. The clinical
+transaction — order → assignment → accept → collection → processing → controlled entry → authorized
+release → immutable versions → exact-version clinician review → follow-up disposition — was
+complete; the human outcome at the end of it was not. A patient had no way to learn what was
+happening or whether they needed to follow up. That is what this ticket builds, and only that: it is
+not a patient portal, a patient EMR, a patient account system, a marketplace, result delivery, or a
+messaging transport.
+
+### Starting state, verified rather than trusted
+
+- Prompt-supplied starting SHA `a5992bd37c40f1296955f15692a84560f7c7b3f0` — **re-verified** against
+  a fresh `git fetch origin`: `HEAD == origin/master == a5992bd`, worktree clean.
+- Prompt-supplied migration head `0025_native_result_binding` — **re-verified** against
+  `adapter/migrations/versions/` and CI's own `EXPECTED_HEAD` constant.
+- Baseline test counts **measured by running the suites**, never copied from a document:
+  adapter **1104 passed, 118 skipped**; UI **415 passed**.
+
+### Backend (commit `815c628`)
+
+**`GET /organizations/{provider_id}/orders/{order_id}/patient-access`** — the metadata read a
+clinician needs to answer "is a patient access link already outstanding for this order?" It sits
+behind `_require_clinician` + `_existing_order_for_provider_or_404`, the identical boundary issuance
+and revocation already use — deliberately not a weaker one because it only reads. Returns
+`{active, expires_at, access_mode}`. It returns **no** raw token (none exists to return — see
+below), no `token_hash`, and no grant UUID: every provider-side patient-access operation is keyed by
+`(provider_id, order_id)`, so no caller needs to address a grant by id. An expired grant reads as
+`{active: false, expires_at: null, access_mode: null}` — reporting an inactive credential's expiry
+instant would leak a fact about something that no longer authorizes anything, and the clinician's
+truthful next action is identical to the no-grant case. Backed by a new
+`PatientAccessGrantRepository.get_active_for_order`: one indexed single-row read (the existing
+partial unique index over `(lab_order_id) WHERE revoked_at IS NULL` guarantees at most one unrevoked
+row), no lock, and **no mutation** — expiry is a read-time predicate, never a `revoked_at` write
+triggered by being asked.
+
+**`PatientOrderResponse.result_status`** — a server-owned closed enum (`NOT_READY`,
+`AWAITING_CLINICIAN_REVIEW`, `NO_FOLLOW_UP_REQUIRED`, `FOLLOW_UP_REQUIRED`) so no frontend ever
+infers follow-up state by combining order status, release existence, and review disposition. Its
+resolution rule:
+
+1. no released version and order not `COMPLETED` → `NOT_READY`;
+2. no released version but order `COMPLETED` → the grandfathered ADR-044 shape: use the order's one
+   honest **unbound** `DoctorReview` row verbatim; **no release version is ever fabricated for it**;
+3. a released version exists → that version's own `DoctorReview`;
+4. a review row genuinely missing → `AWAITING_CLINICIAN_REVIEW`.
+
+Branch 4 is unreachable through any supported path (every order gets a `PENDING` review at creation
+time) and is handled anyway, **conservatively and deliberately**: it is the only value that asserts
+nothing false. `NOT_READY` would deny a result that demonstrably was released; either terminal value
+would invent a clinician disposition nobody recorded. Recorded here as a decision made under this
+ticket's §29 "fail conservatively" instruction, not resolved silently.
+
+**Reading the latest *version*, not the latest *review*, is the load-bearing choice.** A version-2
+amendment release creates a fresh `PENDING` review bound to version 2 and never touches version 1's
+terminal row. So this rule makes an amendment correctly revert the patient's view to
+`AWAITING_CLINICIAN_REVIEW` — continuing to show version 1's disposition would present a clinician
+judgement about content that has since been superseded, to the patient, as though it applied now. An
+amendment merely *in preparation* has released no version, so the patient still sees version 1's
+real disposition — also correct, and the reason this reads released versions rather than amendment
+episodes.
+
+**No new schema.** No migration; Alembic head stays `0025_native_result_binding`.
+`PatientAccessGrant`, `LabOrder`, `LabResultReleaseVersion`, and `DoctorReview` already expressed
+everything needed.
+
+### Bug found and fixed (backend)
+
+`GrantRecord` returned the ORM row's datetimes unnormalized, so a grant read back on SQLite carried
+**naive** values — and the new metadata response would then have serialized `expires_at` as
+`2026-09-27T07:46:44` with no offset, which a browser parses as *local* time, silently shifting a
+clinician-visible expiry by the timezone offset. The issuance response, whose value never
+round-trips through the database, correctly emits `...Z`; the two must agree. Fixed by routing all
+three timestamps through the module's existing `_aware()` discipline. Found by a test comparing the
+two responses' expiries, not by review.
+
+### Frontend (commit `8fe19bf`)
+
+**DHealth Patient** (`ui/src/features/patient/`): `PatientApp`, `PatientStatusPage`,
+`patientAccessClient.ts`, `patientAccessUrl.ts`, `patientStatusWording.ts`, `Patient.module.css`.
+
+- **Routing.** `App.tsx` returns `<PatientApp />` for `?app=patient` **before** constructing any
+  `ExchangeAuthProvider`/`ExchangeAuthGate`. A patient therefore cannot be redirected to Keycloak —
+  structurally, not by configuration. Clinic and Lab branches are untouched.
+- **Credential lifetime.** Read from `#access=` during the *initial render* (a lazy `useState`
+  initialiser, not an effect — React StrictMode double-invokes effects, and read-then-scrub in one
+  effect would find an already-scrubbed URL on the second pass and break the app in development
+  only), moved into component memory, and scrubbed from the address bar with `history.replaceState`
+  (preserving `?app=patient`, so a refresh lands back on the patient surface). Never
+  `localStorage`, `sessionStorage`, IndexedDB, a cookie, a query parameter, or the DOM. After the
+  scrub a refresh has no credential and the patient is told to scan again — the intended MVP
+  trade-off.
+- **Why the fragment.** A URL fragment is not transmitted to the HTTP server as part of the request,
+  so the credential cannot reach reverse-proxy access logs, server routing, or a referrer path.
+  Caddy's `Referrer-Policy: same-origin` helps but is not the primary control.
+- **`PatientAccessClient`, separate from `ExchangeClient`.** A clinician OIDC JWT and a patient
+  order-scoped opaque secret are different kinds of authority and now cannot share a code path. One
+  method; no marketplace method exists on it at all. Every credential failure collapses to one
+  opaque failure kind carrying no server-supplied detail, preserving the backend's own
+  indistinguishability on the client side.
+- **What the patient sees.** One headline status plus at most one short sentence, the requested
+  tests by human display name, the assigned lab's public contact detail, and the ordering clinic.
+  Never a result value, unit, reference range, observation, manifest, price, internal identifier, or
+  clinician identity. `toPatientLab()` is the single narrowing point from the Exchange's full
+  selection receipt (which legitimately carries price fields for the preserved marketplace flow) to
+  the three fields a patient sees — typed against the **real** wire shape rather than a flattering
+  subset, so a future accidental price render would have to be written deliberately.
+- **Wording** is centralised and exhaustive over both backend enums with a `never` guard: adding a
+  status server-side without deciding what to tell a patient becomes a **typecheck failure**, not a
+  raw enum rendered at a patient. `NO_FOLLOW_UP_REQUIRED` is never softened to "tout est normal";
+  `SELECTED` says a lab was assigned, never "envoyé au laboratoire" (a transmission fact the
+  Exchange records separately as `ACCEPTED`).
+
+**Clinic handoff** (`PatientAccessHandoff`, `PatientAccessQr`, print rules in `index.css`):
+
+- **Two distinct active states, never conflated.** Active-with-secret-in-memory → QR, copy link,
+  printable sheet. Active-without-secret (a reload, a navigation, or a lost issuance response) → say
+  so plainly and offer revoke-and-recreate. The raw secret is unrecoverable after issuance by
+  design, so implying the QR could be rebuilt would be a lie the patient discovers at the lab door.
+- **No blind mutation retry.** Every ambiguous outcome re-reads authoritative metadata and acts on
+  what the server says. A speculative second issuance would either hit the one-live-grant-per-order
+  database constraint or, worse, silently invalidate a QR already in a patient's hands. Rotate is
+  strictly revoke → confirm authoritative state → issue, asserted by call-ordering in a test.
+- **`access_mode` fails closed.** An unexpected `LAB_SELECTION` grant (marketplace-capable) is
+  refused in this UI with no QR, no copy, no print, and emphatically no marketplace fallback built
+  as a consolation.
+- **QR is local-only.** `qrcode-generator@2.0.4` (MIT, zero dependencies, **exact** pin in
+  `package-lock.json`), encoded in-process and rendered as SVG `<rect>`s from its own
+  `isDark(row, col)` grid rather than `createSvgTag` + `dangerouslySetInnerHTML`. The access URL
+  appears in no `aria-label`, `title`, `data-*`, `alt`, or `key`. Sending it to an external QR
+  service would be a "what patient data leaves the system" change this repository reserves for a
+  human decision.
+- **Print isolation lives in `index.css`, not a CSS module**, because the Clinic sidebar and header
+  it must hide are mounted far above the component that owns the sheet. It uses `visibility`, not
+  `display: none`: hiding an ancestor with `display` would also remove the printable subtree nested
+  inside it. The printed sheet carries DHealth, the provider, the tests by display name, the lab,
+  the QR, the expiry, and the assisted-care instruction — and **no** result value, internal UUID,
+  catalog code, patient demographic block, or visible token. **Patient identity is deliberately
+  absent from the paper** and stays on the clinician's screen: §16 says minimise, the ticket's own
+  mock has no demographic block, and adding one "because staff might want it" is exactly the
+  "obviously should be filled this way" instinct `AGENTS.md` forbids an agent from acting on alone.
+
+### Two more bugs found and fixed (frontend)
+
+1. **Every successful revoke would have looked like a lost response.**
+   `ExchangeClient.requestWithResponse` unconditionally `await response.json()`s a successful
+   response; a real `204 No Content` has an empty body, so that parse threw a raw `SyntaxError` —
+   not an `ExchangeApiError` — which `isAmbiguousExchangeError` classifies as *ambiguous*. The
+   concrete consequence: a revoke that definitely committed would have driven the clinician into the
+   ambiguity-recovery path and told them it might not have. Fixed with a `requestNoContent` path,
+   and the status-to-code mapping extracted to module scope so both paths share one copy rather than
+   two that could drift. Tested against a real empty-bodied `204 Response`, not a mock returning
+   `{}`.
+2. **"Lien copié." when nothing was copied.** `navigator.clipboard?.writeText(url)` evaluates to
+   `undefined` when the Clipboard API is absent (an insecure origin, an older browser), and
+   `await undefined` succeeds — so the success notice fired having copied nothing. Now checks for
+   the API explicitly and reaches the failure branch, which points at the QR and printed sheet.
+
+### Tests — measured, not estimated
+
+| Suite | Before | After | New |
+|---|---|---|---|
+| adapter `pytest -q` | 1104 passed, 118 skipped | **1122 passed, 118 skipped** | 18 |
+| UI `vitest` | 415 passed | see note below | 92 |
+
+New adapter tests (`tests/test_dhpatient001_patient_status.py`): PS1-PS9 and PM1-PM6 as specified,
+plus four adjacent cases the numbered list does not name — an amendment merely *prepared* keeps
+version 1's disposition (the negative control for the amendment rule), revoked-vs-expired both read
+inactive, a platform admin alone is refused, and the grandfathered legacy order's unbound review row
+is asserted to remain unbound. PS7's no-leak assertion greps the **serialized JSON string** for
+distinctive synthetic sentinels (`87.6543`, `SENTINELUNIT`, `SENTINEL-TEXT-RESULT-DO-NOT-LEAK`, both
+reference-range bounds) and first proves the provider-side response really does contain them — so it
+is real content being withheld, not content that never existed.
+
+New frontend tests: PT1-PT7 credential ingestion, PU1-PU12 wording/content boundaries, CH1-CH12
+handoff, LR1-LR5 lost-response recovery, a dedicated patient axe/a11y file, static source proofs
+that the patient surface imports no Keycloak/auth layer, touches no browser storage, reuses no
+`ExchangeClient`, and names no marketplace route, QR locality (no external host, no `fetch`/`Image`,
+no `dangerouslySetInnerHTML`), print-stylesheet structure, and five `ExchangeClient` tests including
+the real-204 path.
+
+**Note on the UI suite count, stated plainly rather than rounded off.** Locally, `vitest` cannot
+reliably run this suite to completion on this machine: workers fail to start with
+`[vitest-pool-runner]: Timeout waiting for worker to respond` on the `/mnt/c` filesystem, and the
+affected files are reported as *unhandled errors* while the run still **exits 0**. This is
+**pre-existing and environmental, not introduced here** — the measured baseline showed the same
+thing (27 files reported + 11 such errors = the 38 test files then on disk; after this ticket, 33
+reported + 13 errors = the 46 now on disk, the arithmetic closing exactly in both cases). Reported
+totals therefore vary run to run locally (553, 501, and 479 were all observed). **Every new test
+file was run individually and deterministically green**, and CI's Linux runner is the authoritative
+count. Worth a future ticket, not fixed here: a suite that loses whole files and still exits 0 is a
+CI weakness, but changing vitest's pool configuration is outside this ticket's scope and would touch
+every other suite.
+
+### Negative controls — 17 executed, each observed failing for the right reason
+
+Not "control-tested" as a phrase; each property was deliberately broken on the working tree, the
+specific test(s) observed going red, and the change reverted.
+
+| # | What was broken | Tests that went red (and only these) |
+|---|---|---|
+| B1 | Projection reads the *first* released version instead of the latest | PS5, PS6 |
+| B2 | Patient item response echoes a numeric result value | PS7/PS8 no-leak |
+| B3 | Metadata stops evaluating expiry | PM3 |
+| B4 | Metadata route drops `_require_clinician` | PM4, PM5, PM5B |
+| B5 | Metadata discloses the grant UUID | PM1, PM3, PM6 |
+| B6 | `_to_record` leaves timestamps naive (the pre-fix bug) | PM2 |
+| B7 | An unreleased order no longer reports `NOT_READY` | PS1 |
+| F1 | Credential moved from the fragment into the query string | URL contract, CH4/CH6, CH8 |
+| F2 | Fragment scrub removed | PT2 |
+| F3 | Credential written to `localStorage` | PT4/PT5, PT3 lifetime, static storage proof |
+| F4 | `NO_FOLLOW_UP_REQUIRED` reworded to "Tout est normal." | PU5 |
+| F5 | A result value appended to a test name | PU12, PU10 |
+| F6 | Catalog code rendered instead of the display name | PU10 |
+| F7 | Price fields concatenated into the lab line | PU11 |
+| F8 | Patient branch moved behind `ExchangeAuthProvider` | 4 App routing tests incl. the Keycloak-constructor proof |
+| F9 | Ambiguous issuance fires a second blind issuance | LR3, the 409 case |
+| F10 | Active-without-secret state pretends to hold the QR | 8 handoff tests (CH12, rotate ordering, LR1/LR2, LR4/LR5, CH5) |
+| F11 | Print isolation stops hiding the Clinic chrome | print-structure test |
+
+One control (F1) also exposed a **weakness in a test written for this ticket**: two static source
+scans and the print-root count were reading this ticket's own *documentation prose*, which
+legitimately names every forbidden API in order to explain its absence. The naive version would have
+failed on the explanation, and the obvious "fix" would have been to delete the explanation. Both
+scanners now strip comments before matching, so the assertion is about executable code. A separate
+instance of the same class: the print-stylesheet test initially compared against `''` because
+vitest's default `css: false` stubs CSS imports — it now reads the file from disk and **asserts the
+read succeeded** before asserting anything about its contents.
+
+### CI-equivalent checks run locally before the push
+
+`ruff check` and `ruff format --check` (adapter, clean) · full `pytest -q` · `npm run lint`
+(0 errors; 38 warnings, all pre-existing classes already present in
+`LabReleasePage`/`LabRoutingStep`) · `npm run typecheck` (clean) · `npm run build` ·
+`git diff --check` · CI's exact tracked-secret grep · CI's relative-documentation-link checker (27
+documents) · tracked-JSON parse · `.env`-never-tracked · migration-head confirmation (no new file
+under `migrations/versions/`).
+
+### Adversarial review — answers with evidence
+
+Every one of the ticket's 42 questions was answered against code or a test, not asserted. The ones
+whose answers are *not* simply "no, and here is the test": Q7 (raw token retrievable again?) — no,
+and no endpoint exists that could; the UI's recovery path is revoke-and-reissue precisely because of
+it. Q26 (does viewing mark `ResultDelivery` delivered?) — no; `ResultDelivery` is untouched and that
+semantic remains an open product decision. Q31 (unnecessary migration 0026?) — none; head unchanged.
+Q36 (usable at 320px?) — written mobile-first with no fixed width, `min-width`, or horizontal scroll
+container, and reasoned about at 320/375/430px, but **not measured in a real browser**; jsdom cannot
+measure layout, and this is stated as unproven rather than claimed. Q40 (DH-CLINIC-004B still
+separately open?) — yes, untouched: this ticket's diff contains no authentication, Keycloak, or
+Caddy production change. Q41 (DH-DEMO-001 documentation corrected without pretending browser
+qualification exists?) — yes, and the boot claim was verified directly against the GitHub API (run
+`35390037354`, job `native demo — real boot (DH-DEMO-001)`, green with all 10 jobs at `a5992bd`)
+rather than taken from the prompt; real Keycloak login and real browser golden journey remain
+explicitly unqualified.
+
+### Known remaining gaps — not hidden
+
+- **No real browser, phone, or printer has touched any of this.** No rendered patient screen, no
+  scanned QR code, no printed sheet. Responsive and print behaviour are reasoned, not measured.
+- **Patient *read* access is not audited, deliberately.** Issuance and revocation are
+  (`patient_access_issued`/`patient_access_revoked`, real `ExchangeIdentity` actors). A read is not,
+  because `ExchangeSecurityAuditEvent.actor_identity_id` is a real FK to `exchange_identities` and a
+  patient has no identity there — recording one would mean fabricating an actor, which
+  `exchange/patient_access.py`'s own design refuses. Adding patient-read auditing needs an actor
+  model designed for it, not a false row. Documented, per §44, rather than invented.
+- **No push notification of any kind** — no WhatsApp, SMS, email, or voice. A transport added later
+  can carry this same access path.
+- **No family/proxy authorization.** The printed sheet or link can be physically shared, but DHealth
+  does not model that person's legal authority to receive it. Still an open policy question.
+- **No patient account, no offline/PWA caching, no audio prompts.**
+- **`result_status`'s branch 4** (released version with no review row) is unreachable through
+  supported paths and therefore untested against real data — only against the rule.
+- Local `vitest` cannot complete this suite reliably on this machine (see the note above).
+
+### DH-CLINIC-004B
+
+**Confirmed remains OPEN / PARTIALLY QUALIFIED, unchanged.** This ticket's diff touches no
+authentication, Keycloak, or Caddy production code. The pre-existing production files it modifies
+are `ui/src/App.tsx` (one branch added *before* the auth providers, both existing branches
+untouched), `ui/src/api/exchangeClient.ts` (three additive methods plus the 204 fix),
+`ui/src/api/exchangeTypes.ts` (additive types), `ui/src/features/clinic/pages/ClinicOrdersPage.tsx`
+(additive panel), `ui/src/index.css` (additive print block), and the two adapter files above. Clinic
+and Lab remaining gated is itself asserted by two tests in `App.patient.test.tsx`.
+
+### Confirmation no real patient data used
+
+Every name, identifier, test, and result value in this ticket's code, fixtures, and tests is
+synthetic and labelled as such ("Clinique Démo", "Laboratoire Démo DHealth", "Analyse de
+démonstration A", `SENTINEL-*` result values, `SYNTH-*` source identities). No real clinical
+content, analyte, or reference range was invented — this ticket adds no clinical decision surface,
+and the patient surface deliberately carries no clinical content at all.
+
+### Confirmation no branch, no PR
+
+Every change landed as focused commits directly on `master`, per this ticket's own explicit
+instruction. No branch and no pull request were created.
+
+`NEXT: DH-MVP-POLISH-001 — Unified Product Polish + Operational UX`

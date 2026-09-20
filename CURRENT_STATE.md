@@ -1755,3 +1755,22 @@ obligation. SQLite unit/API tests (136 passed) and real-PostgreSQL qualification
 6 test suites, migration 0018->0019 upgrade/downgrade clean, and both downgrade guards verified)
 pass. Real Keycloak qualification, manual live/browser demonstration, and production deployment
 remain not run; this is not a pilot-readiness claim.
+
+**DH-PATIENT-001 update (2026-09-20):** The first DHealth Patient frontend now exists
+(`ui/src/features/patient/`) — a single-screen, mobile-first, French-first status view authorized
+solely by DH-EX-005's pre-existing order-scoped opaque grant, entered by QR code or link with the
+credential in the URL fragment and scrubbed from the address bar on ingestion, never persisted in
+browser storage, and never routed through Keycloak. A Clinic-side handoff issues/revokes/rotates
+that access and produces a locally-generated QR plus a printable sheet for patients without a
+smartphone. Backend: a provider-authorized patient-access metadata read and a server-owned
+`result_status` projection that reverts to awaiting-review when an amendment version is released.
+Patients see status only — never a result value, range, price, internal identifier, or clinician
+identity. 18 new adapter tests (1104 → 1122 passed) and 92 new frontend tests, with 17 negative
+controls actually executed; three real bugs found and fixed (naive `expires_at` on SQLite read-back,
+a 204 parsed as an ambiguous failure so every successful revoke looked lost, and a false "Lien
+copié." when the Clipboard API is absent). No migration — Alembic head unchanged at
+`0025_native_result_binding`. **Not run, and not claimed:** no real browser rendered this screen, no
+real phone scanned one of these QR codes, no printer produced one of these sheets, responsive/print
+behaviour is reasoned rather than measured, and real Keycloak qualification, manual live/browser
+demonstration, and production deployment all remain not run. No SMS/WhatsApp/email/voice transport
+was added and `ResultDelivery` is untouched. This is not a pilot-readiness claim.

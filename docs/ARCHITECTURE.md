@@ -1596,9 +1596,90 @@ creates a marker table no Alembic migration ever creates. `demo_seed.py`'s reset
 run unless all three hold — see `PROJECT_STATE.md`'s DH-DEMO-001 entry for the full mechanism and
 its real-PostgreSQL qualification.
 
-**Evidence boundary, stated plainly:** this topology has been validated by `docker compose config`
-(interpolation/parsing) but has **not** been observed actually booting anywhere — this repo's own
-sandbox cannot pull real container image blobs from the CDN (§2's own build environment did not
-have this restriction; this is a later, different sandbox limitation). The `native-demo-boot` job
-in `.github/workflows/ci.yml` is this topology's first real-boot attempt. Full decision record and
-evidence: `PROJECT_STATE.md`'s DH-DEMO-001 entry.
+**Evidence boundary, stated plainly. [Corrected 2026-09-20, DH-PATIENT-001 — the paragraph this
+replaces said this topology "has **not** been observed actually booting anywhere" and called the
+`native-demo-boot` CI job "this topology's first real-boot attempt". That attempt has since
+happened and succeeded, so the old text is now false and is corrected rather than left standing.]**
+
+- **Real native Compose boot: qualified in CI.** The `native demo — real boot (DH-DEMO-001)` job
+  succeeded in run `35390037354` at `a5992bd37c40f1296955f15692a84560f7c7b3f0` (all 10 jobs green;
+  verified directly against the GitHub API during DH-PATIENT-001, not carried over from a report).
+  This topology does boot and reach healthy on a clean runner.
+- **Real Keycloak interactive login: not yet qualified.** The stack boots with real Keycloak, but
+  no human has completed an interactive browser login against it.
+- **Real browser golden journey: not yet qualified.** No manual or Playwright walkthrough of the
+  Clinic → Exchange → Lab → Patient journey has been performed in a browser.
+
+This repo's own sandbox still cannot pull real container image blobs from the CDN (§2's own build
+environment did not have this restriction; this is a later, different sandbox limitation), so the
+boot evidence above is CI's, not a local observation. Full decision record and evidence:
+`PROJECT_STATE.md`'s DH-DEMO-001 entry.
+
+## 19. DHealth Patient surface (DH-PATIENT-001) — added 2026-09-20
+
+The third native application, and the only one with no authenticated user. It exists because the
+MVP transaction does not end when a clinician reviews a result — it ends when the patient can find
+out what is happening and whether they need to follow up (`docs/MVP-1.0.md` §4's last step).
+
+```
+   Clinic (OIDC, Keycloak)                         Patient (no account, no OIDC)
+   ───────────────────────                         ────────────────────────────
+   PatientAccessHandoff                            PatientApp
+     │  issue / revoke / rotate                      │  reads #access=<token> once
+     │  (ExchangeClient, clinician JWT)              │  scrubs it from the address bar
+     ▼                                               │  holds it in component memory only
+   POST/DELETE/GET                                   ▼
+   .../orders/{id}/patient-access                  GET /exchange/v1/patient/order
+     │                                               │  (PatientAccessClient, opaque bearer)
+     │  raw token returned ONCE ─────────────────────┘
+     ▼         (QR + printable sheet, never as visible text)
+   PatientAccessGrant  (SHA-256 digest persisted; raw value never stored)
+```
+
+**Two credentials, two clients, deliberately not one.** A clinician's Keycloak JWT and a patient's
+order-scoped opaque secret are different kinds of authority, so they do not share a code path:
+`ExchangeClient` (OIDC) and `PatientAccessClient` (one method, patient endpoints only) are separate
+classes. The patient client exposes no marketplace method at all — DH-EX-005's patient lab-selection
+endpoints remain served by the backend but are unreachable from this surface by construction
+(`docs/MVP-1.0.md` §6, Law 1: the launch product is a connected workflow, not price-shopping).
+
+**Routing.** `App.tsx` returns `<PatientApp />` for `?app=patient` **before** constructing any
+`ExchangeAuthProvider`/`ExchangeAuthGate`. A patient is therefore never redirected to Keycloak —
+structurally, not by configuration. Clinic and Lab authentication are unchanged.
+
+**Why the credential lives in the URL fragment.** A fragment is not transmitted to the HTTP server
+as part of the request, so it cannot reach reverse-proxy access logs, server routing, or a referrer
+path. Caddy's `Referrer-Policy: same-origin` helps but is not the control that matters; fragment +
+immediate `history.replaceState` scrub is. The credential is never written to `localStorage`,
+`sessionStorage`, IndexedDB, a cookie, or a query parameter. The accepted cost: after the scrub, a
+refresh has no credential, and the patient is told to scan again.
+
+**What the patient can see, and cannot.** Order status, the assigned laboratory's public contact
+detail, the requested tests by human display name, and one server-owned follow-up projection
+(`result_status`). **Never** a result value, unit, reference range, observation, release manifest,
+diagnosis, interpretation, price, internal identifier, or the reviewing clinician's identity — the
+Exchange does not serialize them to this surface at all, asserted against the response's raw JSON.
+
+**Amendment awareness is load-bearing.** `result_status` resolves from the order's *latest released
+version* and that version's own `DoctorReview`, never from "the most recent terminal review". When a
+version-2 amendment is released, a fresh `PENDING` review is created for it (§17's ADR-048 model),
+so the patient's view reverts to awaiting-review — presenting version 1's disposition would be
+presenting a clinical judgement about content that has since been superseded.
+
+**No raw-token recovery, ever.** There is no endpoint that returns an existing grant's secret. A
+clinician who loses the link must revoke and re-issue, and the UI says exactly that rather than
+implying the QR can be rebuilt. Consequently every ambiguous mutation re-reads authoritative
+metadata instead of retrying: a blind second issuance would either hit the one-live-grant-per-order
+database constraint or silently invalidate a QR already in a patient's hands.
+
+**`ResultDelivery` is untouched.** A patient opening a status page does **not** mean
+`ResultDelivery = DELIVERED`; that semantic remains an open product decision (`docs/MVP-1.0.md`
+§10), and this surface deliberately does not decide it. No SMS/WhatsApp/email/voice transport was
+added — a later transport can carry this same access path.
+
+**Read-access audit gap, documented rather than papered over.** Issuance and revocation are audited
+(`patient_access_issued`/`patient_access_revoked`, real `ExchangeIdentity` actors). A patient *read*
+is not, because `ExchangeSecurityAuditEvent.actor_identity_id` is a real FK to
+`exchange_identities` and a patient has no identity there — recording one would mean fabricating an
+actor, which this repository refuses to do (see `exchange/patient_access.py`'s own docstring). If
+patient-read auditing is wanted, it needs an actor model designed for it, not a false row.

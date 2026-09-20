@@ -6932,3 +6932,84 @@ the original write already did — a correction is not a second opportunity to r
 template governs an item. No schema change was needed for this addendum; it is a property of the
 existing pinned columns, exercised by a new code path. See `PROJECT_STATE.md`'s DH-LAB-005 entry
 for full evidence.
+
+---
+
+### 2026-09-20 clarification (DH-PATIENT-001) — appended to ADR-043 (Laws 1 and 4, §7's assisted-digital strategy) and ADR-048 (versioned review), deciding nothing new
+
+**No new ADR is created for DH-PATIENT-001, deliberately.** The patient-access security model was
+already decided (DH-EX-005: one order-scoped opaque 256-bit grant, only its SHA-256 digest
+persisted, no patient `ExchangeIdentity`, no OIDC, generic 401 on every failure mode); the
+versioned-review model was already decided (ADR-048/DH-EX-014A/014B: one `DoctorReview` per released
+version, never reset, never reassigned); and the product laws this surface exists to satisfy were
+already decided (ADR-043 Law 1 "no forced marketplace", Law 4 "no digital-literacy requirement for
+care"). This ticket **implements** those and records the consequences below. Nothing here supersedes
+or reinterprets any of them.
+
+**1. Law 4 now has an implementation, not only a constraint.** A patient reaches their order status
+through simple mobile web, entered by QR code or link, with a printable clinician-produced sheet as
+the non-smartphone path. No app install, no account, no password, no Keycloak, no technical
+identifier, and no reading of a technical status name is required. `docs/MVP-1.0.md` §7's previous
+"`NOT BUILT`: none of these channels exist yet" line is corrected in place there.
+
+**2. Law 1 is satisfied by absence, not by configuration.** The launch patient surface has no
+marketplace: `PatientAccessClient` exposes one method, and DH-EX-005's `/patient/order/lab-options`
+and `/patient/order/selection` endpoints — which remain served and remain tested — are unreachable
+from it. The ADR's own recorded "acceptable launch options" (a) provider/facility-assigned lab
+workflow is what this surface assumes; option (b)'s price-consent flow is neither used nor removed,
+and the **OPEN DECISION** recorded above about redesigning DH-EX-005's price-consent contract is
+untouched and still open.
+
+**3. The patient sees status, never content — and that boundary is now enforced at the response,
+not only in the UI.** `PatientOrderResponse` gains exactly one field, `result_status`, and still
+serializes no numeric value, text value, reference range, source code, observation, release
+manifest, or reviewer identity. This is asserted against the **serialized JSON string** rather than
+a field list, so a carelessly nested future addition fails the regression. This preserves ADR-043
+§13's "records and routes, does not interpret" boundary: `NO_FOLLOW_UP_REQUIRED` is rendered as "no
+further follow-up was indicated for this order", never as "everything is normal" — a clinician's
+workflow disposition is not a clinical statement about the result, and conflating the two would be
+interpretation.
+
+**4. The one genuinely load-bearing consequence of ADR-048's model for a patient-facing surface.**
+`result_status` resolves from the order's **latest released version** and that version's own
+`DoctorReview` — never from "the most recent terminal review". ADR-048 already requires that an
+amendment release create a fresh `PENDING` review bound to the new version and never mutate the
+prior version's terminal row; read together with a patient-facing projection, that means a
+version-2 release must **revert** the patient's view to awaiting-review. Showing version 1's
+disposition after version 2 exists would present a clinician's judgement about superseded content as
+though it applied to the current result. An amendment merely *in preparation* has released no
+version and correctly changes nothing the patient sees.
+
+**5. A grandfathered order is still never given a fabricated release.** ADR-044's grandfather rule
+holds unchanged: a `COMPLETED`-without-`LabResultRelease` order has no release version, none is
+invented for it, and its one honest unbound `DoctorReview` row is used verbatim.
+
+**6. `ResultDelivery` remains undecided and untouched.** A patient viewing a status page does **not**
+mean `DELIVERED`. The candidate meanings named in `docs/MVP-1.0.md` §10 are still unchosen, and this
+ticket deliberately declines to choose one by implication — which is exactly what silently advancing
+that state on a page view would have done.
+
+**7. Patient read access remains unaudited, by the same reasoning that refused a fake
+`ExchangeIdentity`.** Issuance and revocation are audited with real identity actors. A patient read
+is not, because `ExchangeSecurityAuditEvent.actor_identity_id` is a real foreign key into
+`exchange_identities` and a patient has none — populating it would record a lie in an authoritative
+security table. Adding patient-read auditing requires an actor model designed for it; this ticket
+documents the gap rather than inventing one.
+
+**8. The raw bearer secret remains unrecoverable after issuance, and the UX now depends on that
+rather than working around it.** No endpoint returns an existing grant's secret. The new metadata
+read (`GET .../orders/{order_id}/patient-access`) reports `{active, expires_at, access_mode}` only —
+never the token, its digest, or the grant id — and an expired grant reports inactive with a null
+expiry. A clinician who no longer holds the link must revoke and re-issue; the Clinic UI says
+exactly that instead of implying the QR can be rebuilt, and every ambiguous mutation re-reads
+authoritative metadata rather than retrying blindly.
+
+**9. Transport is still `NOT BUILT`, on purpose.** No WhatsApp, SMS, email, or voice channel was
+added. ADR-043's own open per-channel sensitive-content policy is therefore still open and still
+unanswered by this ticket; a future transport can carry this same access path rather than needing a
+second one. Any such transport remains a "what patient data leaves the system" change, i.e. a human
+decision under `AGENTS.md`, not an agent's call.
+
+No schema change was needed for this clarification or its implementation — Alembic head stays
+`0025_native_result_binding`. See `docs/ARCHITECTURE.md` §19 and `PROJECT_STATE.md`'s
+DH-PATIENT-001 entry for full evidence, including the 17 negative controls actually executed.

@@ -6,6 +6,23 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-20, DH-PATIENT-001, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `a5992bd` (DH-DEMO-001's own final commit), verified
+against `origin/master` by a fresh `git fetch` rather than trusted from the prompt. This ticket
+added the **first DHealth Patient frontend** (`ui/src/features/patient/`) plus a clinician-side
+patient handoff (QR + printable sheet + revoke/rotate), a provider-authorized patient-access
+metadata read, and a server-owned patient follow-up projection. **No migration** — Alembic head
+stays `0025_native_result_binding`, confirmed against CI's own `EXPECTED_HEAD`. Evidence level:
+**CI/unit-test only.** 18 new adapter tests and 92 new frontend tests, all measured by running the
+suites on this commit, plus **17 negative controls actually executed** (each claimed property
+deliberately broken, the specific test observed going red for the specific reason, then reverted).
+**Three real bugs were found and fixed during this ticket** — see §C. **Not proven:** no real
+browser rendered this patient screen, no real phone scanned one of these QR codes, no printer
+produced one of these sheets, and no real-PostgreSQL qualification was needed or run (this ticket
+adds no new concurrency surface — the one new backend read is a single-row, lock-free,
+non-mutating GET). Responsive behaviour was written mobile-first and reasoned about at 320/375/430px
+but **not measured in a real browser** — jsdom cannot measure layout.
+
 **2026-09-18, DH-DEMO-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `0916afd` (DH-LAB-005's own final commit). All
 facts below were re-verified directly against the current repository and fresh local test runs on
@@ -219,6 +236,22 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   was correctly refused) and a genuine permission bug found and fixed (the marker table's missing
   `GRANT SELECT`, which without the fix would have made a non-demo database raise a raw DB error
   instead of a clean refusal). See `PROJECT_STATE.md`'s DH-DEMO-001 entry.
+- **Patient access metadata read and patient result-status projection (DH-PATIENT-001)**: a
+  provider-authorized `GET .../orders/{order_id}/patient-access` behind the identical
+  `CLINICIAN`-for-the-owning-provider boundary as issuance/revocation, returning `{active,
+  expires_at, access_mode}` and never the raw token, its SHA-256 digest, or the grant UUID; an
+  expired grant reads as inactive with a `null` expiry, and reading it never mutates `revoked_at`.
+  Plus `PatientOrderResponse.result_status`, resolved from the order's *latest released version* and
+  that version's own `DoctorReview`, so a version-2 amendment release correctly reverts the
+  patient's view to `AWAITING_CLINICIAN_REVIEW` instead of presenting a disposition recorded about
+  superseded content. A grandfathered `COMPLETED`-without-release order uses its one honest unbound
+  review row; no release version is ever fabricated for it. **CI/unit-qualified** (18 adapter tests,
+  incl. the mandated amendment regression and a no-result-value assertion against the serialized
+  JSON string rather than only a field list) with **7 backend negative controls executed**. No
+  migration; Alembic head unchanged at `0025_native_result_binding`. One real bug found and fixed:
+  `GrantRecord` returned naive datetimes on SQLite read-back, which would have serialized an
+  offset-less `expires_at` a browser parses as local time. See `PROJECT_STATE.md`'s DH-PATIENT-001
+  entry.
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
@@ -267,19 +300,39 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   DH-LAB-004/DH-LAB-005 addenda, ADR-044's DH-LAB-004 addendum, ADR-045's DH-LAB-005 addendum,
   ADR-048's DH-LAB-005 addendum, and `PROJECT_STATE.md`'s DH-LAB-001/DH-LAB-002/DH-LAB-003/
   DH-LAB-004/DH-LAB-005 entries.
+- **DHealth Patient native frontend** (`ui/src/features/patient/`, DH-PATIENT-001) — the first
+  patient-facing surface in the product, and the only one with no authenticated user: a
+  single-screen, mobile-first, French-first status view authorized solely by DH-EX-005's
+  pre-existing order-scoped opaque grant, reached through a QR code or link whose credential lives
+  in the URL **fragment** and is scrubbed from the address bar on ingestion. It renders order
+  status, the assigned laboratory's public contact detail, the requested tests by human name, and
+  one server-owned follow-up projection — **never** a result value, reference range,
+  interpretation, price, internal identifier, or clinician identity. Mounted before any
+  `ExchangeAuthProvider` exists, so a patient is structurally incapable of being redirected to
+  Keycloak. Paired with a Clinic-side `PatientAccessHandoff` that issues/revokes/rotates access and
+  produces a locally-generated QR plus a printable sheet for patients with no smartphone. Built and
+  component/UI-tested only — **same "built but not runtime-proven" boundary as DHealth Clinic and
+  DHealth Lab above**: no real browser has rendered this screen, no real phone has scanned one of
+  these QR codes, and no printer has produced one of these sheets. Responsive layout was written
+  mobile-first and reasoned about at 320/375/430px but **not measured** — jsdom cannot measure
+  layout. No SMS/WhatsApp/email/voice transport was added; `ResultDelivery` is untouched and
+  viewing a status page deliberately does **not** mark it `DELIVERED`. See `docs/ARCHITECTURE.md`
+  §19 and `PROJECT_STATE.md`'s DH-PATIENT-001 entry.
 - **Native demo environment** (DH-DEMO-001, `docker-compose.native-demo.yml`,
   `scripts/demo/*.sh`, `adapter/src/daher_adapter/exchange/demo_seed.py`): a dedicated Compose
   project running the real Keycloak/adapter/DHealth-UI/Caddy code paths, deliberately never
   waiting on OpenMRS/OpenELIS (which stays completely untouched), with a P0 reset-safety boundary
   (three independent facts, real-PostgreSQL-qualified — §C) and deterministic synthetic-only
   baseline data. Real Keycloak-backed authentication throughout — grepped, zero demo-conditional
-  branch exists in any authentication/request-handling code. **Built and locally qualified only —
-  the demo has never actually booted anywhere.** This sandbox's Docker cannot pull real image
-  blobs from the CDN, so the one thing this ticket exists to prove — native-only boot reaching
-  healthy — has not yet been observed; the CI job this ticket's push triggers is its first
-  attempt, not a confirmation. No real Keycloak login and no real browser walkthrough of the
-  golden journey exist yet either. See `PROJECT_STATE.md`'s DH-DEMO-001 entry for the full
-  evidence matrix.
+  branch exists in any authentication/request-handling code. **[Corrected 2026-09-20,
+  DH-PATIENT-001 — this bullet previously said "the demo has never actually booted anywhere" and
+  called the CI job "its first attempt, not a confirmation"; that attempt has since succeeded.]**
+  **Real native Compose boot: qualified in CI** (run `35390037354` at `a5992bd`, job `native demo —
+  real boot (DH-DEMO-001)` green with all 10 jobs — verified against the GitHub API, not carried
+  forward from a report). **Real Keycloak interactive login: not yet qualified. Real browser golden
+  journey: not yet qualified.** This sandbox's Docker still cannot pull real image blobs from the
+  CDN, so that boot is CI's evidence, not a local observation. See `PROJECT_STATE.md`'s
+  DH-DEMO-001 entry for the full evidence matrix.
 - Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: no real-Keycloak
   qualification, no manual live/browser demonstration, no production deployment, for any Exchange
   ticket.
@@ -321,8 +374,14 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   remaining correction/amendment gap DH-LAB-004 deliberately left closed rather than building
   unsafely. Demo seed data now exists (§D, DH-DEMO-001), but LIS/Connect integration still does
   not.
-- **DHealth Patient** (assisted-digital patient layer) and **DHealth Connect** (EMR/LIS integration
-  layer, beyond the OpenMRS/OpenELIS reference track itself): no code of their own exists yet.
+- **DHealth Connect** (EMR/LIS integration layer, beyond the OpenMRS/OpenELIS reference track
+  itself): no code of its own exists yet. **[Updated 2026-09-20, DH-PATIENT-001 — this bullet
+  previously also named "DHealth Patient (assisted-digital patient layer)" as having no code of its
+  own; a first DHealth Patient surface now exists, see §D.]** What remains not built on the patient
+  side specifically: **push notification of any kind** (WhatsApp, SMS, email, voice — DH-PATIENT-001
+  deliberately built a safe access path first and wired no transport to it), detailed result
+  delivery to patients (excluded by policy, not pending — patients see status only), patient
+  accounts, family/proxy authorization, and offline/PWA capability.
 - **Any patient-facing marketplace or pricing surface.** Not built, not scheduled for Launch 1 —
   preserved as a product-law boundary (§B), not merely an unstarted feature.
 - **Any decision-support, alerting, or clinical-interpretation logic anywhere in the repository.**
@@ -361,6 +420,26 @@ cleared yet:
 No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
+
+**NEXT: DH-MVP-POLISH-001 — Unified Product Polish + Operational UX.** With DH-PATIENT-001 the
+native MVP's functional layer is complete end to end: a clinic identifies/registers a patient,
+orders diagnostics, assigns a configured laboratory; the lab receives, accepts, records collection
+and processing, enters controlled results, and releases them under separate authorization;
+corrections and amendments are versioned immutably; the clinician reviews an exact version and
+records a follow-up disposition; and the patient can now reach a simple status/follow-up view
+through an order-scoped QR/link or a staff-assisted printed handoff. The next ticket should stop
+adding major clinical workflow architecture and instead make DHealth Clinic, DHealth Lab, and
+DHealth Patient feel like one coherent product — navigation consistency, visual hierarchy, home
+dashboards, empty/loading/error states, responsive layout, French wording consistency, status
+presentation, forms, confirmation patterns, branding, accessibility, workflow speed, first-use
+clarity, and support/error recovery. Administrative onboarding UX, security hardening,
+operations/monitoring, backup/restore qualification, DHealth Connect, and any marketing site are
+each separate later evaluations, explicitly **not** part of that ticket.
+
+**What the MVP still must not be claimed to do**, regardless of the above: no SMS/WhatsApp
+notification, no detailed patient result delivery, no national MPI, no full EMR, no full LIS, no
+Connect integration, no clinical decision support. And "functionally complete" is not
+"runtime-proven": see §A and §D for what has and has not been observed running.
 
 **DH-CLINIC-004B remains open — incomplete, not closed.** Realm/client reconciliation is now
 real-Keycloak-runtime-qualified (§C), and a genuine deployment-breaking defect (VARCHAR(255) realm
@@ -488,19 +567,32 @@ boundary as above: does not touch, does not runtime-qualify, and does not change
 own open item; DH-CLINIC-004B remains separately open, unchanged. See `DECISIONS.md` ADR-045's and
 ADR-048's 2026-09-18 addenda and `PROJECT_STATE.md`'s DH-LAB-005 entry for full evidence.
 
-**DH-DEMO-001 — Resettable Visible Native DHealth Demo Environment — is now implemented, but
-NOT yet runtime-proven** (§C/§D): a dedicated Compose project running the real Keycloak/adapter/
-DHealth-UI/Caddy code paths without ever waiting on OpenMRS/OpenELIS (untouched, preserved), a
-P0 reset-safety boundary independently real-PostgreSQL-qualified (three facts: database name,
-a process-own env var, a marker table only the demo's own db-init script creates), and
-deterministic synthetic-only baseline data — real Keycloak-backed authentication throughout, no
-bypass anywhere (grepped). **What remains open, stated plainly:** this sandbox's Docker cannot
-pull real image blobs from the CDN, so the demo has never actually booted anywhere. The CI job
-this ticket's own push triggers (`native-demo-boot`) is its first real attempt at the one thing
-this ticket exists to prove, not a rerun of something already observed. No real Keycloak login
-and no real browser walkthrough of the golden journey exist yet. This does not touch, does not
-runtime-qualify, and does not change DH-CLINIC-004B's own open item. See `PROJECT_STATE.md`'s
-DH-DEMO-001 entry for the full evidence matrix.
+**DH-DEMO-001 — Resettable Visible Native DHealth Demo Environment — is implemented and its native
+Compose boot is now CI-qualified** (§C/§D): a dedicated Compose project running the real Keycloak/
+adapter/DHealth-UI/Caddy code paths without ever waiting on OpenMRS/OpenELIS (untouched,
+preserved), a P0 reset-safety boundary independently real-PostgreSQL-qualified (three facts:
+database name, a process-own env var, a marker table only the demo's own db-init script creates),
+and deterministic synthetic-only baseline data — real Keycloak-backed authentication throughout, no
+bypass anywhere (grepped).
+
+**[Corrected 2026-09-20, DH-PATIENT-001 — the paragraph this replaces said "the demo has never
+actually booted anywhere" and described the `native-demo-boot` CI job as "its first real attempt".
+That attempt has since run and succeeded, so that text is now stale and is corrected here rather
+than left standing. This is a documentation correction only; DH-PATIENT-001 changed nothing about
+the demo environment.]** Precisely what is and is not qualified:
+
+- **Real native Compose boot: qualified in CI.** Run `35390037354` at
+  `a5992bd37c40f1296955f15692a84560f7c7b3f0`, job `native demo — real boot (DH-DEMO-001)`, green
+  along with all 10 jobs in that run — verified directly against the GitHub API during
+  DH-PATIENT-001, not carried forward from a report.
+- **Real Keycloak interactive login: not yet qualified.** The stack boots with real Keycloak; no
+  human has completed an interactive browser login against it.
+- **Real browser golden journey: not yet qualified.** No manual or Playwright walkthrough exists.
+
+This sandbox's Docker still cannot pull real image blobs from the CDN, so the boot above is CI's
+evidence, not a local observation. This does not touch, does not runtime-qualify, and does not
+change DH-CLINIC-004B's own open item. See `PROJECT_STATE.md`'s DH-DEMO-001 entry for the full
+evidence matrix.
 
 **Forward context only, not started:** DH-DEMO-001's own forward sequence begins with native
 runtime/browser golden-journey qualification (the immediate next step — see above), then
