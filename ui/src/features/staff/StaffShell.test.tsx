@@ -161,9 +161,29 @@ describe('the unified staff shell', () => {
 
     expect(band.getByText('Clinique de la Paix')).toBeInTheDocument()
     expect(band.getByText('Établissement de soins')).toBeInTheDocument()
-    // And as whom, with the roles actually held there.
+    // And as whom, with the roles actually held there — named in French, not in
+    // the authorization enum. `CLINICIAN` is what the server authorizes on; it is
+    // not what a person reads at a desk.
     expect(band.getByText('Dr. Halima Farah')).toBeInTheDocument()
-    expect(band.getByText('CLINICIAN')).toBeInTheDocument()
+    expect(band.getByText('Clinicien')).toBeInTheDocument()
+    expect(band.queryByText('CLINICIAN')).not.toBeInTheDocument()
+  })
+
+  it('US13: never shows an authorization enum in the identity band', async () => {
+    // A dual-role laboratory user is the case that exposed this: the band read
+    // "LAB_TECH · LAB_RESULT_RELEASER". Both authorities are still shown, because
+    // ADR-044 keeps entry and release separate and the person genuinely holds
+    // both — but as words, in a stable order regardless of what order the API
+    // returned them in.
+    renderStaff([
+      labMembership('lab-1', 'Laboratoire Central', ['LAB_RESULT_RELEASER', 'LAB_TECH']),
+    ])
+    const band = await masthead()
+
+    expect(band.getByText('Analyse · Libération')).toBeInTheDocument()
+    for (const enumValue of ['LAB_TECH', 'LAB_RESULT_RELEASER', 'CLINICIAN', 'ORG_ADMIN']) {
+      expect(band.queryByText(new RegExp(enumValue))).not.toBeInTheDocument()
+    }
   })
 
   it('US12: reaches the logout callback from the shell', async () => {

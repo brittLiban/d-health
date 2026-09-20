@@ -17821,7 +17821,7 @@ check, not because anything in them was touched.
 - `release_lab_order_results` confirmed as the only supported transition from `IN_PROGRESS` to
   `COMPLETED`, which is why the relay treats `COMPLETED` as implying released.
 
-### What landed, in seven commits
+### What landed, in eight commits
 
 1. **`8482b4d` — central design tokens and self-hosted typefaces.** A two-layer token system in
    `ui/src/index.css`: `--dh-*` is the raw palette and the only place literal colour appears;
@@ -17847,8 +17847,12 @@ check, not because anything in them was touched.
    follow-up marker moved off clay onto brass.
 6. **`e9cde24` — an axe suite fixed after it was caught auditing the wrong surface.** Bug 11 above;
    its own commit because it is a fix to this ticket, not part of any feature in it.
-7. **This commit — documentation.** ADR-054, `docs/ARCHITECTURE.md` §20, `docs/UI-002-DESIGN-LANGUAGE.md`,
-   a dated note in `docs/MVP-1.0.md`, and this entry.
+7. **`5057b6d` — documentation.** ADR-054, `docs/ARCHITECTURE.md` §20, `docs/UI-002-DESIGN-LANGUAGE.md`,
+   a dated note in `docs/MVP-1.0.md`, and this entry. CI ran green on this SHA — all ten jobs,
+   run `35526256367`, including `ui — lint, typecheck, test, build` and `adapter — ruff + pytest`.
+8. **This commit — the role labels, from review.** Bug 12 below. The only code change after CI went
+   green, and the reason there is a second push: a reviewer found the authorization enum still on
+   screen, which is a defect in this ticket's own central claim rather than new scope.
 
 ### Bugs found and fixed during the ticket
 
@@ -17885,6 +17889,17 @@ report that only lists features is not a report.
     five and resetting `?app` in `beforeEach`. This one is the argument for the file-count
     reconciliation above: it stayed hidden through every earlier batch because this file's vitest
     worker kept failing to start, and a pass count alone cannot distinguish "green" from "never ran".
+12. **The authorization enum was sitting in the masthead.** `StaffShell` rendered
+    `activeOrganization.roles.join(' · ')`, so the identity band read `CLINICIAN`, or
+    `LAB_TECH · LAB_RESULT_RELEASER` for a dual-role laboratory user. **Found in review, not by me** —
+    and it is the sharpest miss of the ticket: the whole exercise was removing technical vocabulary
+    from the screen (`Rectificatif` for `Version 2 — Amendée`, `Établissement de soins` for
+    `PROVIDER`), and the one band that is on screen at every moment kept the authorization enum.
+    Fixed by `ui/src/features/workspace/roleLabels.ts` — Clinicien / Analyse / Libération /
+    Administration, in a fixed presentation order, with the role values themselves untouched. See
+    ADR-054's post-review addendum for why `ORG_ADMIN` is labelled rather than hidden and why an
+    unknown role falls back to its code.
+
 
 ### Negative controls actually executed
 
@@ -17899,6 +17914,9 @@ and the change reverted. Every one had a clean unpatched baseline first.
   and the reason is worth keeping: OS1 originally asserted on a data row, which the page's own effect
   clears on an organization change whether or not the subtree was discarded. Rewritten to assert on the
   page *heading*, which React reconciles in place unless the subtree is genuinely thrown away.
+- **NC-D** — `roles.join(' · ')` restored in the masthead → `FAIL … US11` **and**
+  `FAIL … US13: never shows an authorization enum in the identity band`. Added with the post-review
+  role-label fix, because the defect it guards shipped once already.
 - **Six token/typeface controls** from commit 1 (a deleted definition, a re-added literal hex, a
   Google Fonts URL, and so on).
 - **Two more in commit 5**: deleting `--radius-lg` from `:root` still fails the undefined-property scan
@@ -17932,13 +17950,13 @@ as passing.
 run is claimed here: these words were written before this ticket's single push existed. No live stack,
 no real Keycloak, no browser.
 
-- **UI: 787 tests across all 51 test files, all passing.** Reconciled rather than reported: a
+- **UI: 794 tests across all 52 test files, all passing.** Reconciled rather than reported: a
   whole-suite `npx vitest run` on this machine printed `Test Files 24 passed (24) · Tests 421 passed
   (421) · Errors 27` — **27 of 51 files never started a worker at all** (`[vitest-pool]: Failed to
   start forks worker … Timeout waiting for worker to respond`, a known flake of this 9p-mounted
   checkout, not a property of the code). Those 27 were then run by name in three batches of nine:
   188 + 86 + 92 = 366 tests, all green. 24 + 27 = 51 files on disk, and 421 + 366 = 787 tests, so
-  the arithmetic closes and no file is unaccounted for. **This reconciliation is the only reason a
+  the arithmetic closes and no file is unaccounted for. A post-review commit then added one file (`roleLabels.test.ts`, 7 tests) and one test to `StaffShell.test.tsx`, re-run by name: 52 files, 794 tests. **This reconciliation is the only reason a
   real regression was caught** — see `App.a11y.test.tsx` in the bug list.
 - **UI typecheck**: `tsc -b --noEmit` clean.
 - **UI e2e typecheck**: `tsc -p e2e/tsconfig.json` clean. Worth stating because CI does **not** run
@@ -17975,7 +17993,13 @@ no real Keycloak, no browser.
 
 ### What is NOT proven
 
-- **No real browser rendered any of this.** No width was measured, no font was seen to load, no
+- **No real browser rendered any of this, and for this ticket that is a gap in acceptance, not just
+  in evidence.** Appearance was part of what DH-MVP-POLISH-001 was asked to deliver, so "the tests
+  pass" cannot close it. A visual inspection of the running interface is an explicit outstanding item
+  before DH-MVP-ADMIN-001, raised in review and recorded here so it is not lost: the enum-in-the-
+  masthead defect (bug 12) is exactly the class of thing a source-scanning suite does not catch and a
+  glance at the screen does.
+- No width was measured, no font was seen to load, no
   focus ring was observed, no contrast was sampled. jsdom cannot measure layout or resolve a cascade
   of custom properties, and the token guards are deliberately *source scans* for that reason.
 - **No E2E run.** No live stack, no real Keycloak, no real organization switch against a real `/me`.

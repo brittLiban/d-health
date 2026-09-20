@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { formatRoleLabels } from '../workspace/roleLabels'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import type { StaffSection, StaffSectionId } from './staffSections'
 import styles from './StaffShell.module.css'
@@ -124,10 +125,14 @@ export function StaffShell({
             <div className={styles.person}>
               <span className={styles.personName}>{user.display_name ?? user.email ?? 'Compte'}</span>
               {activeOrganization ? (
-                // The roles actually held at the active organization, listed as the
-                // server names them. Not a job title, and never a role the person
-                // holds somewhere else.
-                <span className={styles.personRoles}>{activeOrganization.roles.join(' · ')}</span>
+                // The roles actually held at the active organization — never a role
+                // the person holds somewhere else. Named in French rather than in
+                // the authorization enum: `CLINICIAN · LAB_RESULT_RELEASER` is a
+                // database fact, not something to read at a desk. The values
+                // themselves are untouched; this is the label only.
+                <span className={styles.personRoles}>
+                  {formatRoleLabels(activeOrganization.roles)}
+                </span>
               ) : null}
             </div>
           ) : null}

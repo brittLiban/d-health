@@ -7126,3 +7126,42 @@ are recorded rather than left implicit in a diff.
 - DH-CLINIC-004B's E2E paths that navigated *directly* to a per-product native app no longer exist
   as written. They are superseded, not closed: see `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry for
   which spec steps were rewritten and which remain unproven without a live stack.
+
+### Addendum (2026-09-20, DH-MVP-POLISH-001, post-review): the authorization enum is not a label
+
+Decision 8 above governs colour and Decision 9 the version ordinal, both of which are about keeping
+technical vocabulary off the screen. The identity band broke the same rule and it was missed until
+review: `StaffShell` rendered `activeOrganization.roles.join(' · ')`, so the masthead read
+`CLINICIAN`, or `LAB_TECH · LAB_RESULT_RELEASER` for a dual-role laboratory user. A ticket that spent
+its length replacing `Version 2 — Amendée` with `Rectificatif` and `PROVIDER` with `Établissement de
+soins` left the authorization enum in the one band that is on screen at all times.
+
+Roles are now labelled in French by `ui/src/features/workspace/roleLabels.ts`:
+
+| Role | Label |
+| --- | --- |
+| `CLINICIAN` | Clinicien |
+| `LAB_TECH` | Analyse |
+| `LAB_RESULT_RELEASER` | Libération |
+| `ORG_ADMIN` | Administration |
+
+Four properties of that mapping are deliberate:
+
+1. **The role values are untouched.** This is presentation only. Capability derivation, every request,
+   and every existing test still work on the enum; nothing downstream reads a label.
+2. **Entry and release stay two authorities.** A dual-role user reads `Analyse · Libération`, not one
+   merged "laboratoire" role — ADR-044's separation, preserved in the wording.
+3. **Presentation order is fixed** (clinician, entry, release, administration) rather than whatever
+   order the API returned, so the band does not reshuffle between two responses describing the same
+   authorities.
+4. **`ORG_ADMIN` is labelled, not hidden.** It names authority the backend genuinely grants, and
+   dropping a granted authority from an identity band would be its own inaccuracy. It is not a promise
+   of a screen: this build still has no facility-administration surface and no `Réglages` item, per
+   Decision 3. The band says what someone *is* here, not what this build can do.
+
+An unrecognised role falls back to its raw value. That is chosen over dropping it: if a fifth role is
+added server-side, an unlabelled code on screen is a visible prompt to name it, whereas silent
+omission would hide an authority nobody would notice was missing. Tests pin all four known values, so
+the fallback cannot quietly become the normal path for a role that already exists.
+
+Proven by a negative control: restoring `roles.join(' · ')` fails both US11 and the new US13.
