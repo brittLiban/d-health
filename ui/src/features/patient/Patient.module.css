@@ -7,151 +7,200 @@
  * horizontal scroll container, which is what keeps the 320px case free of horizontal scrolling
  * (§51). Layout was not measured in a real browser for this ticket -- see the handoff's own
  * statement of what was and was not proven.
+ *
+ * DH-MVP-POLISH-001: this is the "Assisté" density of one shared design language, not a separate
+ * product with its own look. Every colour now resolves through the token layer in `index.css`
+ * rather than repeating hex values that had drifted from the palette (#f7f7f5 for bone, #0f5c4a
+ * for petrol). Three things change from the staff surfaces, all deliberate:
+ *
+ *   - 18px base type instead of 15px. The reader may be standing in a corridor, on a phone they
+ *     did not choose, possibly handing it to someone else to read aloud.
+ *   - a 56px floor on anything touchable, not 44px.
+ *   - 14px card radius, the patient-facing surface radius.
+ *
+ * The type scale is local custom properties rather than bare `rem`, because `rem` resolves against
+ * the document root (16px) and would silently undo the larger base.
  */
 
 .screen {
+  /* The patient scale. `--pt-base` is 18px; everything below is expressed against it so the
+     density can be retuned in one place. */
+  --pt-base: 1.125rem;
+  --pt-detail: 1.125rem;
+  --pt-small: 1rem;
+  --pt-headline: 1.75rem;
+
   min-height: 100vh;
-  background: #f7f7f5;
-  color: #1a1a1a;
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family-sans);
+  font-size: var(--pt-base);
   display: flex;
   justify-content: center;
-  padding: 16px;
+  padding: var(--space-4);
   box-sizing: border-box;
 }
 
 .card {
   width: 100%;
   max-width: 34rem;
-  background: #ffffff;
-  border-radius: 12px;
-  padding: 20px 16px 28px;
+  background: var(--color-surface);
+  /* 14px: the patient-facing surface radius from the token layer. */
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  padding: var(--space-5) var(--space-4) var(--space-6);
   box-sizing: border-box;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  /* A hairline and a shadow this quiet, rather than the heavier card shadow: the page has exactly
+     one card, so it does not need to lift itself off anything. */
+  box-shadow: 0 1px 2px rgb(20 32 31 / 6%);
 }
 
 .brand {
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-size: var(--pt-small);
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.04em;
-  color: #0f5c4a;
-  margin: 0 0 4px;
+  color: var(--color-primary);
+  margin: 0 0 var(--space-1);
 }
 
 .title {
-  font-size: 1.15rem;
-  font-weight: 600;
-  margin: 0 0 20px;
-  color: #444;
+  font-size: var(--pt-detail);
+  font-weight: var(--font-weight-semibold);
+  margin: 0 0 var(--space-5);
+  color: var(--color-text-muted);
 }
 
 /*
  * The one thing a patient must be able to read across a room, unprompted, without zooming.
  * `word-break` matters here because French status sentences are long and the narrowest supported
  * width is 320px.
+ *
+ * Deliberately the sans face, overriding the global serif for `h2`: the display face carries
+ * identity on staff surfaces, and this line is not identity -- it is the sentence someone may be
+ * reading at arm's length, in a corridor, or aloud to the person the result belongs to.
  */
 .headline {
-  font-size: 1.6rem;
+  font-family: var(--font-family-sans);
+  font-size: var(--pt-headline);
   line-height: 1.25;
   font-weight: 700;
+  letter-spacing: normal;
   margin: 0;
   overflow-wrap: break-word;
 }
 
 .statusBlock {
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   align-items: flex-start;
-  padding: 18px 0 6px;
-  border-top: 1px solid #e6e6e2;
-  border-bottom: 1px solid #e6e6e2;
-  margin-bottom: 20px;
+  padding: var(--space-4) 0 var(--space-2);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--space-5);
 }
 
 /* §52: a shape, not only a colour -- the marker is meaningful without colour perception. */
 .marker {
-  font-size: 1.6rem;
+  font-size: var(--pt-headline);
   line-height: 1.25;
   flex: 0 0 auto;
 }
 
-.markerWaiting { color: #7a6a00; }
-.markerActive { color: #0b5aa8; }
-.markerDone { color: #1c6b3f; }
-.markerAttention { color: #9a3412; }
-.markerStopped { color: #7a1f1f; }
+/*
+ * DH-MVP-POLISH-001 -- these five carry where the order is in the workflow, never a reading of the
+ * result. The product law: petrol = a step is complete or under way, brass = something is still
+ * owed, clay = this stopped.
+ *
+ * `attention` (a follow-up the clinic will arrange) moved off clay onto brass. Clay on a patient's
+ * screen, beside a sentence about their own analysis, reads as alarm about the result itself --
+ * which this surface has no access to and must never imply. A follow-up is an outstanding action,
+ * so it takes the outstanding-action colour, and the `!` glyph keeps it distinct from `waiting`'s
+ * `○` without colour doing that work.
+ */
+.markerWaiting { color: var(--color-waiting); }
+.markerActive { color: var(--color-primary); }
+.markerDone { color: var(--color-success-700); }
+.markerAttention { color: var(--color-waiting); }
+.markerStopped { color: var(--color-stopped); }
 
 .detail {
-  font-size: 1.05rem;
+  font-size: var(--pt-detail);
   line-height: 1.5;
-  margin: 10px 0 0;
-  color: #333;
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-muted);
 }
 
 .section {
-  margin-top: 22px;
+  margin-top: var(--space-5);
 }
 
 .sectionTitle {
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-size: var(--pt-small);
+  font-weight: var(--font-weight-semibold);
   text-transform: none;
-  margin: 0 0 8px;
-  color: #555;
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-subtle);
 }
 
 .list {
   margin: 0;
   padding-left: 1.2em;
-  font-size: 1.05rem;
+  font-size: var(--pt-detail);
   line-height: 1.6;
 }
 
 .labName {
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: var(--pt-detail);
+  font-weight: var(--font-weight-semibold);
   margin: 0;
 }
 
 .labLine {
-  font-size: 1rem;
-  margin: 4px 0 0;
-  color: #444;
+  font-size: var(--pt-detail);
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
 }
 
 .message {
-  font-size: 1.05rem;
+  font-size: var(--pt-detail);
   line-height: 1.55;
   margin: 0;
 }
 
 .retry {
-  margin-top: 18px;
-  font-size: 1.05rem;
-  padding: 14px 18px;
-  /* §51: a comfortably large touch target, not a desktop-sized control. */
-  min-height: 48px;
+  margin-top: var(--space-4);
+  font-size: var(--pt-detail);
+  font-family: inherit;
+  padding: var(--space-3) var(--space-4);
+  /* §51: a comfortably large touch target, not a desktop-sized control. 56px rather than 44px --
+     this surface is used one-handed, sometimes by someone else's hands. */
+  min-height: var(--touch-target-comfortable);
   width: 100%;
-  border-radius: 8px;
-  border: 1px solid #0f5c4a;
-  background: #0f5c4a;
-  color: #ffffff;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
   cursor: pointer;
 }
 
+.retry:hover {
+  background: var(--color-primary-hover);
+  border-color: var(--color-primary-hover);
+}
+
 .footNote {
-  margin-top: 26px;
-  font-size: 0.95rem;
+  margin-top: var(--space-6);
+  font-size: var(--pt-small);
   line-height: 1.5;
-  color: #666;
+  color: var(--color-text-subtle);
 }
 
 @media (min-width: 30rem) {
   .card {
-    padding: 28px 28px 32px;
+    padding: var(--space-6) var(--space-6) var(--space-6);
   }
 
-  .headline {
-    font-size: 1.9rem;
+  .screen {
+    --pt-headline: 2rem;
   }
 }

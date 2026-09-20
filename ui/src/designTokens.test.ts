@@ -77,6 +77,19 @@ function referencedTokens(text: string): string[] {
   return Array.from(text.matchAll(/var\(\s*(--[a-z0-9-]+)/g), (m) => m[1])
 }
 
+/**
+ * Custom properties a file declares for itself, at any indent and in any rule.
+ *
+ * A local scale is legitimate — the patient surface declares `--pt-base` on its
+ * own `.screen` rule because `rem` would resolve against the document root and
+ * undo its larger base. What this scan exists to catch is a reference that
+ * resolves to nothing *anywhere*, so a property defined in the very file that
+ * uses it is defined, and only a name that appears in neither place is a defect.
+ */
+function locallyDeclaredTokens(text: string): Set<string> {
+  return new Set(Array.from(text.matchAll(/(--[a-z0-9-]+)\s*:/g), (m) => m[1]))
+}
+
 describe('design token layer', () => {
   it('reads index.css and the source tree from disk', () => {
     // Guards every assertion below: if the reads silently produced nothing, the
@@ -96,8 +109,10 @@ describe('design token layer', () => {
 
     for (const file of files) {
       if (relative(SRC_DIR, file) === SELF) continue
-      for (const token of referencedTokens(stripComments(contents.get(file) ?? ''))) {
-        if (defined.has(token)) continue
+      const text = stripComments(contents.get(file) ?? '')
+      const local = locallyDeclaredTokens(text)
+      for (const token of referencedTokens(text)) {
+        if (defined.has(token) || local.has(token)) continue
         const where = missing.get(token) ?? []
         where.push(relative(SRC_DIR, file))
         missing.set(token, where)
@@ -133,6 +148,62 @@ describe('design token layer', () => {
   it('keeps the minimum touch target at 44px and a comfortable target at 56px', () => {
     expect(indexCssText()).toMatch(/--touch-target-min:\s*44px/)
     expect(indexCssText()).toMatch(/--touch-target-comfortable:\s*56px/)
+  })
+})
+
+describe('the patient surface is the Assisté density of the same language', () => {
+  const PATIENT_CSS_PATH = join(SRC_DIR, 'features', 'patient', 'Patient.module.css')
+
+  function patientCss(): string {
+    return readFileSync(PATIENT_CSS_PATH, 'utf8')
+  }
+
+  it('writes no literal colour of its own', () => {
+    // The patient stylesheet used to carry its own palette — #f7f7f5 where bone is
+    // #f6f4ef, #0f5c4a where petrol is #0b4f4a. Close enough to look intentional,
+    // far enough to be a second product. Colour here resolves through the token
+    // layer like everywhere else. The one exception is the card's shadow, which is
+    // a translucent ink and has no token.
+    const declarations = stripComments(patientCss())
+      .split('\n')
+      .filter((line) => /^\s*[a-z-]+\s*:/.test(line) && !/^\s*--pt-/.test(line))
+
+    expect(declarations.length).toBeGreaterThan(30)
+    const offenders = declarations.filter(
+      (line) => /#[0-9a-fA-F]{3,8}\b/.test(line) || (/\brgba?\(/.test(line) && !/box-shadow/.test(line)),
+    )
+    expect(offenders).toEqual([])
+  })
+
+  it('sets an 18px base rather than inheriting the 15px staff base', () => {
+    // Expressed as a local custom property because `rem` resolves against the
+    // document root, which would quietly undo the larger base for every child.
+    expect(patientCss()).toMatch(/--pt-base:\s*1\.125rem/)
+    expect(patientCss()).toMatch(/font-size:\s*var\(--pt-base\)/)
+  })
+
+  it('puts a 56px floor under anything touchable', () => {
+    expect(patientCss()).toMatch(/min-height:\s*var\(--touch-target-comfortable\)/)
+    expect(patientCss()).not.toMatch(/min-height:\s*44px/)
+  })
+
+  it('uses the patient-facing card radius', () => {
+    expect(patientCss()).toMatch(/border-radius:\s*var\(--radius-lg\)/)
+  })
+
+  it('never colours a patient-facing marker as clinical alarm', () => {
+    // The five markers carry where the order is in the workflow. `attention` — a
+    // follow-up the clinic will arrange — deliberately does not take clay: beside a
+    // sentence about someone's own analysis, clay reads as alarm about the result
+    // itself, which this surface has no access to and must never imply. Only a
+    // stopped order takes clay.
+    const css = stripComments(patientCss())
+    const markerLine = (name: string) =>
+      css.split('\n').find((line) => line.includes('.marker' + name)) ?? ''
+
+    expect(markerLine('Attention')).toMatch(/var\(--color-waiting\)/)
+    expect(markerLine('Attention')).not.toMatch(/stopped|danger/)
+    expect(markerLine('Stopped')).toMatch(/var\(--color-stopped\)/)
   })
 })
 
