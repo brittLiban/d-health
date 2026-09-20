@@ -30,3 +30,7 @@ e2e-results.json
 *.njsproj
 *.sln
 *.sw?
+
+# DH-MVP-POLISH-001: visual-review screenshots. Regenerated on demand by
+# harness/shoot.mjs; not committed, for the same reason as playwright-report/.
+harness/shots/

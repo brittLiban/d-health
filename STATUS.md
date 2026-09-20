@@ -27,14 +27,14 @@ role labels — so that run's own result is not yet known at the time of writing
 frontend tests across all 52 test files**, measured by
 reconciling a whole-suite run (which reported only 24 files and left 27 workers unstarted, a known
 flake of this 9p-mounted checkout) against the 27 remaining files run by name in three batches —
-24 + 27 = 51 on disk, 421 + 366 = 787, plus 7 tests in one new file added after review. **12 negative controls actually executed** (each claimed
+24 + 27 = 51 on disk, 421 + 366 = 787, plus 7 tests in one new file added after review. **13 negative controls actually executed** (each claimed
 property deliberately broken, the specific test observed going red for the specific reason, then
-reverted); one of them did not fire on first attempt and was rewritten until it did. **Twelve bugs were
+reverted); one of them did not fire on first attempt and was rewritten until it did. **Fourteen bugs were
 found and fixed during this ticket** — including a pre-existing one (21 CSS custom properties
 referenced and defined nowhere, so "muted" labels had been rendering at full strength), a
 working-looking `Se reconnecter` button that could not have reconnected anything, an axe suite that
 had been auditing the wrong surface, and this ticket's own review tests passing green over a submit
-path that threw before it ran. See `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry for all twelve. The twelfth came from review, not from me: the masthead was rendering the authorization enum (`LAB_TECH · LAB_RESULT_RELEASER`) in the one band that is always on screen.
+path that threw before it ran. See `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry for all fourteen. The twelfth came from review, not from me: the masthead was rendering the authorization enum (`LAB_TECH · LAB_RESULT_RELEASER`) in the one band that is always on screen.
 **Not proven:** no real browser rendered any of this, at any width, on any device; no font was
 observed loading; no focus ring or contrast ratio was measured; no E2E ran (no live stack, and
 `typecheck:e2e` — which does pass locally — is not part of CI); and the organization `<select>` on

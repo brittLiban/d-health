@@ -243,11 +243,22 @@
 
   .body {
     grid-template-columns: minmax(0, 1fr);
+    /* `.body` grows to fill the viewport, and a grid distributes that leftover
+       height across its rows — which gave the navigation row a third of the
+       screen and left a blank band between it and the content. The navigation
+       takes the height it needs; the content takes the rest. */
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
-  /* The rail becomes a scrolling row of sections above the content. There are at
-     most four, so this stays a row and never a hamburger: hiding navigation
-     behind a menu costs a tap on every single section change. */
+  /* The rail becomes a row of sections above the content. There are at most four,
+     so this stays a row and never a hamburger: hiding navigation behind a menu
+     costs a tap on every single section change.
+
+     It wraps rather than scrolls. At 390px the fourth item fell off the right
+     edge of a scrolling row, and a section you cannot see is a section you do not
+     know exists — the horizontal scroll had no affordance whatsoever. Wrapping to
+     a second line shows all four. `overflow-x` stays as a floor for a future label
+     long enough to overflow on its own. */
   .nav {
     flex-direction: row;
     overflow-x: auto;
@@ -258,10 +269,14 @@
 
   .navList {
     flex-direction: row;
+    flex-wrap: wrap;
     gap: var(--space-2);
   }
 
   .item {
+    /* `width: 100%` is right for a vertical rail and wrong for a wrapping row —
+       it would put every section on its own line. */
+    width: auto;
     white-space: nowrap;
     padding: 0 var(--space-4);
   }

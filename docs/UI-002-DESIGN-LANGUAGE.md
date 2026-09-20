@@ -84,8 +84,28 @@ outside this repository as a published artifact:
 was produced before implementation, and where it contradicts a repository invariant the invariant
 wins.
 
+## Looking at it
+
+`ui/harness/` exists because this document's claims are about appearance and the test suite cannot
+see appearance. It mounts the real components against stub data — no auth, no backend, no network —
+so the shell, the relay and the patient screen can be looked at in a real browser with the real
+stylesheets and the real self-hosted fonts.
+
+```
+npx vite                         # then open /harness/index.html?scene=shell-lab-dual
+node harness/shoot.mjs           # or capture every scene at 1280px and 390px into harness/shots/
+```
+
+`shoot.mjs` is not only a camera. It fails loudly on a console error, a failed request, horizontal
+overflow, a navigation item sitting outside its container, and a navigation row taller than a quarter
+of a phone screen — the last two because both of those shipped. Screenshots are gitignored; the
+scenes are the durable part.
+
+Use it when changing anything in this document. Three of this ticket's fourteen bugs were invisible
+to a full test suite and obvious in one screenshot.
+
 ## Not verified
 
-No part of this design has been measured in a real browser, on a real device, at any width, by any
-user. Every claim above is about intent and about what the code does under jsdom. The MVP has no
-real-patient pilot on either track.
+The harness covers the shell, the relay and the patient screen at two widths. It does **not** cover
+the full Clinic and Lab pages, any real device, any real session, contrast ratios, or focus-ring
+appearance — and no user has ever used any of it. The MVP has no real-patient pilot on either track.

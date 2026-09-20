@@ -17899,6 +17899,17 @@ report that only lists features is not a report.
     Administration, in a fixed presentation order, with the role values themselves untouched. See
     ADR-054's post-review addendum for why `ORG_ADMIN` is labelled rather than hidden and why an
     unknown role falls back to its code.
+13. **The navigation row clipped its last section on a phone.** At 390px the collapsed rail is a
+    horizontally scrolling row, and `Résultats` sat 40px past its right edge with no scrollbar, no
+    fade, and no affordance of any kind — a section a user could not see and would not know existed.
+    It now wraps to a second line; `overflow-x` stays as a floor for a future label long enough to
+    overflow on its own. Invisible to jsdom, which has no layout, and invisible to the page-level
+    overflow check, because the clipping happened inside the nav's own scroll box.
+14. **The navigation row took a third of the phone screen.** `.body` is a grid that grows to fill the
+    viewport, and a grid distributes leftover height across its rows — so the nav got 244px of an
+    844px screen and left a blank band between it and the content. Fixed with
+    `grid-template-rows: auto minmax(0, 1fr)`.
+
 
 
 ### Negative controls actually executed
@@ -17917,6 +17928,10 @@ and the change reverted. Every one had a clean unpatched baseline first.
 - **NC-D** — `roles.join(' · ')` restored in the masthead → `FAIL … US11` **and**
   `FAIL … US13: never shows an authorization enum in the identity band`. Added with the post-review
   role-label fix, because the defect it guards shipped once already.
+- **NC-E** — both phone-layout fixes reverted → the capture reports `nav item off-screen phone: Résultats`,
+  `nav clipped phone: 40px` and `nav too tall phone: 244px`; with them in place it reports none. The
+  checks live in `harness/shoot.mjs` rather than in vitest, because neither defect is visible without
+  layout.
 - **Six token/typeface controls** from commit 1 (a deleted definition, a re-added literal hex, a
   Google Fonts URL, and so on).
 - **Two more in commit 5**: deleting `--radius-lg` from `:root` still fails the undefined-property scan
@@ -17993,14 +18008,17 @@ no real Keycloak, no browser.
 
 ### What is NOT proven
 
-- **No real browser rendered any of this, and for this ticket that is a gap in acceptance, not just
-  in evidence.** Appearance was part of what DH-MVP-POLISH-001 was asked to deliver, so "the tests
-  pass" cannot close it. A visual inspection of the running interface is an explicit outstanding item
-  before DH-MVP-ADMIN-001, raised in review and recorded here so it is not lost: the enum-in-the-
-  masthead defect (bug 12) is exactly the class of thing a source-scanning suite does not catch and a
-  glance at the screen does.
-- No width was measured, no font was seen to load, no
-  focus ring was observed, no contrast was sampled. jsdom cannot measure layout or resolve a cascade
+- **[Partly closed after review — a browser has now rendered this.]** `ui/harness/` mounts the real
+  components with stub data and `ui/harness/shoot.mjs` captures six scenes at 1280px and 390px in
+  headless Chromium. That run found two real layout defects (bugs 13 and 14) and confirmed three
+  things previously only asserted from source: the self-hosted faces actually load
+  (`IBM Plex Sans 400/600`, `Source Serif 4 600`), no request fails and no console error is raised,
+  and nothing overflows horizontally at 390px. **What that does *not* cover**: the full Clinic and Lab
+  pages (the harness stubs `/me` only and renders the shell, the relay and the patient screen), any
+  real device, any real backend, contrast ratios, focus-ring appearance, and how any of it behaves
+  under a real session. Appearance was part of this ticket's acceptance, so this was the right gap to
+  close first; it is not the same as having used the product.
+- No contrast ratio was sampled and no focus ring was inspected. jsdom cannot measure layout or resolve a cascade
   of custom properties, and the token guards are deliberately *source scans* for that reason.
 - **No E2E run.** No live stack, no real Keycloak, no real organization switch against a real `/me`.
 - **The organization `<select>` has never been used by a person who belongs to two facilities**, which
