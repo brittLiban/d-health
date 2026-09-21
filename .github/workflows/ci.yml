@@ -118,7 +118,7 @@ jobs:
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0025_native_result_binding
+          EXPECTED_HEAD: 0026_facility_enrollment
         working-directory: adapter
         run: |
           alembic upgrade head

@@ -1808,3 +1808,301 @@ class PatientAccessGrant(Base):
     access_mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default=PatientAccessMode.LAB_SELECTION.value
     )
+
+
+# ── DH-MVP-ONBOARD-001: facility enrollment and integration discovery ────────────────────────
+#
+# Two questions that this repository previously had no way to answer, and which are deliberately
+# kept apart because conflating them is how a network claims a facility is connected when it is
+# merely known:
+#
+#   Organizational enrollment -- who is this facility on the DHealth network?
+#   Technical integration     -- how does their existing software talk to DHealth, if at all?
+#
+# An `Organization` row answers neither. It says a name and a type exist. Everything below exists
+# so "Laboratoire Central is enrolled" and "DHealth can route production orders to Laboratoire
+# Central" are separately representable, separately audited, and never inferred from each other.
+
+
+class ParticipationMode(StrEnum):
+    """Which software actually runs this facility's diagnostic workflow.
+
+    Chosen explicitly per facility, never inferred -- entering a LIS vendor name does not make a
+    facility CONNECT, and ADR-043 Law 2 (no double entry) means these are alternatives rather than
+    a spectrum: a facility either works in DHealth or keeps its own system and connects it.
+    """
+
+    NATIVE = "NATIVE"
+    CONNECT = "CONNECT"
+
+
+class OnboardingStatus(StrEnum):
+    """Where a facility is between "agreed to participate" and "production routing enabled".
+
+    The distinctions this preserves are the entire point; collapsing them into ACTIVE is what the
+    ticket forbids and what would let an operator believe a facility is live because a row exists:
+
+        facility exists  !=  facility configured  !=  interface discovered
+                         !=  connector exists     !=  connector tested
+                         !=  production ready
+
+    ``READY_FOR_ROUTING`` is reachable only by a NATIVE facility in this release, because DHealth
+    itself is a Native facility's workflow endpoint and no connector exists yet for anything else.
+    That restriction is enforced in ``facility_enrollment.py``, not merely documented here.
+    """
+
+    DRAFT = "DRAFT"
+    FACILITY_VERIFIED = "FACILITY_VERIFIED"
+    ORGANIZATION_READY = "ORGANIZATION_READY"
+    CONFIGURATION_IN_PROGRESS = "CONFIGURATION_IN_PROGRESS"
+    TECHNICAL_DISCOVERY = "TECHNICAL_DISCOVERY"
+    AWAITING_CONNECTOR = "AWAITING_CONNECTOR"
+    READY_FOR_QUALIFICATION = "READY_FOR_QUALIFICATION"
+    READY_FOR_ROUTING = "READY_FOR_ROUTING"
+    BLOCKED = "BLOCKED"
+
+
+class IntegrationFeasibility(StrEnum):
+    """A technical conclusion about a CONNECT facility's existing software. Not a sales label.
+
+    ``CONNECTABLE`` means only: the documented interfaces appear capable of supporting a DHealth
+    connector. It does not mean a connector exists, and it never means one has been qualified.
+    """
+
+    DISCOVERY_REQUIRED = "DISCOVERY_REQUIRED"
+    CONNECTABLE = "CONNECTABLE"
+    CONNECTOR_DEVELOPMENT_REQUIRED = "CONNECTOR_DEVELOPMENT_REQUIRED"
+    NOT_SAFELY_INTEGRABLE = "NOT_SAFELY_INTEGRABLE"
+
+
+class HostingModel(StrEnum):
+    """Where the facility's existing system runs. ``UNKNOWN`` is a real, accepted answer: a clinic
+    manager genuinely may not know, and refusing to record that would push operators into guessing,
+    which is worse than an honest gap."""
+
+    ON_PREMISE = "ON_PREMISE"
+    CLOUD = "CLOUD"
+    HYBRID = "HYBRID"
+    UNKNOWN = "UNKNOWN"
+
+
+class InterfaceType(StrEnum):
+    """A kind of interface a facility's existing system may expose.
+
+    ``DATABASE_READ`` is representable because vendors do offer it and pretending otherwise would
+    make operators record something false. It is never the preferred route, and nothing in this
+    repository writes to a partner database.
+    """
+
+    REST_API = "REST_API"
+    FHIR = "FHIR"
+    HL7_V2 = "HL7_V2"
+    WEBHOOK = "WEBHOOK"
+    SFTP = "SFTP"
+    FILE_IMPORT_EXPORT = "FILE_IMPORT_EXPORT"
+    DATABASE_READ = "DATABASE_READ"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class InterfaceVerificationState(StrEnum):
+    """How much DHealth actually knows about a reported interface.
+
+    The gap between ``REPORTED`` and ``VERIFIED`` is the most load-bearing distinction in Connect
+    onboarding: a partner saying "we have FHIR" is a claim, and treating a claim as a capability is
+    how an integration project discovers in week six that the endpoint never existed.
+
+    ``VERIFIED`` here means exactly one thing: DHealth staff confirmed the interface exists as
+    documented. It says nothing about whether a DHealth connector exists for it, and nothing about
+    whether the full diagnostic contract has passed qualification -- that is DH-CONNECT's word to
+    use, not this one.
+    """
+
+    REPORTED = "REPORTED"
+    DOCUMENTED = "DOCUMENTED"
+    VERIFIED = "VERIFIED"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class EnrollmentBlockerCode(StrEnum):
+    """Why a facility cannot progress, as a closed set rather than free text.
+
+    Structured because an operator needs to filter and act on these, and because a free-text field
+    on an onboarding record is a place PHI eventually lands. The accompanying note is bounded and
+    operational -- vendor names, ticket references, what DHealth is waiting for.
+    """
+
+    VENDOR_DOCUMENTATION_UNAVAILABLE = "VENDOR_DOCUMENTATION_UNAVAILABLE"
+    VENDOR_CONTACT_REQUIRED = "VENDOR_CONTACT_REQUIRED"
+    REQUIRED_INTERFACE_UNAVAILABLE = "REQUIRED_INTERFACE_UNAVAILABLE"
+    MISSING_RESULT_RELEASE_EVENT = "MISSING_RESULT_RELEASE_EVENT"
+    UNKNOWN_PATIENT_IDENTIFIER_BEHAVIOR = "UNKNOWN_PATIENT_IDENTIFIER_BEHAVIOR"
+    CONNECTOR_NOT_IMPLEMENTED = "CONNECTOR_NOT_IMPLEMENTED"
+    FACILITY_CONFIGURATION_INCOMPLETE = "FACILITY_CONFIGURATION_INCOMPLETE"
+    CLINICAL_TEMPLATE_SIGNOFF_REQUIRED = "CLINICAL_TEMPLATE_SIGNOFF_REQUIRED"
+
+
+class FacilityEnrollment(Base):
+    """One facility's participation in the DHealth network. Exactly one row per ``Organization``.
+
+    Separate from ``Organization`` rather than columns on it, because the two answer different
+    questions and have different lifetimes: an organization is an identity that persists, while an
+    enrollment is a process with a state machine, discovery fields that only a CONNECT facility
+    has, and its own audit trail.
+
+    The CONNECT discovery fields live here as explicit nullable columns rather than in a JSON blob:
+    several of them gate go-live decisions, and a fact that decides whether production orders may
+    be routed somewhere should be a validated column a query can filter, not a key in a document
+    nobody can constrain.
+
+    No credential, API key, password or connection secret is stored here or anywhere adjacent. The
+    fields below describe *what exists*; how DHealth would authenticate to it is DH-CONNECT's
+    problem and belongs to a secrets architecture that does not yet exist.
+    """
+
+    __tablename__ = "exchange_facility_enrollments"
+    __table_args__ = (
+        UniqueConstraint("organization_id", name="uq_exchange_facility_enrollments_organization"),
+        CheckConstraint(
+            "participation_mode IN ('NATIVE', 'CONNECT')",
+            name="ck_exchange_facility_enrollments_participation_mode",
+        ),
+        CheckConstraint(
+            "onboarding_status IN ('DRAFT', 'FACILITY_VERIFIED', 'ORGANIZATION_READY', "
+            "'CONFIGURATION_IN_PROGRESS', 'TECHNICAL_DISCOVERY', 'AWAITING_CONNECTOR', "
+            "'READY_FOR_QUALIFICATION', 'READY_FOR_ROUTING', 'BLOCKED')",
+            name="ck_exchange_facility_enrollments_onboarding_status",
+        ),
+        CheckConstraint(
+            "integration_feasibility IS NULL OR integration_feasibility IN "
+            "('DISCOVERY_REQUIRED', 'CONNECTABLE', 'CONNECTOR_DEVELOPMENT_REQUIRED', "
+            "'NOT_SAFELY_INTEGRABLE')",
+            name="ck_exchange_facility_enrollments_integration_feasibility",
+        ),
+        CheckConstraint(
+            "hosting_model IS NULL OR hosting_model IN "
+            "('ON_PREMISE', 'CLOUD', 'HYBRID', 'UNKNOWN')",
+            name="ck_exchange_facility_enrollments_hosting_model",
+        ),
+        Index("ix_exchange_facility_enrollments_status", "onboarding_status"),
+        Index("ix_exchange_facility_enrollments_mode", "participation_mode"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    participation_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    onboarding_status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # CONNECT technical discovery. All nullable: a NATIVE facility never fills these in, and a
+    # CONNECT facility legitimately starts with every one of them unknown.
+    integration_feasibility: Mapped[str | None] = mapped_column(String(32))
+    existing_system_name: Mapped[str | None] = mapped_column(String(256))
+    existing_system_vendor: Mapped[str | None] = mapped_column(String(256))
+    existing_system_version: Mapped[str | None] = mapped_column(String(64))
+    hosting_model: Mapped[str | None] = mapped_column(String(16))
+    technical_contact: Mapped[str | None] = mapped_column(String(256))
+    vendor_contact: Mapped[str | None] = mapped_column(String(256))
+    documentation_reference: Mapped[str | None] = mapped_column(String(512))
+
+    # Identifier and timestamp discovery (§30/§31) -- capability, never clinical content. These
+    # record whether the source system *has* such a concept, so the future Connect contract knows
+    # what it can correlate and which source event times actually exist. A missing source timestamp
+    # is never to be filled in from a nearby one, which is exactly why its absence is recorded.
+    patient_identifier_namespace: Mapped[str | None] = mapped_column(String(256))
+    order_identifier_concept: Mapped[str | None] = mapped_column(String(256))
+    report_identifier_concept: Mapped[str | None] = mapped_column(String(256))
+    specimen_identifier_concept: Mapped[str | None] = mapped_column(String(256))
+    exposes_source_event_timestamps: Mapped[bool | None] = mapped_column(Boolean)
+    exposes_professional_release_event: Mapped[bool | None] = mapped_column(Boolean)
+
+    notes: Mapped[str | None] = mapped_column(String(2000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class FacilityInterfaceCapability(Base):
+    """One interface a facility's existing system is said to expose, and how well DHealth knows it.
+
+    A child row rather than a column set, because a facility commonly reports several and each
+    carries its own verification state -- "FHIR documented, HL7 v2 reported, REST unknown" is the
+    normal shape of a real discovery conversation, and flattening it would lose which claim was
+    actually checked.
+    """
+
+    __tablename__ = "exchange_facility_interface_capabilities"
+    __table_args__ = (
+        UniqueConstraint(
+            "facility_enrollment_id",
+            "interface_type",
+            name="uq_exchange_facility_interface_capabilities_enrollment_type",
+        ),
+        CheckConstraint(
+            "interface_type IN ('REST_API', 'FHIR', 'HL7_V2', 'WEBHOOK', 'SFTP', "
+            "'FILE_IMPORT_EXPORT', 'DATABASE_READ', 'OTHER', 'UNKNOWN')",
+            name="ck_exchange_facility_interface_capabilities_type",
+        ),
+        CheckConstraint(
+            "verification_state IN ('REPORTED', 'DOCUMENTED', 'VERIFIED', 'UNSUPPORTED')",
+            name="ck_exchange_facility_interface_capabilities_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    facility_enrollment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_facility_enrollments.id", ondelete="RESTRICT"), nullable=False
+    )
+    interface_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    verification_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    # What the partner called it, and where the evidence lives. Never a credential or endpoint
+    # secret -- a URL to vendor documentation is a reference, not a way in.
+    detail: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class FacilityEnrollmentBlocker(Base):
+    """One structured reason a facility cannot progress, open until someone resolves it.
+
+    Resolution is a timestamp rather than a delete: what blocked a facility, and for how long, is
+    exactly the history an operator needs when a partner asks why go-live slipped.
+    """
+
+    __tablename__ = "exchange_facility_enrollment_blockers"
+    __table_args__ = (
+        CheckConstraint(
+            "code IN ('VENDOR_DOCUMENTATION_UNAVAILABLE', 'VENDOR_CONTACT_REQUIRED', "
+            "'REQUIRED_INTERFACE_UNAVAILABLE', 'MISSING_RESULT_RELEASE_EVENT', "
+            "'UNKNOWN_PATIENT_IDENTIFIER_BEHAVIOR', 'CONNECTOR_NOT_IMPLEMENTED', "
+            "'FACILITY_CONFIGURATION_INCOMPLETE', 'CLINICAL_TEMPLATE_SIGNOFF_REQUIRED')",
+            name="ck_exchange_facility_enrollment_blockers_code",
+        ),
+        Index(
+            "ix_exchange_facility_enrollment_blockers_open",
+            "facility_enrollment_id",
+            postgresql_where=text("resolved_at IS NULL"),
+            sqlite_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    facility_enrollment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_facility_enrollments.id", ondelete="RESTRICT"), nullable=False
+    )
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Bounded and operational: what DHealth is waiting for, from whom. Never clinical content and
+    # never a credential.
+    note: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
