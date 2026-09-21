@@ -1838,6 +1838,15 @@ through the evaluator.
 The shared implementation takes the caller's own `Session`, which is also why nothing opens a nested
 session while `assign_by_provider` holds its lock.
 
+**Where it is pressed.** `RouteNetwork` on a provider's platform detail screen reads
+`GET /platform/facilities/{provider_id}/lab-routes` — a platform-gated read that includes inactive
+routes, separate from the provider-scoped `/organizations/{id}/lab-routes` because that one requires
+`CLINICIAN` at the provider and a platform administrator holds no membership. The screen decides
+what to *offer*; the server decides what happens. Readiness findings carry `side` as a field rather
+than a prefix on `code`, so the browser never recovers "which end of the pair" from a string, and
+the frontend's `ExchangeApiError` keeps the parsed body so a 409's reasons reach the operator
+intact.
+
 **Connect stops short, by construction.** `READY_FOR_ROUTING` is unreachable for a CONNECT facility,
 enforced in the repository rather than at one endpoint, because no connector exists for any external
 system. Recording an interface as VERIFIED changes no status and unlocks no routing: a partner's

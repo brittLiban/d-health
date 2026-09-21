@@ -398,3 +398,82 @@
      the container never actually constrains anything. */
   max-width: 100%;
 }
+
+/* ── Routing relationships ───────────────────────────────────────────────── */
+
+.sectionLede {
+  color: var(--color-text-muted);
+  max-width: 62ch;
+}
+
+.routeList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.routeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.routeIdentity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  /* Lets the row's flex children shrink instead of forcing the page wider than
+     the viewport, which is how the interface table overflowed by 129px. */
+  min-width: 0;
+}
+
+.routeLabName {
+  font-weight: 600;
+}
+
+.routeState {
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* The actions never stretch: a full-width button in a list row reads as the
+   page's primary action rather than as one row's. */
+.routeActions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* The second gesture. Deliberately full-width inside the row, because the
+   restatement above it is the thing being read, not a label on a control. */
+.confirmPanel {
+  flex-basis: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.confirmActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* A refused activation states the reasons across the whole row rather than
+   squeezing them beside the laboratory's name. */
+.routeRow > [role='alert'] {
+  flex-basis: 100%;
+}

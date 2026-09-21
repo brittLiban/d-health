@@ -18166,7 +18166,34 @@ the absence directly rather than only the presence of the platform UI.
 
 One `/me`, one auth provider, one shell. Platform surfaces are sections of the same navigation.
 
-### Bugs found and fixed
+### Where the gate is actually pressed
+
+`RouteNetwork`, on a provider's detail screen, is the one place production routing is switched on,
+and it is where the four facts stop being an argument and become a screen. A laboratory reads as
+*Relation configurée · Routage indisponible — Aucune autorité de libération active*: the
+relationship stands, the routing does not, and neither statement is allowed to hide the other.
+
+The division of authority is explicit. This screen decides whether to *offer* a control, which is
+a courtesy; the server decides whether the activation happens, which is the rule. When the two
+disagree — readiness changed between the screen being drawn and the button being pressed — the
+409's reasons are rendered in French and no success is shown. `RN3` proves exactly that path.
+
+Two supporting changes made this honest rather than approximate. Readiness findings carry `side` as
+a field instead of a prefix on `code`, because the frontend was recovering "which end of the pair"
+by stripping `lab_` from a string, which worked only by accident of the current code set. And
+`ExchangeApiError` now keeps the parsed error body, because flattening every refusal to one string
+dropped precisely the part an operator can act on.
+
+`GET /platform/facilities/{provider_id}/lab-routes` is a new platform-gated read rather than a flag
+on the provider-scoped one: that endpoint requires `CLINICIAN` *at the provider*, and widening it
+would hand cross-organization reach to a per-facility role.
+
+### Defects found and fixed — in the product, and in this ticket's own evidence
+
+Items 1–8 are product defects. Items 9–11 are defects in the evidence itself: a harness scene and a
+test suite that would have reported success for something they were not actually exercising. They
+are listed together because a reader counting "eleven bugs" as product bugs would be wrong, and
+because the second kind is the more dangerous one to leave unrecorded.
 
 1. **Refusal telemetry could misreport the refusal.** The route-activation refusal audit was written
    inside the transaction that then raised, so the rollback discarded it; and once moved out, an
@@ -18203,23 +18230,27 @@ left in source.
 - **NC-ELIG** — readiness filter removed from the eligibility read → the unready lab reappeared.
 - **NC-AUDIT** — best-effort wrapper removed → the simulated audit failure escaped as a RuntimeError
   and replaced the 409.
+- **NC-ROUTE-UI** — the frontend's "may this be offered?" guard reduced to "is there no route yet?"
+  → three of seven `RouteNetwork` tests failed, including the Connect laboratory being offered an
+  activation control. The backend gate is unaffected by this control, which is the point: the UI
+  guard is a courtesy and has its own test, and neither is allowed to stand in for the other.
 
 ### Evidence
 
-- **Adapter: 1163 passed, 118 skipped** (1122 before this ticket). `ruff check` and
+- **Adapter: 1168 passed, 118 skipped** (1122 before this ticket). `ruff check` and
   `ruff format --check` clean across 156 files.
 - **Migration, against real PostgreSQL 18** (CI cannot run it): 0025 → 0026 clean; one enrollment per
   pre-existing organization with zero orphans; CHECK constraints genuinely refuse a bad
   participation mode and a bad onboarding status; the unique constraint refuses a second enrollment;
   `downgrade -1` returns to 0025 and re-upgrade reaches head; `current == heads ==
   0026_facility_enrollment`. CI's `EXPECTED_HEAD` is bumped to match.
-- **UI: 804 tests across all 53 test files, every file run.** Measured in seven batches of eight
+- **UI: 811 tests across all 54 test files, every file run.** Measured in seven batches of eight
   because a whole-suite run on this checkout loses a nondeterministic subset of files to
   worker-start failures — that run reported 29 files and 24 worker errors, which is why the batched
   figure is the one quoted. Zero worker errors across the batched run, zero failures.
 - **UI static**: `tsc` clean, `tsc -p e2e/tsconfig.json` clean, `oxlint` 0 errors / 45 warnings,
   `npm run build` clean with `No secrets found across 28 built file(s)`.
-- **Browser**: six platform scenes captured at 1280, 768 and 390 in headless Chromium. No console
+- **Browser**: seven platform scenes captured at 1280, 768 and 390 in headless Chromium. No console
   error, no failed request, no horizontal overflow, no off-screen control, no unlabelled input, and
   the self-hosted faces load.
 
@@ -18234,9 +18265,9 @@ left in source.
 - **No CI conclusion.** See above.
 - The first-administrator bootstrap still requires the intended administrator to sign in once
   before they can be attached. There is no invitation system and no Keycloak provisioning, by scope.
-- Route activation from the facility detail screen is not yet wired; the backend gate, its refusal
-  semantics and its negative controls are complete, and the UI surface for pressing the button is
-  DH-MVP-ONBOARD-001's own remaining gap, recorded here rather than implied as done.
+- The wizard's first-administrator step finds a person and does not yet create their membership or
+  assign their roles; the lookup is real, the attachment is DH-MVP-ONBOARD-001's remaining gap,
+  recorded here rather than implied as done.
 
 ### Confirmations
 

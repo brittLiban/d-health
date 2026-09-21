@@ -275,8 +275,14 @@ export function StaffWorkspace({
             </Button>
           }
         >
-          Un administrateur de votre établissement doit vous y rattacher avant que vous puissiez
-          travailler ici.
+          {/* DH-MVP-ONBOARD-001: this screen is also the first thing a facility's
+              intended administrator sees. There is no invitation system, so the
+              bootstrap is that they sign in once and a *platform* administrator
+              then attaches them. Telling them to ask an administrator of their
+              own facility sends them to somebody who does not exist yet, which
+              is precisely the situation this first sign-in resolves. */}
+          Vous êtes maintenant connu de DHealth. Un administrateur de la plateforme peut désormais
+          vous rattacher à votre établissement — cette première connexion était l'étape nécessaire.
         </EmptyState>
       </div>
     )

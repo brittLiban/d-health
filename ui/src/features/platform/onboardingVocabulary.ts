@@ -126,15 +126,6 @@ const READINESS_FINDING: Record<string, string> = {
   connector_qualified: 'Connecteur DHealth qualifié',
 }
 
-/** Readiness codes arrive prefixed by side when a route pair is evaluated. */
-function stripSide(code: string): string {
-  if (code.startsWith('provider_')) return code.slice('provider_'.length)
-  if (code.startsWith('lab_lab_')) return code.slice('lab_'.length)
-  if (code.startsWith('lab_') && code in READINESS_FINDING) return code
-  if (code.startsWith('lab_')) return code.slice('lab_'.length)
-  return code
-}
-
 function lookup<T extends string>(map: Record<string, string>, value: T | null): string {
   if (value === null) return 'Non renseigné'
   return map[value] ?? value
@@ -196,9 +187,24 @@ const READINESS_FINDING_MISSING: Record<string, string> = {
 }
 
 export function readinessFindingLabel(code: string, satisfied = true): string {
-  const key = stripSide(code)
-  if (!satisfied) return READINESS_FINDING_MISSING[key] ?? READINESS_FINDING[key] ?? code
-  return READINESS_FINDING[key] ?? code
+  if (!satisfied) return READINESS_FINDING_MISSING[code] ?? READINESS_FINDING[code] ?? code
+  return READINESS_FINDING[code] ?? code
+}
+
+/**
+ * Which end of a provider-lab pair a refusal is about.
+ *
+ * The backend sends the side as its own field rather than folded into the code,
+ * so this is a lookup and not string surgery.
+ */
+const ROUTE_SIDE: Record<string, string> = {
+  provider: "Établissement de soins",
+  lab: "Laboratoire",
+}
+
+export function routeSideLabel(side: string | null): string {
+  if (side === null) return ''
+  return ROUTE_SIDE[side] ?? side
 }
 
 /**

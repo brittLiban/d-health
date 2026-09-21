@@ -599,6 +599,12 @@ class ReadinessFinding:
     satisfied: bool
     blocking: bool
     detail: str | None = None
+    #: Which end of a pair this finding is about when it came from a pair decision --
+    #: ``"provider"``, ``"lab"``, or ``None`` for a single facility. A field rather than a prefix
+    #: on ``code``, because a consumer that recovers the side by stripping a string is one new
+    #: code away from being wrong: ``lab_lab_technician_present`` and ``lab_facility_enrolled``
+    #: do not strip alike, and nothing obliges the next code to follow either shape.
+    side: str | None = None
 
 
 @dataclass(frozen=True)
@@ -607,8 +613,17 @@ class RouteActivationDecision:
     findings: tuple[ReadinessFinding, ...]
 
     @property
+    def blocking_findings(self) -> tuple[ReadinessFinding, ...]:
+        return tuple(f for f in self.findings if f.blocking and not f.satisfied)
+
+    @property
     def blocking_reasons(self) -> tuple[str, ...]:
-        return tuple(f.code for f in self.findings if f.blocking and not f.satisfied)
+        """Side-qualified identifiers, for log lines and exception messages only.
+
+        Anything rendering a reason to a person reads ``blocking_findings`` instead and keeps the
+        side and the code apart.
+        """
+        return tuple(f"{f.side}_{f.code}" if f.side else f.code for f in self.blocking_findings)
 
 
 # ── operational readiness, shared by every production path ───────────────────────────────────
@@ -913,10 +928,11 @@ class FacilityReadinessEvaluator:
             ):
                 findings.extend(
                     ReadinessFinding(
-                        code=f"{side}_{f.code}",
+                        code=f.code,
                         satisfied=f.satisfied,
                         blocking=f.blocking,
                         detail=f.detail,
+                        side=side,
                     )
                     for f in operational_findings_in_session(session, organization_id)
                 )

@@ -626,7 +626,9 @@ def test_rr_activation_refused_when_the_lab_cannot_complete_an_order(
     response = _configure_route(client, private_key, provider.id, lab.id)
 
     assert response.status_code == 409, response.text
-    assert "lab_lab_releaser_present" in response.json()["detail"]["blocking_reasons"]
+    assert {"side": "lab", "code": "lab_releaser_present"} in response.json()["detail"][
+        "blocking_reasons"
+    ]
 
     # And nothing was written: a refused activation must not leave a route behind.
     with sessions() as session:
@@ -722,7 +724,9 @@ def test_rr_refusal_survives_a_failure_to_record_its_own_telemetry(
     response = _configure_route(client, private_key, provider.id, lab.id)
 
     assert response.status_code == 409, response.text
-    assert "lab_lab_releaser_present" in response.json()["detail"]["blocking_reasons"]
+    assert {"side": "lab", "code": "lab_releaser_present"} in response.json()["detail"][
+        "blocking_reasons"
+    ]
 
     # And the prohibited thing still did not happen.
     with sessions() as session:

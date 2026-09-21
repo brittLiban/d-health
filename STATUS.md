@@ -31,23 +31,30 @@ SHA `5983da9` was re-run as a control and **failed identically**. The cause is n
 Actions billing needs a token scope this session does not hold. **CI conclusion for this ticket is
 unavailable: not failed on repository code, and not reported as green.**
 
-Measured locally: adapter **1163 passed, 118 skipped** (from 1122), ruff check and format clean
-across 156 files; **804 UI tests across all 53 test files**, run in seven batches because a
+Measured locally: adapter **1168 passed, 118 skipped** (from 1122), ruff check and format clean
+across 156 files; **811 UI tests across all 54 test files**, run in seven batches because a
 whole-suite run loses a nondeterministic subset of files to worker-start failures; `tsc` and
 `tsc -p e2e/tsconfig.json` clean; oxlint 0 errors / 45 warnings; build clean with no secrets across
 28 files; migration re-qualified against **real PostgreSQL 18** (upgrade, backfill with zero orphans,
 CHECK constraints refusing bad values, duplicate enrollment refused, downgrade and re-upgrade,
-`current == heads == 0026_facility_enrollment`); and six platform scenes captured in **headless
+`current == heads == 0026_facility_enrollment`); and seven platform scenes captured in **headless
 Chromium at 1280, 768 and 390** with no console error, failed request, overflow, off-screen control
-or unlabelled input. **Four negative controls executed and reverted** (activation gate, assignment
-gate, eligibility filter, and refusal-telemetry failure). **Eleven defects found and fixed**,
-including one class worth naming: tests of mine that passed for the wrong reason because a fixture
-used a different token issuer than the API resolved.
+or unlabelled input. **Five negative controls executed and reverted** (activation gate, assignment
+gate, eligibility filter, refusal-telemetry failure, and the frontend's offer guard).
+**Eleven defects found and fixed**, including one class worth naming: tests of mine that passed for
+the wrong reason because a fixture used a different token issuer than the API resolved.
+
+Production routing is also **switched on from the interface**, on a care facility's detail screen: a
+two-gesture confirmation that restates what activation permits, no activation control at all for a
+Connect laboratory or an unready one, deactivation never gated, and a server refusal rendered reason
+by reason with no success reported. A laboratory that loses its release authority reads *Relation
+configurée · Routage indisponible* — both halves, because the relationship survives and the routing
+does not.
 
 **Not proven:** no DHealth Connect transport exists and none was built; no real browser has been used
-by a person; no E2E ran; no CI conclusion; the first-administrator bootstrap still requires the
-person to sign in once (no invitation system, by scope); and route activation from the facility
-detail screen is not yet wired — the backend gate and its controls are complete, the button is not.
+by a person; no E2E ran; no CI conclusion; and the first-administrator bootstrap still requires the
+person to sign in once (no invitation system, by scope) — the wizard finds them and does not yet
+create the membership.
 
 **2026-09-20, DH-MVP-POLISH-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `50a7eac` (DH-PATIENT-001's own final commit), verified

@@ -28,6 +28,7 @@ from daher_adapter.exchange.facility_enrollment import (
     FacilityEnrollmentRepository,
     FacilityReadinessEvaluator,
     is_operationally_ready_in_session,
+    operational_findings_in_session,
 )
 from daher_adapter.exchange.membership import (
     ExchangeIdentityRepository,
@@ -354,3 +355,28 @@ class TestStaffingLossDoesNotRewriteTheRoute:
 
         surviving = repos["routes"].list_for_provider(provider.id, active_only=False)
         assert [(r.id, r.active) for r in surviving] == [(route.id, True)]
+
+    def test_RS15_a_pair_finding_carries_its_side_as_a_field_not_as_a_code_prefix(self, repos):
+        # The side must be recoverable without string surgery. A consumer that strips "lab_" off
+        # the front of a code works by accident today -- "lab_facility_enrolled" and
+        # "lab_lab_technician_present" do not strip alike -- and breaks the day a code is added
+        # that follows neither shape.
+        lab = _ready_lab(repos, roles=[OrganizationRole.LAB_TECH])
+        decision = _evaluator(repos).evaluate_route_activation(
+            provider_organization_id=_ready_provider(repos).id, lab_organization_id=lab.id
+        )
+        assert not decision.allowed
+        blocking = decision.blocking_findings
+        assert [(f.side, f.code) for f in blocking] == [("lab", "lab_releaser_present")]
+        # Every finding, satisfied or not, knows which end of the pair it is about, and no code
+        # carries the side inside it.
+        assert {f.side for f in decision.findings} == {"provider", "lab"}
+        assert not any(f.code.startswith(("provider_", "lab_lab_")) for f in decision.findings)
+
+    def test_RS16_a_single_facility_evaluation_has_no_side(self, repos):
+        # Readiness for one facility answers a question with only one end to it.
+        lab = _ready_lab(repos, roles=[OrganizationRole.LAB_TECH])
+        with repos["sessions"]() as session:
+            findings = operational_findings_in_session(session, lab.id)
+        assert findings
+        assert {f.side for f in findings} == {None}

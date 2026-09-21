@@ -552,3 +552,67 @@ def test_TS6_facility_admin_cannot_configure_a_cross_organization_route(
         json={"active": True},
     )
     assert response.status_code == 403, "routing spans two organizations and stays platform-level"
+
+
+# ── RT: the platform's view of configured routes ─────────────────────────────────────────────
+
+
+def test_RT1_platform_route_listing_includes_inactive_routes(client, keypair, sessions) -> None:
+    """A platform operator configuring a relationship must see the ones switched off.
+
+    The provider-scoped listing returns active routes only -- a clinician's directory is where
+    they may send work today. This one answers a different question: which relationships exist.
+    """
+    private_key, _ = keypair
+    provider = _enrol(
+        client, private_key, name="Clinique RT1", org_type="PROVIDER", mode="NATIVE"
+    ).json()
+    lab = _enrol(client, private_key, name="Labo RT1", org_type="LAB", mode="NATIVE").json()
+
+    configured = client.put(
+        f"/exchange/v1/organizations/{provider['organization_id']}"
+        f"/lab-routes/{lab['organization_id']}",
+        headers=_auth(_platform_token(private_key)),
+        json={"active": False},
+    )
+    assert configured.status_code in (200, 201), configured.text
+
+    listed = client.get(
+        f"/exchange/v1/platform/facilities/{provider['organization_id']}/lab-routes",
+        headers=_auth(_platform_token(private_key)),
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert [(r["lab_organization_id"], r["active"]) for r in rows] == [
+        (lab["organization_id"], False)
+    ]
+    assert rows[0]["lab_organization_name"] == "Labo RT1"
+
+
+def test_RT2_a_facility_admin_cannot_read_the_platform_route_listing(
+    client, keypair, sessions
+) -> None:
+    # This read spans two organizations. Holding ORG_ADMIN at the provider is not authority over
+    # the network, and the platform gate is what says so -- not the absence of a button.
+    private_key, _ = keypair
+    provider = _enrol(
+        client, private_key, name="Clinique RT2", org_type="PROVIDER", mode="NATIVE"
+    ).json()
+    _grant_org_admin(sessions, uuid.UUID(provider["organization_id"]), "rt2-admin")
+
+    refused = client.get(
+        f"/exchange/v1/platform/facilities/{provider['organization_id']}/lab-routes",
+        headers=_auth(_plain_token(private_key, "rt2-admin")),
+    )
+    assert refused.status_code == 403, refused.text
+
+
+def test_RT3_an_unknown_organization_is_404_not_an_empty_list(client, keypair) -> None:
+    # An empty list would say "this provider has no routes", which is a true-sounding answer to a
+    # question about an organization that does not exist.
+    private_key, _ = keypair
+    missing = client.get(
+        f"/exchange/v1/platform/facilities/{uuid.uuid4()}/lab-routes",
+        headers=_auth(_platform_token(private_key)),
+    )
+    assert missing.status_code == 404, missing.text

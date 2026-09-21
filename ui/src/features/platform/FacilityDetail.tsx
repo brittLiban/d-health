@@ -17,6 +17,7 @@ import type { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
 import type { FacilityEnrollment, FacilityReadiness } from '../../api/exchangeTypes'
 import { Button, LoadingSkeleton } from '../../design-system'
 import { ConnectDiscovery } from './ConnectDiscovery'
+import { RouteNetwork } from './RouteNetwork'
 import {
   blockerLabel,
   feasibilityLabel,
@@ -29,12 +30,20 @@ import styles from './Platform.module.css'
 
 export interface FacilityDetailProps {
   facility: FacilityEnrollment
+  /** Every facility on the network -- the routing section needs the laboratories. */
+  facilities: FacilityEnrollment[]
   client: ExchangeClient
   onBack: () => void
   onChanged: () => void
 }
 
-export function FacilityDetail({ facility, client, onBack, onChanged }: FacilityDetailProps) {
+export function FacilityDetail({
+  facility,
+  facilities,
+  client,
+  onBack,
+  onChanged,
+}: FacilityDetailProps) {
   const [readiness, setReadiness] = useState<FacilityReadiness | null>(null)
   const [readinessError, setReadinessError] = useState<ExchangeApiError | null>(null)
 
@@ -194,6 +203,19 @@ export function FacilityDetail({ facility, client, onBack, onChanged }: Facility
           </p>
         </section>
       )}
+
+      {facility.organization_type === 'PROVIDER' ? (
+        <RouteNetwork
+          provider={facility}
+          facilities={facilities}
+          providerReadiness={readiness}
+          client={client}
+          onChanged={() => {
+            onChanged()
+            void loadReadiness()
+          }}
+        />
+      ) : null}
 
       {facility.integration_feasibility && !notIntegrable ? (
         <p className={styles.facilityMeta}>

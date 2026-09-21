@@ -133,13 +133,23 @@ export class ExchangeApiError extends Error {
   readonly detail: string
   readonly isAuthError: boolean
   readonly isNetworkError: boolean
+  /**
+   * The parsed error body, when the server sent one.
+   *
+   * Some refusals carry structure a person needs -- a readiness refusal names
+   * which conditions failed and at which end of the pair. Flattening every error
+   * to one string would drop exactly the part an operator can act on, so the body
+   * is kept, typed as unknown: a caller that wants it must narrow it.
+   */
+  readonly body: unknown
 
-  constructor(status: number, code: ExchangeErrorCode, detail: string) {
+  constructor(status: number, code: ExchangeErrorCode, detail: string, body?: unknown) {
     super(detail)
     this.name = 'ExchangeApiError'
     this.status = status
     this.code = code
     this.detail = detail
+    this.body = body
     this.isAuthError = code === 'UNAUTHORIZED' || code === 'FORBIDDEN'
     this.isNetworkError = code === 'NETWORK_ERROR'
   }
@@ -254,9 +264,10 @@ export class ExchangeClient {
     }
 
     let errorDetail = response.statusText || 'Erreur du serveur DHealth Exchange.'
+    let errorBody: unknown
     try {
-      const body = await response.json()
-      errorDetail = parseFastApiDetail(body, errorDetail)
+      errorBody = await response.json()
+      errorDetail = parseFastApiDetail(errorBody, errorDetail)
     } catch {
       // Body not json, retain statusText
     }
@@ -265,6 +276,7 @@ export class ExchangeClient {
       response.status,
       mapStatusToExchangeErrorCode(response.status),
       errorDetail,
+      errorBody,
     )
   }
 
@@ -319,14 +331,20 @@ export class ExchangeClient {
     }
 
     let errorDetail = response.statusText || 'Erreur du serveur DHealth Exchange.'
+    let errorBody: unknown
     try {
-      const body = await response.json()
-      errorDetail = parseFastApiDetail(body, errorDetail)
+      errorBody = await response.json()
+      errorDetail = parseFastApiDetail(errorBody, errorDetail)
     } catch {
       // Body not json, retain statusText
     }
 
-    throw new ExchangeApiError(response.status, mapStatusToExchangeErrorCode(response.status), errorDetail)
+    throw new ExchangeApiError(
+      response.status,
+      mapStatusToExchangeErrorCode(response.status),
+      errorDetail,
+      errorBody,
+    )
   }
 
   /**
@@ -1497,6 +1515,47 @@ export class ExchangeClient {
     return this.request<FacilityReadiness>(
       `/organizations/${encodeURIComponent(organizationId)}/enrollment/readiness`,
       { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/platform/facilities/{providerId}/lab-routes
+   *
+   * Every route configured for this provider, active or not. Deliberately not
+   * `listProviderLabRoutes`, which requires CLINICIAN at the provider and returns
+   * only active routes: a platform operator holds no membership and is looking at
+   * the relationships themselves, including the ones switched off.
+   */
+  async listPlatformProviderLabRoutes(
+    providerId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ProviderLabRoute[]> {
+    return this.request<ProviderLabRoute[]>(
+      `/platform/facilities/${encodeURIComponent(providerId)}/lab-routes`,
+      { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * PUT /exchange/v1/organizations/{providerId}/lab-routes/{labId}
+   *
+   * Activation is readiness-gated on the server and may be refused with 409 even
+   * when this client was told moments ago that it would be allowed. That refusal
+   * is authoritative: readiness is evaluated from live rows inside the writing
+   * transaction, and the caller's job is to show the reasons, never to retry past
+   * them. Deactivation is never gated.
+   */
+  async setProviderLabRoute(
+    providerId: string,
+    labId: string,
+    active: boolean,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ProviderLabRoute> {
+    return this.request<ProviderLabRoute>(
+      `/organizations/${encodeURIComponent(providerId)}/lab-routes/${encodeURIComponent(labId)}`,
+      { method: "PUT", body: JSON.stringify({ active }), signal: options.signal },
       options.token,
     )
   }

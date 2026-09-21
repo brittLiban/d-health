@@ -18,6 +18,7 @@ const SCENES = [
   'platform-connect-readiness',
   'platform-native-blocked',
   'platform-not-integrable',
+  'platform-route-activation',
   'platform-new-facility',
   'shell-provider',
   'shell-lab-dual',
@@ -30,10 +31,14 @@ const SCENES = [
 // Scenes whose subject is a screen reached by an action, and the control that
 // reaches it. Without this the detail captures would show the facility list.
 const SCENE_ACTIONS = {
-  'platform-connect-readiness': /Laboratoire Central/,
-  'platform-native-blocked': /Laboratoire Horizon/,
-  'platform-not-integrable': /Laboratoire Central/,
-  'platform-new-facility': /Enregistrer un établissement/,
+  'platform-connect-readiness': [/Laboratoire Central/],
+  'platform-native-blocked': [/Laboratoire Horizon/],
+  'platform-not-integrable': [/Laboratoire Central/],
+  'platform-new-facility': [/Enregistrer un établissement/],
+  // Two gestures, because the confirmation is the subject: open the provider,
+  // then press Activer. The scene is the restatement an operator reads before
+  // switching production routing on, not the button that leads to it.
+  'platform-route-activation': [/Clinique Al Rahma/, /^Activer$/],
 }
 
 // Phone width is the patient surface's case. Platform work is desktop and tablet,
@@ -97,9 +102,8 @@ for (const viewport of WIDTHS) {
     // Some scenes are about a screen you reach by doing something. Capturing the
     // list and calling the file "connect-readiness" would be a screenshot that
     // documents the wrong thing, so the capture performs the real interaction.
-    const open = SCENE_ACTIONS[scene]
-    if (open) {
-      await page.getByRole('button', { name: open }).first().click()
+    for (const control of SCENE_ACTIONS[scene] ?? []) {
+      await page.getByRole('button', { name: control }).first().click()
       await page.waitForTimeout(300)
     }
 

@@ -27,6 +27,7 @@ import type {
   ExchangeMeResponse,
   FacilityEnrollment,
   FacilityReadiness,
+  ProviderLabRoute,
   PatientOrder,
 } from '../src/api/exchangeTypes'
 import { PatientStatusPage } from '../src/features/patient/PatientStatusPage'
@@ -268,18 +269,61 @@ const NATIVE_BLOCKED_READINESS: FacilityReadiness = {
     { code: 'lab_has_active_offering', satisfied: true, blocking: true, detail: '2 analyse(s) active(s)' },
     { code: 'lab_technician_present', satisfied: true, blocking: true, detail: null },
     { code: 'lab_releaser_present', satisfied: false, blocking: true, detail: null },
-    { code: 'lab_result_templates_active', satisfied: true, blocking: false, detail: '2/2 analyse(s) structurée(s)' },
+    // Unsatisfied and non-blocking, so "Configuration à compléter" is actually
+    // rendered in at least one captured scene. A section no screenshot ever
+    // shows is a section nobody has looked at.
+    { code: 'lab_result_templates_active', satisfied: false, blocking: false, detail: '1/2 analyse(s) structurée(s)' },
+  ],
+}
+
+/** A provider that may order, for the routing scene. */
+const PROVIDER_READY_READINESS: FacilityReadiness = {
+  organization_id: 'org-native-provider',
+  participation_mode: 'NATIVE',
+  onboarding_status: 'READY_FOR_ROUTING',
+  production_routing_allowed: true,
+  findings: [
+    { code: 'organization_active', satisfied: true, blocking: true, detail: null },
+    { code: 'enrollment_not_blocked', satisfied: true, blocking: true, detail: null },
+    { code: 'clinician_present', satisfied: true, blocking: true, detail: null },
+    { code: 'administrator_present', satisfied: true, blocking: false, detail: null },
+  ],
+}
+
+/** A Native laboratory that can take work today. */
+const LAB_READY_READINESS: FacilityReadiness = {
+  organization_id: 'org-1',
+  participation_mode: 'NATIVE',
+  onboarding_status: 'READY_FOR_ROUTING',
+  production_routing_allowed: true,
+  findings: [
+    { code: 'organization_active', satisfied: true, blocking: true, detail: null },
+    { code: 'enrollment_not_blocked', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_accepting_orders', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_has_active_offering', satisfied: true, blocking: true, detail: '3 analyse(s) active(s)' },
+    { code: 'lab_technician_present', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_releaser_present', satisfied: true, blocking: true, detail: null },
   ],
 }
 
 function platformClient(
   facilities: FacilityEnrollment[],
   readiness: FacilityReadiness,
+  readinessByOrg: Record<string, FacilityReadiness> = {},
+  routes: ProviderLabRoute[] = [],
 ): ExchangeClient {
   return {
     getMe: () => Promise.resolve(platformMe()),
     listFacilities: () => Promise.resolve(facilities),
-    getFacilityReadiness: () => Promise.resolve(readiness),
+    // Per-organization when a scene needs several facilities to differ -- the
+    // routing scene shows one ready laboratory beside one that is not, and a
+    // single shared answer would make that scene a picture of something the
+    // product cannot produce.
+    getFacilityReadiness: (organizationId: string) =>
+      Promise.resolve(readinessByOrg[organizationId] ?? readiness),
+    listPlatformProviderLabRoutes: () => Promise.resolve(routes),
+    setProviderLabRoute: () =>
+      Promise.reject(new Error('the harness never writes; scenes are captured before the write')),
     // Org-scoped reads, for the scene where the platform admin also holds a
     // membership and therefore lands in organization scope first.
     listOrders: () => Promise.resolve([]),
@@ -297,14 +341,18 @@ function platformClient(
 function PlatformScene({
   facilities = NETWORK_FIXTURE,
   readiness = CONNECT_READINESS,
+  readinessByOrg = {},
+  routes = [],
   memberships = [],
 }: {
   facilities?: FacilityEnrollment[]
   readiness?: FacilityReadiness
+  readinessByOrg?: Record<string, FacilityReadiness>
+  routes?: ProviderLabRoute[]
   memberships?: ExchangeMembershipSummary[]
 }) {
   const client = {
-    ...platformClient(facilities, readiness),
+    ...platformClient(facilities, readiness, readinessByOrg, routes),
     getMe: () => Promise.resolve(platformMe(memberships)),
   } as unknown as ExchangeClient
   return (
@@ -373,6 +421,71 @@ const SCENES: Record<string, () => ReactElement> = {
         }),
       ]}
       readiness={NATIVE_BLOCKED_READINESS}
+    />
+  ),
+  // §62: the provider's network relationships. One laboratory ready to be
+  // switched on, one Native laboratory already configured whose release
+  // authority went inactive -- configured and unavailable at the same time --
+  // and one Connect laboratory that cannot be offered at all.
+  'platform-route-activation': () => (
+    <PlatformScene
+      readinessByOrg={{
+        'org-native-provider': PROVIDER_READY_READINESS,
+        'org-ready-lab': LAB_READY_READINESS,
+        'org-native-lab': NATIVE_BLOCKED_READINESS,
+        // `org-1` is a Connect laboratory and deliberately keeps a *ready*
+        // readiness here: no staffing answer makes a connector exist, so it must
+        // still be unofferable, and the scene shows that rather than asserting it.
+        'org-1': LAB_READY_READINESS,
+      }}
+      facilities={[
+        ...NETWORK_FIXTURE,
+        facilityFixture({
+          organization_id: 'org-ready-lab',
+          organization_name: 'Laboratoire Nour',
+          participation_mode: 'NATIVE',
+          onboarding_status: 'READY_FOR_ROUTING',
+          integration_feasibility: null,
+          existing_system_name: null,
+          existing_system_vendor: null,
+          existing_system_version: null,
+          hosting_model: null,
+          technical_contact: null,
+          vendor_contact: null,
+          interfaces: [],
+        }),
+        facilityFixture({
+          organization_id: 'org-native-lab',
+          organization_name: 'Laboratoire Horizon',
+          participation_mode: 'NATIVE',
+          onboarding_status: 'ORGANIZATION_READY',
+          integration_feasibility: null,
+          existing_system_name: null,
+          existing_system_vendor: null,
+          existing_system_version: null,
+          hosting_model: null,
+          technical_contact: null,
+          vendor_contact: null,
+          interfaces: [],
+        }),
+        facilityFixture({
+          organization_id: 'org-connect-lab',
+          organization_name: 'Laboratoire Bahr',
+          participation_mode: 'CONNECT',
+          onboarding_status: 'AWAITING_CONNECTOR',
+        }),
+      ]}
+      routes={[
+        {
+          id: 'route-horizon',
+          provider_organization_id: 'org-native-provider',
+          lab_organization_id: 'org-native-lab',
+          lab_organization_name: 'Laboratoire Horizon',
+          active: true,
+          created_at: '2026-09-20T09:00:00Z',
+          updated_at: '2026-09-20T09:00:00Z',
+        },
+      ]}
     />
   ),
   'platform-not-integrable': () => (

@@ -185,6 +185,29 @@ Production activation is platform-level and readiness-gated. If readiness change
 being drawn and the button being pressed, the server refuses and the blocking reasons are shown; the
 interface cannot override that.
 
+### Switching a route on
+
+On a care facility's detail screen, **Relations de routage** lists every laboratory on the network
+and what is true about each one:
+
+| What you see | What it means |
+|---|---|
+| *Non connecté* | No relationship is configured. **Activer** is offered if the laboratory can take work today. |
+| *Relation configurée · Prêt* | Configured, and orders can be routed there now. |
+| *Relation configurée · Routage indisponible — …* | Configured, and the laboratory cannot currently take work. Nothing was deleted; the reason is named. |
+| *Non connecté — Aucun connecteur DHealth (mode Connect)* | A Connect laboratory. No staffing or configuration changes this until a connector exists. |
+
+Activation takes two gestures. The second one is preceded by a restatement naming the care facility,
+the laboratory, and what activation permits — *"autorisera les nouveaux ordres éligibles de cet
+établissement à être adressés à ce laboratoire. Les ordres déjà en cours ne sont pas modifiés."*
+
+**Deactivation is never gated.** Switching routing off stays available precisely when a facility is
+in no condition to receive work — that is when an operator most needs it.
+
+If the server refuses, its reasons are shown against that laboratory and nothing is reported as
+having succeeded. That is not an error to retry past: readiness is evaluated from live rows inside
+the writing transaction, so the refusal is newer than what the screen was showing.
+
 ---
 
 ## What this does not do

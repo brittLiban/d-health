@@ -111,6 +111,7 @@ export function PlatformWorkspace({
     return (
       <FacilityDetail
         facility={open}
+        facilities={state.facilities}
         client={client}
         onBack={() => onOpenFacility(null)}
         onChanged={() => void load()}

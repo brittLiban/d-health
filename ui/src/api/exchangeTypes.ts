@@ -995,6 +995,18 @@ export interface FacilityReadiness {
   findings: ReadinessFinding[]
 }
 
+/**
+ * The body of a 409 from `PUT .../lab-routes/{labId}`.
+ *
+ * Each reason names the side and the code separately. The side is a field rather
+ * than a prefix on the code precisely so this client never has to recover it by
+ * stripping a string.
+ */
+export interface RouteActivationRefusal {
+  message: string
+  blocking_reasons: { side: 'provider' | 'lab' | null; code: string }[]
+}
+
 export interface IdentityLookupResult {
   identity_id: string
   display_name: string | null

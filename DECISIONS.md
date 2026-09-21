@@ -7236,14 +7236,26 @@ separations below are recorded rather than left to whichever screen is being wri
     mutation, and the eligible-destinations read all consult one evaluator.
     `ProviderLabRouteRepository.upsert` remains the low-level persistence primitive with no policy in
     it, so fixtures and seeds can construct state without satisfying the policy they exist to test.
-14. **Identity lookup grants nothing.** Finding somebody who has already authenticated is
+    The platform UI's activation control is a *courtesy* on top of that gate, never a substitute for
+    it: the screen decides what to offer, the server decides what happens, and when readiness changed
+    between the two the server's refusal — with its reasons — is what the operator is shown.
+    Deactivation is gated nowhere, because switching routing off must stay available exactly when a
+    facility is in no condition to receive work.
+14. **A readiness finding names its side in a field, not in its code.** A pair evaluation returns
+    `{side: "lab", code: "lab_releaser_present"}` rather than `lab_lab_releaser_present`. The
+    prefixed form forced every consumer to recover the side by stripping a string, which held only
+    by accident of the current code set — `lab_facility_enrolled` and `lab_lab_technician_present`
+    do not strip alike — and would have broken silently on the first code that followed neither
+    shape. Related: the frontend's `ExchangeApiError` keeps the parsed error body, because a refusal
+    flattened to one string loses precisely the part a person can act on.
+15. **Identity lookup grants nothing.** Finding somebody who has already authenticated is
     platform-admin-only, bounded, prefix-matched rather than fuzzy, and returns identity id, display
     name and email only. Creating the membership is a separate, explicit, audited act, and an email
     address is never authorization.
-15. **No double entry remains binding.** A missing connector is never to be solved by asking staff to
+16. **No double entry remains binding.** A missing connector is never to be solved by asking staff to
     enter results in their LIS and again in DHealth. A temporary pilot exception would be its own
     documented decision, never the default enrollment path.
-16. **Onboarding requires no real patient data.** Discovery records whether the source system *has* a
+17. **Onboarding requires no real patient data.** Discovery records whether the source system *has* a
     patient identifier namespace or a release event, never any patient's data. Examples are synthetic.
 
 ### Consequences

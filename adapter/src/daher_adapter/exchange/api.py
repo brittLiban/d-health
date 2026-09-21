@@ -4121,7 +4121,13 @@ def build_exchange_router(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "message": "cet établissement n'est pas prêt pour le routage de production",
-                    "blocking_reasons": list(error.decision.blocking_reasons),
+                    # Structured, not a side-prefixed string: the browser renders each reason in
+                    # French and needs to know which end of the pair it belongs to without
+                    # parsing an identifier back apart.
+                    "blocking_reasons": [
+                        {"side": finding.side, "code": finding.code}
+                        for finding in error.decision.blocking_findings
+                    ],
                 },
             ) from error
         except InvalidProviderLabRouteOrganizationType as error:
@@ -7139,6 +7145,36 @@ def build_exchange_router(
                 for f in findings
             ],
         )
+
+    @router.get(
+        "/platform/facilities/{provider_id}/lab-routes",
+        response_model=list[ProviderLabRouteResponse],
+    )
+    def list_platform_provider_lab_routes(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[ProviderLabRouteResponse]:
+        """Every route configured for this provider, active or not, for the platform operator.
+
+        Separate from the provider-scoped `/organizations/{id}/lab-routes` rather than a flag on
+        it, for two reasons. That endpoint requires CLINICIAN *at the provider*, and a platform
+        administrator legitimately holds no membership anywhere (ADR-055 §4) -- widening its gate
+        would hand cross-organization reach to a per-facility role. And it deliberately returns
+        only active routes, because a clinician's routing directory is the set of places they may
+        send work today; a platform operator is configuring the relationship itself and must see
+        the inactive ones to switch them back on.
+        """
+        _require_platform(principal, provider_id)
+        try:
+            organizations.get(provider_id)
+        except OrganizationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        return [
+            _to_provider_lab_route_response(route)
+            for route in provider_lab_routes.list_for_provider(provider_id, active_only=False)
+        ]
 
     @router.get("/platform/identities", response_model=list[IdentityLookupResponse])
     def lookup_identities(
