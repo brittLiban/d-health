@@ -37,6 +37,24 @@ export type WorkspaceStatus =
   | 'no_organizations'
   | 'error'
 
+/**
+ * DH-MVP-ONBOARD-001 — platform scope is not an organization.
+ *
+ * A DHealth platform administrator may legitimately hold no membership anywhere:
+ * they administer the network, not a facility. The temptation is to invent a
+ * "DHealth Headquarters" organization so the existing shell has something to put
+ * in `activeOrganization`, and that would be a lie with consequences — every
+ * capability check, every audit row and every org-scoped read would then be
+ * answering questions about a facility that does not exist.
+ *
+ * So scope is explicit. In `platform` scope `activeOrganization` is genuinely
+ * `null`, and the network surfaces read from platform endpoints that take no
+ * organization. A person holding both platform authority and memberships keeps
+ * both, and switches between them deliberately; platform context never
+ * masquerades as a membership.
+ */
+export type WorkspaceScope = 'organization' | 'platform'
+
 export interface WorkspaceContextValue {
   status: WorkspaceStatus
   user: ExchangeIdentity | null
@@ -46,7 +64,15 @@ export interface WorkspaceContextValue {
   capabilities: WorkspaceCapabilities
   error: ExchangeApiError | null
   client: ExchangeClient
-  /** Bumped on every accepted change of active organization. */
+  /** True when this identity holds DHealth platform authority. Never derived
+   *  from a membership, and never implied by ORG_ADMIN anywhere. */
+  platformAdmin: boolean
+  /** Which of the two scopes is on screen. `platform` only ever when
+   *  `platformAdmin` is true; `activeOrganization` is null throughout it. */
+  scope: WorkspaceScope
+  setScope: (scope: WorkspaceScope) => void
+  /** Bumped on every accepted change of active organization, and on every scope
+   *  change, because both invalidate every scoped async surface on screen. */
   generation: number
   setActiveOrganizationId: (organizationId: string) => void
   reload: () => Promise<void>

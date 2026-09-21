@@ -885,3 +885,118 @@ export interface PatientOrder {
   selection: PatientOrderSelection | null
   result_status: PatientResultStatus
 }
+
+// ── DH-MVP-ONBOARD-001: facility enrollment and integration readiness ────────────────────────
+
+export type ParticipationMode = 'NATIVE' | 'CONNECT'
+
+export type OnboardingStatus =
+  | 'DRAFT'
+  | 'FACILITY_VERIFIED'
+  | 'ORGANIZATION_READY'
+  | 'CONFIGURATION_IN_PROGRESS'
+  | 'TECHNICAL_DISCOVERY'
+  | 'AWAITING_CONNECTOR'
+  | 'READY_FOR_QUALIFICATION'
+  | 'READY_FOR_ROUTING'
+  | 'BLOCKED'
+
+export type IntegrationFeasibility =
+  | 'DISCOVERY_REQUIRED'
+  | 'CONNECTABLE'
+  | 'CONNECTOR_DEVELOPMENT_REQUIRED'
+  | 'NOT_SAFELY_INTEGRABLE'
+
+export type HostingModel = 'ON_PREMISE' | 'CLOUD' | 'HYBRID' | 'UNKNOWN'
+
+export type InterfaceType =
+  | 'REST_API'
+  | 'FHIR'
+  | 'HL7_V2'
+  | 'WEBHOOK'
+  | 'SFTP'
+  | 'FILE_IMPORT_EXPORT'
+  | 'DATABASE_READ'
+  | 'OTHER'
+  | 'UNKNOWN'
+
+/**
+ * What DHealth actually knows about a reported interface. The gap between
+ * REPORTED and VERIFIED is the most load-bearing distinction in Connect
+ * onboarding, and neither of them means a connector exists.
+ */
+export type InterfaceVerificationState = 'REPORTED' | 'DOCUMENTED' | 'VERIFIED' | 'UNSUPPORTED'
+
+export type EnrollmentBlockerCode =
+  | 'VENDOR_DOCUMENTATION_UNAVAILABLE'
+  | 'VENDOR_CONTACT_REQUIRED'
+  | 'REQUIRED_INTERFACE_UNAVAILABLE'
+  | 'MISSING_RESULT_RELEASE_EVENT'
+  | 'UNKNOWN_PATIENT_IDENTIFIER_BEHAVIOR'
+  | 'CONNECTOR_NOT_IMPLEMENTED'
+  | 'FACILITY_CONFIGURATION_INCOMPLETE'
+  | 'CLINICAL_TEMPLATE_SIGNOFF_REQUIRED'
+
+export interface FacilityInterfaceCapability {
+  interface_type: InterfaceType
+  verification_state: InterfaceVerificationState
+  detail: string | null
+}
+
+export interface FacilityEnrollmentBlocker {
+  id: string
+  code: EnrollmentBlockerCode
+  note: string | null
+  created_at: string
+}
+
+export interface FacilityEnrollment {
+  organization_id: string
+  organization_name: string
+  organization_type: string
+  organization_status: string
+  participation_mode: ParticipationMode
+  onboarding_status: OnboardingStatus
+  integration_feasibility: IntegrationFeasibility | null
+  existing_system_name: string | null
+  existing_system_vendor: string | null
+  existing_system_version: string | null
+  hosting_model: HostingModel | null
+  technical_contact: string | null
+  vendor_contact: string | null
+  documentation_reference: string | null
+  patient_identifier_namespace: string | null
+  order_identifier_concept: string | null
+  report_identifier_concept: string | null
+  specimen_identifier_concept: string | null
+  exposes_source_event_timestamps: boolean | null
+  exposes_professional_release_event: boolean | null
+  notes: string | null
+  interfaces: FacilityInterfaceCapability[]
+  open_blockers: FacilityEnrollmentBlocker[]
+}
+
+/**
+ * One server-derived fact about whether this facility can take production work.
+ * The frontend renders these; it never computes its own version of them.
+ */
+export interface ReadinessFinding {
+  code: string
+  satisfied: boolean
+  blocking: boolean
+  detail: string | null
+}
+
+export interface FacilityReadiness {
+  organization_id: string
+  participation_mode: ParticipationMode
+  onboarding_status: OnboardingStatus
+  production_routing_allowed: boolean
+  findings: ReadinessFinding[]
+}
+
+export interface IdentityLookupResult {
+  identity_id: string
+  display_name: string | null
+  email: string | null
+}

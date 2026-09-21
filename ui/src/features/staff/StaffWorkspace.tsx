@@ -14,7 +14,14 @@ import { LabOrdersPage } from '../lab/pages/LabOrdersPage'
 import { LabReleasePage } from '../lab/pages/LabReleasePage'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import { StaffShell } from './StaffShell'
-import { availableSections, resolveSection, type StaffSectionId } from './staffSections'
+import {
+  availablePlatformSections,
+  availableSections,
+  resolveSection,
+  type PlatformSectionId,
+  type StaffSectionId,
+} from './staffSections'
+import { PlatformWorkspace } from '../platform/PlatformWorkspace'
 
 /** DH-IDENTITY-001: a request identity only, never a patient identity (§13/§28). */
 export interface PendingPatientCreation {
@@ -100,7 +107,8 @@ export function StaffWorkspace({
   onReauthenticate,
 }: StaffWorkspaceProps) {
   const workspace = useWorkspace()
-  const { status, activeOrganization, capabilities, error, reload } = workspace
+  const { status, activeOrganization, capabilities, error, reload, platformAdmin, scope } =
+    workspace
 
   const [requestedSection, setRequestedSection] = useState<StaffSectionId | null>(
     initialSection ?? null,
@@ -113,11 +121,27 @@ export function StaffWorkspace({
     Record<string, PendingOrderMutation>
   >({})
 
+  // Platform navigation state, held here beside the staff equivalent rather than
+  // inside the platform tree, so switching scope and back does not lose where the
+  // operator was.
+  const [requestedPlatformSection, setRequestedPlatformSection] =
+    useState<PlatformSectionId>("facilities")
+  const [openFacilityId, setOpenFacilityId] = useState<string | null>(null)
+
   const sections = useMemo(
     () => availableSections(activeOrganization, capabilities),
     [activeOrganization, capabilities],
   )
   const activeSection = resolveSection(requestedSection, sections)
+
+  const platformSections = useMemo(
+    () => availablePlatformSections(platformAdmin),
+    [platformAdmin],
+  )
+  const activePlatformSection: PlatformSectionId =
+    platformSections.some((s) => s.id === requestedPlatformSection)
+      ? requestedPlatformSection
+      : "facilities"
 
   const handleLogout = () => {
     // Drops the in-memory reconciliation records for this browser session. They
@@ -202,6 +226,35 @@ export function StaffWorkspace({
     )
   }
 
+  // DH-MVP-ONBOARD-001: platform scope, before the organization branches below.
+  // A platform administrator may legitimately hold no membership at all, so this
+  // must come first — otherwise the `no_organizations` branch would tell someone
+  // who administers the whole network that nothing is attached to their account.
+  // `activeOrganization` stays null throughout: network authority is not a
+  // membership and never borrows one.
+  if (scope === 'platform' && platformAdmin) {
+    return (
+      <StaffShell
+        sections={platformSections}
+        activeSection={activePlatformSection}
+        onSelectSection={(section) => setRequestedPlatformSection(section as PlatformSectionId)}
+        onLogout={handleLogout}
+      >
+        {/* Keyed on the scope for the same reason the organization subtree is
+            keyed on its id: leaving platform scope must discard everything the
+            network surfaces were holding. */}
+        <div key="platform-scope">
+          <PlatformWorkspace
+            section={activePlatformSection}
+            client={workspace.client}
+            onOpenFacility={setOpenFacilityId}
+            openFacilityId={openFacilityId}
+          />
+        </div>
+      </StaffShell>
+    )
+  }
+
   if (status === 'no_organizations' || !activeOrganization) {
     return (
       <div style={{ padding: 'var(--space-5)' }}>
@@ -274,7 +327,7 @@ export function StaffWorkspace({
     <StaffShell
       sections={sections}
       activeSection={activeSection}
-      onSelectSection={setRequestedSection}
+      onSelectSection={(section) => setRequestedSection(section as StaffSectionId)}
       onLogout={handleLogout}
     >
       {/* See the note above: this key is the organization-switch safety mechanism. */}

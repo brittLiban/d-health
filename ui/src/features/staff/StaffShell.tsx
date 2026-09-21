@@ -1,15 +1,28 @@
 import type { ReactNode } from 'react'
 import { formatRoleLabels } from '../workspace/roleLabels'
 import { useWorkspace } from '../workspace/WorkspaceContext'
-import type { StaffSection, StaffSectionId } from './staffSections'
 import styles from './StaffShell.module.css'
+
+/** The switcher value standing for platform scope. Not an organization id, and
+ *  deliberately not a uuid-shaped string, so it can never collide with one. */
+const PLATFORM_SCOPE_VALUE = "__dhealth_platform__"
 
 export const STAFF_MAIN_CONTENT_ID = 'staff-main-content'
 
+/**
+ * A navigable section. Deliberately widened from `StaffSectionId` so platform
+ * scope can use the same navigation: the shell renders what it is given and does
+ * not need to know whether a section belongs to a membership or to the network.
+ */
+export interface ShellSection {
+  id: string
+  label: string
+}
+
 export interface StaffShellProps {
-  sections: readonly StaffSection[]
-  activeSection: StaffSectionId | null
-  onSelectSection: (section: StaffSectionId) => void
+  sections: readonly ShellSection[]
+  activeSection: string | null
+  onSelectSection: (section: string) => void
   children: ReactNode
   onLogout?: () => void
 }
@@ -77,7 +90,15 @@ export function StaffShell({
   children,
   onLogout,
 }: StaffShellProps) {
-  const { user, organizations, activeOrganization, setActiveOrganizationId } = useWorkspace()
+  const {
+    user,
+    organizations,
+    activeOrganization,
+    setActiveOrganizationId,
+    platformAdmin,
+    scope,
+    setScope,
+  } = useWorkspace()
 
   return (
     <div className={styles.shell}>
@@ -91,7 +112,15 @@ export function StaffShell({
           DHealth
         </p>
 
-        {activeOrganization ? (
+        {scope === "platform" ? (
+          // Platform scope names the network, never an establishment. There is no
+          // organization here and the masthead must not imply one -- a platform
+          // administrator acting on the network is not acting as a facility.
+          <div className={styles.identity}>
+            <span className={styles.organization}>Réseau DHealth</span>
+            <span className={styles.organizationKind}>Administration de la plateforme</span>
+          </div>
+        ) : activeOrganization ? (
           <div className={styles.identity}>
             <span className={styles.organization}>{activeOrganization.organization_name}</span>
             <span className={styles.organizationKind}>
@@ -101,17 +130,40 @@ export function StaffShell({
         ) : null}
 
         <div className={styles.actions}>
-          {organizations.length > 1 ? (
+          {organizations.length + (platformAdmin ? 1 : 0) > 1 ? (
+            // One control for both kinds of context, because to the person using it
+            // "where am I working" is a single question. The platform entry is a
+            // scope rather than an organization: choosing it leaves
+            // `activeOrganization` null instead of pointing at a fabricated
+            // facility, so nothing downstream can mistake network authority for a
+            // membership.
             <div className={styles.switcher}>
+              {/* "Contexte" only when there is more than one kind of context to be in.
+                  For somebody who simply belongs to two clinics, "Établissement
+                  actif" is the more precise word and stays. */}
               <label className={styles.switcherLabel} htmlFor="staff-organization-switcher">
-                Établissement actif
+                {platformAdmin ? "Contexte actif" : "Établissement actif"}
               </label>
               <select
                 id="staff-organization-switcher"
                 className={styles.select}
-                value={activeOrganization?.organization_id ?? ''}
-                onChange={(event) => setActiveOrganizationId(event.target.value)}
+                value={
+                  scope === 'platform'
+                    ? PLATFORM_SCOPE_VALUE
+                    : (activeOrganization?.organization_id ?? '')
+                }
+                onChange={(event) => {
+                  if (event.target.value === PLATFORM_SCOPE_VALUE) {
+                    setScope('platform')
+                    return
+                  }
+                  setScope('organization')
+                  setActiveOrganizationId(event.target.value)
+                }}
               >
+                {platformAdmin ? (
+                  <option value={PLATFORM_SCOPE_VALUE}>Réseau DHealth</option>
+                ) : null}
                 {organizations.map((organization) => (
                   <option key={organization.organization_id} value={organization.organization_id}>
                     {organization.organization_name}

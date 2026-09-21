@@ -1,0 +1,386 @@
+/* DH-MVP-ONBOARD-001 — network administration, in the DHealth design language.
+ *
+ * This is the same product, so every value resolves through the token layer in
+ * src/index.css: bone ground, petrol for a step complete, brass for something
+ * owed, clay for stopped, ink for recorded fact. Nothing here is a generic admin
+ * theme, and there is no literal colour in this file.
+ *
+ * Registre density: platform work is scanning a list of facilities and finding
+ * the one that needs attention, so rows are 56px-floored and comfortable rather
+ * than dense.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  max-width: 62rem;
+}
+
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.pageTitle {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-2xl);
+  color: var(--color-text);
+}
+
+.sectionTitle {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.subTitle {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+/* ── Facility list ───────────────────────────────────────────────────────── */
+
+.facilityList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.facilityRow {
+  width: 100%;
+  min-height: var(--row-height-registre);
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1.2fr) minmax(0, 1.5fr);
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.facilityRow:hover {
+  background: var(--color-surface-hover);
+}
+
+.facilityName {
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.facilityMeta {
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-sm);
+}
+
+/* The state word carries a tint, never the meaning on its own — the word is
+   always present and always readable without colour. */
+.facilityStatus {
+  font-weight: var(--font-weight-medium);
+}
+
+.facilityBlocker {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ── Workflow state ──────────────────────────────────────────────────────── */
+
+.done {
+  color: var(--color-success-700);
+}
+
+.owed {
+  color: var(--color-waiting);
+}
+
+.stopped {
+  color: var(--color-stopped);
+}
+
+.stoppedPanel {
+  padding: var(--space-4);
+  background: var(--color-stopped-bg);
+  border: 1px solid var(--color-stopped-border);
+  border-radius: var(--radius-md);
+}
+
+.stoppedPanel h2 {
+  margin-top: 0;
+}
+
+.nextStep {
+  margin-top: var(--space-3);
+}
+
+.routingVerdict {
+  font-size: var(--font-size-lg);
+}
+
+.routingLabel {
+  color: var(--color-text-subtle);
+}
+
+/* ── Findings and definitions ────────────────────────────────────────────── */
+
+.findingList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.findingList li {
+  padding-left: var(--space-4);
+  position: relative;
+}
+
+/* A marker that survives monochrome: the blocking items are squared, matching
+   the relay's own stopped node, rather than differing only by hue. */
+.findingList li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong);
+}
+
+.findingBlocking {
+  color: var(--color-text);
+}
+
+.findingBlocking::before {
+  border-radius: 2px;
+  border-color: var(--color-waiting);
+  background: var(--color-waiting);
+}
+
+.findingDetail {
+  color: var(--color-text-subtle);
+}
+
+.definitionList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.definitionList dt {
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-sm);
+}
+
+.definitionList dd {
+  margin: 2px 0 0;
+  color: var(--color-text);
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+
+.interfaceTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-base);
+}
+
+.interfaceTable th,
+.interfaceTable td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.interfaceTable thead th {
+  color: var(--color-text-subtle);
+  font-weight: var(--font-weight-medium);
+}
+
+.select {
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-3);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.linkButton {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.linkButton:hover {
+  text-decoration: underline;
+}
+
+/* ── Progress ────────────────────────────────────────────────────────────── */
+
+.progressList {
+  margin: 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── Wizard ──────────────────────────────────────────────────────────────── */
+
+.stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.stepCurrent {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  box-shadow: inset 0 -2px 0 var(--color-primary);
+}
+
+.stepBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: var(--measure-focus);
+}
+
+.fieldset {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fieldset legend {
+  padding: 0 var(--space-2);
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.radioRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--touch-target-min);
+}
+
+/* The participation choice is consequential, so each option is a card with its
+   explanation attached rather than a bare radio in a list. */
+.choiceCard {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.choiceCard:hover {
+  background: var(--color-surface-hover);
+}
+
+.choiceDescription {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.searchRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.resultList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.resultRow,
+.resultSelected {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--space-3);
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.resultSelected {
+  background: var(--color-primary-tint);
+  border-color: var(--color-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.wizardActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.errorText {
+  color: var(--color-danger);
+}
+
+@media (max-width: 900px) {
+  .facilityRow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}

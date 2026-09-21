@@ -8,7 +8,7 @@ import type {
   ExchangeIdentity,
   ExchangeMembershipSummary,
 } from '../../api/exchangeTypes'
-import { WorkspaceContext, type WorkspaceStatus } from './WorkspaceContext'
+import { WorkspaceContext, type WorkspaceScope, type WorkspaceStatus } from './WorkspaceContext'
 import { capabilitiesFor, usableMemberships } from './workspaceCapabilities'
 
 export interface WorkspaceProviderProps {
@@ -41,6 +41,7 @@ export function WorkspaceProvider({
   const [activeOrganizationId, setActiveOrganizationIdState] = useState<string | null>(null)
   const [error, setError] = useState<ExchangeApiError | null>(null)
   const [generation, setGeneration] = useState(0)
+  const [scope, setScopeState] = useState<WorkspaceScope>('organization')
 
   const requestSeq = useRef(0)
 
@@ -77,8 +78,20 @@ export function WorkspaceProvider({
       setOrganizations(usable)
 
       if (usable.length === 0) {
-        setStatus('no_organizations')
         setActiveOrganizationIdState(null)
+        // A platform administrator with no membership is not a broken account: they
+        // administer the network rather than working inside a facility. Telling them
+        // "no establishment is attached to your account" would be true and useless,
+        // and inventing an organization so the shell had something to put in
+        // `activeOrganization` would be false — every capability check and every
+        // org-scoped read would then be answering about a facility that does not
+        // exist. They get platform scope, where `activeOrganization` stays null.
+        if (me.platform_admin) {
+          setScopeState('platform')
+          setStatus('ready')
+          return
+        }
+        setStatus('no_organizations')
         return
       }
 
@@ -145,10 +158,35 @@ export function WorkspaceProvider({
     [activeOrganizationId, organizations],
   )
 
+  const platformAdmin = user?.platform_admin === true
+
+  const setScope = useCallback(
+    (next: WorkspaceScope) => {
+      if (next === scope) return
+      // Platform scope is unreachable without platform authority. The control that
+      // offers it is hidden for everyone else, and that hiding is a courtesy: this
+      // check is what actually prevents a stale or crafted call from putting an
+      // ordinary user in front of network administration, and the platform
+      // endpoints refuse them regardless.
+      if (next === 'platform' && !platformAdmin) return
+      // Leaving platform scope needs somewhere to land. A platform admin with no
+      // membership has nowhere, so they stay where they are.
+      if (next === 'organization' && organizations.length === 0) return
+      setScopeState(next)
+      // A scope change invalidates every scoped async surface on screen for exactly
+      // the same reason an organization change does.
+      setGeneration((g) => g + 1)
+    },
+    [scope, platformAdmin, organizations.length],
+  )
+
   const value = useMemo(
     () => ({
       status,
       user,
+      platformAdmin,
+      scope,
+      setScope,
       organizations,
       activeOrganization,
       capabilities,
@@ -161,6 +199,9 @@ export function WorkspaceProvider({
     [
       status,
       user,
+      platformAdmin,
+      scope,
+      setScope,
       organizations,
       activeOrganization,
       capabilities,

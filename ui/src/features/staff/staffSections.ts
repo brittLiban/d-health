@@ -94,3 +94,47 @@ export function resolveSection(
   if (requested && available.some((section) => section.id === requested)) return requested
   return available[0].id
 }
+
+// ── DH-MVP-ONBOARD-001: platform scope ───────────────────────────────────────────────────────
+
+/**
+ * The network administration sections, shown only in platform scope.
+ *
+ * Deliberately a separate list rather than extra entries in `availableSections`:
+ * the staff sections derive from an active membership, and platform authority is
+ * not a membership. Merging them would have required an organization to exist for
+ * a platform administrator who legitimately has none.
+ *
+ * `Configuration réseau` is not here for the same reason `Réglages` is absent
+ * from the staff nav — there is no screen behind it yet. Route configuration
+ * lives inside a facility's own detail page, where the relationship it is about
+ * is on screen.
+ */
+export type PlatformSectionId = 'facilities' | 'integrations'
+
+export interface PlatformSection {
+  id: PlatformSectionId
+  label: string
+}
+
+const PLATFORM_SECTION_LABELS: Record<PlatformSectionId, string> = {
+  facilities: 'Établissements',
+  integrations: 'Intégrations',
+}
+
+export function platformSectionLabel(id: PlatformSectionId): string {
+  return PLATFORM_SECTION_LABELS[id]
+}
+
+/**
+ * Platform sections require platform authority and nothing else. Hiding them from
+ * everybody else is usability; the server refuses them regardless, which is the
+ * part that makes it safe.
+ */
+export function availablePlatformSections(platformAdmin: boolean): PlatformSection[] {
+  if (!platformAdmin) return []
+  return (['facilities', 'integrations'] as const).map((id) => ({
+    id,
+    label: PLATFORM_SECTION_LABELS[id],
+  }))
+}

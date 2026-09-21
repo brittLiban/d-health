@@ -26,8 +26,16 @@ import type {
   ClinicPatientSummary,
   DoctorReviewResponse,
   EntryCompletionResponse,
+  EnrollmentBlockerCode,
   ExchangeErrorCode,
   ExchangeMeResponse,
+  FacilityEnrollment,
+  FacilityReadiness,
+  IdentityLookupResult,
+  InterfaceType,
+  InterfaceVerificationState,
+  OnboardingStatus,
+  ParticipationMode,
   LabAssignmentResponse,
   LabCollectionResponse,
   LabObservation,
@@ -1435,6 +1443,163 @@ export class ExchangeClient {
     await this.requestNoContent(
       `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/patient-access`,
       { method: 'DELETE', signal: options.signal },
+      options.token,
+    )
+  }
+
+  // ── DH-MVP-ONBOARD-001: the platform control plane ─────────────────────────────────────────
+
+  /**
+   * GET /exchange/v1/platform/facilities -- every enrolled facility on the network.
+   * Platform-admin only server-side; this client method does not and cannot make that true.
+   */
+  async listFacilities(
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment[]> {
+    return this.request<FacilityEnrollment[]>(
+      "/platform/facilities",
+      { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** POST /exchange/v1/platform/facilities -- organization and enrollment, one transaction. */
+  async enrolFacility(
+    body: { name: string; organization_type: "PROVIDER" | "LAB"; participation_mode: ParticipationMode },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      "/platform/facilities",
+      { method: "POST", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  async getFacilityEnrollment(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment`,
+      { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../enrollment/readiness -- server-derived, never recomputed here.
+   * The UI formats these findings; it does not decide them.
+   */
+  async getFacilityReadiness(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityReadiness> {
+    return this.request<FacilityReadiness>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment/readiness`,
+      { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  async setParticipationMode(
+    organizationId: string,
+    participationMode: ParticipationMode,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment/participation-mode`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ participation_mode: participationMode }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  async setOnboardingStatus(
+    organizationId: string,
+    onboardingStatus: OnboardingStatus,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment/status`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ onboarding_status: onboardingStatus }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /** PUT .../integration-profile -- CONNECT technical discovery. Never carries a credential. */
+  async updateIntegrationProfile(
+    organizationId: string,
+    body: Record<string, string | boolean | null>,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/integration-profile`,
+      { method: "PUT", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * PUT .../integration-profile/interfaces/{type} -- what DHealth knows about one interface.
+   * Recording VERIFIED says the interface exists as documented. It is not a connector, and the
+   * server changes no onboarding status and unlocks no routing in response to it.
+   */
+  async setInterfaceCapability(
+    organizationId: string,
+    interfaceType: InterfaceType,
+    body: { verification_state: InterfaceVerificationState; detail?: string | null },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/integration-profile/interfaces/${encodeURIComponent(interfaceType)}`,
+      { method: "PUT", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  async addEnrollmentBlocker(
+    organizationId: string,
+    body: { code: EnrollmentBlockerCode; note?: string | null },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment/blockers`,
+      { method: "POST", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  async resolveEnrollmentBlocker(
+    organizationId: string,
+    blockerId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityEnrollment> {
+    return this.request<FacilityEnrollment>(
+      `/organizations/${encodeURIComponent(organizationId)}/enrollment/blockers/${encodeURIComponent(blockerId)}`,
+      { method: "DELETE", signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/platform/identities -- find somebody who has already signed in.
+   * A match grants nothing; creating the membership is a separate, explicit call.
+   */
+  async lookupIdentities(
+    query: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<IdentityLookupResult[]> {
+    const params = new URLSearchParams({ q: query })
+    return this.request<IdentityLookupResult[]>(
+      `/platform/identities?${params.toString()}`,
+      { method: "GET", signal: options.signal },
       options.token,
     )
   }
