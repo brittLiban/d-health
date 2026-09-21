@@ -49,6 +49,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.exchange.facility_enrollment import is_operationally_ready_in_session
 from daher_adapter.exchange.models import (
     LabDirectoryProfile,
     LabOffering,
@@ -111,6 +112,22 @@ class LabAssignmentIntegrityError(RuntimeError):
     docstring). Mirrors `PatientIdentityIntegrityError`'s own fail-closed discipline (`exchange/
     patients.py`): never fabricate or silently null a destination-lab projection field when the
     canonical source data is inconsistent -- raise instead."""
+
+
+class LabNotOperationallyReady(RuntimeError):
+    """DH-MVP-ONBOARD-001: the route is configured and active, and the lab still cannot take the
+    work right now.
+
+    The three facts this system keeps apart:
+
+        configured route      a platform admin said this pair may exchange work
+        operationally ready   the facility can actually do that work today
+        eligible destination  both of the above, for this order, at this moment
+
+    A lab whose last LAB_RESULT_RELEASER left is still configured -- that relationship was a
+    deliberate decision and nothing here revokes it -- but it is not a destination new work may be
+    sent to, because an order arriving there could be entered and never released.
+    """
 
 
 class ProviderLabRouteNotActive(RuntimeError):
@@ -523,6 +540,26 @@ class LabSelectionRepository:
             raise LabCannotFulfillOrder(
                 f"lab {lab_organization_id} does not have an active offering for every "
                 f"requested item -- refusing partial assignment"
+            )
+
+        # DH-MVP-ONBOARD-001: last, deliberately. Every check above diagnoses one specific defect
+        # -- not accepting orders, no directory profile, an inactive organization, an inactive
+        # offering -- and each raises `LabCannotFulfillOrder` with that exact reason. Running this
+        # broader check first would subsume all of them behind one generic refusal and destroy the
+        # diagnostic precision those messages carry. So it runs here, where it catches only what
+        # the specific checks cannot see: a facility whose enrollment is blocked, or which lacks
+        # the staffing DHealth requires to carry an order to release.
+        #
+        # A configured route is not the same fact as a facility that can do the work. Staffing
+        # changes after a route was activated -- the lab's only result releaser leaves -- and
+        # nothing rewrites the route row when that happens, by design: a platform admin configured
+        # that relationship deliberately and it stays theirs. What changes is whether new work may
+        # be sent there now, re-derived from live rows inside this same locked transaction.
+        if not is_operationally_ready_in_session(session, lab_organization_id):
+            raise LabNotOperationallyReady(
+                f"lab {lab_organization_id} is configured for this provider but cannot currently "
+                f"receive production work -- its facility enrollment is blocked, or it lacks the "
+                f"staffing DHealth requires to enter and release a result"
             )
 
         lab_selection = LabSelection(

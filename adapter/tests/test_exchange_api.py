@@ -682,7 +682,7 @@ def test_org_admin_lists_their_own_organizations_memberships(
     client: TestClient, keypair, organizations: OrganizationRepository
 ) -> None:
     private_key, _ = keypair
-    org = make_provider(organizations)
+    org = make_provider(organizations, operational=False)
     admin_identity_id = _bootstrap_identity(client, private_key, "admin-sub")
     _grant_org_admin(client, keypair, organizations, org.id, admin_identity_id, "admin-sub")
     member_identity_id = _bootstrap_identity(client, private_key, "member-sub")

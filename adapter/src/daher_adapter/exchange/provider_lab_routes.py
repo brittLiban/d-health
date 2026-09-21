@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.exchange.facility_enrollment import is_operationally_ready_in_session
 from daher_adapter.exchange.models import (
     LabDirectoryProfile,
     LabOffering,
@@ -278,9 +279,24 @@ class ProviderLabRouteRepository:
             ).all()
             if not directory_rows:
                 return []
+            # DH-MVP-ONBOARD-001: a configured, active route is necessary and not sufficient. A lab
+            # that has lost the staffing DHealth needs to complete an order -- most sharply, its
+            # last LAB_RESULT_RELEASER -- stops being an eligible destination here, while its route
+            # row stays exactly as the platform admin configured it. Nothing in this system rewrites
+            # that row when people come and go; what changes is the answer to "may new work go there
+            # now", re-derived from live rows on every read.
+            #
+            # Evaluated per surviving candidate rather than as a join: the readiness rule lives in
+            # one place (`facility_enrollment.operational_findings_in_session`) so this read, the
+            # assignment mutation, and the activation endpoint cannot drift apart. The candidate
+            # list is already narrowed by route and offering, so this is a handful of rows.
             directory_by_lab = {
-                organization.id: (organization, profile) for organization, profile in directory_rows
+                organization.id: (organization, profile)
+                for organization, profile in directory_rows
+                if is_operationally_ready_in_session(session, organization.id)
             }
+            if not directory_by_lab:
+                return []
             final_lab_ids = list(directory_by_lab.keys())
 
             # Re-verify every condition pass (1) already checked, not just re-trust it -- the same

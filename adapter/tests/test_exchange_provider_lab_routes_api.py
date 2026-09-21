@@ -24,7 +24,12 @@ from daher_adapter.exchange.audit import ExchangeAuditWriter
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.directory import LabDirectoryProfileRepository
 from daher_adapter.exchange.identity import PatientReferenceRepository
-from daher_adapter.exchange.models import ExchangeSecurityAuditEvent
+from daher_adapter.exchange.models import (
+    ExchangeSecurityAuditEvent,
+    OrganizationMembership,
+    OrganizationRoleAssignment,
+    ProviderLabRoute,
+)
 from daher_adapter.exchange.organizations import OrganizationRepository
 
 
@@ -143,6 +148,29 @@ def _configure_route(client, private_key, provider_id, lab_id, *, active: bool =
     )
 
 
+def _production_ready_lab(organizations, directory, catalog, *, name: str):
+    """A lab that satisfies every production-routing condition.
+
+    DH-MVP-ONBOARD-001 made route activation readiness-gated, so a bare `make_lab` is no longer a
+    routable destination: it has no directory profile and no offerings, and §37 requires both. The
+    tests below are about route management mechanics, not about readiness, so they need a lab that
+    genuinely is ready.
+    """
+    lab = make_lab(organizations, name=name)
+    directory.upsert(
+        lab_organization_id=lab.id,
+        public_address=f"{name} Address",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=False,
+        accepting_orders=True,
+    )
+    entry, _ = catalog.create_entry(code=f"RDY-{name[:12]}", display_name=f"Analyse {name}")
+    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    return lab
+
+
 def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, listed: bool = False):
     lab = make_lab(organizations, name=name)
     directory.upsert(
@@ -156,6 +184,30 @@ def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, lis
     )
     catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
     return lab
+
+
+def _revoke_role(sessions, organization_id, role: str) -> None:
+    """Remove one role from every active membership at this organization.
+
+    Deletes the assignment row rather than inactivating the whole membership, so the test isolates
+    "this authority is gone" from "this person is gone" -- a lab that still has staff and no longer
+    has a releaser is the case that matters.
+    """
+    with sessions() as session:
+        rows = session.scalars(
+            select(OrganizationRoleAssignment)
+            .join(
+                OrganizationMembership,
+                OrganizationMembership.id == OrganizationRoleAssignment.membership_id,
+            )
+            .where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationRoleAssignment.role == role,
+            )
+        ).all()
+        for row in rows:
+            session.delete(row)
+        session.commit()
 
 
 def _audit_events(sessions, event_type: str) -> list[dict]:
@@ -185,7 +237,7 @@ def test_put_route_platform_admin_creates_and_returns_201(
 ) -> None:
     private_key, _ = keypair
     provider = make_provider(organizations, name="PutRouteProvider")
-    lab = make_lab(organizations, name="PutRouteLab")
+    lab = _production_ready_lab(organizations, directory, catalog, name="PutRouteLab")
 
     response = _configure_route(client, private_key, provider.id, lab.id)
 
@@ -204,7 +256,7 @@ def test_put_route_platform_admin_creates_and_returns_201(
 
 
 def test_put_route_idempotent_same_state_records_unchanged_outcome(
-    client: TestClient, keypair, organizations, sessions
+    client: TestClient, keypair, organizations, directory, catalog, sessions
 ) -> None:
     """Mirrors ``put_directory_profile``'s own established convention: every PUT call is audited,
     including a no-op replay -- ``outcome`` distinguishes ``"created"``/``"updated"``/
@@ -213,7 +265,7 @@ def test_put_route_idempotent_same_state_records_unchanged_outcome(
     admin configuration change)."""
     private_key, _ = keypair
     provider = make_provider(organizations, name="PutRouteReplayProvider")
-    lab = make_lab(organizations, name="PutRouteReplayLab")
+    lab = _production_ready_lab(organizations, directory, catalog, name="PutRouteReplayLab")
 
     first = _configure_route(client, private_key, provider.id, lab.id)
     second = _configure_route(client, private_key, provider.id, lab.id)
@@ -228,11 +280,11 @@ def test_put_route_idempotent_same_state_records_unchanged_outcome(
 
 
 def test_put_route_changing_active_returns_200_with_updated_audit(
-    client: TestClient, keypair, organizations, sessions
+    client: TestClient, keypair, organizations, directory, catalog, sessions
 ) -> None:
     private_key, _ = keypair
     provider = make_provider(organizations, name="PutRouteChangeProvider")
-    lab = make_lab(organizations, name="PutRouteChangeLab")
+    lab = _production_ready_lab(organizations, directory, catalog, name="PutRouteChangeLab")
     _configure_route(client, private_key, provider.id, lab.id, active=True)
 
     response = _configure_route(client, private_key, provider.id, lab.id, active=False)
@@ -299,11 +351,11 @@ def test_put_route_nonexistent_provider_is_404(client: TestClient, keypair, orga
 
 
 def test_get_lab_routes_clinician_sees_own_active_routes(
-    client: TestClient, keypair, organizations
+    client: TestClient, keypair, organizations, directory, catalog
 ) -> None:
     private_key, _ = keypair
     provider, clinician_token = _setup_clinician(client, private_key, organizations, "GetRoutes")
-    lab = make_lab(organizations, name="GetRoutesLab")
+    lab = _production_ready_lab(organizations, directory, catalog, name="GetRoutesLab")
     _configure_route(client, private_key, provider.id, lab.id)
 
     response = client.get(
@@ -550,3 +602,85 @@ def test_a9_offering_deactivated_after_eligible_read_assignment_refuses(
         json={"lab_organization_id": str(lab.id)},
     )
     assert assign_response.status_code == 409, assign_response.text
+
+
+# -- DH-MVP-ONBOARD-001: production route activation is readiness-gated -------------------------
+
+
+def test_rr_activation_refused_when_the_lab_cannot_complete_an_order(
+    client: TestClient, keypair, organizations, directory, catalog, sessions
+) -> None:
+    """The production path -- the HTTP endpoint a platform admin actually uses -- must consult
+    readiness, not merely offer it as a separate read somebody might call.
+
+    This lab is configured perfectly except that nobody there may release a result. It can receive
+    an order and enter every value, and can never finish. Activating routing to it would send work
+    somewhere it cannot leave, so the endpoint refuses with the specific reason.
+    """
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="GateProvider")
+    lab = _production_ready_lab(organizations, directory, catalog, name="GateLabNoReleaser")
+    # Strip the release authority the default helper granted, leaving entry in place.
+    _revoke_role(sessions, lab.id, "LAB_RESULT_RELEASER")
+
+    response = _configure_route(client, private_key, provider.id, lab.id)
+
+    assert response.status_code == 409, response.text
+    assert "lab_lab_releaser_present" in response.json()["detail"]["blocking_reasons"]
+
+    # And nothing was written: a refused activation must not leave a route behind.
+    with sessions() as session:
+        assert (
+            session.scalar(
+                select(ProviderLabRoute).where(
+                    ProviderLabRoute.provider_organization_id == provider.id,
+                    ProviderLabRoute.lab_organization_id == lab.id,
+                )
+            )
+            is None
+        )
+
+
+def test_rr_deactivation_is_never_gated(
+    client: TestClient, keypair, organizations, directory, catalog, sessions
+) -> None:
+    """Switching routing *off* must stay available even when the facility is in no condition to
+    receive work -- gating it would trap a route in the exact state an operator most needs to be
+    able to leave."""
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="DeactivateProvider")
+    lab = _production_ready_lab(organizations, directory, catalog, name="DeactivateLab")
+
+    assert _configure_route(client, private_key, provider.id, lab.id).status_code == 201
+
+    _revoke_role(sessions, lab.id, "LAB_RESULT_RELEASER")
+
+    response = _configure_route(client, private_key, provider.id, lab.id, active=False)
+    assert response.status_code == 200, response.text
+    assert response.json()["active"] is False
+
+
+def test_rr_staffing_loss_leaves_the_configured_route_alone(
+    client: TestClient, keypair, organizations, directory, catalog, sessions
+) -> None:
+    """configured route != operationally ready != currently eligible.
+
+    Losing the last releaser must not rewrite a relationship a platform admin configured
+    deliberately. What it changes is whether new work may go there.
+    """
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="StaffLossProvider")
+    lab = _production_ready_lab(organizations, directory, catalog, name="StaffLossLab")
+    assert _configure_route(client, private_key, provider.id, lab.id).status_code == 201
+
+    _revoke_role(sessions, lab.id, "LAB_RESULT_RELEASER")
+
+    with sessions() as session:
+        route = session.scalar(
+            select(ProviderLabRoute).where(
+                ProviderLabRoute.provider_organization_id == provider.id,
+                ProviderLabRoute.lab_organization_id == lab.id,
+            )
+        )
+        assert route is not None
+        assert route.active is True, "the configured relationship must survive a staffing change"

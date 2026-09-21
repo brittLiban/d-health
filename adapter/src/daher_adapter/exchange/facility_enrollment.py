@@ -32,7 +32,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -45,8 +45,14 @@ from daher_adapter.exchange.models import (
     IntegrationFeasibility,
     InterfaceType,
     InterfaceVerificationState,
+    LabDirectoryProfile,
+    LabOffering,
     OnboardingStatus,
     Organization,
+    OrganizationMembership,
+    OrganizationMembershipStatus,
+    OrganizationRoleAssignment,
+    OrganizationStatus,
     OrganizationType,
     ParticipationMode,
 )
@@ -605,174 +611,285 @@ class RouteActivationDecision:
         return tuple(f.code for f in self.findings if f.blocking and not f.satisfied)
 
 
+# ── operational readiness, shared by every production path ───────────────────────────────────
+#
+# Three different code paths need the same answer to "can this facility actually do the work?":
+# the platform endpoint that activates a route, the read that lists eligible destinations for an
+# order, and the assignment mutation itself. Expressing it three times -- once in Python, twice in
+# SQL -- is how the three quietly drift apart until a lab is eligible but unassignable.
+#
+# So it lives here once, as a function taking a caller's own `Session`. That shape matters: the
+# assignment path evaluates this while already holding a `LabOrder` row lock, and a helper that
+# opened its own session there would be a deadlock waiting for load. Callers that have no session
+# use `FacilityReadinessEvaluator`, which opens one and delegates to exactly this function.
+
+#: Roles a NATIVE facility must actually have, through an ACTIVE membership, before production
+#: work may be routed to it. A lab needs both: entry and release are separate authorities
+#: (ADR-044), so a lab with technicians and no releaser can receive orders it is structurally
+#: incapable of ever completing -- results would be entered and could never be released. One
+#: person holding both roles satisfies both requirements; the check is on roles present at the
+#: organization, never on a count of humans.
+NATIVE_REQUIRED_ROLES: dict[str, tuple[str, ...]] = {
+    OrganizationType.PROVIDER.value: ("CLINICIAN",),
+    OrganizationType.LAB.value: ("LAB_TECH", "LAB_RESULT_RELEASER"),
+}
+
+#: Which finding codes, when unsatisfied, mean "do not send production work here".
+STAFFING_FINDING_CODES = {
+    "CLINICIAN": "clinician_present",
+    "LAB_TECH": "lab_technician_present",
+    "LAB_RESULT_RELEASER": "lab_releaser_present",
+}
+
+
+def active_roles_in_session(session: Session, organization_id: uuid.UUID) -> frozenset[str]:
+    """Roles held through an ACTIVE membership at this organization.
+
+    Inactive memberships are excluded deliberately: an inactivated membership fails authorization
+    everywhere else in this system, so counting it here would let readiness claim a capability the
+    authorization layer would refuse the moment someone tried to use it.
+    """
+    rows = session.execute(
+        select(OrganizationRoleAssignment.role)
+        .join(
+            OrganizationMembership,
+            OrganizationMembership.id == OrganizationRoleAssignment.membership_id,
+        )
+        .where(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.status == OrganizationMembershipStatus.ACTIVE.value,
+        )
+    ).all()
+    return frozenset(row[0] for row in rows)
+
+
+def operational_findings_in_session(
+    session: Session, organization_id: uuid.UUID
+) -> list[ReadinessFinding]:
+    """Everything that decides whether production work may be routed to this facility right now.
+
+    Derived entirely from live rows (§74). Nothing here reads a stored verdict, which is what makes
+    a facility that loses its last releaser stop being an eligible destination without anybody
+    having to remember to update a flag -- and without this code touching the configured route,
+    which stays exactly as the platform admin left it.
+    """
+    findings: list[ReadinessFinding] = []
+    organization = session.get(Organization, organization_id)
+    if organization is None:
+        return [
+            ReadinessFinding(
+                code="organization_exists", satisfied=False, blocking=True, detail=None
+            )
+        ]
+
+    enrollment = session.scalar(
+        select(FacilityEnrollment).where(FacilityEnrollment.organization_id == organization_id)
+    )
+    if enrollment is None:
+        # Fail closed. An organization nobody enrolled is not a destination, and treating a missing
+        # row as a pass would be a permanent hole for anything created outside the onboarding flow.
+        return [
+            ReadinessFinding(
+                code="facility_enrolled",
+                satisfied=False,
+                blocking=True,
+                detail="cet établissement n'a pas de dossier d'adhésion",
+            )
+        ]
+
+    findings.append(
+        ReadinessFinding(
+            code="organization_active",
+            satisfied=organization.status == OrganizationStatus.ACTIVE.value,
+            blocking=True,
+        )
+    )
+
+    open_blockers = session.scalars(
+        select(FacilityEnrollmentBlocker.code).where(
+            FacilityEnrollmentBlocker.facility_enrollment_id == enrollment.id,
+            FacilityEnrollmentBlocker.resolved_at.is_(None),
+        )
+    ).all()
+    findings.append(
+        ReadinessFinding(
+            code="enrollment_not_blocked",
+            satisfied=(
+                enrollment.onboarding_status != OnboardingStatus.BLOCKED.value and not open_blockers
+            ),
+            blocking=True,
+            detail="; ".join(open_blockers) if open_blockers else None,
+        )
+    )
+
+    roles = active_roles_in_session(session, organization_id)
+    findings.append(
+        ReadinessFinding(
+            code="administrator_present", satisfied="ORG_ADMIN" in roles, blocking=False
+        )
+    )
+
+    is_native = enrollment.participation_mode == ParticipationMode.NATIVE.value
+    for role in NATIVE_REQUIRED_ROLES.get(organization.org_type, ()):
+        findings.append(
+            ReadinessFinding(
+                code=STAFFING_FINDING_CODES[role],
+                satisfied=role in roles,
+                # Staffing gates production routing for a NATIVE facility, where DHealth itself is
+                # the workflow: an order routed to a lab with no releaser would arrive and could
+                # never be completed. For a CONNECT facility the work happens in the partner's own
+                # system, so DHealth-side staffing is not what decides deliverability -- and such a
+                # facility is blocked anyway by the absent connector below.
+                blocking=is_native,
+            )
+        )
+
+    if organization.org_type == OrganizationType.LAB.value:
+        profile = session.scalar(
+            select(LabDirectoryProfile).where(
+                LabDirectoryProfile.lab_organization_id == organization_id
+            )
+        )
+        findings.append(
+            ReadinessFinding(
+                code="lab_accepting_orders",
+                satisfied=bool(profile and profile.accepting_orders),
+                blocking=True,
+            )
+        )
+        active_offerings = session.scalar(
+            select(func.count())
+            .select_from(LabOffering)
+            .where(
+                LabOffering.lab_organization_id == organization_id,
+                LabOffering.active.is_(True),
+            )
+        )
+        findings.append(
+            ReadinessFinding(
+                code="lab_has_active_offering",
+                satisfied=bool(active_offerings),
+                blocking=True,
+                detail=f"{active_offerings or 0} analyse(s) active(s)",
+            )
+        )
+
+    if not is_native:
+        findings.append(
+            ReadinessFinding(
+                code="connector_qualified",
+                satisfied=False,
+                blocking=True,
+                detail="aucun connecteur DHealth n'existe encore pour cet établissement",
+            )
+        )
+
+    return findings
+
+
+def is_operationally_ready_in_session(session: Session, organization_id: uuid.UUID) -> bool:
+    """The one-line form, for a caller that only needs the verdict.
+
+    "Operationally ready" is the middle of three distinct facts this system keeps apart:
+
+        configured route      a platform admin has said this pair may exchange work
+        operationally ready   the facility can actually do that work today
+        eligible destination  both of the above, for this specific order, right now
+
+    A facility that loses its last releaser stops being operationally ready. Its configured route
+    is untouched -- somebody decided that relationship deliberately and it remains their decision
+    -- but it stops being an eligible destination until the staffing comes back.
+    """
+    return all(
+        f.satisfied for f in operational_findings_in_session(session, organization_id) if f.blocking
+    )
+
+
 class FacilityReadinessEvaluator:
     """Derives readiness from real rows, never from anything an operator ticked.
 
-    §74: every fact below is a query. "Does this lab have a technician?" is answered by reading
-    memberships and role assignments, not by a checkbox somebody set during onboarding and nobody
-    revisited when that technician left.
+    §74: every fact is a query. "Does this lab have a releaser?" is answered by reading memberships
+    and role assignments, not by a checkbox somebody set during onboarding and nobody revisited
+    when that person left.
 
-    Two classes of finding, deliberately distinguished:
+    This class is a session-owning wrapper. The logic lives in
+    ``operational_findings_in_session`` so that the endpoint activating a route, the read listing
+    eligible destinations, and the assignment mutation itself all consult one implementation
+    instead of three that drift.
 
-    *Blocking* findings gate production route activation -- §37's list plus the rule that a CONNECT
-    destination cannot be routed at all while no connector exists. These are the conditions under
-    which activating routing would send a transaction nowhere.
+    Two classes of finding:
 
-    *Non-blocking* findings are configuration completeness -- §11's staffing and template facts.
-    A Native lab with offerings, open doors and no technician yet is genuinely routable: orders
-    arrive and wait inside DHealth, which is exactly where they belong, and the lab will staff up.
-    Blocking activation on it would hold up a Native deployment for a condition that resolves
-    itself, which is the failure §38 warns against.
+    *Blocking* findings mean production work must not be routed here -- §37's conditions, the
+    NATIVE staffing requirements, and the rule that a CONNECT destination cannot be routed at all
+    while no connector exists.
+
+    *Non-blocking* findings are configuration completeness that does not make work undeliverable:
+    an administrator, and the controlled result templates a Native lab needs for structured entry.
+
+    Staffing is blocking, and that placement is deliberate. Entry and release are separate
+    authorities (ADR-044), so a Native lab holding LAB_TECH but no LAB_RESULT_RELEASER can receive
+    an order, enter results against it, and then be structurally unable to release them -- work
+    that arrives somewhere it can never leave. One person holding both roles satisfies both
+    requirements; the requirement is on authority present at the organization, not on headcount.
     """
 
     def __init__(
         self,
         *,
+        sessions: SessionFactory,
         enrollments: FacilityEnrollmentRepository,
-        memberships,
-        roles,
-        directory,
-        catalog,
+        catalog=None,
         templates=None,
     ) -> None:
+        self._sessions = sessions
         self._enrollments = enrollments
-        self._memberships = memberships
-        self._roles = roles
-        self._directory = directory
         self._catalog = catalog
         self._templates = templates
 
     def roles_present(self, organization_id: uuid.UUID) -> frozenset[str]:
-        """Roles actually held through an ACTIVE membership at this organization.
-
-        Inactive memberships are excluded on purpose: an inactivated membership must fail
-        authorization everywhere else in this system, so counting it as staffing here would make
-        readiness claim a capability the authorization layer would refuse.
-        """
-        present: set[str] = set()
-        for membership in self._memberships.list_for_organization(organization_id):
-            if membership.status != "ACTIVE":
-                continue
-            present.update(self._roles.list_for_membership(membership.id))
-        return frozenset(present)
+        with self._sessions() as session:
+            return active_roles_in_session(session, organization_id)
 
     def evaluate(
         self, organization_id: uuid.UUID
     ) -> tuple[FacilityEnrollmentRecord, list[ReadinessFinding]]:
         enrollment = self._enrollments.get_for_organization(organization_id)
-        findings: list[ReadinessFinding] = []
-
-        findings.append(
-            ReadinessFinding(
-                code="organization_active",
-                satisfied=enrollment.organization_status == "ACTIVE",
-                blocking=True,
-            )
-        )
-        findings.append(
-            ReadinessFinding(
-                code="enrollment_not_blocked",
-                satisfied=enrollment.onboarding_status != OnboardingStatus.BLOCKED.value,
-                blocking=True,
-                detail=(
-                    "; ".join(b.code for b in enrollment.open_blockers)
-                    if enrollment.open_blockers
-                    else None
-                ),
-            )
-        )
-
-        roles = self.roles_present(organization_id)
-        findings.append(
-            ReadinessFinding(
-                code="administrator_present",
-                satisfied="ORG_ADMIN" in roles,
-                blocking=False,
-            )
-        )
-
-        if enrollment.organization_type == OrganizationType.LAB.value:
-            findings.extend(self._lab_findings(enrollment, roles))
-        else:
-            findings.extend(self._provider_findings(roles))
-
-        # The one rule that overrides every other consideration: DHealth has no connector, so a
-        # CONNECT facility is not a destination production work can be sent to, however complete
-        # its discovery is. Verified interfaces do not change this; only a qualified connector
-        # would, and that is DH-CONNECT-CONTRACT-001's to deliver.
-        if enrollment.participation_mode == ParticipationMode.CONNECT.value:
-            findings.append(
-                ReadinessFinding(
-                    code="connector_qualified",
-                    satisfied=False,
-                    blocking=True,
-                    detail="aucun connecteur DHealth n'existe encore pour cet établissement",
-                )
-            )
-
+        with self._sessions() as session:
+            findings = operational_findings_in_session(session, organization_id)
+        findings.extend(self._template_findings(enrollment))
         return enrollment, findings
 
-    def _lab_findings(
-        self, enrollment: FacilityEnrollmentRecord, roles: frozenset[str]
-    ) -> list[ReadinessFinding]:
-        profile = self._directory.get_for_lab(enrollment.organization_id)
-        offerings = self._catalog.list_offerings_for_lab(enrollment.organization_id)
-        active_offerings = [o for o in offerings if o.active]
+    def is_operationally_ready(self, organization_id: uuid.UUID) -> bool:
+        with self._sessions() as session:
+            return is_operationally_ready_in_session(session, organization_id)
 
-        findings = [
-            ReadinessFinding(
-                code="lab_accepting_orders",
-                satisfied=bool(profile and profile.accepting_orders),
-                blocking=True,
-            ),
-            ReadinessFinding(
-                code="lab_has_active_offering",
-                satisfied=bool(active_offerings),
-                blocking=True,
-                detail=f"{len(active_offerings)} analyse(s) active(s)",
-            ),
-            ReadinessFinding(
-                code="lab_technician_present",
-                satisfied="LAB_TECH" in roles,
-                blocking=False,
-            ),
-            ReadinessFinding(
-                code="lab_releaser_present",
-                satisfied="LAB_RESULT_RELEASER" in roles,
-                blocking=False,
-            ),
-        ]
+    def _template_findings(self, enrollment: FacilityEnrollmentRecord) -> list[ReadinessFinding]:
+        """Native structured result entry runs against controlled templates.
 
-        # Native result entry runs against controlled templates; a Native lab without one cannot
-        # record a structured result even though orders would still reach it. Configuration, not a
-        # routing gate -- and never evaluated for a CONNECT lab, which does not use Native entry.
+        Non-blocking: a lab missing one can still receive orders and record results by the
+        pre-template path, so this is configuration completeness rather than deliverability. Never
+        evaluated for a CONNECT lab, which does not use Native entry at all.
+        """
         if (
-            self._templates is not None
-            and enrollment.participation_mode == ParticipationMode.NATIVE.value
+            self._templates is None
+            or self._catalog is None
+            or enrollment.organization_type != OrganizationType.LAB.value
+            or enrollment.participation_mode != ParticipationMode.NATIVE.value
         ):
-            offering_ids = [o.id for o in active_offerings]
-            active_templates = (
-                self._templates.get_active_templates_for_offerings(offering_ids)
-                if offering_ids
-                else {}
-            )
-            findings.append(
-                ReadinessFinding(
-                    code="lab_result_templates_active",
-                    satisfied=bool(offering_ids) and len(active_templates) == len(offering_ids),
-                    blocking=False,
-                    detail=f"{len(active_templates)}/{len(offering_ids)} analyse(s) structurée(s)",
-                )
-            )
-
-        return findings
-
-    def _provider_findings(self, roles: frozenset[str]) -> list[ReadinessFinding]:
+            return []
+        offerings = [
+            o for o in self._catalog.list_offerings_for_lab(enrollment.organization_id) if o.active
+        ]
+        offering_ids = [o.id for o in offerings]
+        active_templates = (
+            self._templates.get_active_templates_for_offerings(offering_ids) if offering_ids else {}
+        )
         return [
             ReadinessFinding(
-                code="clinician_present",
-                satisfied="CLINICIAN" in roles,
+                code="lab_result_templates_active",
+                satisfied=bool(offering_ids) and len(active_templates) == len(offering_ids),
                 blocking=False,
+                detail=f"{len(active_templates)}/{len(offering_ids)} analyse(s) structurée(s)",
             )
         ]
 
@@ -781,38 +898,39 @@ class FacilityReadinessEvaluator:
     ) -> RouteActivationDecision:
         """§37: may production routing from this provider to this lab be switched on?
 
-        Both ends are evaluated, because routing is a claim about a pair. A blocked provider must
-        not be able to send work either, even to a perfectly configured lab.
+        Both ends are evaluated, because routing is a claim about a pair: a provider with no
+        clinician has nobody to order, and a lab with no releaser has nobody to finish. A blocked
+        provider must not be able to send work even to a perfectly staffed lab.
 
-        A missing enrollment is a refusal rather than a pass. Fail-open by omission is how a
+        A missing enrollment is a refusal rather than a pass -- fail-open by omission is how a
         facility nobody enrolled ends up receiving production orders.
         """
         findings: list[ReadinessFinding] = []
-        for side, organization_id in (
-            ("provider", provider_organization_id),
-            ("lab", lab_organization_id),
-        ):
-            try:
-                _, side_findings = self.evaluate(organization_id)
-            except FacilityEnrollmentNotFound:
-                findings.append(
+        with self._sessions() as session:
+            for side, organization_id in (
+                ("provider", provider_organization_id),
+                ("lab", lab_organization_id),
+            ):
+                findings.extend(
                     ReadinessFinding(
-                        code=f"{side}_enrolled",
-                        satisfied=False,
-                        blocking=True,
-                        detail="cet établissement n'a pas de dossier d'adhésion",
+                        code=f"{side}_{f.code}",
+                        satisfied=f.satisfied,
+                        blocking=f.blocking,
+                        detail=f.detail,
                     )
+                    for f in operational_findings_in_session(session, organization_id)
                 )
-                continue
-            findings.extend(
-                ReadinessFinding(
-                    code=f"{side}_{f.code}",
-                    satisfied=f.satisfied,
-                    blocking=f.blocking,
-                    detail=f.detail,
-                )
-                for f in side_findings
-            )
-
         allowed = all(f.satisfied for f in findings if f.blocking)
         return RouteActivationDecision(allowed=allowed, findings=tuple(findings))
+
+
+class RouteActivationNotReady(FacilityEnrollmentError):
+    """A production route activation refused because the pair is not operationally ready.
+
+    Carries the whole decision rather than a message: the caller needs to tell an operator exactly
+    which conditions failed, and a string would force the UI to parse prose.
+    """
+
+    def __init__(self, decision: RouteActivationDecision) -> None:
+        super().__init__("route activation refused: " + ", ".join(decision.blocking_reasons))
+        self.decision = decision

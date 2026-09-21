@@ -163,8 +163,8 @@ def test_list_for_organization_and_list_for_identity(
     identities: ExchangeIdentityRepository,
     memberships: OrganizationMembershipRepository,
 ) -> None:
-    org_a = make_provider(organizations, name="Clinic A")
-    org_b = make_provider(organizations, name="Clinic B")
+    org_a = make_provider(organizations, name="Clinic A", operational=False)
+    org_b = make_provider(organizations, name="Clinic B", operational=False)
     identity, _ = identities.get_or_create(issuer="https://idp.test", subject="sub-1")
     memberships.create(organization_id=org_a.id, identity_id=identity.id)
     memberships.create(organization_id=org_b.id, identity_id=identity.id)

@@ -60,6 +60,11 @@ from daher_adapter.exchange.directory import (
     LabDirectoryProfileRecord,
     LabDirectoryProfileRepository,
 )
+from daher_adapter.exchange.facility_enrollment import (
+    FacilityEnrollmentRepository,
+    FacilityReadinessEvaluator,
+    RouteActivationNotReady,
+)
 from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
     PractitionerReferenceRepository,
@@ -191,6 +196,7 @@ from daher_adapter.exchange.selection import (
     LabAssignmentIntegrityError,
     LabAssignmentSummaryRecord,
     LabCannotFulfillOrder,
+    LabNotOperationallyReady,
     LabSelectionRepository,
     PatientAccessGrantInvalidated,
     PatientAccessGrantLacksSelectionAuthority,
@@ -2012,6 +2018,13 @@ def build_exchange_router(
     releases = LabResultReleaseRepository(session_factory)
     reviews = DoctorReviewRepository(session_factory)
     amendments = LabResultAmendmentRepository(session_factory)
+    facility_enrollments = FacilityEnrollmentRepository(session_factory)
+    facility_readiness = FacilityReadinessEvaluator(
+        sessions=session_factory,
+        enrollments=facility_enrollments,
+        catalog=catalog,
+        templates=result_templates,
+    )
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -3773,6 +3786,13 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except LabCannotFulfillOrder as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except LabNotOperationallyReady as error:
+            # Same 409 as the other "the world is not in a state where this can happen" refusals:
+            # the request is well-formed and authorized, and the destination cannot take the work
+            # right now. A distinct exception type from LabCannotFulfillOrder because the reason is
+            # different -- this lab is configured and offering the test, and lacks the staffing or
+            # the enrollment standing to complete it.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ProviderLabRouteNotActive as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
@@ -3810,6 +3830,37 @@ def build_exchange_router(
 
         try:
             with session_factory.begin() as session:
+                # DH-MVP-ONBOARD-001 §37/§63: activating production routing is readiness-gated, and
+                # the gate lives on this path rather than inside `ProviderLabRouteRepository.upsert`
+                # -- that stays the low-level primitive fixtures and seeds build state with. This
+                # endpoint is the production way a route is switched on, so it is where the
+                # evaluation belongs, evaluated inside the same transaction that writes the row so
+                # the decision cannot be made against a state that changed underneath it.
+                #
+                # Deactivation is never gated: switching routing *off* is always safe and must stay
+                # available even when a facility is in no condition to receive work.
+                # Existence and type first, so a request naming an organization that does not exist
+                # still answers 404. Without this the readiness evaluator would answer first and
+                # report "not enrolled" for a uuid that was never an organization at all, which is
+                # a true statement about the wrong question.
+                organizations.get(provider_id)
+                organizations.get(lab_id)
+                if body.active:
+                    decision = facility_readiness.evaluate_route_activation(
+                        provider_organization_id=provider_id,
+                        lab_organization_id=lab_id,
+                    )
+                    if not decision.allowed:
+                        security_audit.record(
+                            session,
+                            event_type="provider_lab_route_activation_refused",
+                            actor_identity_id=principal.identity_id,
+                            organization_id=provider_id,
+                            outcome="refused",
+                            resource_type="provider_lab_route",
+                            resource_id=None,
+                        )
+                        raise RouteActivationNotReady(decision)
                 record, created, changed = provider_lab_routes.upsert(
                     provider_organization_id=provider_id,
                     lab_organization_id=lab_id,
@@ -3829,6 +3880,18 @@ def build_exchange_router(
                     resource_type="provider_lab_route",
                     resource_id=record.id,
                 )
+        except RouteActivationNotReady as error:
+            # 409, not 422: the request is well-formed and the operator has the authority to make
+            # it. What is wrong is the state of the world, and it may well be right tomorrow. The
+            # blocking reasons are returned so the UI can say precisely what is missing rather than
+            # showing a refusal with no next action.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "cet établissement n'est pas prêt pour le routage de production",
+                    "blocking_reasons": list(error.decision.blocking_reasons),
+                },
+            ) from error
         except InvalidProviderLabRouteOrganizationType as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)

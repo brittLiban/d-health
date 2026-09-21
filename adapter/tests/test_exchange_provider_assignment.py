@@ -32,7 +32,10 @@ from daher_adapter.exchange.models import (
     LabOrderStatus,
     LabPrice,
     Organization,
+    OrganizationMembership,
+    OrganizationRoleAssignment,
     PatientAccessGrant,
+    ProviderLabRoute,
 )
 from daher_adapter.exchange.orders import InvalidOrderTransition as OrderInvalidTransition
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput, OrderNotFound
@@ -41,6 +44,7 @@ from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepositor
 from daher_adapter.exchange.selection import (
     DifferentLabAlreadySelected,
     LabCannotFulfillOrder,
+    LabNotOperationallyReady,
     LabSelectionRepository,
     ProviderLabRouteNotActive,
 )
@@ -713,3 +717,69 @@ def test_provider_assignment_succeeds_after_all_price_rows_removed(
     )
     assert created is True
     assert record.lab_organization_id == lab.id
+
+
+def test_lab_that_lost_its_releaser_cannot_be_assigned(sessions: sessionmaker[Session]) -> None:
+    """DH-MVP-ONBOARD-001: the assignment mutation is a production path, so it re-derives
+    operational readiness rather than trusting that the route was ready when it was configured.
+
+    This lab is accepting orders, offers the test, and is actively routed. The only thing wrong is
+    that nobody there may release a result any more -- so an order sent here could be entered and
+    never finished. The configured route is deliberately left untouched; what changes is that new
+    work stops being sent.
+    """
+    (
+        organizations,
+        catalog,
+        patients,
+        practitioners,
+        orders,
+        selections,
+        directory,
+        provider_lab_routes,
+    ) = _build(sessions)
+    provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
+    lab = make_lab(organizations, name="LostReleaserLab")
+    directory.upsert(
+        lab_organization_id=lab.id,
+        public_address="X",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=True,
+        accepting_orders=True,
+    )
+    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    _route(provider_lab_routes, provider.id, lab.id)
+
+    with sessions() as session:
+        rows = session.scalars(
+            select(OrganizationRoleAssignment)
+            .join(
+                OrganizationMembership,
+                OrganizationMembership.id == OrganizationRoleAssignment.membership_id,
+            )
+            .where(
+                OrganizationMembership.organization_id == lab.id,
+                OrganizationRoleAssignment.role == "LAB_RESULT_RELEASER",
+            )
+        ).all()
+        assert rows, "fixture should have granted a releaser to revoke"
+        for row in rows:
+            session.delete(row)
+        session.commit()
+
+    with pytest.raises(LabNotOperationallyReady):
+        selections.assign_by_provider(
+            lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
+        )
+
+    # The relationship a platform admin configured is still there.
+    with sessions() as session:
+        route = session.scalar(
+            select(ProviderLabRoute).where(
+                ProviderLabRoute.provider_organization_id == provider.id,
+                ProviderLabRoute.lab_organization_id == lab.id,
+            )
+        )
+        assert route is not None and route.active is True
