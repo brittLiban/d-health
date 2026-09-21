@@ -43,6 +43,7 @@ export function IntegrationsOverview({ facilities, onOpenFacility }: Integration
           Les établissements utilisant DHealth directement n'ont pas besoin d'intégration.
         </EmptyState>
       ) : (
+        <div className={styles.tableScroll}>
         <table className={styles.interfaceTable}>
           <caption className="visually-hidden">
             Établissements en mode Connect et état de leur découverte technique
@@ -91,6 +92,7 @@ export function IntegrationsOverview({ facilities, onOpenFacility }: Integration
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   )

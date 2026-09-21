@@ -240,8 +240,12 @@ describe('the connect facility, told truthfully', () => {
     await user.click(await screen.findByRole('button', { name: /Laboratoire Central/ }))
 
     await waitFor(() => expect(screen.getByText('Indisponible')).toBeInTheDocument())
-    // The reason is the server's own finding, rendered rather than recomputed.
-    expect(screen.getByText('Connecteur DHealth qualifié')).toBeInTheDocument()
+    // The reason is the server's own finding, rendered rather than recomputed --
+    // and worded as the absence. Under "ce qui empêche la mise en service", the
+    // satisfied phrasing ("Connecteur DHealth qualifié") would state the opposite
+    // of what is wrong.
+    expect(screen.getByText('Connecteur DHealth non qualifié')).toBeInTheDocument()
+    expect(screen.queryByText('Connecteur DHealth qualifié')).not.toBeInTheDocument()
   })
 
   it('PS9: an unintegrable facility is kept, with the reason and the next step', async () => {

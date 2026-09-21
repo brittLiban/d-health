@@ -59,9 +59,13 @@ export function FacilityDetail({ facility, client, onBack, onChanged }: Facility
 
   return (
     <section className={styles.page} aria-labelledby="facility-detail-heading">
-      <Button variant="secondary" onClick={onBack}>
-        ← Retour aux établissements
-      </Button>
+      {/* Constrained rather than stretched: the design system's button fills its
+          container, and a full-width "back" reads as a primary action. */}
+      <div>
+        <Button variant="secondary" onClick={onBack}>
+          ← Retour aux établissements
+        </Button>
+      </div>
 
       <header className={styles.pageHeader}>
         <div>
@@ -123,7 +127,7 @@ export function FacilityDetail({ facility, client, onBack, onChanged }: Facility
                 <ul className={styles.findingList}>
                   {blocking.map((finding) => (
                     <li key={finding.code} className={styles.findingBlocking}>
-                      {readinessFindingLabel(finding.code)}
+                      {readinessFindingLabel(finding.code, finding.satisfied)}
                       {finding.detail ? (
                         <span className={styles.findingDetail}> — {finding.detail}</span>
                       ) : null}
@@ -141,7 +145,7 @@ export function FacilityDetail({ facility, client, onBack, onChanged }: Facility
                 <ul className={styles.findingList}>
                   {outstanding.map((finding) => (
                     <li key={finding.code}>
-                      {readinessFindingLabel(finding.code)}
+                      {readinessFindingLabel(finding.code, finding.satisfied)}
                       {finding.detail ? (
                         <span className={styles.findingDetail}> — {finding.detail}</span>
                       ) : null}

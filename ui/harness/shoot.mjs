@@ -13,6 +13,12 @@ import { mkdirSync } from 'node:fs'
 import { chromium } from '@playwright/test'
 
 const SCENES = [
+  'platform-zero-membership',
+  'platform-with-membership',
+  'platform-connect-readiness',
+  'platform-native-blocked',
+  'platform-not-integrable',
+  'platform-new-facility',
   'shell-provider',
   'shell-lab-dual',
   'shell-two-establishments',
@@ -21,8 +27,21 @@ const SCENES = [
   'patient',
 ]
 
+// Scenes whose subject is a screen reached by an action, and the control that
+// reaches it. Without this the detail captures would show the facility list.
+const SCENE_ACTIONS = {
+  'platform-connect-readiness': /Laboratoire Central/,
+  'platform-native-blocked': /Laboratoire Horizon/,
+  'platform-not-integrable': /Laboratoire Central/,
+  'platform-new-facility': /Enregistrer un établissement/,
+}
+
+// Phone width is the patient surface's case. Platform work is desktop and tablet,
+// so 768 is the width that matters for the network scenes -- a facility list and a
+// wizard have to stay usable on a tablet in an office, not on a handset.
 const WIDTHS = [
   { name: 'desktop', width: 1280, height: 860 },
+  { name: 'tablet', width: 768, height: 1024 },
   { name: 'phone', width: 390, height: 844 },
 ]
 
@@ -75,6 +94,15 @@ for (const viewport of WIDTHS) {
     await page.evaluate(() => document.fonts.ready.then(() => true))
     await page.waitForTimeout(250)
 
+    // Some scenes are about a screen you reach by doing something. Capturing the
+    // list and calling the file "connect-readiness" would be a screenshot that
+    // documents the wrong thing, so the capture performs the real interaction.
+    const open = SCENE_ACTIONS[scene]
+    if (open) {
+      await page.getByRole('button', { name: open }).first().click()
+      await page.waitForTimeout(300)
+    }
+
     // Horizontal overflow is the one layout claim that can be checked mechanically.
     const overflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -104,6 +132,39 @@ for (const viewport of WIDTHS) {
     // leftover height across its rows rather than to the content.
     if (viewport.name === 'phone' && nav && nav.height > viewport.height * 0.25)
       problems.push(`nav too tall ${viewport.name}/${scene}: ${Math.round(nav.height)}px`)
+
+    // DH-MVP-ONBOARD-001: a primary action pushed outside the viewport is unusable
+    // without anything looking wrong, and a wizard is exactly where that happens --
+    // the step advances and the button that advances it is off the right edge.
+    const offscreen = await page.evaluate(() => {
+      const width = document.documentElement.clientWidth
+      return [...document.querySelectorAll('button')]
+        .filter((el) => {
+          const r = el.getBoundingClientRect()
+          return r.width > 0 && (r.right > width + 1 || r.left < -1)
+        })
+        .map((el) => el.textContent?.trim() ?? '(sans texte)')
+    })
+    if (offscreen.length)
+      problems.push(`control off-screen ${viewport.name}/${scene}: ${offscreen.join(', ')}`)
+
+    // Every interactive control needs an accessible name. A select whose only
+    // label is a neighbouring table header reads as nothing to a screen reader.
+    const unlabelled = await page.evaluate(() =>
+      [...document.querySelectorAll('select, input')]
+        .filter((el) => {
+          if (el.type === 'radio' || el.type === 'checkbox' || el.type === 'hidden') return false
+          const labelled =
+            el.getAttribute('aria-label') ||
+            el.getAttribute('aria-labelledby') ||
+            (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)) ||
+            el.closest('label')
+          return !labelled
+        })
+        .map((el) => `${el.tagName.toLowerCase()}#${el.id || '(no id)'}`),
+    )
+    if (unlabelled.length)
+      problems.push(`unlabelled control ${viewport.name}/${scene}: ${unlabelled.join(', ')}`)
 
     await page.screenshot({
       path: `${OUT}${scene}-${viewport.name}.png`,

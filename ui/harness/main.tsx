@@ -22,8 +22,15 @@
 import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ExchangeClient } from '../src/api/exchangeClient'
-import type { ExchangeMembershipSummary, ExchangeMeResponse, PatientOrder } from '../src/api/exchangeTypes'
+import type {
+  ExchangeMembershipSummary,
+  ExchangeMeResponse,
+  FacilityEnrollment,
+  FacilityReadiness,
+  PatientOrder,
+} from '../src/api/exchangeTypes'
 import { PatientStatusPage } from '../src/features/patient/PatientStatusPage'
+import { StaffWorkspace } from '../src/features/staff/StaffWorkspace'
 import { StaffShell } from '../src/features/staff/StaffShell'
 import { WorkflowRelay } from '../src/features/staff/WorkflowRelay'
 import { providerRelayNodes } from '../src/features/staff/relayNodes'
@@ -144,6 +151,169 @@ const PATIENT_ORDER: PatientOrder = {
   },
 } as unknown as PatientOrder
 
+// ── DH-MVP-ONBOARD-001: the platform control plane ───────────────────────────────────────────
+//
+// Network administration is desktop and tablet work, so these scenes are captured at 1280 and
+// 768 rather than at phone width. They mount the real components against stub data: the point is
+// what an operator sees, and the readiness verdicts below are the shapes the server actually
+// returns rather than anything this harness decides.
+
+function platformMe(memberships: ExchangeMembershipSummary[] = []): ExchangeMeResponse {
+  return {
+    identity_id: 'identity-platform',
+    issuer: 'harness',
+    subject: 'harness',
+    display_name: 'Opérateur Plateforme',
+    email: null,
+    platform_admin: true,
+    memberships,
+  }
+}
+
+function facilityFixture(overrides: Partial<FacilityEnrollment> = {}): FacilityEnrollment {
+  return {
+    organization_id: 'org-1',
+    organization_name: 'Laboratoire Central',
+    organization_type: 'LAB',
+    organization_status: 'ACTIVE',
+    participation_mode: 'CONNECT',
+    onboarding_status: 'AWAITING_CONNECTOR',
+    integration_feasibility: 'CONNECTOR_DEVELOPMENT_REQUIRED',
+    existing_system_name: 'XYZ LIS',
+    existing_system_vendor: 'ABC Systems',
+    existing_system_version: '8.4',
+    hosting_model: 'ON_PREMISE',
+    technical_contact: 'Ahmed Osman',
+    vendor_contact: 'support@abc-systems.example',
+    documentation_reference: null,
+    patient_identifier_namespace: null,
+    order_identifier_concept: null,
+    report_identifier_concept: null,
+    specimen_identifier_concept: null,
+    exposes_source_event_timestamps: null,
+    exposes_professional_release_event: null,
+    notes: null,
+    interfaces: [
+      { interface_type: 'FHIR', verification_state: 'VERIFIED', detail: null },
+      { interface_type: 'HL7_V2', verification_state: 'REPORTED', detail: null },
+    ],
+    open_blockers: [],
+    ...overrides,
+  }
+}
+
+const NETWORK_FIXTURE: FacilityEnrollment[] = [
+  facilityFixture({
+    organization_id: 'org-native-provider',
+    organization_name: 'Clinique Al Rahma',
+    organization_type: 'PROVIDER',
+    participation_mode: 'NATIVE',
+    onboarding_status: 'READY_FOR_ROUTING',
+    integration_feasibility: null,
+    existing_system_name: null,
+    existing_system_vendor: null,
+    existing_system_version: null,
+    hosting_model: null,
+    technical_contact: null,
+    vendor_contact: null,
+    interfaces: [],
+  }),
+  facilityFixture(),
+  facilityFixture({
+    organization_id: 'org-discovery',
+    organization_name: 'Clinique Salaam',
+    organization_type: 'PROVIDER',
+    onboarding_status: 'TECHNICAL_DISCOVERY',
+    integration_feasibility: 'DISCOVERY_REQUIRED',
+    existing_system_name: null,
+    existing_system_vendor: null,
+    hosting_model: 'UNKNOWN',
+    interfaces: [{ interface_type: 'UNKNOWN', verification_state: 'REPORTED', detail: null }],
+    open_blockers: [
+      {
+        id: 'blk-1',
+        code: 'VENDOR_DOCUMENTATION_UNAVAILABLE',
+        note: "en attente de la documentation de l'éditeur",
+        created_at: '2026-09-20T09:00:00Z',
+      },
+    ],
+  }),
+]
+
+const CONNECT_READINESS: FacilityReadiness = {
+  organization_id: 'org-1',
+  participation_mode: 'CONNECT',
+  onboarding_status: 'AWAITING_CONNECTOR',
+  production_routing_allowed: false,
+  findings: [
+    { code: 'organization_active', satisfied: true, blocking: true, detail: null },
+    { code: 'enrollment_not_blocked', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_accepting_orders', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_has_active_offering', satisfied: true, blocking: true, detail: '3 analyse(s) active(s)' },
+    { code: 'connector_qualified', satisfied: false, blocking: true, detail: "aucun connecteur DHealth n'existe encore pour cet établissement" },
+    { code: 'administrator_present', satisfied: true, blocking: false, detail: null },
+  ],
+}
+
+/** A Native lab that has lost its release authority: configured, and not currently usable. */
+const NATIVE_BLOCKED_READINESS: FacilityReadiness = {
+  organization_id: 'org-native-lab',
+  participation_mode: 'NATIVE',
+  onboarding_status: 'ORGANIZATION_READY',
+  production_routing_allowed: false,
+  findings: [
+    { code: 'organization_active', satisfied: true, blocking: true, detail: null },
+    { code: 'enrollment_not_blocked', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_accepting_orders', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_has_active_offering', satisfied: true, blocking: true, detail: '2 analyse(s) active(s)' },
+    { code: 'lab_technician_present', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_releaser_present', satisfied: false, blocking: true, detail: null },
+    { code: 'lab_result_templates_active', satisfied: true, blocking: false, detail: '2/2 analyse(s) structurée(s)' },
+  ],
+}
+
+function platformClient(
+  facilities: FacilityEnrollment[],
+  readiness: FacilityReadiness,
+): ExchangeClient {
+  return {
+    getMe: () => Promise.resolve(platformMe()),
+    listFacilities: () => Promise.resolve(facilities),
+    getFacilityReadiness: () => Promise.resolve(readiness),
+    // Org-scoped reads, for the scene where the platform admin also holds a
+    // membership and therefore lands in organization scope first.
+    listOrders: () => Promise.resolve([]),
+    listPatients: () => Promise.resolve([]),
+    listResultReviews: () => Promise.resolve({ entries: [] }),
+    listLabOrders: () => Promise.resolve([]),
+    lookupIdentities: () =>
+      Promise.resolve([
+        { identity_id: 'id-1', display_name: 'Ahmed Ismail', email: 'ahmed@example.test' },
+        { identity_id: 'id-2', display_name: 'Ahmed Osman', email: 'a.osman@example.test' },
+      ]),
+  } as unknown as ExchangeClient
+}
+
+function PlatformScene({
+  facilities = NETWORK_FIXTURE,
+  readiness = CONNECT_READINESS,
+  memberships = [],
+}: {
+  facilities?: FacilityEnrollment[]
+  readiness?: FacilityReadiness
+  memberships?: ExchangeMembershipSummary[]
+}) {
+  const client = {
+    ...platformClient(facilities, readiness),
+    getMe: () => Promise.resolve(platformMe(memberships)),
+  } as unknown as ExchangeClient
+  return (
+    <WorkspaceProvider client={client}>
+      <StaffWorkspace />
+    </WorkspaceProvider>
+  )
+}
+
 const SCENES: Record<string, () => ReactElement> = {
   'shell-provider': () => (
     <ShellScene
@@ -172,7 +342,58 @@ const SCENES: Record<string, () => ReactElement> = {
   relay: () => <RelayScene amended={false} />,
   'relay-amended': () => <RelayScene amended />,
   patient: () => <PatientStatusPage order={PATIENT_ORDER} />,
+
+  // DH-MVP-ONBOARD-001 platform scenes. Network administration is desktop and
+  // tablet work, captured at 1280 and 768 rather than at phone width.
+  'platform-zero-membership': () => <PlatformScene />,
+  'platform-facility-list': () => <PlatformScene />,
+  'platform-new-facility': () => <PlatformScene />,
+  'platform-with-membership': () => (
+    <PlatformScene memberships={[membership('PROVIDER', 'Clinique Al Rahma', ['CLINICIAN'])]} />
+  ),
+  'platform-connect-readiness': () => <PlatformScene />,
+  // A Native laboratory whose last release authority went inactive: the route it
+  // is configured on is untouched, and it is not currently a usable destination.
+  'platform-native-blocked': () => (
+    <PlatformScene
+      facilities={[
+        facilityFixture({
+          organization_id: 'org-native-lab',
+          organization_name: 'Laboratoire Horizon',
+          participation_mode: 'NATIVE',
+          onboarding_status: 'ORGANIZATION_READY',
+          integration_feasibility: null,
+          existing_system_name: null,
+          existing_system_vendor: null,
+          existing_system_version: null,
+          hosting_model: null,
+          technical_contact: null,
+          vendor_contact: null,
+          interfaces: [],
+        }),
+      ]}
+      readiness={NATIVE_BLOCKED_READINESS}
+    />
+  ),
+  'platform-not-integrable': () => (
+    <PlatformScene
+      facilities={[
+        facilityFixture({
+          integration_feasibility: 'NOT_SAFELY_INTEGRABLE',
+          open_blockers: [
+            {
+              id: 'blk-x',
+              code: 'REQUIRED_INTERFACE_UNAVAILABLE',
+              note: "aucune interface supportee par l'editeur actuel",
+              created_at: '2026-09-20T09:00:00Z',
+            },
+          ],
+        }),
+      ]}
+    />
+  ),
 }
+
 
 const scene = new URLSearchParams(window.location.search).get('scene') ?? 'shell-provider'
 const render = SCENES[scene]

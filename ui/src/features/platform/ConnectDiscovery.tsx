@@ -122,6 +122,7 @@ export function ConnectDiscovery({ facility, client, onChanged }: ConnectDiscove
           {error}
         </p>
       ) : null}
+      <div className={styles.tableScroll}>
       <table className={styles.interfaceTable}>
         <caption className="visually-hidden">
           Interfaces signalées par le partenaire et niveau de vérification par DHealth
@@ -174,6 +175,7 @@ export function ConnectDiscovery({ facility, client, onChanged }: ConnectDiscove
           })}
         </tbody>
       </table>
+      </div>
 
       <h3 className={styles.subTitle}>Progression vers la production</h3>
       <ol className={styles.progressList}>

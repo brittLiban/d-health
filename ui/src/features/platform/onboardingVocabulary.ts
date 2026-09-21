@@ -172,8 +172,33 @@ export function blockerLabel(value: EnrollmentBlockerCode): string {
   return lookup(BLOCKER, value)
 }
 
-export function readinessFindingLabel(code: string): string {
-  return READINESS_FINDING[stripSide(code)] ?? code
+/**
+ * How an unmet condition is worded.
+ *
+ * The satisfied labels read as facts: "Autorité de libération active". Under a
+ * heading like "Ce qui empêche la mise en service" that exact phrasing states the
+ * opposite of what is wrong, and a reader scanning the list sees a condition that
+ * appears to be met. An unmet finding therefore names the absence.
+ */
+const READINESS_FINDING_MISSING: Record<string, string> = {
+  organization_exists: "L'établissement n'existe pas",
+  facility_enrolled: "Aucun dossier d'adhésion",
+  organization_active: "Établissement inactif",
+  enrollment_not_blocked: "Adhésion bloquée",
+  administrator_present: 'Aucun responsable désigné',
+  clinician_present: 'Aucun clinicien actif',
+  lab_technician_present: "Aucun personnel d'analyse actif",
+  lab_releaser_present: 'Aucune autorité de libération active',
+  lab_accepting_orders: 'Laboratoire fermé aux nouveaux ordres',
+  lab_has_active_offering: 'Aucune analyse active proposée',
+  lab_result_templates_active: 'Structures de résultat incomplètes',
+  connector_qualified: 'Connecteur DHealth non qualifié',
+}
+
+export function readinessFindingLabel(code: string, satisfied = true): string {
+  const key = stripSide(code)
+  if (!satisfied) return READINESS_FINDING_MISSING[key] ?? READINESS_FINDING[key] ?? code
+  return READINESS_FINDING[key] ?? code
 }
 
 /**
