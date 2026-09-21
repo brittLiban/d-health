@@ -1678,12 +1678,18 @@ class ExchangeSecurityAuditEvent(Base):
             # DH-LAB-003/ADR-053: controlled, LabOffering-scoped Native Lab result-structure
             # template configuration. See `security_audit.py`'s own `SecurityEventType` docstring
             # for the create/activate distinction.
-            "'lab_result_template_created', 'lab_result_template_activated'"
+            "'lab_result_template_created', 'lab_result_template_activated', "
+            # DH-MVP-ONBOARD-001: facility enrollment, technical discovery, and the refusal of a
+            # production route activation to a facility that cannot take the work.
+            "'facility_enrollment_created', 'facility_participation_mode_changed', "
+            "'facility_onboarding_status_changed', 'facility_technical_discovery_updated', "
+            "'facility_interface_capability_recorded', 'facility_onboarding_blocked', "
+            "'facility_onboarding_unblocked', 'provider_lab_route_activation_refused'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
         CheckConstraint(
-            "outcome IN ('created', 'returned_existing', 'updated', 'unchanged')",
+            "outcome IN ('created', 'returned_existing', 'updated', 'unchanged', 'refused')",
             name="ck_exchange_security_audit_events_outcome",
         ),
         CheckConstraint(
@@ -1694,7 +1700,8 @@ class ExchangeSecurityAuditEvent(Base):
             "resource_type IS NULL OR resource_type IN "
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
             "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route', "
-            "'lab_result_template')",
+            "'lab_result_template', 'facility_enrollment', "
+            "'facility_interface_capability', 'facility_enrollment_blocker')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

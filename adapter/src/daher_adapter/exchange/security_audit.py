@@ -115,8 +115,21 @@ SecurityEventType = Literal[
     # activation/deactivation event, not merely the create.
     "lab_result_template_created",
     "lab_result_template_activated",
+    # DH-MVP-ONBOARD-001: facility enrollment and technical-integration discovery. The last of
+    # these is a refusal rather than a write -- a platform admin tried to activate production
+    # routing to a facility that cannot take the work -- and it is recorded because "who tried to
+    # switch this on, and when" is exactly what an operator needs when a partner asks why their
+    # orders are not flowing.
+    "facility_enrollment_created",
+    "facility_participation_mode_changed",
+    "facility_onboarding_status_changed",
+    "facility_technical_discovery_updated",
+    "facility_interface_capability_recorded",
+    "facility_onboarding_blocked",
+    "facility_onboarding_unblocked",
+    "provider_lab_route_activation_refused",
 ]
-SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged"]
+SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
     "catalog_entry",
     "lab_directory_profile",
@@ -128,6 +141,9 @@ SecurityResourceType = Literal[
     "patient",
     "provider_lab_route",
     "lab_result_template",
+    "facility_enrollment",
+    "facility_interface_capability",
+    "facility_enrollment_blocker",
 ]
 
 

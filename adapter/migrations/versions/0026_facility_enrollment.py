@@ -48,6 +48,51 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+# Audit vocabulary. Same drop-and-recreate discipline 0024 used: the CHECK constraint is the thing
+# that makes an unrecognised event type a database error rather than a silently-accepted string, so
+# it is extended deliberately rather than loosened.
+_PRE_0026_EVENT_TYPES = (
+    "'organization_created', 'membership_created', 'role_assigned', "
+    "'catalog_entry_created', 'lab_directory_profile_created', "
+    "'lab_directory_profile_updated', 'lab_offering_created', "
+    "'lab_offering_status_changed', 'lab_price_changed', "
+    "'lab_order_created', 'patient_access_issued', 'patient_access_revoked', "
+    "'lab_order_accepted', 'lab_order_rejected', 'lab_order_processing_started', "
+    "'lab_result_recorded', 'lab_order_completed', 'doctor_review_recorded', "
+    "'patient_reference_bound', 'lab_order_assigned', 'lab_sample_collection_recorded', "
+    "'lab_results_released', 'lab_observation_recorded', 'lab_result_entry_completed', "
+    "'lab_observation_corrected', 'lab_result_amendment_started', "
+    "'lab_observation_amended', 'lab_result_amendment_released', "
+    "'patient_created', "
+    "'provider_lab_route_created', 'provider_lab_route_updated', "
+    "'lab_result_template_created', 'lab_result_template_activated'"
+)
+
+_0026_NEW_EVENT_TYPES = (
+    "'facility_enrollment_created', 'facility_participation_mode_changed', "
+    "'facility_onboarding_status_changed', 'facility_technical_discovery_updated', "
+    "'facility_interface_capability_recorded', 'facility_onboarding_blocked', "
+    "'facility_onboarding_unblocked', 'provider_lab_route_activation_refused'"
+)
+
+_PRE_0026_RESOURCE_TYPES = (
+    "'catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
+    "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route', "
+    "'lab_result_template'"
+)
+
+_0026_NEW_RESOURCE_TYPES = (
+    "'facility_enrollment', 'facility_interface_capability', 'facility_enrollment_blocker'"
+)
+
+# `refused` joins the outcome vocabulary because this ticket audits a refusal that matters: a
+# platform admin tried to activate production routing to a facility that cannot take the work.
+# The existing outcomes all describe writes that happened; this one describes a write that was
+# deliberately prevented, which is exactly the kind of thing an operator later needs to find.
+_PRE_0026_OUTCOMES = "'created', 'returned_existing', 'updated', 'unchanged'"
+_0026_OUTCOMES = f"{_PRE_0026_OUTCOMES}, 'refused'"
+
+
 def upgrade() -> None:
     op.create_table(
         "exchange_facility_enrollments",
@@ -201,7 +246,37 @@ def upgrade() -> None:
     )
 
 
+    for name, expression in (
+        (
+            "ck_exchange_security_audit_events_event_type",
+            f"event_type IN ({_PRE_0026_EVENT_TYPES}, {_0026_NEW_EVENT_TYPES})",
+        ),
+        (
+            "ck_exchange_security_audit_events_resource_type",
+            f"resource_type IS NULL OR resource_type IN "
+            f"({_PRE_0026_RESOURCE_TYPES}, {_0026_NEW_RESOURCE_TYPES})",
+        ),
+        ("ck_exchange_security_audit_events_outcome", f"outcome IN ({_0026_OUTCOMES})"),
+    ):
+        op.drop_constraint(name, "exchange_security_audit_events", type_="check")
+        op.create_check_constraint(name, "exchange_security_audit_events", expression)
+
+
 def downgrade() -> None:
+    for name, expression in (
+        ("ck_exchange_security_audit_events_outcome", f"outcome IN ({_PRE_0026_OUTCOMES})"),
+        (
+            "ck_exchange_security_audit_events_resource_type",
+            f"resource_type IS NULL OR resource_type IN ({_PRE_0026_RESOURCE_TYPES})",
+        ),
+        (
+            "ck_exchange_security_audit_events_event_type",
+            f"event_type IN ({_PRE_0026_EVENT_TYPES})",
+        ),
+    ):
+        op.drop_constraint(name, "exchange_security_audit_events", type_="check")
+        op.create_check_constraint(name, "exchange_security_audit_events", expression)
+
     op.drop_index(
         "ix_exchange_facility_enrollment_blockers_open",
         table_name="exchange_facility_enrollment_blockers",

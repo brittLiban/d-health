@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -149,6 +149,46 @@ class ExchangeIdentityRepository:
             if identity is None:
                 raise IdentityNotFound(str(identity_id))
             return _to_identity_record(identity)
+
+    def search(self, *, query: str, limit: int = 20) -> list[ExchangeIdentityRecord]:
+        """DH-MVP-ONBOARD-001 §22: find a person who has already signed into DHealth.
+
+        Exists so a platform administrator can attach a facility's first administrator without
+        anybody reading a uuid out of the database by hand. Every constraint here is deliberate:
+
+        - **Prefix matching on display name and email, never fuzzy.** This repository does not do
+          approximate identity matching anywhere -- ``PatientReference`` is exact-or-create for the
+          same reason -- and an administrative lookup for someone the operator is already speaking
+          to does not need it.
+        - **A bounded result set**, so the endpoint cannot be walked as an enumeration of everyone
+          who has ever authenticated.
+        - **Only ACTIVE identities.** An inactivated identity is not somebody to attach to a new
+          facility.
+        - **Ordered deterministically**, so two identical queries do not return different people in
+          different orders and an operator can trust what they are looking at.
+
+        A match grants nothing. Creating the membership is a separate, explicit, audited act -- the
+        same separation ``ExchangeIdentity``'s own docstring describes between "DHealth has seen a
+        valid token for this human" and "this human may do something".
+        """
+        needle = query.strip()
+        if not needle:
+            return []
+        pattern = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._sessions() as session:
+            identities = session.scalars(
+                select(ExchangeIdentity)
+                .where(
+                    ExchangeIdentity.status == ExchangeIdentityStatus.ACTIVE.value,
+                    or_(
+                        ExchangeIdentity.display_name.ilike(pattern, escape="\\"),
+                        ExchangeIdentity.email.ilike(pattern, escape="\\"),
+                    ),
+                )
+                .order_by(ExchangeIdentity.display_name, ExchangeIdentity.id)
+                .limit(limit)
+            ).all()
+            return [_to_identity_record(identity) for identity in identities]
 
 
 class OrganizationMembershipRepository:

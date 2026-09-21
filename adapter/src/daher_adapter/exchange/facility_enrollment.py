@@ -32,7 +32,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -934,3 +934,44 @@ class RouteActivationNotReady(FacilityEnrollmentError):
     def __init__(self, decision: RouteActivationDecision) -> None:
         super().__init__("route activation refused: " + ", ".join(decision.blocking_reasons))
         self.decision = decision
+
+
+def facility_has_dependent_workflow_in_session(
+    session: Session, organization_id: uuid.UUID
+) -> bool:
+    """Does real work already depend on how this facility participates? (§34)
+
+    Derived rather than asked of the caller, because a UI that had to answer this would be deciding
+    a safety question from stale state. "Dependent" means either an active route touching this
+    organization or any order it has created or been assigned -- switching participation mode with
+    either in place would strand whatever exists, and migrating a live facility between Native and
+    Connect is a deliberate operation this release does not implement.
+    """
+    from daher_adapter.exchange.models import LabOrder, LabSelection, ProviderLabRoute
+
+    active_route = session.scalar(
+        select(func.count())
+        .select_from(ProviderLabRoute)
+        .where(
+            ProviderLabRoute.active.is_(True),
+            or_(
+                ProviderLabRoute.provider_organization_id == organization_id,
+                ProviderLabRoute.lab_organization_id == organization_id,
+            ),
+        )
+    )
+    if active_route:
+        return True
+    ordered = session.scalar(
+        select(func.count())
+        .select_from(LabOrder)
+        .where(LabOrder.provider_organization_id == organization_id)
+    )
+    if ordered:
+        return True
+    assigned = session.scalar(
+        select(func.count())
+        .select_from(LabSelection)
+        .where(LabSelection.lab_organization_id == organization_id)
+    )
+    return bool(assigned)

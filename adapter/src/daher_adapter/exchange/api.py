@@ -61,9 +61,13 @@ from daher_adapter.exchange.directory import (
     LabDirectoryProfileRepository,
 )
 from daher_adapter.exchange.facility_enrollment import (
+    FacilityEnrollmentNotFound,
     FacilityEnrollmentRepository,
     FacilityReadinessEvaluator,
+    InvalidOnboardingTransition,
+    ParticipationModeChangeRefused,
     RouteActivationNotReady,
+    facility_has_dependent_workflow_in_session,
 )
 from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
@@ -99,6 +103,7 @@ from daher_adapter.exchange.models import (
     DoctorReviewStatus,
     LabOrderStatus,
     LabResultType,
+    OnboardingStatus,
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
@@ -1986,6 +1991,205 @@ class DoctorReviewResponse(BaseModel):
     reviewed_by_practitioner_reference_id: uuid.UUID | None
 
 
+# ── DH-MVP-ONBOARD-001: facility enrollment, discovery and readiness ─────────────────────────
+
+
+class FacilityEnrollmentCreateRequest(BaseModel):
+    """Enrol a facility: create the organization and its enrollment as one act.
+
+    Two steps in the product's mental model, one transaction here -- an organization that exists
+    without an enrollment is the fail-open state migration 0026 went to the trouble of eliminating,
+    and creating one through this endpoint would put it straight back.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=256)
+    organization_type: Literal["PROVIDER", "LAB"]
+    participation_mode: Literal["NATIVE", "CONNECT"]
+
+
+class ParticipationModeChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    participation_mode: Literal["NATIVE", "CONNECT"]
+
+
+class OnboardingStatusChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    onboarding_status: Literal[
+        "DRAFT",
+        "FACILITY_VERIFIED",
+        "ORGANIZATION_READY",
+        "CONFIGURATION_IN_PROGRESS",
+        "TECHNICAL_DISCOVERY",
+        "AWAITING_CONNECTOR",
+        "READY_FOR_QUALIFICATION",
+        "READY_FOR_ROUTING",
+        "BLOCKED",
+    ]
+
+
+class IntegrationDiscoveryRequest(BaseModel):
+    """What a CONNECT partner told us about their existing system.
+
+    Every field is optional and every one may stay unknown: a clinic manager genuinely may not know
+    their LIS vendor, and a form that refuses to record that pushes an operator into guessing.
+    Absence here is a real answer that produces a discovery obligation, not a validation failure.
+
+    Deliberately carries no credential field of any kind. `documentation_reference` is a pointer to
+    vendor documentation -- a reference, never a way in. DHealth stores no API key, password or
+    connection secret for a partner system anywhere, and when a connector eventually needs one that
+    belongs to a secrets architecture this release does not have.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    existing_system_name: str | None = Field(default=None, max_length=256)
+    existing_system_vendor: str | None = Field(default=None, max_length=256)
+    existing_system_version: str | None = Field(default=None, max_length=64)
+    hosting_model: Literal["ON_PREMISE", "CLOUD", "HYBRID", "UNKNOWN"] | None = None
+    technical_contact: str | None = Field(default=None, max_length=256)
+    vendor_contact: str | None = Field(default=None, max_length=256)
+    documentation_reference: str | None = Field(default=None, max_length=512)
+    patient_identifier_namespace: str | None = Field(default=None, max_length=256)
+    order_identifier_concept: str | None = Field(default=None, max_length=256)
+    report_identifier_concept: str | None = Field(default=None, max_length=256)
+    specimen_identifier_concept: str | None = Field(default=None, max_length=256)
+    exposes_source_event_timestamps: bool | None = None
+    exposes_professional_release_event: bool | None = None
+    integration_feasibility: (
+        Literal[
+            "DISCOVERY_REQUIRED",
+            "CONNECTABLE",
+            "CONNECTOR_DEVELOPMENT_REQUIRED",
+            "NOT_SAFELY_INTEGRABLE",
+        ]
+        | None
+    ) = None
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class InterfaceCapabilityRequest(BaseModel):
+    """One interface, and how much DHealth actually knows about it.
+
+    `verification_state` is platform-authorized on purpose (§14/ID6): a facility administrator may
+    tell us their system speaks FHIR, and only DHealth may record that DHealth checked. VERIFIED
+    here means the interface exists as documented -- it is not a statement that a connector exists
+    or that anything has passed qualification.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verification_state: Literal["REPORTED", "DOCUMENTED", "VERIFIED", "UNSUPPORTED"]
+    detail: str | None = Field(default=None, max_length=512)
+
+
+class BlockerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "VENDOR_DOCUMENTATION_UNAVAILABLE",
+        "VENDOR_CONTACT_REQUIRED",
+        "REQUIRED_INTERFACE_UNAVAILABLE",
+        "MISSING_RESULT_RELEASE_EVENT",
+        "UNKNOWN_PATIENT_IDENTIFIER_BEHAVIOR",
+        "CONNECTOR_NOT_IMPLEMENTED",
+        "FACILITY_CONFIGURATION_INCOMPLETE",
+        "CLINICAL_TEMPLATE_SIGNOFF_REQUIRED",
+    ]
+    # Operational note: what DHealth is waiting for, from whom. Never clinical content, never a
+    # credential -- bounded length so it cannot quietly become a free-text record of anything else.
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class InterfaceCapabilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interface_type: str
+    verification_state: str
+    detail: str | None
+
+
+class BlockerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    code: str
+    note: str | None
+    created_at: datetime
+
+
+class FacilityEnrollmentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: uuid.UUID
+    organization_name: str
+    organization_type: str
+    organization_status: str
+    participation_mode: str
+    onboarding_status: str
+    integration_feasibility: str | None
+    existing_system_name: str | None
+    existing_system_vendor: str | None
+    existing_system_version: str | None
+    hosting_model: str | None
+    technical_contact: str | None
+    vendor_contact: str | None
+    documentation_reference: str | None
+    patient_identifier_namespace: str | None
+    order_identifier_concept: str | None
+    report_identifier_concept: str | None
+    specimen_identifier_concept: str | None
+    exposes_source_event_timestamps: bool | None
+    exposes_professional_release_event: bool | None
+    notes: str | None
+    interfaces: list[InterfaceCapabilityResponse]
+    open_blockers: list[BlockerResponse]
+
+
+class ReadinessFindingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    satisfied: bool
+    blocking: bool
+    detail: str | None
+
+
+class FacilityReadinessResponse(BaseModel):
+    """Server-derived (§74), never a stored verdict and never a frontend checkbox.
+
+    `production_routing_allowed` answers the one question an operator is really asking, and
+    `findings` says why -- including the non-blocking ones, because "what is left to configure" and
+    "what is stopping go-live" are different questions that a single boolean would merge.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: uuid.UUID
+    participation_mode: str
+    onboarding_status: str
+    production_routing_allowed: bool
+    findings: list[ReadinessFindingResponse]
+
+
+class IdentityLookupResponse(BaseModel):
+    """One already-authenticated person, for the first-administrator bootstrap (§21/§22).
+
+    Carries the minimum an operator needs to recognise the right human and nothing more: no
+    memberships, no organization data, no credential material of any kind. Selecting somebody here
+    grants nothing -- attaching them to a facility is a separate, explicit, audited act.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity_id: uuid.UUID
+    display_name: str | None
+    email: str | None
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -3851,15 +4055,10 @@ def build_exchange_router(
                         lab_organization_id=lab_id,
                     )
                     if not decision.allowed:
-                        security_audit.record(
-                            session,
-                            event_type="provider_lab_route_activation_refused",
-                            actor_identity_id=principal.identity_id,
-                            organization_id=provider_id,
-                            outcome="refused",
-                            resource_type="provider_lab_route",
-                            resource_id=None,
-                        )
+                        # Raise here and audit the refusal *after* this transaction has rolled
+                        # back. Recording it inside would be pointless: the rollback that abandons
+                        # the route write would abandon the audit row with it, and an audit trail
+                        # that disappears exactly when something was refused is worse than none.
                         raise RouteActivationNotReady(decision)
                 record, created, changed = provider_lab_routes.upsert(
                     provider_organization_id=provider_id,
@@ -3881,6 +4080,20 @@ def build_exchange_router(
                     resource_id=record.id,
                 )
         except RouteActivationNotReady as error:
+            # The write transaction has rolled back by now, so this audit row commits on its own
+            # and survives. "Who tried to switch production routing on, to what, and when it was
+            # refused" is exactly what an operator needs when a partner asks why orders are not
+            # flowing.
+            with session_factory.begin() as audit_session:
+                security_audit.record(
+                    audit_session,
+                    event_type="provider_lab_route_activation_refused",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=provider_id,
+                    outcome="refused",
+                    resource_type="provider_lab_route",
+                    resource_id=None,
+                )
             # 409, not 422: the request is well-formed and the operator has the authority to make
             # it. What is wrong is the state of the world, and it may well be right tomorrow. The
             # blocking reasons are returned so the UI can say precisely what is missing rather than
@@ -6484,6 +6697,459 @@ def build_exchange_router(
             DoctorReviewStatus.FOLLOW_UP_REQUIRED,
             release_version_id,
         )
+
+    # ── DH-MVP-ONBOARD-001: the platform control plane ───────────────────────────────────────
+    #
+    # Facility creation and cross-organization configuration are platform-level acts: a facility
+    # administrator runs their own organization and never enrols another one, never inspects an
+    # unrelated facility, and never activates a route spanning two organizations. §51/§52 -- and
+    # enforced here, in the backend, because hidden UI is not a security boundary.
+
+    def _enrollment_response(record) -> FacilityEnrollmentResponse:
+        return FacilityEnrollmentResponse(
+            organization_id=record.organization_id,
+            organization_name=record.organization_name,
+            organization_type=record.organization_type,
+            organization_status=record.organization_status,
+            participation_mode=record.participation_mode,
+            onboarding_status=record.onboarding_status,
+            integration_feasibility=record.integration_feasibility,
+            existing_system_name=record.existing_system_name,
+            existing_system_vendor=record.existing_system_vendor,
+            existing_system_version=record.existing_system_version,
+            hosting_model=record.hosting_model,
+            technical_contact=record.technical_contact,
+            vendor_contact=record.vendor_contact,
+            documentation_reference=record.documentation_reference,
+            patient_identifier_namespace=record.patient_identifier_namespace,
+            order_identifier_concept=record.order_identifier_concept,
+            report_identifier_concept=record.report_identifier_concept,
+            specimen_identifier_concept=record.specimen_identifier_concept,
+            exposes_source_event_timestamps=record.exposes_source_event_timestamps,
+            exposes_professional_release_event=record.exposes_professional_release_event,
+            notes=record.notes,
+            interfaces=[
+                InterfaceCapabilityResponse(
+                    interface_type=i.interface_type,
+                    verification_state=i.verification_state,
+                    detail=i.detail,
+                )
+                for i in record.interfaces
+            ],
+            open_blockers=[
+                BlockerResponse(id=b.id, code=b.code, note=b.note, created_at=b.created_at)
+                for b in record.open_blockers
+            ],
+        )
+
+    def _facility_has_dependent_workflow(organization_id: uuid.UUID) -> bool:
+        with session_factory() as session:
+            return facility_has_dependent_workflow_in_session(session, organization_id)
+
+    def _require_platform(principal: AuthenticatedPrincipal, organization_id) -> None:
+        try:
+            authz.require_platform_admin(principal)
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="platform admin required"
+            ) from error
+
+    def _require_own_org_admin_or_platform(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> None:
+        """A facility's own administrator may read their own enrollment; a platform admin may read
+        any. Anyone else is refused before a single field is assembled -- an unrelated facility's
+        onboarding data is not theirs to see, and a 403 that leaks nothing is the whole point."""
+        if principal.platform_admin:
+            return
+        try:
+            authz.require_role(
+                principal, organization_id=organization_id, role=OrganizationRole.ORG_ADMIN
+            )
+        except ResourceNotFound as error:
+            # Anti-enumeration, the convention this API already follows: someone with no
+            # membership at all is told the organization does not exist rather than that it exists
+            # and is not theirs. A 403 here would let an outsider walk uuids and learn which
+            # facilities are enrolled.
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            # Membership exists, the role does not: safe to say so, because the caller already
+            # knows this organization exists.
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="organization administrator required",
+            ) from error
+
+    @router.post(
+        "/platform/facilities",
+        response_model=FacilityEnrollmentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def enrol_facility(
+        body: FacilityEnrollmentCreateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        """Create an organization and its enrollment together, or neither.
+
+        §72: one transaction covering the organization, the enrollment and both audit rows. A
+        half-created facility -- an organization with no enrollment -- is exactly the fail-open
+        state the readiness gate refuses to treat as routable, so it must not be reachable by a
+        request that failed halfway through.
+        """
+        _require_platform(principal, None)
+        try:
+            with session_factory.begin() as session:
+                organization = organizations.create(
+                    org_type=body.organization_type, name=body.name, session=session
+                )
+                security_audit.record(
+                    session,
+                    event_type="organization_created",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=organization.id,
+                    outcome="created",
+                )
+                enrollment, created = facility_enrollments.create(
+                    organization_id=organization.id,
+                    participation_mode=body.participation_mode,
+                    onboarding_status=OnboardingStatus.DRAFT,
+                    session=session,
+                )
+                security_audit.record(
+                    session,
+                    event_type="facility_enrollment_created",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=organization.id,
+                    outcome="created" if created else "unchanged",
+                    resource_type="facility_enrollment",
+                    resource_id=enrollment.id,
+                )
+        except (InvalidOrganizationType, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        return _enrollment_response(facility_enrollments.get_for_organization(organization.id))
+
+    @router.get("/platform/facilities", response_model=list[FacilityEnrollmentResponse])
+    def list_facilities(
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[FacilityEnrollmentResponse]:
+        _require_platform(principal, None)
+        return [_enrollment_response(record) for record in facility_enrollments.list_all()]
+
+    @router.get(
+        "/organizations/{organization_id}/enrollment", response_model=FacilityEnrollmentResponse
+    )
+    def get_facility_enrollment(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        _require_own_org_admin_or_platform(principal, organization_id)
+        try:
+            return _enrollment_response(facility_enrollments.get_for_organization(organization_id))
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+
+    @router.put(
+        "/organizations/{organization_id}/enrollment/participation-mode",
+        response_model=FacilityEnrollmentResponse,
+    )
+    def set_participation_mode(
+        organization_id: uuid.UUID,
+        body: ParticipationModeChangeRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        """§34. Platform-only, audited, and fails closed once real work depends on the current mode.
+
+        Whether work depends on it is derived here rather than asked of the caller: an active route
+        or any existing order means switching mode would strand something, and migrating a live
+        facility is a deliberate operation this release does not implement.
+        """
+        _require_platform(principal, organization_id)
+        has_dependent_workflow = _facility_has_dependent_workflow(organization_id)
+        try:
+            record, changed = facility_enrollments.set_participation_mode(
+                organization_id=organization_id,
+                participation_mode=body.participation_mode,
+                has_dependent_workflow=has_dependent_workflow,
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        except ParticipationModeChangeRefused as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        if changed:
+            with session_factory.begin() as session:
+                security_audit.record(
+                    session,
+                    event_type="facility_participation_mode_changed",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=organization_id,
+                    outcome="updated",
+                    resource_type="facility_enrollment",
+                    resource_id=record.id,
+                )
+        return _enrollment_response(record)
+
+    @router.put(
+        "/organizations/{organization_id}/enrollment/status",
+        response_model=FacilityEnrollmentResponse,
+    )
+    def set_onboarding_status(
+        organization_id: uuid.UUID,
+        body: OnboardingStatusChangeRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        _require_platform(principal, organization_id)
+        try:
+            record, changed = facility_enrollments.set_onboarding_status(
+                organization_id=organization_id, onboarding_status=body.onboarding_status
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        except InvalidOnboardingTransition as error:
+            # 422: the caller asked for a state this facility cannot legitimately be in -- most
+            # often READY_FOR_ROUTING on a CONNECT facility, which no connector exists to serve.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        if changed:
+            with session_factory.begin() as session:
+                security_audit.record(
+                    session,
+                    event_type="facility_onboarding_status_changed",
+                    actor_identity_id=principal.identity_id,
+                    organization_id=organization_id,
+                    outcome="updated",
+                    resource_type="facility_enrollment",
+                    resource_id=record.id,
+                )
+        return _enrollment_response(record)
+
+    @router.put(
+        "/organizations/{organization_id}/integration-profile",
+        response_model=FacilityEnrollmentResponse,
+    )
+    def update_integration_profile(
+        organization_id: uuid.UUID,
+        body: IntegrationDiscoveryRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        """Technical discovery for a CONNECT facility. Platform-only: what DHealth believes about a
+        partner's system is DHealth's own record, and a facility cannot write its own feasibility
+        conclusion."""
+        _require_platform(principal, organization_id)
+        try:
+            record = facility_enrollments.update_discovery(
+                organization_id=organization_id,
+                fields=body.model_dump(exclude_unset=True),
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        except InvalidOnboardingTransition as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        with session_factory.begin() as session:
+            security_audit.record(
+                session,
+                event_type="facility_technical_discovery_updated",
+                actor_identity_id=principal.identity_id,
+                organization_id=organization_id,
+                outcome="updated",
+                resource_type="facility_enrollment",
+                resource_id=record.id,
+            )
+        return _enrollment_response(record)
+
+    @router.put(
+        "/organizations/{organization_id}/integration-profile/interfaces/{interface_type}",
+        response_model=FacilityEnrollmentResponse,
+    )
+    def set_interface_capability(
+        organization_id: uuid.UUID,
+        interface_type: Literal[
+            "REST_API",
+            "FHIR",
+            "HL7_V2",
+            "WEBHOOK",
+            "SFTP",
+            "FILE_IMPORT_EXPORT",
+            "DATABASE_READ",
+            "OTHER",
+            "UNKNOWN",
+        ],
+        body: InterfaceCapabilityRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        """ID6: recording what DHealth knows about an interface is platform-authorized.
+
+        A partner may tell us their system speaks FHIR; only DHealth may record that DHealth
+        checked. Note what this does not do -- no verification state here changes an onboarding
+        status, unlocks routing, or implies a connector exists.
+        """
+        _require_platform(principal, organization_id)
+        try:
+            _, created = facility_enrollments.set_interface_capability(
+                organization_id=organization_id,
+                interface_type=interface_type,
+                verification_state=body.verification_state,
+                detail=body.detail,
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        record = facility_enrollments.get_for_organization(organization_id)
+        with session_factory.begin() as session:
+            security_audit.record(
+                session,
+                event_type="facility_interface_capability_recorded",
+                actor_identity_id=principal.identity_id,
+                organization_id=organization_id,
+                outcome="created" if created else "updated",
+                resource_type="facility_interface_capability",
+                resource_id=record.id,
+            )
+        return _enrollment_response(record)
+
+    @router.post(
+        "/organizations/{organization_id}/enrollment/blockers",
+        response_model=FacilityEnrollmentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def add_enrollment_blocker(
+        organization_id: uuid.UUID,
+        body: BlockerCreateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        _require_platform(principal, organization_id)
+        try:
+            blocker = facility_enrollments.add_blocker(
+                organization_id=organization_id, code=body.code, note=body.note
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        with session_factory.begin() as session:
+            security_audit.record(
+                session,
+                event_type="facility_onboarding_blocked",
+                actor_identity_id=principal.identity_id,
+                organization_id=organization_id,
+                outcome="created",
+                resource_type="facility_enrollment_blocker",
+                resource_id=blocker.id,
+            )
+        return _enrollment_response(facility_enrollments.get_for_organization(organization_id))
+
+    @router.delete(
+        "/organizations/{organization_id}/enrollment/blockers/{blocker_id}",
+        response_model=FacilityEnrollmentResponse,
+    )
+    def resolve_enrollment_blocker(
+        organization_id: uuid.UUID,
+        blocker_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityEnrollmentResponse:
+        """Resolving a blocker marks it resolved; it never deletes the history of it having existed
+        -- how long a facility was blocked, and by what, is what an operator needs when a partner
+        asks why go-live slipped."""
+        _require_platform(principal, organization_id)
+        try:
+            facility_enrollments.resolve_blocker(blocker_id=blocker_id)
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="blocker not found"
+            ) from error
+        with session_factory.begin() as session:
+            security_audit.record(
+                session,
+                event_type="facility_onboarding_unblocked",
+                actor_identity_id=principal.identity_id,
+                organization_id=organization_id,
+                outcome="updated",
+                resource_type="facility_enrollment_blocker",
+                resource_id=blocker_id,
+            )
+        return _enrollment_response(facility_enrollments.get_for_organization(organization_id))
+
+    @router.get(
+        "/organizations/{organization_id}/enrollment/readiness",
+        response_model=FacilityReadinessResponse,
+    )
+    def get_facility_readiness(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityReadinessResponse:
+        """§48: what is preventing this facility from going live?
+
+        Derived from live rows on every call. The UI displays this; it never computes its own
+        version, and it cannot override a refusal -- the same evaluation runs again inside the
+        endpoint that would actually activate routing.
+        """
+        _require_own_org_admin_or_platform(principal, organization_id)
+        try:
+            record, findings = facility_readiness.evaluate(organization_id)
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        return FacilityReadinessResponse(
+            organization_id=organization_id,
+            participation_mode=record.participation_mode,
+            onboarding_status=record.onboarding_status,
+            production_routing_allowed=all(f.satisfied for f in findings if f.blocking),
+            findings=[
+                ReadinessFindingResponse(
+                    code=f.code, satisfied=f.satisfied, blocking=f.blocking, detail=f.detail
+                )
+                for f in findings
+            ],
+        )
+
+    @router.get("/platform/identities", response_model=list[IdentityLookupResponse])
+    def lookup_identities(
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        q: Annotated[str, Query(min_length=3, max_length=256)],
+    ) -> list[IdentityLookupResponse]:
+        """§22: find a person who has already signed into DHealth, so a platform admin can attach
+        them to a facility without anybody copying a database uuid by hand.
+
+        Four deliberate limits. Platform-admin only. A minimum query length, so this cannot be
+        walked as an enumeration of everyone who has ever signed in. A hard result cap. And a
+        response carrying only identity id, display name and email -- no memberships, no
+        organization data, no credential material, and nothing that would tell the caller anything
+        about facilities they have no business seeing.
+
+        Matching is exact-or-prefix on display name and email. Deliberately not fuzzy: this is an
+        administrative lookup for a person the operator is already talking to, not a demographic
+        search, and this repository does not do fuzzy identity matching anywhere.
+
+        Finding somebody here grants nothing. Attaching them to an organization is a separate,
+        explicit, audited membership mutation.
+        """
+        _require_platform(principal, None)
+        matches = identities.search(query=q, limit=20)
+        return [
+            IdentityLookupResponse(
+                identity_id=match.id, display_name=match.display_name, email=match.email
+            )
+            for match in matches
+        ]
 
     return router
 
