@@ -278,11 +278,15 @@ export function StaffWorkspace({
           {/* DH-MVP-ONBOARD-001: this screen is also the first thing a facility's
               intended administrator sees. There is no invitation system, so the
               bootstrap is that they sign in once and a *platform* administrator
-              then attaches them. Telling them to ask an administrator of their
-              own facility sends them to somebody who does not exist yet, which
-              is precisely the situation this first sign-in resolves. */}
-          Vous êtes maintenant connu de DHealth. Un administrateur de la plateforme peut désormais
-          vous rattacher à votre établissement — cette première connexion était l'étape nécessaire.
+              then attaches them — telling them to ask an administrator of their
+              own facility sends them to somebody who does not exist yet.
+              But the same screen also catches somebody whose membership was
+              revoked or whose organization was suspended, so it must not claim
+              this is a first sign-in either. It says what is true in both
+              readings and names both ways out. */}
+          Votre compte est connu de DHealth, mais aucun établissement actif n'y est rattaché. Un
+          administrateur de la plateforme peut vous rattacher à votre établissement, ou en rétablir
+          l'accès.
         </EmptyState>
       </div>
     )

@@ -18083,10 +18083,23 @@ commit, same workflow, previously green. Four attempts across two days on the ne
 the same shape. Repository-level Actions are enabled (`{"enabled":true,"allowed_actions":"all"}`),
 and the failing commits touch no workflow file.
 
-The cause is not asserted here. Reading Actions billing requires a `user`-scoped token this session
-does not hold, and the ticket's own instruction is not to assume. **CI conclusion for this ticket is
-unavailable — not failed on repository code, and not reported as green.** Local qualification is
-therefore the authoritative evidence below.
+**The cause is now stated by GitHub itself**, and no longer has to be inferred. The push of this
+ticket's final commit produced run `35621071589` on `91c4589`, which carried an annotation on all
+ten jobs:
+
+> The job was not started because recent account payments have failed or your spending limit needs
+> to be increased. Please check the 'Billing & plans' section in your settings.
+
+That closes the question the earlier attempts could only bound from outside. Through four attempts
+across two days, the evidence available was the *shape* of the failure — zero steps, no logs, a
+previously-green commit failing identically on re-run — and reading Actions billing needed a
+`user`-scoped token this session does not hold, so the cause was deliberately left unasserted rather
+than guessed. It happens that the guess would have been right; the discipline still was.
+
+**CI conclusion for this ticket remains unavailable — repository code was never evaluated, so it is
+neither failed nor green.** This is an account-billing condition, not a workflow or repository
+defect, and no change to this repository can clear it. Local qualification is therefore the
+authoritative evidence below.
 
 ### Schema
 
@@ -18263,11 +18276,11 @@ left in source.
   under a real engine at three widths; it is not the same as somebody enrolling a facility.
 - **No E2E run**, no live stack, no real Keycloak. `typecheck:e2e` passes and is not part of CI.
 - **No CI conclusion.** See above.
-- The first-administrator bootstrap still requires the intended administrator to sign in once
-  before they can be attached. There is no invitation system and no Keycloak provisioning, by scope.
-- The wizard's first-administrator step finds a person and does not yet create their membership or
-  assign their roles; the lookup is real, the attachment is DH-MVP-ONBOARD-001's remaining gap,
-  recorded here rather than implied as done.
+- **The first administrator is found but not yet attached.** The bootstrap still requires the
+  intended administrator to sign in once — there is no invitation system and no Keycloak
+  provisioning, by scope — and the wizard's step for them performs a real lookup without yet
+  creating the membership or assigning the roles. That attachment is DH-MVP-ONBOARD-001's one
+  remaining gap, recorded here rather than implied as done.
 
 ### Confirmations
 

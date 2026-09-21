@@ -1775,3 +1775,44 @@ real phone scanned one of these QR codes, no printer produced one of these sheet
 behaviour is reasoned rather than measured, and real Keycloak qualification, manual live/browser
 demonstration, and production deployment all remain not run. No SMS/WhatsApp/email/voice transport
 was added and `ResultDelivery` is untouched. This is not a pilot-readiness claim.
+
+**DH-MVP-ONBOARD-001 update (2026-09-21):** DHealth can now represent how a clinic or laboratory
+*becomes* a participant, which it previously could not: an `Organization` row said a name and a type
+existed and nothing else. A platform operator enrols a facility, records whether it will use DHealth
+directly (`NATIVE`) or keep its existing software (`CONNECT`), captures what that software is, and
+reads a server-derived answer to "can clinics send orders here, and if not exactly why". Migration
+`0026_facility_enrollment` adds three tables and backfills every existing organization as
+`NATIVE`/`ORGANIZATION_READY`.
+
+**What actually works:** enrollment and organization creation in one transaction; explicit
+participation-mode choice, refused once real work depends on the current mode; Connect technical
+discovery with three distinct truth levels (reported / documented / verified by DHealth); a
+server-derived readiness verdict computed from live rows on every read; a production-routing gate on
+all three paths that can send work (the activation endpoint, `assign_by_provider` inside its row
+lock, and the eligible-destinations read); and a platform screen that switches routing on, with a
+two-gesture confirmation, no control at all for a Connect or unready laboratory, and a server
+refusal rendered reason by reason.
+
+**The distinction this ticket exists to protect:** enrolled ≠ configured ≠ operationally ready ≠
+production-routable. A Native laboratory that loses its last `LAB_RESULT_RELEASER` keeps its
+configured route untouched, stops being an eligible destination, and reads on screen as *Relation
+configurée · Routage indisponible* — both halves at once. Restoring the staffing makes the same
+route usable again with nothing recreated.
+
+**NOT BUILT, and not implied anywhere in the product:** DHealth Connect transport. No FHIR, HL7,
+SFTP, webhook, agent, VPN, OpenELIS or OpenMRS binding; no partner credential storage; no mapping,
+connector health, or qualification. `READY_FOR_ROUTING` is unreachable for a CONNECT facility by
+construction, and no interface state or operator action can move it. That is
+DH-CONNECT-CONTRACT-001's subject. Also not built: Keycloak user provisioning and any invitation
+system — the intended administrator must sign in once before they can be attached, and the wizard
+currently finds that person without yet creating their membership.
+
+**Not run, and not claimed:** no real browser has been used by a person (seven platform scenes were
+captured in headless Chromium at 1280/768/390 and two were reviewed by eye); no E2E; no live stack;
+no real Keycloak. **GitHub Actions executed nothing for any commit in this ticket** — every job was
+refused before starting, and GitHub's own annotation on run `35621071589` gives the cause:
+*"The job was not started because recent account payments have failed or your spending limit needs
+to be increased."* Repository code was never evaluated, so there is no CI conclusion to report in
+either direction. Local qualification is the authoritative evidence: adapter 1168 passed / 118
+skipped, 811 UI tests across all 54 files, migration re-qualified against real PostgreSQL 18, and
+five negative controls executed and reverted. This is not a pilot-readiness claim.

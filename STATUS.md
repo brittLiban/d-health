@@ -27,9 +27,12 @@ repository, not at one endpoint.
 
 **Evidence level: local qualification only, because GitHub Actions executes nothing.** Every job of
 every run ends in 2–3 seconds with zero steps and no logs; the previously-green run `35527353831` on
-SHA `5983da9` was re-run as a control and **failed identically**. The cause is not asserted — reading
-Actions billing needs a token scope this session does not hold. **CI conclusion for this ticket is
-unavailable: not failed on repository code, and not reported as green.**
+SHA `5983da9` was re-run as a control and **failed identically**. GitHub finally named the cause
+itself, in an annotation on run `35621071589`: *"The job was not started because recent account
+payments have failed or your spending limit needs to be increased."* An account-billing condition,
+not a workflow or repository defect, and nothing in this repository can clear it. **CI conclusion
+for this ticket is unavailable: repository code was never evaluated, so it is neither failed nor
+green.**
 
 Measured locally: adapter **1168 passed, 118 skipped** (from 1122), ruff check and format clean
 across 156 files; **811 UI tests across all 54 test files**, run in seven batches because a
