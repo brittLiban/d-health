@@ -283,3 +283,74 @@ class TestStaffingLossDoesNotRewriteTheRoute:
 
         # Same active route, same offerings, same open doors -- and no longer a destination.
         assert repos["routes"].find_whole_order_eligible_labs(provider.id, entry_ids) == []
+
+    def test_RS12_two_memberships_splitting_the_lab_roles_are_ready(self, repos):
+        """Two people, one entering and one releasing, is the other real laboratory shape.
+
+        The requirement is that both authorities are present at the organization -- not that one
+        person holds both, and not that two different humans exist. Both configurations satisfy it.
+        """
+        lab = make_lab(repos["organizations"], "Laboratoire Deux Personnes", operational=False)
+        _enrol(repos, lab.id)
+        repos["directory"].upsert(
+            lab_organization_id=lab.id,
+            public_address="Avenue 15, Djibouti",
+            latitude=None,
+            longitude=None,
+            public_phone=None,
+            listed=False,
+            accepting_orders=True,
+        )
+        entry, _ = repos["catalog"].create_entry(code="GLU-2P", display_name="Glycémie")
+        repos["catalog"].create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        _grant(repos, lab.id, [OrganizationRole.LAB_TECH], "tech-only-person")
+        _grant(repos, lab.id, [OrganizationRole.LAB_RESULT_RELEASER], "releaser-only-person")
+
+        _, findings = _evaluator(repos).evaluate(lab.id)
+        assert _blocking(findings) == set()
+
+    def test_RS13_org_admin_alone_satisfies_no_operational_role(self, repos):
+        """ORG_ADMIN administers a facility; it does not enter results and does not release them.
+
+        ADR-044 keeps those authorities separate deliberately, and administration implying either
+        would quietly hand a manager clinical authority nobody granted.
+        """
+        lab = _ready_lab(repos, name="Laboratoire Admin Seul", roles=[OrganizationRole.ORG_ADMIN])
+        _, lab_findings = _evaluator(repos).evaluate(lab.id)
+        assert "lab_technician_present" in _blocking(lab_findings)
+        assert "lab_releaser_present" in _blocking(lab_findings)
+
+        provider = _ready_provider(
+            repos, name="Clinique Admin Seul", roles=[OrganizationRole.ORG_ADMIN]
+        )
+        _, provider_findings = _evaluator(repos).evaluate(provider.id)
+        assert "clinician_present" in _blocking(provider_findings)
+
+    def test_RS14_restoring_staffing_makes_the_same_route_usable_again(self, repos):
+        """No route recreation. The relationship never went anywhere; only the facility's ability
+        to act on it did, and that is re-derived on every read."""
+        provider = _ready_provider(repos, name="Clinique Retour")
+        lab = _ready_lab(repos, name="Laboratoire Retour")
+        route, _, _ = repos["routes"].upsert(
+            provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
+        )
+        entry_ids = [o.catalog_entry_id for o in repos["catalog"].list_offerings_for_lab(lab.id)]
+        assert repos["routes"].find_whole_order_eligible_labs(provider.id, entry_ids)
+
+        for membership in repos["memberships"].list_for_organization(lab.id):
+            repos["memberships"].set_inactive(membership.id)
+        assert repos["routes"].find_whole_order_eligible_labs(provider.id, entry_ids) == []
+
+        # A new person arrives holding both authorities. The original route row is untouched
+        # throughout -- same id, still active.
+        _grant(
+            repos,
+            lab.id,
+            [OrganizationRole.LAB_TECH, OrganizationRole.LAB_RESULT_RELEASER],
+            "replacement-staff",
+        )
+        eligible_again = repos["routes"].find_whole_order_eligible_labs(provider.id, entry_ids)
+        assert [e.lab_organization_id for e in eligible_again] == [lab.id]
+
+        surviving = repos["routes"].list_for_provider(provider.id, active_only=False)
+        assert [(r.id, r.active) for r in surviving] == [(route.id, True)]

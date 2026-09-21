@@ -24,6 +24,7 @@ never compares roles or organization ids inline. ``TokenValidationError`` always
 per the anti-enumeration policy documented on ``authorization.py``.
 """
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -2190,6 +2191,9 @@ class IdentityLookupResponse(BaseModel):
     email: str | None
 
 
+logger = logging.getLogger("daher_adapter.exchange.api")
+
+
 def build_exchange_router(
     *,
     session_factory: sessionmaker[Session],
@@ -4084,15 +4088,30 @@ def build_exchange_router(
             # and survives. "Who tried to switch production routing on, to what, and when it was
             # refused" is exactly what an operator needs when a partner asks why orders are not
             # flowing.
-            with session_factory.begin() as audit_session:
-                security_audit.record(
-                    audit_session,
-                    event_type="provider_lab_route_activation_refused",
-                    actor_identity_id=principal.identity_id,
-                    organization_id=provider_id,
-                    outcome="refused",
-                    resource_type="provider_lab_route",
-                    resource_id=None,
+            #
+            # Best-effort, exactly like `_audit_refused` above, and for the same reason: refusal
+            # telemetry must never be able to change the refusal itself. If this write fails, the
+            # route is still not activated -- the transaction that would have written it has
+            # already rolled back -- and the caller must still receive the truthful 409 explaining
+            # why, not a 500 that reads like a server fault and hides the real answer. Readiness
+            # enforcement does not depend on audit availability in either direction: it cannot be
+            # bypassed by an audit failure, and it must not be misreported by one.
+            try:
+                with session_factory.begin() as audit_session:
+                    security_audit.record(
+                        audit_session,
+                        event_type="provider_lab_route_activation_refused",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="refused",
+                        resource_type="provider_lab_route",
+                        resource_id=None,
+                    )
+            except Exception:  # noqa: BLE001 -- see above; telemetry never alters the refusal
+                logger.warning(
+                    "failed to record provider_lab_route_activation_refused telemetry; "
+                    "the activation itself remains refused",
+                    exc_info=True,
                 )
             # 409, not 422: the request is well-formed and the operator has the authority to make
             # it. What is wrong is the state of the world, and it may well be right tomorrow. The

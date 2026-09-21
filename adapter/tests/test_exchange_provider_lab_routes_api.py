@@ -684,3 +684,54 @@ def test_rr_staffing_loss_leaves_the_configured_route_alone(
         )
         assert route is not None
         assert route.active is True, "the configured relationship must survive a staffing change"
+
+
+def test_rr_refusal_survives_a_failure_to_record_its_own_telemetry(
+    client: TestClient, keypair, organizations, directory, catalog, sessions, monkeypatch
+) -> None:
+    """Authorization and readiness must not depend on audit availability.
+
+    The hazard is specific: the refusal path writes its telemetry *after* the write transaction
+    has rolled back, so an exception there would escape and replace a truthful 409 with a 500 --
+    a response that reads like a server fault and hides the real answer from the operator.
+
+    What must hold when telemetry fails:
+
+      readiness says no  ->  audit write fails  ->  the activation is STILL refused,
+                                                    with the same 409 and the same reasons
+
+    The inverse matters too and is covered by the gate's own negative control: a failing audit must
+    never become a way to get the prohibited activation through.
+    """
+    private_key, _ = keypair
+    provider = make_provider(organizations, name="AuditFailProvider")
+    lab = _production_ready_lab(organizations, directory, catalog, name="AuditFailLab")
+    _revoke_role(sessions, lab.id, "LAB_RESULT_RELEASER")
+
+    import daher_adapter.exchange.api as api_module
+
+    real_record = api_module.ExchangeSecurityAuditRepository.record
+
+    def exploding_record(self, session, *, event_type, **kwargs):
+        if event_type == "provider_lab_route_activation_refused":
+            raise RuntimeError("simulated audit storage failure")
+        return real_record(self, session, event_type=event_type, **kwargs)
+
+    monkeypatch.setattr(api_module.ExchangeSecurityAuditRepository, "record", exploding_record)
+
+    response = _configure_route(client, private_key, provider.id, lab.id)
+
+    assert response.status_code == 409, response.text
+    assert "lab_lab_releaser_present" in response.json()["detail"]["blocking_reasons"]
+
+    # And the prohibited thing still did not happen.
+    with sessions() as session:
+        assert (
+            session.scalar(
+                select(ProviderLabRoute).where(
+                    ProviderLabRoute.provider_organization_id == provider.id,
+                    ProviderLabRoute.lab_organization_id == lab.id,
+                )
+            )
+            is None
+        )
