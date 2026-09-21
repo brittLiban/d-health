@@ -3,8 +3,8 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-POLISH-001,
-> 2026-09-20 — this parenthetical has now gone stale twice, first reading "DH-MVP-001 and
+> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-ONBOARD-001,
+> 2026-09-21 — this parenthetical has now gone stale twice, first reading "DH-MVP-001 and
 > DH-DOC-001" and then "DH-PATIENT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
@@ -18050,3 +18050,209 @@ Every change landed as focused commits directly on `master`, per this ticket's o
 instruction. No branch and no pull request were created.
 
 `NEXT: DH-MVP-ADMIN-001 — Facility Setup + Administration`
+
+---
+
+## DH-MVP-ONBOARD-001 — Facility Enrollment + Integration Readiness · 2026-09-21 · directly on `master`
+
+**What this closes.** DHealth could represent and operate a diagnostic workflow once organizations,
+memberships, roles, offerings, templates and provider→lab routes already existed. It had no answer
+to how a real clinic or laboratory *becomes* a participant. The only durable statement of
+membership in the network was an `Organization` row, which says a name and a type exist and nothing
+else — not who administers the place, not whether they will work in DHealth or keep their own
+software, not what that software is, not whether DHealth can integrate it, and not whether clinics
+may send them orders today.
+
+This ticket builds that control plane, and spends most of its weight on keeping four facts apart:
+**enrolled ≠ configured ≠ operationally ready ≠ production-routable.**
+
+### Starting state
+
+- `HEAD == 3f9729b` at the start of this session's work, clean worktree; `origin/master` at
+  `85f2cba` (this ticket follows a one-final-push workflow, so the remote was deliberately behind).
+- Migration head `0025_native_result_binding` before this ticket; `0026_facility_enrollment` after.
+
+### CI: infrastructure unavailable, with a control
+
+GitHub Actions executes nothing for this repository. Every job of every run ends in 2–3 seconds
+with **zero steps executed** and no logs.
+
+The control that settles it: the previously-green run `35527353831` on SHA `5983da9` — ten green
+jobs on 2026-09-20 at 17:54 — was re-run and **failed identically**, 10/10 jobs, 0 steps. Same
+commit, same workflow, previously green. Four attempts across two days on the newer SHA produced
+the same shape. Repository-level Actions are enabled (`{"enabled":true,"allowed_actions":"all"}`),
+and the failing commits touch no workflow file.
+
+The cause is not asserted here. Reading Actions billing requires a `user`-scoped token this session
+does not hold, and the ticket's own instruction is not to assume. **CI conclusion for this ticket is
+unavailable — not failed on repository code, and not reported as green.** Local qualification is
+therefore the authoritative evidence below.
+
+### Schema
+
+`0026_facility_enrollment`, one migration, three tables:
+
+- `exchange_facility_enrollments` — 1:1 with `Organization`, unique on `organization_id`.
+  Participation mode, onboarding status, integration feasibility, and the CONNECT discovery fields
+  as explicit nullable columns. Not a JSON blob: several of them gate whether production orders may
+  be routed somewhere, and a fact that decides that should be a constrained column a query can
+  filter.
+- `exchange_facility_interface_capabilities` — one row per interface a partner reports, each with
+  its own verification state, because a real discovery conversation produces several claims at
+  different confidence levels.
+- `exchange_facility_enrollment_blockers` — a closed set of reasons, resolved by timestamp rather
+  than deleted.
+
+It also extends three audit CHECK constraints (event type, resource type, outcome) following
+0024's drop-and-recreate pattern, and backfills every existing organization as
+`NATIVE` / `ORGANIZATION_READY`. The backfill is a statement of fact rather than a default: Connect
+does not exist in any form, so every organization operating today *is* Native. Treating a missing
+enrollment as "passes the readiness gate" was rejected as a permanent fail-open hole.
+
+### Native readiness, and why staffing blocks routing
+
+Production routing requires real operational authority held through an **active** membership: a
+provider needs a `CLINICIAN`; a laboratory needs a `LAB_TECH` **and** a `LAB_RESULT_RELEASER`.
+
+I initially made staffing advisory, reasoning that orders arriving at an understaffed Native lab
+would simply wait. That was wrong, and review corrected it. Entry and release are separate
+authorities (ADR-044), so a lab holding only `LAB_TECH` can accept an order, enter every value, and
+then be structurally incapable of releasing it. Work does not wait there; it arrives somewhere it
+can never leave.
+
+One membership holding both lab roles satisfies both — the requirement is on authority present at
+the organization, never headcount. `ORG_ADMIN` alone satisfies nothing operational.
+
+### Enforcement, and where it deliberately is not
+
+One evaluator, consulted by every production path:
+
+| Path | Behaviour |
+| --- | --- |
+| `PUT .../lab-routes/{lab_id}` | evaluates before writing; 409 with the blocking reasons |
+| `assign_by_provider` | re-derived inside the `LabOrder` row lock |
+| `find_whole_order_eligible_labs` | unready labs dropped from the candidate set |
+
+`ProviderLabRouteRepository.upsert` stays the low-level primitive with no policy in it. `demo_seed`
+activates its route *before* creating the lab's offerings, and the DH-CLINIC-006 concurrency tests
+construct routes directly — a gate inside the primitive would make building a fixture require
+satisfying the policy the fixture exists to test. The actor a gate protects against is a platform
+administrator activating routing in a browser.
+
+The shared implementation takes the caller's own `Session`, which is also what keeps
+`assign_by_provider` from opening a nested session while holding its lock.
+
+**Staffing loss never rewrites a route.** Revoke a lab's last releaser: `ProviderLabRoute.active`
+stays exactly as the platform admin set it, the lab stops being an eligible destination, and new
+assignments are refused. Restore the staffing and the same route works again, with nothing
+recreated.
+
+### Connect stops short, by construction
+
+`READY_FOR_ROUTING` is unreachable for a CONNECT facility, enforced in the repository rather than at
+one endpoint. This holds with perfect staffing, offerings, templates, accepting-orders and every
+interface field populated, because none of those makes a connector exist. Recording an interface as
+`VERIFIED` changes no status and unlocks no routing, and only platform authority may record it — a
+facility cannot certify its own interface. The UI's strongest wording is "Interface vérifiée"; the
+word "connecté" appears nowhere.
+
+### Platform scope
+
+A platform administrator may hold no membership anywhere. `WorkspaceScope` is explicit, and in
+platform scope `activeOrganization` is genuinely `null`. **No organization was fabricated** — no
+"DHealth Headquarters", no placeholder — because inventing one would make every capability check,
+audit row and org-scoped read answer questions about a facility that does not exist. A test asserts
+the absence directly rather than only the presence of the platform UI.
+
+One `/me`, one auth provider, one shell. Platform surfaces are sections of the same navigation.
+
+### Bugs found and fixed
+
+1. **Refusal telemetry could misreport the refusal.** The route-activation refusal audit was written
+   inside the transaction that then raised, so the rollback discarded it; and once moved out, an
+   exception there would have replaced the truthful 409 with a 500. Now best-effort and logged:
+   readiness enforcement does not depend on audit availability in either direction.
+2. **`outcome="refused"` and eight event types were not in the audit vocabulary** — missing from the
+   migration, the model CHECK constraints and the Python `Literal`s.
+3. **My readiness check ran before the four specific `LabCannotFulfillOrder` cases** and subsumed
+   them behind one generic refusal, destroying the diagnostics those messages carry.
+4. **A nonexistent organization answered 409 "not enrolled"** instead of 404 — true about the wrong
+   question.
+5. **`LabNotOperationallyReady` was unmapped** at the assignment endpoint and would have surfaced as
+   a 500.
+6. **129px of page-level horizontal overflow at 390px** on every facility detail: the interface table
+   dictated the document width. Found by the browser harness, invisible to jsdom.
+7. **A blocking readiness item read "Autorité de libération active"** under the heading "Ce qui
+   empêche la mise en service" — the satisfied phrasing, stating the opposite of what was wrong.
+8. **The back control spanned the full width**, reading as a primary action.
+9. **A harness scene named `platform-native-blocked` showed a CONNECT facility** with Native
+   readiness attached — internally inconsistent, and evidence for a claim it did not support.
+10. **Three harness scenes captured the facility list** rather than the detail screens they were
+    named for, because nothing opened a facility.
+11. **Tests of mine passed for the wrong reason**: the ORG_ADMIN fixture used a different issuer than
+    the test token, so "a facility admin is refused" was passing because the caller had no
+    membership at all. With the issuer matched they prove a real authorization boundary.
+
+### Negative controls executed
+
+Each removed the thing under test, observed the specific failure, and was reverted with zero markers
+left in source.
+
+- **NC-GATE** — evaluator bypassed in the activation endpoint → 201 instead of 409.
+- **NC-ASSIGN** — readiness check removed from `assign_by_provider` → the assignment succeeded.
+- **NC-ELIG** — readiness filter removed from the eligibility read → the unready lab reappeared.
+- **NC-AUDIT** — best-effort wrapper removed → the simulated audit failure escaped as a RuntimeError
+  and replaced the 409.
+
+### Evidence
+
+- **Adapter: 1163 passed, 118 skipped** (1122 before this ticket). `ruff check` and
+  `ruff format --check` clean across 156 files.
+- **Migration, against real PostgreSQL 18** (CI cannot run it): 0025 → 0026 clean; one enrollment per
+  pre-existing organization with zero orphans; CHECK constraints genuinely refuse a bad
+  participation mode and a bad onboarding status; the unique constraint refuses a second enrollment;
+  `downgrade -1` returns to 0025 and re-upgrade reaches head; `current == heads ==
+  0026_facility_enrollment`. CI's `EXPECTED_HEAD` is bumped to match.
+- **UI: 804 tests across all 53 test files, every file run.** Measured in seven batches of eight
+  because a whole-suite run on this checkout loses a nondeterministic subset of files to
+  worker-start failures — that run reported 29 files and 24 worker errors, which is why the batched
+  figure is the one quoted. Zero worker errors across the batched run, zero failures.
+- **UI static**: `tsc` clean, `tsc -p e2e/tsconfig.json` clean, `oxlint` 0 errors / 45 warnings,
+  `npm run build` clean with `No secrets found across 28 built file(s)`.
+- **Browser**: six platform scenes captured at 1280, 768 and 390 in headless Chromium. No console
+  error, no failed request, no horizontal overflow, no off-screen control, no unlabelled input, and
+  the self-hosted faces load.
+
+### What is NOT proven
+
+- **No DHealth Connect transport exists** and none was built: no FHIR, HL7, SFTP, webhook, agent,
+  VPN, OpenELIS or OpenMRS binding, no credential storage, no mapping, no connector health, no
+  qualification. The UI represents these as future requirements and fakes none of them.
+- **No real browser has been used by a person.** The harness proves the screens render and behave
+  under a real engine at three widths; it is not the same as somebody enrolling a facility.
+- **No E2E run**, no live stack, no real Keycloak. `typecheck:e2e` passes and is not part of CI.
+- **No CI conclusion.** See above.
+- The first-administrator bootstrap still requires the intended administrator to sign in once
+  before they can be attached. There is no invitation system and no Keycloak provisioning, by scope.
+- Route activation from the facility detail screen is not yet wired; the backend gate, its refusal
+  semantics and its negative controls are complete, and the UI surface for pressing the button is
+  DH-MVP-ONBOARD-001's own remaining gap, recorded here rather than implied as done.
+
+### Confirmations
+
+- **No real patient data** at any point. Every name, facility and value in code, fixtures, tests and
+  harness scenes is synthetic. Discovery records whether a source system *has* a patient identifier
+  namespace or a release event, never any patient's data.
+- **No external credentials stored.** No API key, password or connection string anywhere; unknown
+  fields are refused rather than absorbed, and a test asserts no secret-shaped key appears in a
+  response.
+- **No fabricated organization** for platform administrators.
+- **No double entry introduced.** A missing connector is never resolved by asking staff to enter
+  results twice.
+- **No clinical content invented.** No template, catalog entry, reference range or interpretation.
+
+### Confirmation no branch, no PR
+
+Every change landed as focused commits directly on `master`, per this ticket's own instruction.
+
+`NEXT: DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model`

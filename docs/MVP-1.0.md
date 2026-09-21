@@ -732,3 +732,35 @@ This ticket added no backend route, no schema change, and no migration (head rem
 `0025_native_result_binding`). It is a frontend and documentation ticket. Real Keycloak qualification,
 a live browser walkthrough, and any real-patient pilot remain unrun on this track, and nothing in
 this note makes the Exchange pilot-ready.
+
+**DH-MVP-ONBOARD-001 update (2026-09-21): how a facility joins the network, and the four facts that
+are not the same fact.** §3's product family describes what DHealth Clinic and DHealth Lab do; it
+never said how a real clinic or laboratory becomes a participant. That control plane now exists
+(`docs/FACILITY-ONBOARDING.md`, ADR-055, `docs/ARCHITECTURE.md` §21): a platform operator enrols a
+facility, attaches its first administrator, records whether it will use DHealth directly or keep its
+existing software, and — for the latter — records what that software is and what DHealth actually
+knows about its interfaces.
+
+The distinction this introduces, and which §8's build table should be read against from now on:
+**enrolled ≠ configured ≠ operationally ready ≠ production-routable.** An organization existing says
+nothing about whether orders can be sent there. Production routing to a Native facility requires real
+operational authority — a provider needs an active clinician, a laboratory needs both an active
+technician and an active release authority, because entry and release are separate authorities
+(ADR-044) and a lab without a releaser can accept work it can never finish. Losing that staffing
+blocks new routing without deleting the configured relationship, and restoring it makes the same
+route usable again.
+
+**DHealth Connect is enrollable, not integrated.** A Connect facility can be fully enrolled, fully
+discovered, have a verified interface, and still be unable to receive a single production order,
+because no connector to any external EMR or LIS exists and none has been qualified. That is enforced
+rather than merely stated: `READY_FOR_ROUTING` is unreachable for a CONNECT facility, and no API
+request or UI action overrides it. The three levels — a partner's *reported* interface, DHealth's
+*verified* interface, and a *qualified* connector — are kept apart in the data and in the wording.
+Transport, mapping, credential storage and qualification are DH-CONNECT-CONTRACT-001's subject and
+none of them is built here.
+
+This ticket adds migration `0026_facility_enrollment` and no backend route that moves clinical data.
+Law 2 (no double entry) remains binding: a missing connector is never to be solved by asking staff to
+enter results twice. No real patient data is required at any point in onboarding — discovery records
+whether a source system *has* a patient identifier namespace or a release event, never any patient's
+data.

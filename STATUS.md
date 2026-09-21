@@ -6,6 +6,49 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-21, DH-MVP-ONBOARD-001, directly on `master`** (this ticket's own explicit instruction: no
+branch, no PR). Starting point was `master` at `85f2cba` (DH-MVP-POLISH-001's final commit). This
+ticket builds the **facility enrollment control plane**: a platform operator can enrol a clinic or
+laboratory, attach its first administrator, record whether it will use DHealth directly or keep its
+existing software, capture what that software is, and read a server-derived answer to "can clinics
+send orders here, and if not exactly why". **Migration `0026_facility_enrollment`** adds three tables
+and backfills every existing organization as `NATIVE`/`ORGANIZATION_READY` — a statement of fact,
+since Connect does not exist and every organization operating today *is* Native.
+
+The distinction the ticket exists to protect: **enrolled ≠ configured ≠ operationally ready ≠
+production-routable**. Production routing to a Native facility now requires real operational
+authority — a provider needs an active clinician, a laboratory needs both an active technician and
+an active release authority, because entry and release are separate authorities (ADR-044) and a lab
+without a releaser can accept work it can never finish. One person may hold both lab roles.
+Losing that staffing blocks new routing **without** rewriting the configured `ProviderLabRoute`;
+restoring it makes the same route usable again. A **CONNECT facility cannot reach production
+readiness at all**, however complete its discovery, because no connector exists — enforced in the
+repository, not at one endpoint.
+
+**Evidence level: local qualification only, because GitHub Actions executes nothing.** Every job of
+every run ends in 2–3 seconds with zero steps and no logs; the previously-green run `35527353831` on
+SHA `5983da9` was re-run as a control and **failed identically**. The cause is not asserted — reading
+Actions billing needs a token scope this session does not hold. **CI conclusion for this ticket is
+unavailable: not failed on repository code, and not reported as green.**
+
+Measured locally: adapter **1163 passed, 118 skipped** (from 1122), ruff check and format clean
+across 156 files; **804 UI tests across all 53 test files**, run in seven batches because a
+whole-suite run loses a nondeterministic subset of files to worker-start failures; `tsc` and
+`tsc -p e2e/tsconfig.json` clean; oxlint 0 errors / 45 warnings; build clean with no secrets across
+28 files; migration re-qualified against **real PostgreSQL 18** (upgrade, backfill with zero orphans,
+CHECK constraints refusing bad values, duplicate enrollment refused, downgrade and re-upgrade,
+`current == heads == 0026_facility_enrollment`); and six platform scenes captured in **headless
+Chromium at 1280, 768 and 390** with no console error, failed request, overflow, off-screen control
+or unlabelled input. **Four negative controls executed and reverted** (activation gate, assignment
+gate, eligibility filter, and refusal-telemetry failure). **Eleven defects found and fixed**,
+including one class worth naming: tests of mine that passed for the wrong reason because a fixture
+used a different token issuer than the API resolved.
+
+**Not proven:** no DHealth Connect transport exists and none was built; no real browser has been used
+by a person; no E2E ran; no CI conclusion; the first-administrator bootstrap still requires the
+person to sign in once (no invitation system, by scope); and route activation from the facility
+detail screen is not yet wired — the backend gate and its controls are complete, the button is not.
+
 **2026-09-20, DH-MVP-POLISH-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `50a7eac` (DH-PATIENT-001's own final commit), verified
 against `origin/master` by a fresh `git fetch` rather than trusted from the prompt. This ticket made
@@ -368,6 +411,23 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   layout. No SMS/WhatsApp/email/voice transport was added; `ResultDelivery` is untouched and
   viewing a status page deliberately does **not** mark it `DELIVERED`. See `docs/ARCHITECTURE.md`
   §19 and `PROJECT_STATE.md`'s DH-PATIENT-001 entry.
+- **Facility enrollment and integration readiness** (`adapter/.../facility_enrollment.py`,
+  `ui/src/features/platform/`, DH-MVP-ONBOARD-001) — the control plane for joining the network.
+  A platform operator enrols an organization and its enrollment in one transaction, attaches a first
+  administrator found through a bounded platform-only identity lookup, records `NATIVE` or `CONNECT`
+  explicitly, captures a Connect facility's software/vendor/version/hosting and the interfaces it
+  reports, and reads a server-derived answer to whether production orders may be routed there.
+  **Four facts stay separate**: enrolled, configured, operationally ready, production-routable.
+  Native routing requires an active CLINICIAN (provider) or an active LAB_TECH *and*
+  LAB_RESULT_RELEASER (laboratory), one person may hold both lab roles, and losing that staffing
+  blocks new routing without rewriting the configured route. A **CONNECT facility cannot reach
+  production readiness at all** while no connector exists — enforced in the repository, and
+  unaffected by staffing, offerings, templates or a verified interface. Platform scope is distinct
+  from organization scope and **no organization is fabricated** for a platform administrator with no
+  membership. Built and component/UI-tested plus real-PostgreSQL migration qualification — **no CI
+  conclusion exists for it** (see §A), no E2E has run, and no person has used it in a browser. See
+  `DECISIONS.md` ADR-055, `docs/ARCHITECTURE.md` §21, `docs/FACILITY-ONBOARDING.md`, and
+  `PROJECT_STATE.md`'s DH-MVP-ONBOARD-001 entry.
 - **One authenticated DHealth staff application** (`ui/src/features/staff/`, DH-MVP-POLISH-001) —
   supersedes the separate `ClinicApp`/`LabApp` shells and the application-switch buttons that reached
   them. `StaffApp` loads `/me` **once** for the whole application; the active organization plus the
@@ -487,7 +547,27 @@ No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
 
-**NEXT: DH-MVP-ADMIN-001 — Facility Setup + Administration.** DH-MVP-POLISH-001 made the native
+**NEXT: DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model.**
+DH-MVP-ONBOARD-001 made it possible to enrol a facility, record that it keeps its own EMR or LIS,
+and capture what that software is and which interfaces it reports. What it deliberately could not
+do is connect any of them: no DHealth connector exists for any external system, so a Connect
+facility can be fully enrolled, fully discovered, hold a verified interface, and still be unable to
+receive one production order. The onboarding UI says exactly that and refuses to say more.
+
+The next ticket defines the one canonical contract every external connector must satisfy before it
+may carry production work: connector identity and facility binding, authentication, patient and
+practitioner correlation, order delivery and acknowledgement, collection and processing events,
+result observations, source timestamps kept distinct from DHealth received and recorded times,
+professional release, rectificatifs, external report identifiers, idempotency, duplicate
+suppression, retry, outage recovery, dead-letter behaviour, connector health, credential rotation,
+mapping versioning, suspension, and qualification. Only once that contract is accepted should
+`DH-CONNECT-AGENT-001` and specific adapters be built. The readiness gate this ticket installed is
+what will keep an unqualified connector out of production in the meantime.
+
+**[Superseded 2026-09-21, DH-MVP-ONBOARD-001 — the paragraph below proposed a facility-setup ticket
+and is preserved as the brief it was written as; that work is now done, under a different name.]**
+
+~~**NEXT: DH-MVP-ADMIN-001 — Facility Setup + Administration.**~~ DH-MVP-POLISH-001 made the native
 surfaces one authenticated staff application whose visible workflow derives from the active
 organization and the user's roles in it (ADR-054, `docs/ARCHITECTURE.md` §20). That exposes the next
 gap plainly: **nothing in the product can create or administer any of the facts it now depends on.**

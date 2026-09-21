@@ -1,0 +1,195 @@
+# Facility onboarding — how a clinic or laboratory joins DHealth
+
+**Added 2026-09-21, DH-MVP-ONBOARD-001.** The operator's guide to enrolling a facility, and to
+reading what DHealth is telling you about one. Decisions and their reasoning: `DECISIONS.md`
+ADR-055. Architecture: `docs/ARCHITECTURE.md` §21.
+
+> **DHealth Connect transport is not implemented.** No connector to any external EMR or LIS exists,
+> none has been qualified, and nothing in this document describes working integration. A facility
+> in Connect mode can be fully enrolled, fully discovered and still unable to receive a single
+> production order — that is the truthful state of the product today, and the screens say so.
+
+---
+
+## The process
+
+```
+partner agrees to participate
+        ↓
+facility identity verified
+        ↓
+organization enrolled          ← creates the organization and its enrollment together
+        ↓
+first administrator attached
+        ↓
+NATIVE or CONNECT chosen       ← explicit, never inferred
+        ↓
+configuration (Native) or technical discovery (Connect)
+        ↓
+readiness evaluated            ← server-derived, from live rows
+        ↓
+network relationship configured
+        ↓
+connector qualification        ← Connect only; does not exist yet
+        ↓
+production routing activated   ← platform-level, readiness-gated
+```
+
+Each arrow is a separate fact. A facility that has reached step three is enrolled and is not
+configured; one that has reached step seven is configured and may still not be a place orders can
+be sent. Conflating them is the failure this whole design exists to prevent.
+
+---
+
+## The two participation modes
+
+| | **DHealth** (`NATIVE`) | **Connect** (`CONNECT`) |
+|---|---|---|
+| Who runs the workflow | DHealth itself | The facility's existing EMR/LIS |
+| What must be configured | Staff, roles, lab profile, offerings, result templates | Technical discovery of the existing system |
+| Can it receive orders today | Yes, once operationally ready | **No.** No connector exists |
+| What is outstanding | Whatever readiness reports | A DHealth connector, then its qualification |
+
+Neither is the better choice. A facility that keeps its own software is not a lesser participant,
+and one that adopts DHealth is not taking a shortcut.
+
+---
+
+## Native readiness
+
+Production routing to or from a Native facility requires real operational authority, held through
+an **active** membership:
+
+- **Établissement de soins** — at least one `CLINICIAN`. Nobody else may order.
+- **Laboratoire d'analyses** — at least one `LAB_TECH` **and** at least one `LAB_RESULT_RELEASER`.
+
+The releaser requirement is the one worth explaining. Entry and release are separate authorities
+(ADR-044). A laboratory with technicians and no releaser can accept an order, enter every value
+against it, and then be structurally incapable of releasing the result — work that arrives
+somewhere it can never leave. That is why the absence blocks routing rather than merely being
+reported.
+
+**One person may hold both laboratory roles.** The requirement is that both authorities exist at
+the organization, never that two humans do; a small laboratory where the same person enters and
+releases is a real and permitted configuration.
+
+**`Administration` implies nothing operational.** An `ORG_ADMIN` administers the facility. They are
+not thereby a clinician, a technician, or a releaser.
+
+---
+
+## Connect technical discovery
+
+What DHealth records about a facility's existing software:
+
+- software name, vendor, version
+- hosting: *Serveur dans l'établissement* · *Cloud* · *Hybride* · *Je ne sais pas*
+- technical contact and vendor contact
+- which interfaces the partner reports, each with how much DHealth actually knows about it
+- whether the source system exposes separate event timestamps and a professional release event
+- what identifier concepts exist (patient, order, report, specimen)
+
+**"Je ne sais pas" is a real answer.** A clinic manager may genuinely not know their LIS vendor, and
+a form that refuses to record that pushes an operator into guessing. An unknown creates a discovery
+obligation for DHealth; it never blocks enrollment.
+
+**No credential is ever stored.** Not an API key, not a password, not a connection string. The
+discovery fields describe *what exists*; how DHealth would authenticate to it belongs to a secrets
+architecture that does not yet exist. A request carrying an unrecognised field is refused rather
+than absorbed into a notes column.
+
+### The three truth levels
+
+```
+Signalé par le partenaire   a claim somebody made
+Documentation reçue          paper in hand
+Interface vérifiée           DHealth checked it exists as documented
+```
+
+None of the three means a connector exists. The word "connecté" appears nowhere in this surface,
+because nothing has connected. Only platform authority may record a verification — a facility
+cannot certify its own interface.
+
+### Where Connect stops today
+
+```
+Système identifié            ✓ possible
+Interface signalée           ✓ possible
+Documentation obtenue        ✓ possible
+Interface vérifiée           ✓ possible
+Connecteur DHealth           ✗ à construire
+Qualification                ✗ non commencée
+Routage de production        ✗ désactivé
+```
+
+The last three are fixed. No interface state and no operator action can move them — that is
+DH-CONNECT-CONTRACT-001's work.
+
+---
+
+## Integration currently impossible
+
+`NOT_SAFELY_INTEGRABLE` is a truthful conclusion, not a deletion. The facility stays enrolled, the
+reason stays visible, and the next step is named: engage the vendor, or reconsider the participation
+mode. A partner DHealth cannot serve today is not a record to erase.
+
+---
+
+## Attaching the first administrator
+
+There is **no invitation system** in this release, and no account provisioning. The bootstrap is:
+
+1. The intended administrator signs into DHealth once.
+2. That materialises their `ExchangeIdentity` — which grants zero access on its own.
+3. A platform administrator searches for them by name or email.
+4. They select the person and grant explicit roles.
+
+If they cannot be found, the reason is almost always that they have never signed in. The screen says
+so rather than leaving an operator wondering.
+
+The lookup is platform-admin-only, needs at least three characters, caps its results, matches by
+prefix rather than fuzzily, and returns only identity id, display name and email. **Finding somebody
+grants nothing**, and an email address is never authorization.
+
+---
+
+## Reading a facility's availability
+
+Two questions with different answers:
+
+- **Ce qui empêche la mise en service** — conditions that block production routing right now.
+- **Configuration à compléter** — things still to set up that do not make work undeliverable.
+
+Both come from the server, evaluated from live rows on every read. The interface displays them and
+never computes its own version: a copy of the rule in the browser would drift from the backend, and
+the drift would only be noticed when somebody activated a route that should have been refused.
+
+---
+
+## Route configuration, readiness and eligibility
+
+Three facts, deliberately never merged:
+
+| | Meaning | Changes when |
+|---|---|---|
+| **Relation configurée** | A platform admin said this pair may exchange work | Somebody decides it |
+| **Disponibilité opérationnelle** | The facility can actually do that work today | Staffing, offerings or standing change |
+| **Destination éligible** | Both of the above, for this order, right now | Either of the above changes |
+
+A laboratory whose last releaser leaves **keeps its configured route**. Nothing rewrites that row:
+the relationship was a deliberate human decision and it remains one. What changes is that the lab
+stops being an eligible destination and new assignments are refused. When the staffing returns, the
+same route works again — there is nothing to recreate.
+
+Production activation is platform-level and readiness-gated. If readiness changed between the screen
+being drawn and the button being pressed, the server refuses and the blocking reasons are shown; the
+interface cannot override that.
+
+---
+
+## What this does not do
+
+No FHIR or HL7 transport. No SFTP runtime, webhook listener, Connect agent or VPN. No partner
+credential storage. No OpenELIS or OpenMRS binding. No automatic vendor detection, code mapping or
+patient matching. No connector health and no connector qualification. No email or WhatsApp
+invitations. No billing, contracts or CRM.

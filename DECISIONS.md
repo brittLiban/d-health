@@ -7165,3 +7165,98 @@ omission would hide an authority nobody would notice was missing. Tests pin all 
 the fallback cannot quietly become the normal path for a role that already exists.
 
 Proven by a negative control: restoring `roles.join(' · ')` fails both US11 and the new US13.
+
+---
+
+## ADR-055 — ACCEPTED / IMPLEMENTED (2026-09-21, DH-MVP-ONBOARD-001): a facility is enrolled, configured, operationally ready and production-routable as four separate facts
+
+**Date raised:** 2026-09-21, DH-MVP-ONBOARD-001 · **Status:** ACCEPTED, IMPLEMENTED · **Ticket:**
+DH-MVP-ONBOARD-001.
+
+**Why this needed a decision.** Before this ticket, the only durable answer to "is this facility
+part of the DHealth network?" was the existence of an `Organization` row, which says a name and a
+type exist and nothing else. Every other question a network operator actually asks — who
+administers this place, will they work in DHealth or keep their own software, what is that
+software, can we integrate it, can clinics send them orders today, and if not what is stopping it —
+had no representation at all. The failure mode of adding them casually is a system that reports a
+facility as connected when all it knows is that somebody typed a name into a form, so the
+separations below are recorded rather than left to whichever screen is being written next.
+
+### Decisions
+
+1. **Facility enrollment is distinct from technical integration.** Organizational enrollment answers
+   "who is this facility on the network"; technical integration answers "how does their existing
+   software talk to DHealth". `FacilityEnrollment` carries both but never conflates them, and
+   creating an organization performs no integration of any kind.
+2. **Every facility declares `NATIVE` or `CONNECT` explicitly.** Participation mode is chosen, never
+   inferred — entering a LIS vendor name does not make a facility CONNECT. ADR-043 Law 2 (no double
+   entry) makes these alternatives rather than a spectrum: a facility either works in DHealth or
+   keeps its own system and connects it.
+3. **Platform scope is not organization scope.** A DHealth platform administrator acts on the
+   network, not inside a facility. The frontend models this as an explicit `WorkspaceScope`, and in
+   platform scope `activeOrganization` is genuinely `null`.
+4. **A platform administrator needs no fabricated membership.** No "DHealth Headquarters"
+   organization exists, and none may be created to satisfy a UI expectation. Inventing one would
+   make every capability check, audit row and org-scoped read answer questions about a facility that
+   does not exist. A zero-membership platform admin reaches network administration directly; a
+   person holding both platform authority and memberships switches between the two deliberately, and
+   platform context never masquerades as a membership.
+5. **Creating an organization does not imply production readiness.** A new facility is `DRAFT`. It
+   becomes usable through configuration and staffing, which are evaluated, not asserted.
+6. **A configured `ProviderLabRoute` does not imply operational readiness.** The route answers only
+   "may this provider route orders to this lab?", exactly as ADR-052 defined it. Whether the lab can
+   currently do the work is a separate, live question.
+7. **Operational readiness does not imply a lab can fulfil every order.** Whole-order eligibility
+   (does this lab offer every requested test?) remains its own check, unchanged.
+8. **Native production routing requires minimum operational authority.** A Native provider needs an
+   active `CLINICIAN`; a Native laboratory needs an active `LAB_TECH` *and* an active
+   `LAB_RESULT_RELEASER`. The releaser is the sharp case: entry and release are separate authorities
+   (ADR-044), so a lab holding only `LAB_TECH` can accept an order, enter every value, and be
+   structurally incapable of releasing it — work arriving somewhere it can never leave, which is
+   exactly what §37's gate exists to prevent. `ORG_ADMIN` alone satisfies no operational role.
+9. **One human may hold both laboratory authorities.** The requirement is that both exist at the
+   organization, never that two people do. A small laboratory where one person enters and releases
+   is a real, permitted configuration, and ADR-044 explicitly declines to force a second human.
+10. **Losing staffing blocks new routing without deleting route configuration.** Nothing rewrites
+    `ProviderLabRoute.active` when people come and go: a platform administrator configured that
+    relationship deliberately and it stays theirs. What changes is that the facility stops being an
+    eligible destination and new assignments are refused. Restoring the staffing makes the same
+    configured route usable again, with no route recreation.
+11. **A CONNECT facility cannot reach production readiness before connector qualification exists.**
+    `READY_FOR_ROUTING` is unreachable for a CONNECT facility, enforced in the repository rather than
+    at one endpoint. This holds however complete the facility is — perfect staffing, offerings,
+    templates, accepting orders and every interface field populated do not move it, because none of
+    them makes a connector exist.
+12. **Interface REPORTED ≠ VERIFIED ≠ connector QUALIFIED.** A partner's claim, DHealth having
+    checked the interface exists as documented, and a connector having passed qualification are three
+    facts. Recording verification changes no onboarding status and unlocks no routing, and only
+    platform authority may record it — a facility's own `ORG_ADMIN` cannot certify itself.
+13. **Cross-organization route activation stays platform-controlled**, unchanged from ADR-052, and is
+    now additionally readiness-gated on the production paths: the activation endpoint, the assignment
+    mutation, and the eligible-destinations read all consult one evaluator.
+    `ProviderLabRouteRepository.upsert` remains the low-level persistence primitive with no policy in
+    it, so fixtures and seeds can construct state without satisfying the policy they exist to test.
+14. **Identity lookup grants nothing.** Finding somebody who has already authenticated is
+    platform-admin-only, bounded, prefix-matched rather than fuzzy, and returns identity id, display
+    name and email only. Creating the membership is a separate, explicit, audited act, and an email
+    address is never authorization.
+15. **No double entry remains binding.** A missing connector is never to be solved by asking staff to
+    enter results in their LIS and again in DHealth. A temporary pilot exception would be its own
+    documented decision, never the default enrollment path.
+16. **Onboarding requires no real patient data.** Discovery records whether the source system *has* a
+    patient identifier namespace or a release event, never any patient's data. Examples are synthetic.
+
+### Consequences
+
+- Migration `0026_facility_enrollment` adds three tables and backfills every existing organization as
+  `NATIVE` / `ORGANIZATION_READY`. That is a statement of fact rather than a default: Connect does
+  not exist in any form, so every organization operating today *is* Native. The alternative —
+  treating a missing enrollment as "passes the readiness gate" — was rejected as a permanent
+  fail-open hole.
+- Readiness is server-derived and never recomputed in React. The frontend formats findings and
+  displays the verdict; a copy of the rule in the browser would drift, and the drift would only
+  surface when somebody activated a route that should have been refused.
+- Refusal telemetry is best-effort and cannot alter a refusal. An audit failure neither permits a
+  prohibited activation nor replaces the truthful 409 with a misleading server error.
+- No DHealth Connect transport was built, and none may be inferred from this ADR. The connector
+  contract and its qualification model are DH-CONNECT-CONTRACT-001's subject.

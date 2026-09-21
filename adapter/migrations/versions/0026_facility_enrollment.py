@@ -245,7 +245,6 @@ def upgrade() -> None:
         )
     )
 
-
     for name, expression in (
         (
             "ck_exchange_security_audit_events_event_type",

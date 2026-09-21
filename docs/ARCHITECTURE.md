@@ -1764,3 +1764,83 @@ instead of the tree below it and the entry form unmounts with the drafts in it �
 That path cannot be bridged without persisting clinical values outside the component, which
 `docs/MVP-1.0.md` and this ticket both forbid, so the per-field marker names both losing events
 instead of implying the work is safe.
+
+---
+
+## 21. Facility enrollment and platform scope (DH-MVP-ONBOARD-001) — added 2026-09-21
+
+§20 described one staff application whose visible workflow derives from the active organization.
+This section adds the layer above it: how an organization comes to exist on the network at all, and
+where a DHealth platform administrator acts from.
+
+```
+   Platform scope                          Organization scope
+   ──────────────                          ──────────────────
+   activeOrganization === null             activeOrganization = a real membership
+   platform endpoints, no org id           org-scoped endpoints
+   Réseau · Établissements · Intégrations  Aujourd'hui · Patients · Ordres · Résultats
+
+              \                                    /
+               \        one WorkspaceProvider     /
+                \       one /me, one auth        /
+                 \      one StaffShell          /
+                  ────────────────────────────
+```
+
+**Scope, not a fabricated membership.** A platform administrator may legitimately hold no membership
+anywhere. The obvious way to satisfy a shell that expects an active organization is to invent a
+"DHealth Headquarters" row, and that would be a lie with consequences: every capability check, every
+audit row and every organization-scoped read would then be answering questions about a facility that
+does not exist. So `WorkspaceScope` is explicit, `activeOrganization` stays genuinely `null` in
+platform scope, and somebody holding both platform authority and memberships moves between the two
+deliberately. Nothing derives platform authority from a membership, and `ORG_ADMIN` never implies it.
+
+```
+   Organization ──1:1── FacilityEnrollment ──┬── FacilityInterfaceCapability  (n)
+                                             └── FacilityEnrollmentBlocker    (n)
+```
+
+**Why the enrollment is its own table.** An organization is an identity that persists; an enrollment
+is a process with a state machine, discovery fields only a CONNECT facility has, and its own audit
+trail. The CONNECT discovery fields are explicit nullable columns rather than a JSON blob because
+several of them gate whether production orders may be routed somewhere, and a fact that decides that
+should be a constrained column a query can filter.
+
+**Four facts, kept apart.** Enrolled, configured, operationally ready, production-routable. ADR-055
+records all four; the one that most often gets merged is the last two, so:
+
+```
+   ProviderLabRoute.active = true     a platform admin said this pair may exchange work
+   operational readiness              the facility can actually do that work today
+   eligible destination               both, for this order, at this moment
+```
+
+A laboratory that loses its last `LAB_RESULT_RELEASER` keeps its configured route — nothing rewrites
+a relationship a human decided — and stops being an eligible destination until the authority
+returns. Entry and release are separate authorities (ADR-044), so a lab without a releaser can
+accept an order, enter every value, and never be able to release it.
+
+**Where readiness is enforced.** One evaluator, three production paths:
+
+```
+   PUT .../lab-routes/{lab_id}         409 + blocking reasons, evaluated before the write
+   assign_by_provider                  re-derived inside the LabOrder row lock
+   find_whole_order_eligible_labs      unready labs dropped from the candidate set
+```
+
+`ProviderLabRouteRepository.upsert` stays the low-level persistence primitive with no policy in it.
+That is deliberate: `demo_seed` activates its route before creating the lab's offerings, and the
+DH-CLINIC-006 concurrency tests construct routes directly, so a gate inside the primitive would make
+building a fixture require satisfying the policy the fixture exists to test. The actor a gate
+protects against is a platform administrator activating routing in a browser, and that path goes
+through the evaluator.
+
+The shared implementation takes the caller's own `Session`, which is also why nothing opens a nested
+session while `assign_by_provider` holds its lock.
+
+**Connect stops short, by construction.** `READY_FOR_ROUTING` is unreachable for a CONNECT facility,
+enforced in the repository rather than at one endpoint, because no connector exists for any external
+system. Recording an interface as VERIFIED changes no status and unlocks no routing: a partner's
+claim, DHealth's verification, and a qualified connector are three different facts and the UI words
+them so they cannot be mistaken for each other. Connector transport and qualification are
+DH-CONNECT-CONTRACT-001's subject and none of it is built here.
