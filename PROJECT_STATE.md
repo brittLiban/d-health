@@ -18665,3 +18665,153 @@ reason that it is the one capability requiring a push to the connector and nothi
 limitations are stated in `docs/CONNECT-QUALIFICATION.md` and carried into the stored evidence.
 
 **DH-CONNECT-CONTRACT-001 is closed.**
+
+---
+
+## DH-CONNECT-CONTRACT-001 — correction: DECLARED ≠ EXERCISED ≠ QUALIFIED · 2026-09-22 · directly on `master`
+
+From `a7e4d5e`. A narrow semantic correction to the ticket above. **No transport was added, the
+contract was not redesigned, and DH-CONNECT-AGENT-001 was not started.**
+
+### The hole
+
+The original ticket recorded `ORDER_RECEIPT` as `passed=True` with the limitation "déclaration
+seule" written into a prose `detail` column — and `qualification_verdict_in_session` counted every
+`passed=True` row toward the required production bundle. Nothing read the prose.
+
+So a connector that merely *claimed* it could receive orders satisfied `ORDER_RECEIPT`, and the
+laboratory bundle came out qualified. That was harmless on the day it shipped, because
+`connector_operational` is unconditionally false and no facility is routable. It was not harmless in
+the direction the project is moving: **DH-CONNECT-AGENT-001 is precisely the ticket that supplies
+the missing runtime.** On the day it lands, that connector becomes production-routable without
+DHealth ever having watched it receive an order, and the reason it happened would have been a
+sentence in a text column that read well and gated nothing.
+
+**A limitation the verdict does not consult is decoration.**
+
+### What was built
+
+- **`EvidenceLevel`** — `DECLARED` / `EXERCISED`. Two levels, deliberately; a third ("partially
+  exercised", "exercised in staging") would be a judgement call dressed as data, and every such call
+  is somebody's opportunity to round upward.
+- **Migration `0028_connect_evidence`** — `evidence_level` on `connector_qualification_capabilities`:
+  non-null, CHECK-constrained, **no server default**. Backfilled by capability rather than by
+  inspecting rows, because a 0027 row does not record which harness produced it: `ORDER_RECEIPT` and
+  the four provider capabilities were unexercisable by anything in the 0027 build → `DECLARED`; the
+  rest → `EXERCISED`. The ambiguous direction resolves to `DECLARED`, the fail-closed one.
+- **`CapabilityOutcome.evidence_level` has no default either**, and neither does `outcomes_from`.
+  `EXERCISED` would silently upgrade every pre-existing caller into claiming proof nobody produced;
+  `DECLARED` would let a genuine result be recorded as weaker than it is by omission. Every call
+  site states which it means.
+- **The verdict rule**: a required capability counts only when `passed` **and** `EXERCISED`.
+- **Two new gaps.** `REQUIRED_CAPABILITY_UNEXERCISED`, kept separate from
+  `REQUIRED_CAPABILITY_MISSING` because "you never built it" sends an operator to a partner while
+  "you built it and we cannot yet drive it" is DHealth's own missing transport — telling a partner
+  to implement something they already implemented is a bad bug report. And
+  `SUITE_VERSION_OUTDATED`, because `QUALIFICATION_SUITE_VERSION` moved 1 → 2 and is now part of
+  applicability; without its own gap that case fell through to `QUALIFICATION_STALE`, whose French
+  says the configuration or connector changed. Nothing changed. The suite did.
+- **UI**: the panel now states two things separately — *Suite de qualification — Réussie* and
+  *Qualification de production — Incomplète*. The capability table has three outcomes and three
+  words (*Exercée avec succès* / *Déclarée — non encore exercée* / *Non satisfaite*), the declared
+  one does not carry the success class, and nothing says "Qualification réussie" while production
+  qualification is incomplete.
+
+### One scenario moved, and why
+
+`NDE1-no-double-entry` was filed under `RELEASED_RESULT_PUBLICATION`. It reads the subject's
+declared `requires_manual_duplicate_entry` rather than driving anything, so under the new rule it
+would have dragged a capability the harness genuinely exercises down to `DECLARED` and made it
+permanently unqualifiable — a scenario about workflow ergonomics silently blocking a proven
+capability. It moved to run level (`capability=None`), where it still fails the whole run:
+`all_passed` covers scenarios with no capability.
+
+### The honest result after the correction
+
+```
+Laboratoire Central · CONNECT · FHIR VERIFIED · connector registered
+synthetic qualification suite runs
+
+  BUSINESS_ACCEPTANCE          EXERCISED ✓
+  COLLECTION_EVENT             EXERCISED ✓
+  RELEASED_RESULT_PUBLICATION  EXERCISED ✓
+  AMENDMENT_PUBLICATION        EXERCISED ✓
+  ORDER_RECEIPT                DECLARED only
+
+  suite de qualification        RÉUSSIE     ← and stays PASSED forever
+  connector_qualified           FALSE       ← REQUIRED_CAPABILITY_UNEXERCISED: ORDER_RECEIPT
+  connector_operational         FALSE
+  production_routing_allowed    FALSE
+```
+
+**No laboratory connector in this build reaches `connector_qualified = true`, and no provider
+connector can either** (there is no provider harness, so every provider capability row is a
+declaration). That is more truthful than what the first version reported. §18's second half —
+flipping `ORDER_RECEIPT` to `EXERCISED` and watching qualification complete while routing stays
+refused — exists only as a test fixture (`ES6`), and no transport was created to produce it.
+
+### Tests
+
+`adapter/tests/test_connect_evidence_strength.py` — ES1–ES12, 12 tests:
+
+| | |
+|---|---|
+| ES1 | a declared required capability does not qualify |
+| ES2 | the same capability exercised does |
+| ES3 | the synthetic lab harness does not reach production qualification |
+| ES4 | the gap names it as unexercised, not missing, and no raw enum reaches the sentence |
+| ES5 | a declaration-only provider connector does not qualify |
+| ES6 | flipping `ORDER_RECEIPT` to exercised completes qualification — fixture only |
+| ES7 | an optional capability may be declared without blocking |
+| ES8 | an exercised failure still fails |
+| ES9 | a suite-1 qualification no longer applies, with its own truthful reason |
+| ES10 | NATIVE readiness unchanged |
+| ES11 | `connector_operational` false at every evidence level |
+| ES12 | production routing refused even when fully qualified |
+
+Plus `CQ16`–`CQ19` on the panel, `PG9`–`PG11` on real PostgreSQL, and rewritten `AC`/`AC6`
+assertions — `AC` now pins the truthful unqualified outcome that used to read
+`connector_qualified is True`.
+
+### Negative controls (§13) — executed and reverted
+
+| Control | Injected | Red |
+|---|---|---|
+| NC-EVIDENCE-1 | verdict counts every `passed=True` row | **7** — ES1, ES3, ES4, ES5, ES6, AC, AC6 |
+| NC-EVIDENCE-2 | `LQ1-order-receipt-declared` marked EXERCISED | **2** — AC, AC6 |
+| NC-EVIDENCE-3 | suite-version applicability removed | **1** — ES9 |
+
+§13 named ES1, ES3 and ES5 for the first and a declaration-only assertion for the second; all fired.
+Control run after revert: **74 passed**, both source files byte-identical to their pristine copies.
+
+### Real PostgreSQL (§16) — and a bug SQLite structurally cannot find
+
+Against native PostgreSQL 18.6 on the existing `dhconnect001_qual` database, which still held **48
+real capability rows written under 0027** — free backfill evidence rather than a synthetic setup.
+
+**The first revision id was `0028_connect_qualification_evidence` — 35 characters against
+`alembic_version.version_num VARCHAR(32)`.** PostgreSQL refused to stamp it with
+`StringDataRightTruncation` *after* applying the DDL. SQLite does not enforce VARCHAR length, so the
+entire SQLite suite had passed a migration that could never be applied to production. Renamed to
+`0028_connect_evidence` (21 chars) and recorded in the migration docstring.
+
+Verified after that: upgrade 0027 → 0028; the 48 rows backfilled **10 `ORDER_RECEIPT` → DECLARED, 38
+→ EXERCISED**, zero NULL; column non-null, `character varying(16)`, **no column default**; CHECK
+contains exactly `DECLARED` and `EXERCISED`; an invalid level refused by CHECK and a missing one by
+NOT NULL; downgrade drops the column while all 48 rows survive; re-upgrade reproduces the identical
+backfill; `current == heads`. `PG9`–`PG11` cover the same ground as tests; 11/11 pass.
+
+### Local qualification
+
+- **Adapter**: `1268 passed, 129 skipped` (was `1256 / 126` — exactly `+12` ES and `+3`
+  PostgreSQL-gated). `ruff check` passed; 171 files formatted.
+- **UI**: **57/57 files accounted, 850 tests passed, 0 unaccounted batches.** `tsc` clean,
+  `typecheck:e2e` clean, oxlint 0 errors, build clean, bundle secret scan clean.
+- **Browser**: all scenes re-captured, `PROBLEMS: none`, plus a new **`connector-suite-passed`**
+  scene — the truthful synthetic state, and now the most important capture in the set. Opened and
+  read rather than assumed.
+- One full-suite adapter run earlier hit
+  `test_final_result_vs_release_race_both_valid_orderings`, catalogued flake #1; it passes alone and
+  this correction does not touch that code.
+
+**The correction is complete. DH-CONNECT-CONTRACT-001 remains closed.**

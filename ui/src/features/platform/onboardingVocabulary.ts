@@ -322,6 +322,14 @@ const QUALIFICATION_GAP: Record<string, string> = {
   QUALIFICATION_STALE: 'Qualification périmée — la configuration a changé',
   CONTRACT_MAJOR_MISMATCH: 'Contrat d’échange incompatible',
   REQUIRED_CAPABILITY_MISSING: 'Capacité obligatoire non satisfaite',
+  /**
+   * Deliberately not worded as a failure. Nothing failed: the connector declares the capability,
+   * DHealth simply has no way yet to drive it, because the transport that would is not built. An
+   * operator reading "non satisfaite" here would go and tell a partner to fix something that is
+   * not the partner's to fix.
+   */
+  REQUIRED_CAPABILITY_UNEXERCISED: 'Capacité obligatoire déclarée mais non encore exercée',
+  SUITE_VERSION_OUTDATED: 'Qualification produite par une version antérieure de la suite',
   SUSPENDED: 'Connecteur suspendu',
   RETIRED: 'Connecteur retiré',
 }
@@ -369,4 +377,33 @@ const HEALTH_STATE: Record<string, string> = {
 
 export function healthStateLabel(state: string): string {
   return HEALTH_STATE[state] ?? state
+}
+
+/**
+ * What a capability row actually proves.
+ *
+ * Three outcomes, not two, and the middle one is the reason this vocabulary exists. A capability
+ * the connector merely declares is not a success and is not a failure — it is a claim DHealth has
+ * recorded and not verified. Giving it either of the other two words would be wrong in a different
+ * direction each time: "Satisfaite" would launder an assertion into proof, "Non satisfaite" would
+ * blame a partner for DHealth's own missing transport.
+ *
+ * The words carry the state. The classes only reinforce it — a reader who cannot distinguish the
+ * colours loses nothing.
+ */
+export function capabilityEvidenceLabel(passed: boolean, evidenceLevel: string): string {
+  if (!passed) return 'Non satisfaite'
+  if (evidenceLevel === 'EXERCISED') return 'Exercée avec succès'
+  return 'Déclarée — non encore exercée'
+}
+
+/**
+ * Whether a capability row may be shown as a success.
+ *
+ * A declared required capability must not receive the same visual treatment as an exercised one,
+ * so this returns false for it and the row takes the "owed" styling instead. It is not a failure
+ * either, which is why the label above stays distinct from the failing one.
+ */
+export function capabilityEvidenceIsProven(passed: boolean, evidenceLevel: string): boolean {
+  return passed && evidenceLevel === 'EXERCISED'
 }

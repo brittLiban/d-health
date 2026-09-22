@@ -23,6 +23,7 @@ from daher_adapter.connect.models import (
     ConnectorInstallationStatus,
     ConnectorQualification,
     ConnectorQualificationCapability,
+    EvidenceLevel,
     QualificationResult,
 )
 from daher_adapter.exchange.models import (
@@ -68,10 +69,20 @@ class InstallationRetired(RuntimeError):
 
 @dataclass(frozen=True)
 class CapabilityOutcome:
-    """One capability a qualification run exercised, and what happened."""
+    """One capability a qualification run covered, what happened, and how strongly it is evidenced.
+
+    ``evidence_level`` has **no default**, on purpose, and it is the one line in this file most
+    worth not changing. A default of ``EXERCISED`` would silently upgrade every existing caller --
+    every fixture, every helper, every ``CapabilityOutcome(capability=c, passed=True)`` written
+    before this correction -- into claiming proof nobody produced. A default of ``DECLARED`` would
+    be safe but would let a genuine harness result be recorded as weaker than it is by omission.
+    Requiring it makes every call site state which one it means, which is the only way the
+    distinction survives contact with the next person to add a call site.
+    """
 
     capability: Capability
     passed: bool
+    evidence_level: EvidenceLevel
     detail: str | None = None
 
 
@@ -552,6 +563,7 @@ class ConnectorInstallationRepository:
                     qualification_id=row.id,
                     capability=outcome.capability.value,
                     passed=outcome.passed,
+                    evidence_level=outcome.evidence_level.value,
                     detail=outcome.detail,
                 )
             )
@@ -636,6 +648,7 @@ class ConnectorInstallationRepository:
                             CapabilityOutcome(
                                 capability=Capability(c.capability),
                                 passed=c.passed,
+                                evidence_level=EvidenceLevel(c.evidence_level),
                                 detail=c.detail,
                             )
                             for c in caps
@@ -650,9 +663,16 @@ class ConnectorInstallationRepository:
             return _read(owned)
 
 
-#: Convenience for tests and the harness: capability outcomes keyed by capability.
-def outcomes_from(mapping: Mapping[Capability, bool]) -> tuple[CapabilityOutcome, ...]:
+def outcomes_from(
+    mapping: Mapping[Capability, bool], *, evidence_level: EvidenceLevel
+) -> tuple[CapabilityOutcome, ...]:
+    """Convenience for tests and fixtures: capability outcomes keyed by capability.
+
+    ``evidence_level`` is keyword-only and required for the same reason ``CapabilityOutcome``'s is.
+    A helper that quietly chose one would be the easiest place in the codebase to manufacture proof
+    that nothing produced, precisely because it reads as boilerplate.
+    """
     return tuple(
-        CapabilityOutcome(capability=cap, passed=ok)
+        CapabilityOutcome(capability=cap, passed=ok, evidence_level=evidence_level)
         for cap, ok in sorted(mapping.items(), key=lambda kv: kv[0].value)
     )

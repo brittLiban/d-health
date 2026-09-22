@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.connect.contract import CONTRACT_VERSION, Capability, fingerprint
-from daher_adapter.connect.models import QualificationResult
+from daher_adapter.connect.models import EvidenceLevel, QualificationResult
 from daher_adapter.connect.qualification import QUALIFICATION_SUITE_VERSION
 from daher_adapter.connect.repository import (
     CapabilityOutcome,
@@ -137,10 +137,23 @@ def _get(client, private_key, organization_id):
     )
 
 
-def _qualify(sessions, installation_id, *, capabilities=LAB_BUNDLE, result=None):
+def _qualify(
+    sessions,
+    installation_id,
+    *,
+    capabilities=LAB_BUNDLE,
+    result=None,
+    evidence=EvidenceLevel.EXERCISED,
+):
     """Record a qualification the only way anything can: through the repository, not the API.
 
     That this helper has to reach past HTTP is the point of CX1 -- there is no endpoint for it.
+
+    ``evidence`` defaults to EXERCISED because these tests are about the API's shape, and CA3's
+    subject is specifically "a connector that proved everything is still not operational". That is
+    a fixture constructing exercised evidence to reach a verdict, **not** a claim that the
+    synthetic laboratory harness produces it -- it cannot exercise ORDER_RECEIPT, and ES3 pins
+    that. ``CapabilityOutcome`` has no default of its own, so this choice is visible here.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -155,7 +168,10 @@ def _qualify(sessions, installation_id, *, capabilities=LAB_BUNDLE, result=None)
         started_at=started,
         completed_at=started + timedelta(minutes=4),
         result=result or QualificationResult.PASSED,
-        capabilities=[CapabilityOutcome(capability=c, passed=True) for c in capabilities],
+        capabilities=[
+            CapabilityOutcome(capability=c, passed=True, evidence_level=evidence)
+            for c in capabilities
+        ],
         actor_identity_id=identity.id,
         evidence_summary="exécution de la suite de qualification",
     )

@@ -21,6 +21,8 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
 import type { FacilityConnector } from '../../api/exchangeTypes'
 import {
+  capabilityEvidenceIsProven,
+  capabilityEvidenceLabel,
   capabilityLabel,
   connectorStatusLabel,
   healthStateLabel,
@@ -283,11 +285,35 @@ export function ConnectorQualification({
       )}
 
       <h3 className={styles.subTitle}>Qualification</h3>
+
+      {/* Two lines, not one, because they are two different facts and this screen used to
+          merge them.
+
+          "Suite de qualification" is about the run: did every scenario the suite could
+          execute behave correctly. "Qualification de production" is about the connector:
+          may clinical work be routed to it. A run can legitimately pass while production
+          qualification stays incomplete, because one required capability rests on the
+          connector's own declaration and nothing has driven it. Showing only the first and
+          calling it "Qualification réussie" is exactly how weak evidence gets read as
+          strong. */}
+      {latest !== null ? (
+        <p>
+          <strong>Suite de qualification</strong> —{' '}
+          <span className={latest.result === 'PASSED' ? styles.done : styles.owed}>
+            {latest.result === 'PASSED' ? 'Réussie' : 'Échouée'}
+          </span>
+        </p>
+      ) : null}
       <p>
+        <strong>Qualification de production</strong> —{' '}
         <strong className={verdict.qualified ? styles.done : styles.owed}>
           {/* Never colour alone: the word carries the state, the class only
               reinforces it. A greyscale screen must read identically. */}
-          {verdict.qualified ? 'Qualifié' : 'Non qualifié'}
+          {verdict.qualified
+            ? 'Qualifiée'
+            : verdict.gap === 'REQUIRED_CAPABILITY_UNEXERCISED'
+              ? 'Incomplète'
+              : 'Non qualifiée'}
         </strong>{' '}
         — {verdict.detail}
       </p>
@@ -297,13 +323,31 @@ export function ConnectorQualification({
         </p>
       ) : null}
       {verdict.missing_capabilities.length > 0 ? (
-        <ul className={styles.routeList}>
-          {verdict.missing_capabilities.map((capability) => (
-            <li key={capability} className={styles.owed}>
-              {capabilityLabel(capability)} — non satisfaite
-            </li>
-          ))}
-        </ul>
+        <>
+          <h4 className={styles.subTitle}>Capacités obligatoires non satisfaites</h4>
+          <ul className={styles.routeList}>
+            {verdict.missing_capabilities.map((capability) => (
+              <li key={capability} className={styles.owed}>
+                {capabilityLabel(capability)} — non satisfaite
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {verdict.unexercised_capabilities.length > 0 ? (
+        <>
+          {/* Listed separately from the missing ones on purpose. These capabilities are not
+              absent and the partner has nothing to fix: DHealth has no transport with which
+              to drive them, which is its own gap and its own next ticket. */}
+          <h4 className={styles.subTitle}>Capacité restant à démontrer</h4>
+          <ul className={styles.routeList}>
+            {verdict.unexercised_capabilities.map((capability) => (
+              <li key={capability} className={styles.owed}>
+                {capabilityLabel(capability)} — déclarée, non encore exercée
+              </li>
+            ))}
+          </ul>
+        </>
       ) : null}
 
       <p>
@@ -344,8 +388,17 @@ export function ConnectorQualification({
                 {latest.capabilities.map((capability) => (
                   <tr key={capability.capability}>
                     <th scope="row">{capabilityLabel(capability.capability)}</th>
-                    <td className={capability.passed ? styles.done : styles.owed}>
-                      {capability.passed ? 'Satisfaite' : 'Non satisfaite'}
+                    {/* Three outcomes, three words. A declared capability does not get the
+                        success class -- it is not a success -- and it does not get the
+                        failure wording either, because nothing failed. */}
+                    <td
+                      className={
+                        capabilityEvidenceIsProven(capability.passed, capability.evidence_level)
+                          ? styles.done
+                          : styles.owed
+                      }
+                    >
+                      {capabilityEvidenceLabel(capability.passed, capability.evidence_level)}
                     </td>
                     <td>{capability.detail ?? '—'}</td>
                   </tr>
@@ -370,10 +423,15 @@ export function ConnectorQualification({
             ? 'Connecteur DHealth — non enregistré'
             : 'Connecteur DHealth enregistré'}
         </li>
+        {/* "Qualification de production", never "Qualification réussie". The suite may well
+            have succeeded; this line is about whether the connector may take clinical work,
+            and conflating the two is the misreading this correction exists to close. */}
         <li className={verdict.qualified ? styles.done : styles.owed}>
           {verdict.qualified
-            ? 'Qualification réussie'
-            : `Qualification — ${qualificationGapLabel(verdict.gap).toLowerCase()}`}
+            ? 'Qualification de production — complète'
+            : verdict.gap === 'REQUIRED_CAPABILITY_UNEXERCISED'
+              ? 'Qualification de production — incomplète, capacité restant à démontrer'
+              : `Qualification de production — ${qualificationGapLabel(verdict.gap).toLowerCase()}`}
         </li>
         <li className={styles.owed}>
           Exécution du connecteur — aucun runtime dans cette version

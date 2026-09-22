@@ -10,6 +10,36 @@ part that gets misread — what it does **not** mean. Decisions: `DECISIONS.md` 
 
 ---
 
+## The rule
+
+> **A capability declaration says what a connector claims to implement. Only exercised evidence can
+> satisfy a required production capability.**
+
+> **A qualification suite may successfully complete every scenario available to it while production
+> qualification remains incomplete, because a required capability could not yet be exercised.**
+
+Every capability row carries an evidence level:
+
+| Level | Means |
+|---|---|
+| `DECLARED` | the connector says it implements this. Useful, recorded, and not proof. |
+| `EXERCISED` | DHealth drove it and observed the required effect. |
+
+Two levels, deliberately. A third — "partially exercised", "exercised in staging" — would be a
+judgement call dressed as data, and every such call is somebody's opportunity to round upward.
+
+A required capability counts toward `connector_qualified` only when it is **both** `passed` and
+`EXERCISED`. A declared one yields the gap `REQUIRED_CAPABILITY_UNEXERCISED`, which is deliberately
+*not* `REQUIRED_CAPABILITY_MISSING`: "you never built it" and "we have no way yet to prove what you
+built" are different bug reports for different people, and today the second is DHealth's own gap.
+
+**This was a correction.** The original ticket recorded `ORDER_RECEIPT` as passing with "declaration
+only" written in prose, and the verdict counted it. Nothing was routable then, so nothing looked
+wrong — and DH-CONNECT-AGENT-001 is exactly the ticket that supplies the missing runtime. That is
+recorded rather than quietly fixed; see ADR-056 decision 23.
+
+---
+
 ## What a PASS does not prove
 
 Read this section before the others.
@@ -22,18 +52,20 @@ build, one configuration and one mapping revision at one moment in the past, and
 
 Three specific limits worth naming individually:
 
-1. **`ORDER_RECEIPT` is declared, not exercised.** It is the only capability whose direction is
-   DHealth → connector: it asks whether the connector can *receive* an order pushed to it. Pushing
-   requires a transport, and there is none. So the scenario — named `LQ1-order-receipt-declared`
-   rather than `LQ1-order-receipt`, so the limitation is visible in the evidence itself — records
-   that the connector *claims* it can receive orders. Nobody watched it receive one. The limitation
-   is carried into the stored capability row, not only into a source comment.
-2. **Provider qualification is declared-only in this build.** There is a laboratory harness
-   (`LabQualificationHarness`). There is no provider harness. `required_capabilities("PROVIDER")`
-   can therefore only be satisfied by a directly recorded qualification, which means no provider
-   connector has been meaningfully qualified by anything in this repository. Building one is future
-   work, and until then a provider connector's PASS carries no more weight than the declaration
-   behind it.
+1. **`ORDER_RECEIPT` is declared, not exercised — so no laboratory connector in this build reaches
+   production qualification.** It is the only capability whose direction is DHealth → connector: it
+   asks whether the connector can *receive* an order pushed to it. Pushing requires a transport, and
+   there is none. The scenario is named `LQ1-order-receipt-declared`, its row is `DECLARED`, and the
+   verdict refuses to count it. The synthetic laboratory suite therefore ends at
+   **`connector_qualified = false`, gap `REQUIRED_CAPABILITY_UNEXERCISED`, naming `ORDER_RECEIPT`**
+   — which is more truthful than what the first version of this ticket reported.
+2. **Provider qualification is declared-only in this build, and therefore never qualifies.** There
+   is a laboratory harness (`LabQualificationHarness`). There is no provider harness, so every
+   provider capability row is a recorded declaration and `ORDER_SUBMISSION`,
+   `RELEASED_RESULT_RECEIPT` and `AMENDMENT_RECEIPT` are all `DECLARED`. A provider connector is
+   consequently `connector_qualified = false` under this contract until a real provider harness
+   exists. The declarations are kept — they are how DHealth records what a partner says it
+   implements, which is what the next conversation with that partner is about.
 3. **Nothing here was run against a real EMR or LIS.** The subject is
    `SyntheticConnectorSubject`, which talks to nothing. The Exchange effects are real — real rows,
    real repositories, real constraints — but the connector side is synthetic.
@@ -166,6 +198,18 @@ connector_qualified   = TRUE
 connector_operational = FALSE      ← no runtime exists, in any release yet shipped
 production_routing_allowed = FALSE
 ```
+
+**And in this build, nothing reaches even the first line.** After the evidence-level correction, the
+best a real CONNECT laboratory can reach is:
+
+```
+suite de qualification     RÉUSSIE     ← every scenario the suite could run behaved correctly
+connector_qualified        FALSE       ← ORDER_RECEIPT is DECLARED, not EXERCISED
+connector_operational      FALSE       ← no runtime reports in
+production_routing_allowed FALSE
+```
+
+Three separate falsehoods would have to be introduced to route a connector today, not one.
 
 Both findings are emitted for every CONNECT facility, and both are blocking. The screen states them
 as two separate lines rather than one badge, because they are two separate facts and the second

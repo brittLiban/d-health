@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.connect.contract import CONTRACT_VERSION
 from daher_adapter.connect.qualification import (
+    QUALIFICATION_SUITE_VERSION,
     connector_operational_in_session,
     health_state_in_session,
     qualification_verdict_in_session,
@@ -2323,6 +2324,9 @@ class ConnectorCapabilityResponse(BaseModel):
 
     capability: str
     passed: bool
+    #: DECLARED or EXERCISED. A required capability satisfies production qualification only when
+    #: EXERCISED -- `passed` alone is what the connector claims, not what DHealth watched happen.
+    evidence_level: str
     detail: str | None
 
 
@@ -2383,9 +2387,15 @@ class ConnectorQualificationVerdictResponse(BaseModel):
     detail: str
     qualification_id: uuid.UUID | None
     completed_at: datetime | None
+    #: Required capabilities the applicable qualification did not cover at all.
     missing_capabilities: list[str]
+    #: Required capabilities the connector declares and nothing has driven end to end. Separate
+    #: from `missing_capabilities` because they are different work: one is "build it", the other is
+    #: "we have no way to prove the thing you built". Today the second is DHealth's own gap.
+    unexercised_capabilities: list[str]
     installed_contract_version: str | None
     current_contract_version: str
+    current_suite_version: str
 
 
 class FacilityConnectorResponse(BaseModel):
@@ -7485,7 +7495,10 @@ def build_exchange_router(
             evidence_summary=record.evidence_summary,
             capabilities=[
                 ConnectorCapabilityResponse(
-                    capability=c.capability.value, passed=c.passed, detail=c.detail
+                    capability=c.capability.value,
+                    passed=c.passed,
+                    evidence_level=c.evidence_level.value,
+                    detail=c.detail,
                 )
                 for c in record.capabilities
             ],
@@ -7521,8 +7534,10 @@ def build_exchange_router(
                 qualification_id=verdict.qualification_id,
                 completed_at=verdict.completed_at,
                 missing_capabilities=[c.value for c in verdict.missing_capabilities],
+                unexercised_capabilities=[c.value for c in verdict.unexercised_capabilities],
                 installed_contract_version=verdict.installed_contract_version,
                 current_contract_version=CONTRACT_VERSION,
+                current_suite_version=QUALIFICATION_SUITE_VERSION,
             ),
             health_state=health.value,
             operational=operational,

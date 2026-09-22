@@ -232,8 +232,14 @@ exists — `docs/CONNECT-CONTRACT.md`, ADR-056 — together with a durable quali
 records whether a given build satisfied it. The *transport* does not: no FHIR client, HL7 parser,
 MLLP, SFTP runtime, webhook receiver, polling loop, on-premise agent or delivery worker exists, and
 nothing in this repository has contacted an external EMR or LIS. A Connect facility can now hold a
-registered, qualified connector and remain **unroutable**, because `connector_operational` derives
-from a runtime that does not exist. That is DH-CONNECT-AGENT-001's subject.
+registered connector and remain **unroutable**, because `connector_operational` derives from a
+runtime that does not exist. That is DH-CONNECT-AGENT-001's subject.
+
+**Corrected the same day.** Capability evidence carries an explicit strength — `DECLARED` or
+`EXERCISED` — and only exercised evidence satisfies a required production capability. Since
+`ORDER_RECEIPT` cannot be driven without a transport, **no connector in this build reaches
+`connector_qualified = true` at all**; the synthetic suite passes every scenario it can run and
+production qualification stays incomplete. Two claims, stated separately.
 
 OpenMRS/OpenELIS (ADR-042) are the first reference connector track under this model, not an
 instance of DHealth Clinic/Lab. `CURRENT`: the OpenMRS/OpenELIS clinical stack and its adapter exist

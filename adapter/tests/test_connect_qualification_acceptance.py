@@ -53,7 +53,7 @@ from daher_adapter.connect.contract import (
     mapping_fingerprint,
 )
 from daher_adapter.connect.harness import LabQualificationHarness, SyntheticConnectorSubject
-from daher_adapter.connect.models import QualificationResult
+from daher_adapter.connect.models import EvidenceLevel, QualificationResult
 from daher_adapter.connect.qualification import (
     QUALIFICATION_SUITE_VERSION,
     QualificationGap,
@@ -301,15 +301,24 @@ def test_AC_the_whole_connect_contract_journey(world):
         Capability.AMENDMENT_PUBLICATION,
     } <= passed
 
-    # -- ADR-056 decision 21: a PASS says how far it goes -------------------------------------
+    # -- ADR-056 decisions 21 and 23: a PASS says how far it goes ------------------------------
     #
-    # ORDER_RECEIPT passed, and the evidence has to say that it passed on a *declaration* rather
-    # than on anything the harness watched happen -- it is the one DHealth -> connector capability
-    # and there is no transport to push over. A limitation that lives only in a source comment is a
-    # limitation that will eventually be read as absent, so this asserts it reached the stored row
-    # and the run summary, not just the code.
-    receipt = next(c for c in run.capability_outcomes if c.capability is Capability.ORDER_RECEIPT)
+    # Four of the five required capabilities were driven end to end through the real Exchange
+    # repositories. ORDER_RECEIPT was not and could not be: it is the one DHealth -> connector
+    # capability, it needs something to push a message over, and no transport exists. So it is
+    # recorded DECLARED, which the verdict reads.
+    outcomes = {c.capability: c for c in run.capability_outcomes}
+    for capability in (
+        Capability.BUSINESS_ACCEPTANCE,
+        Capability.COLLECTION_EVENT,
+        Capability.RELEASED_RESULT_PUBLICATION,
+        Capability.AMENDMENT_PUBLICATION,
+    ):
+        assert outcomes[capability].evidence_level is EvidenceLevel.EXERCISED, capability
+
+    receipt = outcomes[Capability.ORDER_RECEIPT]
     assert receipt.passed is True
+    assert receipt.evidence_level is EvidenceLevel.DECLARED
     assert receipt.detail is not None and "déclaration seule" in receipt.detail
     assert "déclaration seule" in run.evidence_summary
     assert "LQ1-order-receipt-declared" in run.evidence_summary
@@ -318,18 +327,39 @@ def test_AC_the_whole_connect_contract_journey(world):
     stored_receipt = next(
         c for c in stored.capabilities if c.capability is Capability.ORDER_RECEIPT
     )
-    assert stored_receipt.detail is not None and "déclaration seule" in stored_receipt.detail, (
-        "the limitation did not survive into the durable evidence row"
+    assert stored_receipt.evidence_level is EvidenceLevel.DECLARED, (
+        "the evidence level did not survive into the durable row"
     )
+    assert stored_receipt.detail is not None and "déclaration seule" in stored_receipt.detail
 
-    # -- the three facts, held apart ---------------------------------------------------------
+    # -- §18, first half: the suite passed and production qualification is incomplete ----------
+    #
+    # This is the assertion the correction to this ticket exists to produce, and it reads as a
+    # contradiction only if "passed" and "qualified" are the same word. They are not. The run is
+    # recorded PASSED and stays PASSED forever: every scenario this suite could execute behaved
+    # correctly, which is true and worth keeping. Production qualification is a different question
+    # -- may clinical work be routed here -- and the answer is no, because one required capability
+    # rests on the connector's own say-so.
+    #
+    # Before the correction this block asserted `connector_qualified is True`. That was the bug:
+    # nothing was routable then, so it looked harmless, and DH-CONNECT-AGENT-001 is precisely the
+    # ticket that would have made it dangerous.
+    assert stored.result == QualificationResult.PASSED.value
+
     findings = _findings(world, lab.id)
-    assert findings["connector_qualified"] is True
+    assert findings["connector_qualified"] is False
     assert findings["connector_operational"] is False
+
     with world["sessions"]() as session:
-        assert not is_operationally_ready_in_session(session, lab.id), (
-            "a qualified connector with no runtime must not be routable"
-        )
+        verdict = qualification_verdict_in_session(session, lab.id, "LAB")
+        assert not is_operationally_ready_in_session(session, lab.id)
+    assert verdict.qualified is False
+    assert verdict.gap is QualificationGap.REQUIRED_CAPABILITY_UNEXERCISED
+    assert verdict.unexercised_capabilities == (Capability.ORDER_RECEIPT,)
+    assert verdict.missing_capabilities == (), (
+        "ORDER_RECEIPT is declared, not absent -- the two are different work for different people"
+    )
+    assert "non encore exercée" in verdict.detail
 
     # -- staleness: change the mapping, lose the qualification, keep the evidence ------------
     world["connectors"].update_fingerprints(
@@ -509,7 +539,18 @@ def test_AC6_qualification_evidence_is_never_rewritten(world):
         QualificationResult.FAILED.value,
         QualificationResult.PASSED.value,
     }
-    assert _findings(world, lab.id)["connector_qualified"] is True
+    # The later run is the applicable one and it PASSED -- the earlier failure does not linger as
+    # the answer. Production qualification is nonetheless false, because the passing run's
+    # ORDER_RECEIPT is a declaration; that is this ticket's correction, and AC pins it. What AC6
+    # is about is that neither row was rewritten, so assert on the gap rather than on `False`,
+    # which would also be satisfied if the failure had somehow become the applicable verdict.
+    with world["sessions"]() as session:
+        verdict = qualification_verdict_in_session(session, lab.id, "LAB")
+    assert verdict.gap is QualificationGap.REQUIRED_CAPABILITY_UNEXERCISED
+    assert verdict.qualification_id == history[0].id, (
+        "the applicable verdict must come from the later, passing run"
+    )
+    assert _findings(world, lab.id)["connector_qualified"] is False
 
 
 def test_AC7_the_source_event_time_survives_into_nothing_it_should_not(world):

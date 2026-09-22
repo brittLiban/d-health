@@ -6,6 +6,30 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-22, DH-CONNECT-CONTRACT-001 correction, directly on `master`.** From `a7e4d5e`. A hole in
+the ticket above: `ORDER_RECEIPT` was recorded as a passing required capability with "declaration
+only" written in prose, and the verdict counted every `passed=True` row. Nothing was routable, so it
+looked harmless — and DH-CONNECT-AGENT-001 is precisely the ticket that supplies the missing
+runtime, on whose arrival a connector that had merely *claimed* it could receive orders would have
+become production-routable without DHealth ever watching it receive one. **A limitation the verdict
+does not consult is decoration.** Every capability row now carries `evidence_level` — `DECLARED` or
+`EXERCISED`, non-null, CHECK-constrained (`0028_connect_evidence`) — and a required capability
+counts only when it is both passed and exercised. Two new gaps keep the reasons honest:
+`REQUIRED_CAPABILITY_UNEXERCISED` (the connector claims it, nothing has driven it — DHealth's own
+missing transport, not the partner's bug) and `SUITE_VERSION_OUTDATED` (the suite version moved from
+1 to 2 and is now part of applicability, so old evidence fails closed rather than being re-credited
+with a claim it never made). **The honest result is that the synthetic laboratory suite no longer
+qualifies anything**: it passes every scenario it can execute, the run stays `PASSED` forever, and
+production qualification is *incomplete* — those are different claims and the screen now states them
+on two separate lines. Provider connectors likewise cannot qualify at all in this build, there being
+no provider harness. Three negative controls executed and reverted, each red exactly where the
+ticket predicted. Real PostgreSQL 18.6 found a bug SQLite structurally cannot: the first revision id
+was 35 characters against a `VARCHAR(32)` `alembic_version`, so the whole SQLite suite passed a
+migration that could never be stamped on production. **`connector_operational` is unchanged and
+still unconditionally false** — this correction changed what qualification *means*, not what DHealth
+can observe, and no transport, runtime, heartbeat or delivery worker was added.
+
+
 **2026-09-22, DH-CONNECT-CONTRACT-001, directly on `master`. The ticket is CLOSED.** Starting point
 was `master` at `80af8d4`. **DHealth Connect's transport is still not built** — no FHIR client, no
 HL7 parser, no MLLP, no SFTP runtime, no webhook receiver, no agent, no delivery worker, and nothing

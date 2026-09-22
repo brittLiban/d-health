@@ -8,9 +8,16 @@
 > for any product and none has been qualified against a real system**; the harness runs against a
 > synthetic subject that contacts nothing. A CONNECT facility can now hold a registered, genuinely
 > qualified connector and still be **unroutable**, because `connector_operational` is
-> unconditionally false and blocking until DH-CONNECT-AGENT-001 supplies a real runtime. Provider
-> qualification and `ORDER_RECEIPT` are declared-only in this build. See `docs/CONNECT-CONTRACT.md`,
-> `docs/CONNECT-QUALIFICATION.md`, ADR-056.
+> unconditionally false and blocking until DH-CONNECT-AGENT-001 supplies a real runtime. See
+> `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-QUALIFICATION.md`, ADR-056.
+>
+> **Corrected 2026-09-22, same ticket:** capability evidence now carries an explicit strength —
+> `DECLARED` or `EXERCISED` — and a required capability satisfies production qualification only when
+> it was exercised. Because `ORDER_RECEIPT` cannot be driven without a transport, **no laboratory
+> connector in this build reaches `connector_qualified = true`**, and provider connectors cannot
+> either (there is no provider harness). The synthetic suite still passes every scenario it can run;
+> "the suite passed" and "production qualification is complete" are now separate statements. See
+> ADR-056 decision 23.
 
 > **Current Exchange status (DH-EX-014B, 2026-09-14):** post-release amendment episodes,
 > immutable release-version history, provider exact-version reads, and version-bound review routes

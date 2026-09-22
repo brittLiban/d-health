@@ -90,8 +90,10 @@ function client(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
         qualification_id: null,
         completed_at: null,
         missing_capabilities: [],
+        unexercised_capabilities: [],
         installed_contract_version: null,
         current_contract_version: '1.0',
+        current_suite_version: '2',
       },
       health_state: 'UNKNOWN',
       operational: false,
@@ -261,7 +263,9 @@ describe('the connect facility, told truthfully', () => {
     expect(
       await screen.findByText(/Connecteur DHealth — non enregistré/),
     ).toBeInTheDocument()
-    expect(screen.getByText(/Qualification — aucun connecteur enregistré/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Qualification de production — aucun connecteur enregistré/),
+    ).toBeInTheDocument()
     expect(
       screen.getByText(/Exécution du connecteur — aucun runtime dans cette version/),
     ).toBeInTheDocument()

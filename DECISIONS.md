@@ -7473,3 +7473,81 @@ any connector exists, so the first one meets a standard it cannot negotiate.
 - The platform UI gains a connector section on CONNECT facility detail and nothing on NATIVE ones. A
   NATIVE facility needs no connector, and showing it an empty connector panel would invent a
   deficiency it does not have.
+
+### Correction, 2026-09-22 (same ticket, after the first push) — decision 23
+
+**Decisions 1–22 and the Consequences above are left exactly as written.** They were what this ADR
+said when it was accepted, one of them was wrong in a way nobody had yet felt, and striking it out
+would hide the fact that the hole existed. Decision 23 supersedes the part of decision 21 that
+mattered.
+
+23. **A declaration is evidence. It is not proof, and only proof satisfies a required production
+    capability.** Every capability row carries an explicit `evidence_level` — `DECLARED` or
+    `EXERCISED` — and `qualification_verdict_in_session` counts a required capability only when it
+    is both `passed` and `EXERCISED`.
+
+    **What was wrong.** Decision 21 made the harness state its own limits *inside the evidence*,
+    which it did: `ORDER_RECEIPT` was recorded with the limitation "déclaration seule" on the
+    stored row. But the limitation lived in a `detail` string, and nothing read it. The verdict
+    counted every `passed=True` row toward the required bundle, so a connector that merely
+    *claimed* it could receive orders satisfied `ORDER_RECEIPT`, and the laboratory bundle came out
+    qualified.
+
+    That was harmless on the day it shipped, because `connector_operational` is unconditionally
+    false and no facility is routable. It was not harmless in the direction the project is moving:
+    **DH-CONNECT-AGENT-001 is precisely the ticket that supplies the missing runtime.** On the day
+    it lands, this connector would have become production-routable without DHealth ever having
+    watched it receive an order — and the reason would have been a sentence in a text column that
+    read well and gated nothing. A limitation the verdict does not consult is decoration.
+
+    Three consequences follow, and all three are improvements in truthfulness rather than in
+    capability:
+
+    - **The synthetic laboratory suite no longer produces a qualified connector.** It ends at
+      `connector_qualified = false` with the gap `REQUIRED_CAPABILITY_UNEXERCISED` naming
+      `ORDER_RECEIPT`. The run itself is still recorded `PASSED`, and stays `PASSED` forever: every
+      scenario the suite *could* execute behaved correctly. "The suite passed" and "this connector
+      may take clinical work" are different claims, and this ticket stopped merging them.
+    - **Provider connectors cannot qualify at all under this build**, since there is no provider
+      harness and every provider capability row is therefore a declaration. Stated plainly rather
+      than left as an asterisk.
+    - **`REQUIRED_CAPABILITY_UNEXERCISED` is a separate gap from `REQUIRED_CAPABILITY_MISSING`**,
+      not a flattening of it. "The connector does not claim this" sends an operator to a partner;
+      "the connector claims it and nothing has driven it" is DHealth's own missing transport.
+      Telling a partner to implement something they already implemented would be a bad bug report.
+
+    A fourth gap, **`SUITE_VERSION_OUTDATED`**, was added for the same honesty reason.
+    `QUALIFICATION_SUITE_VERSION` moved from `"1"` to `"2"` and is now part of applicability, so a
+    qualification written under the old semantics stops applying — fail closed, requalify. Without
+    its own gap that case would have fallen through to `QUALIFICATION_STALE`, whose French says the
+    configuration or the connector changed. Nothing changed; the suite did. A readiness finding that
+    lies about *why* is worse than one that says nothing.
+
+    Two design details worth recording because they are the ones a later change will be tempted to
+    undo:
+
+    - **`CapabilityOutcome.evidence_level` has no default.** Not `EXERCISED`, which would silently
+      upgrade every pre-existing caller into claiming proof nobody produced; not `DECLARED`, which
+      would let a genuine result be recorded as weaker than it is by omission. Every call site
+      states which it means. The database column likewise has no server default.
+    - **`NDE1-no-double-entry` moved from `RELEASED_RESULT_PUBLICATION` to run level.** It reads the
+      subject's declared `requires_manual_duplicate_entry` rather than driving anything, so under
+      the new rule it would have dragged a capability the harness genuinely exercises down to
+      `DECLARED` and made it permanently unqualifiable. It still fails the whole run, which is where
+      it always belonged: `all_passed` covers scenarios with no capability.
+
+### Consequences of the correction
+
+- Migration `0028_connect_evidence` adds the column and backfills **by capability, not by
+  inspecting rows** — a 0027 row does not record which harness produced it. `ORDER_RECEIPT` and the
+  four provider capabilities were unexercisable by anything in the 0027 build and backfill to
+  `DECLARED`; the rest to `EXERCISED`. The ambiguous direction is resolved toward `DECLARED`, the
+  fail-closed one. Since every 0027 qualification carries `suite_version = "1"`, none of them
+  satisfies the new verdict regardless — the backfill governs the history an operator reads.
+- The revision id is `0028_connect_evidence`, not `0028_connect_qualification_evidence`.
+  `alembic_version.version_num` is `VARCHAR(32)` and the longer name is 35 characters; real
+  PostgreSQL refused to stamp it while SQLite, which does not enforce VARCHAR length, had passed the
+  entire suite. Found only because §16 required a real-PostgreSQL run.
+- `connector_operational` is unchanged and still unconditionally false. This correction changed what
+  qualification *means*, not what DHealth can observe, and no heartbeat, runtime, agent, transport
+  or delivery worker was added.

@@ -66,6 +66,34 @@ class QualificationResult(StrEnum):
     FAILED = "FAILED"
 
 
+class EvidenceLevel(StrEnum):
+    """How strongly a capability row is evidenced. Added by DH-CONNECT-CONTRACT-001's correction.
+
+    This exists because the original ticket had a hole. It recorded ``ORDER_RECEIPT`` as
+    ``passed=True`` with the limitation "declaration only" in prose, and the verdict counted every
+    ``passed=True`` row toward the required bundle. That was safe only while nothing could turn a
+    qualified connector into a routable one -- and DH-CONNECT-AGENT-001 is precisely the ticket
+    that supplies the missing runtime. Left alone, a connector that merely *claimed* it could
+    receive orders would have become production-routable the moment a heartbeat existed, without
+    DHealth ever having watched it receive one.
+
+    So the distinction is a column, not a sentence:
+
+        DECLARED   the connector says it implements this. Useful, and not proof.
+        EXERCISED  DHealth drove it and observed the required effect.
+
+    Two levels, deliberately. A third ("partially exercised", "exercised in staging") would be a
+    judgement call dressed as data, and every such call is somebody's opportunity to round upward.
+
+    A declaration is real evidence and is kept: it is how DHealth records what a connector claims,
+    which is what a partner conversation is about. It simply does not satisfy a required production
+    capability.
+    """
+
+    DECLARED = "DECLARED"
+    EXERCISED = "EXERCISED"
+
+
 class ConnectorInstallation(Base):
     """One connector implementation, installed for exactly one facility.
 
@@ -232,6 +260,10 @@ class ConnectorQualificationCapability(Base):
             "'REVIEW_REPORTING')",
             name="ck_connector_qualification_capabilities_capability",
         ),
+        CheckConstraint(
+            "evidence_level IN ('DECLARED', 'EXERCISED')",
+            name="ck_connector_qualification_capabilities_evidence_level",
+        ),
         Index(
             "ix_connector_qualification_capabilities_qualification_id",
             "qualification_id",
@@ -244,5 +276,9 @@ class ConnectorQualificationCapability(Base):
     )
     capability: Mapped[str] = mapped_column(String(32), nullable=False)
     passed: Mapped[bool] = mapped_column(nullable=False)
+    #: DECLARED or EXERCISED -- see ``EvidenceLevel``. Non-nullable and CHECK-constrained, and
+    #: deliberately given no server default: a row that forgot to say how it was evidenced must
+    #: fail to insert rather than quietly inherit the stronger answer.
+    evidence_level: Mapped[str] = mapped_column(String(16), nullable=False)
     #: Why it failed, in one short sentence, for the operator screen. Never a stack trace.
     detail: Mapped[str | None] = mapped_column(String(512))

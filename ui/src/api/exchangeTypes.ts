@@ -1095,9 +1095,20 @@ export interface ConnectorInstallation {
   updated_at: string
 }
 
+/** How strongly a capability row is evidenced. `passed` alone does not gate production. */
+export type ConnectorEvidenceLevel = 'DECLARED' | 'EXERCISED'
+
 export interface ConnectorCapabilityOutcome {
   capability: string
   passed: boolean
+  /**
+   * `DECLARED` — the connector says it implements this, and nothing drove it.
+   * `EXERCISED` — DHealth drove it and observed the required effect.
+   *
+   * A required capability satisfies production qualification only when `EXERCISED`. A declared
+   * one must never be given the same visual treatment as an exercised one.
+   */
+  evidence_level: ConnectorEvidenceLevel
   detail: string | null
 }
 
@@ -1130,9 +1141,20 @@ export interface ConnectorQualificationVerdict {
   detail: string
   qualification_id: string | null
   completed_at: string | null
+  /** Required capabilities the applicable qualification did not cover at all. */
   missing_capabilities: string[]
+  /**
+   * Required capabilities the connector declares and nothing has driven end to end.
+   *
+   * Kept separate from `missing_capabilities` because they are different work: one is "build it",
+   * the other is "we have no way yet to prove the thing you built". Today the second is DHealth's
+   * own gap, not the partner's, and telling an operator otherwise would send them to file a bad
+   * bug report against a partner.
+   */
+  unexercised_capabilities: string[]
   installed_contract_version: string | null
   current_contract_version: string
+  current_suite_version: string
 }
 
 export interface FacilityConnector {

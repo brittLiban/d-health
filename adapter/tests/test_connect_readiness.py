@@ -21,7 +21,7 @@ from exchange_support import make_lab, make_provider
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.connect.contract import Capability, fingerprint
-from daher_adapter.connect.models import QualificationResult
+from daher_adapter.connect.models import EvidenceLevel, QualificationResult
 from daher_adapter.connect.qualification import (
     QUALIFICATION_SUITE_VERSION,
     QualificationGap,
@@ -112,16 +112,35 @@ def _register(repos, organization_id, **overrides):
     return repos["connectors"].register(**payload)
 
 
-def _qualify(repos, installation_id, *, capabilities=None, result=QualificationResult.PASSED):
+def _qualify(
+    repos,
+    installation_id,
+    *,
+    capabilities=None,
+    result=QualificationResult.PASSED,
+    evidence=EvidenceLevel.EXERCISED,
+    suite_version=None,
+):
+    """Record a qualification directly, bypassing the harness.
+
+    ``evidence`` defaults to EXERCISED **here and only here**, because these tests are about the
+    verdict logic rather than about what any harness produced: CR8's subject is "a connector that
+    genuinely proved everything is still unroutable without a runtime", and expressing that
+    requires being able to construct exercised evidence. That is a statement about a fixture, not
+    a claim that a run produced it -- the real synthetic laboratory harness cannot exercise
+    ORDER_RECEIPT and ES3 pins that separately.
+
+    ``CapabilityOutcome`` itself has no default, so nothing outside a test can drift into this.
+    """
     started = datetime.now(UTC) - timedelta(minutes=5)
     return repos["connectors"].record_qualification(
         installation_id=installation_id,
-        suite_version=QUALIFICATION_SUITE_VERSION,
+        suite_version=suite_version or QUALIFICATION_SUITE_VERSION,
         started_at=started,
         completed_at=started + timedelta(minutes=4),
         result=result,
         capabilities=[
-            CapabilityOutcome(capability=cap, passed=ok)
+            CapabilityOutcome(capability=cap, passed=ok, evidence_level=evidence)
             for cap, ok in (capabilities or LAB_BUNDLE).items()
         ],
         actor_identity_id=_actor(repos),
@@ -273,7 +292,13 @@ class TestConnectReadinessDerivesFromEvidence:
         assert verdict.qualified is False
         assert verdict.gap is QualificationGap.REQUIRED_CAPABILITY_MISSING
         assert verdict.missing_capabilities == (Capability.AMENDMENT_PUBLICATION,)
-        assert "AMENDMENT_PUBLICATION" in verdict.detail
+        # The sentence counts and does not name the capability. Raw contract enums are not French,
+        # and the connector panel enumerates them with the labels it already owns -- see the gap's
+        # `detail`. The capability itself is on `missing_capabilities`, asserted above.
+        assert verdict.detail == (
+            "1 capacité requise non satisfaite par la dernière qualification applicable"
+        )
+        assert "AMENDMENT_PUBLICATION" not in verdict.detail
 
     def test_CR8_a_fully_qualified_connector_with_no_runtime_is_still_unroutable(self, repos):
         """The ticket's central claim, and the one a future change is most likely to break.

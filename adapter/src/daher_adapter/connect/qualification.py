@@ -35,12 +35,18 @@ from daher_adapter.connect.models import (
     ConnectorInstallationStatus,
     ConnectorQualification,
     ConnectorQualificationCapability,
+    EvidenceLevel,
     QualificationResult,
 )
 
 #: The revision of the qualification scenario set. Bump when a scenario is added or changed, so an
 #: older PASS is not credited with having proved something that did not exist when it ran.
-QUALIFICATION_SUITE_VERSION = "1"
+#:
+#: "2" as of DH-CONNECT-CONTRACT-001's correction. Suite 1 recorded a declared ORDER_RECEIPT as a
+#: satisfied required capability; suite 2 records evidence strength and refuses to. Those are
+#: materially different claims about the same connector, so a suite-1 PASS must not be readable as
+#: a suite-2 result -- see ``applicable_qualification``, which now compares this value.
+QUALIFICATION_SUITE_VERSION = "2"
 
 
 class QualificationGap(StrEnum):
@@ -61,6 +67,19 @@ class QualificationGap(StrEnum):
     QUALIFICATION_STALE = "QUALIFICATION_STALE"
     CONTRACT_MAJOR_MISMATCH = "CONTRACT_MAJOR_MISMATCH"
     REQUIRED_CAPABILITY_MISSING = "REQUIRED_CAPABILITY_MISSING"
+    #: Added by this ticket's correction. Deliberately **not** folded into
+    #: REQUIRED_CAPABILITY_MISSING, because the two are different pieces of work for different
+    #: people. "Missing" means the connector does not claim the capability at all, and somebody has
+    #: to go build it. "Declared but unexercised" means the capability exists conceptually, the
+    #: connector says it implements it, and nothing has yet been able to drive it end to end --
+    #: which today is a statement about DHealth's own missing transport, not about the partner.
+    #: Telling a partner to implement something they already implemented would be a bad bug report.
+    REQUIRED_CAPABILITY_UNEXERCISED = "REQUIRED_CAPABILITY_UNEXERCISED"
+    #: The applicable PASS was produced by an older suite whose semantics this build no longer
+    #: honours. Separate from QUALIFICATION_STALE because nothing about the *installation* changed
+    #: -- saying "the configuration or connector have changed" would be a plain falsehood, and a
+    #: readiness finding that lies about why is worse than one that says nothing.
+    SUITE_VERSION_OUTDATED = "SUITE_VERSION_OUTDATED"
     SUSPENDED = "SUSPENDED"
     RETIRED = "RETIRED"
 
@@ -75,6 +94,10 @@ class QualificationVerdict:
     completed_at: datetime | None = None
     #: Required capabilities that did not pass, when that is the reason.
     missing_capabilities: tuple[Capability, ...] = ()
+    #: Required capabilities that passed on a declaration alone -- the connector says it implements
+    #: them and nothing has driven them end to end. Distinct from ``missing_capabilities``: these
+    #: are not absent, they are unproven.
+    unexercised_capabilities: tuple[Capability, ...] = ()
     #: What the installation declares it implements, when that is what disqualifies it.
     installed_contract_version: str | None = None
 
@@ -107,8 +130,30 @@ class QualificationVerdict:
                     f"{CONTRACT_VERSION} et une nouvelle qualification est requise"
                 )
             case QualificationGap.REQUIRED_CAPABILITY_MISSING:
-                names = ", ".join(c.value for c in self.missing_capabilities)
-                return f"capacités requises non démontrées : {names}"
+                count = len(self.missing_capabilities)
+                plural = "s" if count > 1 else ""
+                return (
+                    f"{count} capacité{plural} requise{plural} non satisfaite{plural} par la "
+                    "dernière qualification applicable"
+                )
+            case QualificationGap.REQUIRED_CAPABILITY_UNEXERCISED:
+                # No raw enum here, and no per-capability French either: the finding list is a
+                # sentence, and the connector panel enumerates the capabilities with the labels it
+                # already owns. Duplicating capability vocabulary server-side would give the same
+                # word two homes and eventually two spellings.
+                count = len(self.unexercised_capabilities)
+                plural = "s" if count > 1 else ""
+                return (
+                    f"{count} capacité{plural} requise{plural} déclarée{plural} par le connecteur "
+                    f"mais non encore exercée{plural} ; la qualification de production est "
+                    "incomplète"
+                )
+            case QualificationGap.SUITE_VERSION_OUTDATED:
+                return (
+                    "la dernière qualification a été produite par une version antérieure de la "
+                    f"suite ; la suite {QUALIFICATION_SUITE_VERSION} est requise et une nouvelle "
+                    "qualification doit être exécutée"
+                )
             case QualificationGap.SUSPENDED:
                 return "le connecteur est suspendu"
             case QualificationGap.RETIRED:
@@ -138,14 +183,25 @@ def active_installation_in_session(
     )
 
 
-def _passed_capabilities(session: Session, qualification_id: uuid.UUID) -> set[Capability]:
-    rows = session.scalars(
-        select(ConnectorQualificationCapability.capability).where(
+def _passed_capabilities(
+    session: Session, qualification_id: uuid.UUID
+) -> dict[Capability, EvidenceLevel]:
+    """Capabilities this qualification recorded as passing, and how strongly each is evidenced.
+
+    Returns evidence level rather than a bare set because ``passed`` alone is not enough to gate
+    production: a connector that merely declares it can receive orders has a ``passed=True`` row
+    and has proved nothing. The caller decides what each level is good for.
+    """
+    rows = session.execute(
+        select(
+            ConnectorQualificationCapability.capability,
+            ConnectorQualificationCapability.evidence_level,
+        ).where(
             ConnectorQualificationCapability.qualification_id == qualification_id,
             ConnectorQualificationCapability.passed.is_(True),
         )
     ).all()
-    return {Capability(row) for row in rows}
+    return {Capability(cap): EvidenceLevel(level) for cap, level in rows}
 
 
 def applicable_qualification(
@@ -153,9 +209,17 @@ def applicable_qualification(
 ) -> ConnectorQualification | None:
     """The PASSED qualification that still describes this exact installation, if there is one.
 
-    Applicability is **exact equality on what was tested**, never recency:
+    Applicability is **exact equality on what was tested and on what testing meant**, never
+    recency:
 
-        contract version, connector version, configuration fingerprint, mapping fingerprint
+        contract version, connector version, configuration fingerprint, mapping fingerprint,
+        suite version
+
+    Suite version was added by this ticket's correction. Suite 1 counted a declared ORDER_RECEIPT
+    as a satisfied required capability; suite 2 does not. A suite-1 PASS is therefore not a weaker
+    suite-2 PASS -- it is an answer to a different question, and reading it as if it answered this
+    one is exactly the silent reinterpretation the correction forbids. Fail closed: an old PASS
+    stops applying and the facility must requalify.
 
     That is deliberately not "the most recent PASS". Consider two qualification runs completing
     concurrently, one for the build currently installed and one for a build that has since been
@@ -177,9 +241,36 @@ def applicable_qualification(
             ConnectorQualification.configuration_fingerprint
             == installation.configuration_fingerprint,
             ConnectorQualification.mapping_fingerprint == installation.mapping_fingerprint,
+            ConnectorQualification.suite_version == QUALIFICATION_SUITE_VERSION,
         )
         .order_by(ConnectorQualification.completed_at.desc(), ConnectorQualification.id)
         .limit(1)
+    )
+
+
+def _superseded_by_suite_version(session: Session, installation: ConnectorInstallation) -> bool:
+    """Was there a PASS that would have applied but for the suite version?
+
+    Used only to give the operator the right sentence. Without this, an installation whose
+    qualification was produced by an older suite falls through to QUALIFICATION_STALE, whose French
+    says the configuration or connector changed -- and nothing did. The suite changed.
+    """
+    return (
+        session.scalar(
+            select(ConnectorQualification.id)
+            .where(
+                ConnectorQualification.connector_installation_id == installation.id,
+                ConnectorQualification.result == QualificationResult.PASSED.value,
+                ConnectorQualification.contract_version == installation.contract_version,
+                ConnectorQualification.connector_version == installation.connector_version,
+                ConnectorQualification.configuration_fingerprint
+                == installation.configuration_fingerprint,
+                ConnectorQualification.mapping_fingerprint == installation.mapping_fingerprint,
+                ConnectorQualification.suite_version != QUALIFICATION_SUITE_VERSION,
+            )
+            .limit(1)
+        )
+        is not None
     )
 
 
@@ -236,6 +327,13 @@ def qualification_verdict_in_session(
         )
         if any_attempt is None:
             return QualificationVerdict(qualified=False, gap=QualificationGap.NEVER_QUALIFIED)
+        # Checked before the stale/failed split: a PASS that matches this installation in every
+        # respect except the suite version is not a stale configuration and not a failure, and
+        # telling the operator either would send them to fix something that is not broken.
+        if _superseded_by_suite_version(session, installation):
+            return QualificationVerdict(
+                qualified=False, gap=QualificationGap.SUITE_VERSION_OUTDATED
+            )
         # There is history, but none of it describes what is installed now. Distinguishing "you
         # tried and failed" from "you passed, then changed something" matters: the first needs a
         # connector fix, the second needs a rerun.
@@ -256,7 +354,8 @@ def qualification_verdict_in_session(
 
     required = required_capabilities(organization_type)
     passed = _passed_capabilities(session, qualification.id)
-    missing = tuple(sorted(required - passed, key=lambda c: c.value))
+
+    missing = tuple(sorted(required - set(passed), key=lambda c: c.value))
     if missing:
         # A run can complete and be recorded PASSED for the scenarios it covered while still not
         # covering the production bundle -- a laboratory connector that receives orders and cannot
@@ -269,6 +368,35 @@ def qualification_verdict_in_session(
             missing_capabilities=missing,
         )
 
+    # Checked after MISSING, deliberately: a capability the connector does not have at all is the
+    # more severe finding and the one worth naming first. Only capabilities that are present and
+    # passing reach this branch.
+    #
+    # **This is the rule the correction exists for.** A required production capability counts only
+    # when it was driven end to end. `passed=True` with DECLARED evidence is a claim DHealth has
+    # recorded and not verified, and it must not gate clinical routing -- today that changes
+    # nothing, because no facility is routable anyway, but DH-CONNECT-AGENT-001 supplies the
+    # missing runtime and on that day this is the only thing standing between a connector's own
+    # assertion and real patient orders being sent to it.
+    unexercised = tuple(
+        sorted(
+            (c for c in required if passed[c] is not EvidenceLevel.EXERCISED),
+            key=lambda c: c.value,
+        )
+    )
+    if unexercised:
+        return QualificationVerdict(
+            qualified=False,
+            gap=QualificationGap.REQUIRED_CAPABILITY_UNEXERCISED,
+            qualification_id=qualification.id,
+            completed_at=qualification.completed_at,
+            unexercised_capabilities=unexercised,
+        )
+
+    # Optional capabilities are deliberately not consulted here. PROCESSING_EVENT and
+    # REVIEW_REPORTING may be DECLARED, absent, or failing without affecting production
+    # qualification -- they are not what makes a connector safe to route clinical work to, and
+    # requiring proof of them would block partners on capabilities the contract calls optional.
     return QualificationVerdict(
         qualified=True,
         gap=None,

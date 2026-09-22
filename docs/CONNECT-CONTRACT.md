@@ -146,6 +146,15 @@ this (scenario `LQ4-unmapped-code-fails-closed`) rather than asserting it.
 A connector declares what it can do, per capability, and is qualified per capability. There is no
 `connected: true`.
 
+> **A capability declaration says what a connector claims to implement. Only exercised evidence can
+> satisfy a required production capability.**
+>
+> Added 2026-09-22 as a correction. The first version of this contract recorded a declaration as a
+> passing required capability, which would have let a connector become production-routable on its
+> own say-so the moment a runtime existed. Every capability row now carries an evidence level —
+> `DECLARED` or `EXERCISED` — and the production verdict reads it. See
+> `docs/CONNECT-QUALIFICATION.md` and ADR-056 decision 23.
+
 **Required for a laboratory connector:**
 
 | Capability | Why required |

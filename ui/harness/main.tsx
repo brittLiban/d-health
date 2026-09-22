@@ -487,7 +487,7 @@ const CONNECTOR_CAPABILITIES = [
 const CONNECTOR_PASSED_RUN = {
   qualification_id: 'qual-1',
   result: 'PASSED',
-  suite_version: '1',
+  suite_version: '2',
   started_at: '2026-09-10T08:00:00Z',
   completed_at: '2026-09-10T08:04:00Z',
   contract_version: '1.0',
@@ -502,11 +502,14 @@ const CONNECTOR_PASSED_RUN = {
   capabilities: CONNECTOR_CAPABILITIES.map((capability) => ({
     capability,
     passed: true,
+    // The one capability the harness cannot drive, recorded as a declaration in the column the
+    // verdict actually reads -- not only in the prose beside it, which is what the correction to
+    // this ticket fixed.
+    evidence_level:
+      capability === 'ORDER_RECEIPT' ? ('DECLARED' as const) : ('EXERCISED' as const),
     detail:
       capability === 'ORDER_RECEIPT'
-        ? // The one scenario the harness could not exercise, said so in the
-          // evidence rather than only in a source comment.
-          "LQ1-order-receipt-declared: déclaration seule : la réception d'une commande n'est pas exercée dans cette version (aucun transport n'existe pour la livrer)"
+        ? "LQ1-order-receipt-declared: déclaration seule : la réception d'une commande n'est pas exercée dans cette version (aucun transport n'existe pour la livrer)"
         : null,
   })),
 }
@@ -523,8 +526,10 @@ const CONNECTOR_NONE: FacilityConnector = {
     qualification_id: null,
     completed_at: null,
     missing_capabilities: [],
+    unexercised_capabilities: [],
     installed_contract_version: null,
     current_contract_version: '1.0',
+    current_suite_version: '2',
   },
   health_state: 'UNKNOWN',
   operational: false,
@@ -543,6 +548,38 @@ const CONNECTOR_REGISTERED: FacilityConnector = {
   },
 }
 
+/**
+ * What the synthetic laboratory harness actually produces, and the scene that matters most.
+ *
+ * The suite ran and every scenario it could execute behaved correctly — so the run is PASSED and
+ * will stay PASSED forever. `ORDER_RECEIPT` is DECLARED, because it is the one DHealth → connector
+ * capability and there is no transport to drive it over. Production qualification is therefore
+ * incomplete, and the screen has to say both things at once without either implying the other.
+ */
+const CONNECTOR_SUITE_PASSED: FacilityConnector = {
+  ...CONNECTOR_REGISTERED,
+  verdict: {
+    ...CONNECTOR_REGISTERED.verdict,
+    qualified: false,
+    gap: 'REQUIRED_CAPABILITY_UNEXERCISED',
+    detail:
+      '1 capacité requise déclarée par le connecteur mais non encore exercée ; la qualification' +
+      ' de production est incomplète',
+    qualification_id: 'qual-1',
+    completed_at: '2026-09-10T08:04:00Z',
+    unexercised_capabilities: ['ORDER_RECEIPT'],
+  },
+  qualification_history: [CONNECTOR_PASSED_RUN],
+}
+
+/**
+ * Fully qualified — which nothing in this build can produce.
+ *
+ * Every capability EXERCISED including `ORDER_RECEIPT`, which requires a delivery path that does
+ * not exist. Kept as a scene because it is the state DH-CONNECT-AGENT-001 will legitimately reach,
+ * and because it is the clearest demonstration that even then the facility stays unroutable:
+ * `operational` is still false below, and so is production routing.
+ */
 const CONNECTOR_QUALIFIED: FacilityConnector = {
   ...CONNECTOR_REGISTERED,
   verdict: {
@@ -552,10 +589,23 @@ const CONNECTOR_QUALIFIED: FacilityConnector = {
     qualification_id: 'qual-1',
     completed_at: '2026-09-10T08:04:00Z',
     missing_capabilities: [],
+    unexercised_capabilities: [],
     installed_contract_version: '1.0',
     current_contract_version: '1.0',
+    current_suite_version: '2',
   },
-  qualification_history: [CONNECTOR_PASSED_RUN],
+  qualification_history: [
+    {
+      ...CONNECTOR_PASSED_RUN,
+      evidence_summary: '16 scénario(s) exécuté(s), tous satisfaits',
+      capabilities: CONNECTOR_CAPABILITIES.map((capability) => ({
+        capability,
+        passed: true,
+        evidence_level: 'EXERCISED' as const,
+        detail: null,
+      })),
+    },
+  ],
 }
 
 const CONNECTOR_FAILED: FacilityConnector = {
@@ -578,6 +628,8 @@ const CONNECTOR_FAILED: FacilityConnector = {
       capabilities: CONNECTOR_CAPABILITIES.map((capability) => ({
         capability,
         passed: capability !== 'AMENDMENT_PUBLICATION',
+        evidence_level:
+          capability === 'ORDER_RECEIPT' ? ('DECLARED' as const) : ('EXERCISED' as const),
         detail:
           capability === 'AMENDMENT_PUBLICATION'
             ? 'LQ10-amendment: capacité non déclarée par le connecteur'
@@ -955,6 +1007,21 @@ const SCENES: Record<string, () => ReactElement> = {
       connector={CONNECTOR_FAILED}
     />
   ),
+  // The truthful synthetic state, and the scene that matters most after the correction: the
+  // suite passed and production qualification is incomplete, both said at once.
+  'connector-suite-passed': () => (
+    <PlatformScene
+      facilities={[facilityFixture()]}
+      readiness={connectReadinessWithReason(
+        '1 capacité requise déclarée par le connecteur mais non encore exercée ; la ' +
+          'qualification de production est incomplète',
+      )}
+      connector={CONNECTOR_SUITE_PASSED}
+    />
+  ),
+  // Fully qualified, which nothing in this build can produce -- ORDER_RECEIPT exercised requires
+  // a delivery path that does not exist. Kept because it shows that even then the facility stays
+  // unroutable, which is the claim the next ticket must not quietly undo.
   'connector-qualified': () => (
     <PlatformScene
       facilities={[facilityFixture()]}

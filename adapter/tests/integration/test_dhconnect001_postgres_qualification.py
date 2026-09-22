@@ -52,6 +52,7 @@ from daher_adapter.connect.models import (
     ConnectorInstallationStatus,
     ConnectorQualification,
     ConnectorQualificationCapability,
+    EvidenceLevel,
     QualificationResult,
 )
 from daher_adapter.connect.qualification import (
@@ -167,7 +168,21 @@ def _register(repos, organization_id, **overrides):
     return repos["connectors"].register(**payload)
 
 
-def _qualify(repos, installation_id, *, capabilities=LAB_BUNDLE, result=QualificationResult.PASSED):
+def _qualify(
+    repos,
+    installation_id,
+    *,
+    capabilities=LAB_BUNDLE,
+    result=QualificationResult.PASSED,
+    evidence=EvidenceLevel.EXERCISED,
+):
+    """``evidence`` defaults to EXERCISED because these tests are about storage and constraints.
+
+    PG8's subject is "a genuinely qualified installation goes stale when its configuration
+    changes", which needs a qualified starting point. A fixture constructing exercised evidence,
+    not a claim that any run produced one -- the synthetic laboratory harness cannot exercise
+    ORDER_RECEIPT, and the ES suite pins that. ``CapabilityOutcome`` has no default of its own.
+    """
     started = datetime.now(UTC) - timedelta(minutes=5)
     return repos["connectors"].record_qualification(
         installation_id=installation_id,
@@ -175,7 +190,10 @@ def _qualify(repos, installation_id, *, capabilities=LAB_BUNDLE, result=Qualific
         started_at=started,
         completed_at=started + timedelta(minutes=4),
         result=result,
-        capabilities=[CapabilityOutcome(capability=c, passed=True) for c in capabilities],
+        capabilities=[
+            CapabilityOutcome(capability=c, passed=True, evidence_level=evidence)
+            for c in capabilities
+        ],
         actor_identity_id=_actor(repos),
         evidence_summary="qualification PostgreSQL réelle",
     )
@@ -327,6 +345,7 @@ def test_PG4_the_database_refuses_states_the_contract_does_not_define(repos):
                     qualification_id=qualification.id,
                     capability="EVERYTHING",
                     passed=True,
+                    evidence_level=EvidenceLevel.EXERCISED.value,
                 )
             )
 
@@ -337,6 +356,7 @@ def test_PG4_the_database_refuses_states_the_contract_does_not_define(repos):
                     qualification_id=qualification.id,
                     capability=Capability.ORDER_RECEIPT.value,  # already recorded by _qualify
                     passed=False,
+                    evidence_level=EvidenceLevel.EXERCISED.value,
                 )
             )
 
@@ -462,3 +482,140 @@ def test_PG8_a_configuration_change_invalidates_the_stored_qualification(repos):
     assert verdict.gap is QualificationGap.QUALIFICATION_STALE
     assert stored.result == QualificationResult.PASSED.value, "the evidence was rewritten"
     assert stored.configuration_fingerprint == CONFIG_FP
+
+
+# -- PG9-PG11: the evidence-level column (DH-CONNECT-CONTRACT-001 correction) ------------------
+
+
+def test_PG9_the_evidence_level_column_is_constrained_on_real_postgresql(engine):
+    """Migration 0028 on real PostgreSQL: non-null, CHECK-limited, no server default.
+
+    The absence of a default is the part worth asserting. A default would mean a row that forgot
+    to say how it was evidenced quietly inherits an answer, and since the verdict reads this
+    column, the inherited answer would be the one that gates clinical routing.
+    """
+    with engine.connect() as conn:
+        column = conn.execute(
+            text(
+                "SELECT is_nullable, column_default, character_maximum_length "
+                "FROM information_schema.columns "
+                "WHERE table_name = 'connector_qualification_capabilities' "
+                "AND column_name = 'evidence_level'"
+            )
+        ).one()
+        assert column.is_nullable == "NO"
+        assert column.column_default is None, "a default would let a forgotten level be inherited"
+        assert column.character_maximum_length == 16
+
+        check = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_connector_qualification_capabilities_evidence_level'"
+            )
+        ).scalar_one()
+    assert "DECLARED" in check
+    assert "EXERCISED" in check
+    # Exactly two levels. A third would be a judgement call dressed as data, and every such call
+    # is somebody's opportunity to round upward.
+    for invented in ("PARTIAL", "STAGING", "PROBABLY", "ASSUMED"):
+        assert invented not in check
+
+
+def test_PG10_an_invalid_or_missing_evidence_level_is_refused(repos):
+    """Enforced by the database, not only by the Python enum.
+
+    Both directions: a level the contract does not define, and no level at all. The second is the
+    one a future code path is likelier to produce, by adding a row and not knowing this column
+    exists.
+    """
+    lab = _lab(repos)
+    installation = _register(repos, lab.id)
+    qualification = _qualify(repos, installation.id)
+
+    with pytest.raises(IntegrityError):
+        with repos["sessions"].begin() as session:
+            session.add(
+                ConnectorQualificationCapability(
+                    qualification_id=qualification.id,
+                    capability=Capability.PROCESSING_EVENT.value,
+                    passed=True,
+                    evidence_level="PROBABLY",
+                )
+            )
+
+    with pytest.raises(IntegrityError):
+        with repos["sessions"].begin() as session:
+            session.add(
+                ConnectorQualificationCapability(
+                    qualification_id=qualification.id,
+                    capability=Capability.PROCESSING_EVENT.value,
+                    passed=True,
+                )
+            )
+
+
+def test_PG11_declared_and_exercised_rows_survive_and_decide_the_verdict(repos):
+    """The whole correction, round-tripped through real PostgreSQL.
+
+    Two installations at two facilities, differing in exactly one column on one row. The one whose
+    ORDER_RECEIPT is a declaration is not production-qualified; the one whose ORDER_RECEIPT was
+    driven is -- and is still not routable, because `connector_operational` is a separate gate.
+    """
+    declared_lab = _lab(repos)
+    declared_installation = _register(repos, declared_lab.id)
+    repos["connectors"].record_qualification(
+        installation_id=declared_installation.id,
+        suite_version=QUALIFICATION_SUITE_VERSION,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        completed_at=datetime.now(UTC),
+        result=QualificationResult.PASSED,
+        capabilities=[
+            CapabilityOutcome(
+                capability=c,
+                passed=True,
+                evidence_level=(
+                    EvidenceLevel.DECLARED
+                    if c is Capability.ORDER_RECEIPT
+                    else EvidenceLevel.EXERCISED
+                ),
+            )
+            for c in LAB_BUNDLE
+        ],
+        actor_identity_id=_actor(repos),
+        evidence_summary="déclaration seule pour la réception des ordres",
+    )
+
+    exercised_lab = _lab(repos)
+    exercised_installation = _register(repos, exercised_lab.id)
+    _qualify(repos, exercised_installation.id, evidence=EvidenceLevel.EXERCISED)
+
+    with repos["sessions"]() as session:
+        declared_verdict = qualification_verdict_in_session(
+            session, declared_lab.id, OrganizationType.LAB
+        )
+        exercised_verdict = qualification_verdict_in_session(
+            session, exercised_lab.id, OrganizationType.LAB
+        )
+
+    assert declared_verdict.qualified is False
+    assert declared_verdict.gap is QualificationGap.REQUIRED_CAPABILITY_UNEXERCISED
+    assert declared_verdict.unexercised_capabilities == (Capability.ORDER_RECEIPT,)
+    assert exercised_verdict.qualified is True
+
+    # The rows are what they were written as -- read back from the database, not from the objects.
+    with repos["sessions"]() as session:
+        levels = dict(
+            session.execute(
+                select(
+                    ConnectorQualificationCapability.capability,
+                    ConnectorQualificationCapability.evidence_level,
+                )
+                .join(
+                    ConnectorQualification,
+                    ConnectorQualification.id == ConnectorQualificationCapability.qualification_id,
+                )
+                .where(ConnectorQualification.connector_installation_id == declared_installation.id)
+            ).all()
+        )
+    assert levels[Capability.ORDER_RECEIPT.value] == EvidenceLevel.DECLARED.value
+    assert levels[Capability.BUSINESS_ACCEPTANCE.value] == EvidenceLevel.EXERCISED.value

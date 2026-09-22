@@ -39,6 +39,7 @@ from daher_adapter.connect.contract import (
     ResultObservation,
     TechnicalAck,
 )
+from daher_adapter.connect.models import EvidenceLevel
 from daher_adapter.connect.repository import CapabilityOutcome
 
 
@@ -133,6 +134,10 @@ class ScenarioResult:
     scenario: str
     capability: Capability | None
     passed: bool
+    #: How strongly this scenario evidenced its capability. Defaults to the weaker answer on
+    #: purpose: a scenario that forgets to say is a scenario nobody has checked drives anything,
+    #: and defaulting to EXERCISED would make forgetting look like proof.
+    evidence_level: EvidenceLevel = EvidenceLevel.DECLARED
     detail: str | None = None
     limitation: str | None = None
     """Why a PASS here proves less than the other scenarios' PASSes.
@@ -177,10 +182,21 @@ class QualificationRun:
             notes.extend(
                 f"{r.scenario}: {r.limitation}" for r in results if r.passed and r.limitation
             )
+            # A capability is EXERCISED only if *every* scenario touching it exercised it. One
+            # declaration-only scenario in the set means the capability as a whole has not been
+            # driven end to end, and rounding that up to EXERCISED because the other scenarios
+            # were is exactly the "reinterpret weak evidence as strong" move this column exists to
+            # prevent. The strength of a claim is the strength of its weakest support.
+            evidence = (
+                EvidenceLevel.EXERCISED
+                if all(r.evidence_level is EvidenceLevel.EXERCISED for r in results)
+                else EvidenceLevel.DECLARED
+            )
             outcomes.append(
                 CapabilityOutcome(
                     capability=capability,
                     passed=not failures,
+                    evidence_level=evidence,
                     detail="; ".join(notes) or None,
                 )
             )
@@ -277,10 +293,20 @@ class LabQualificationHarness:
         # -- no double entry ------------------------------------------------------------------
         # Checked first and reported as its own scenario: a connector that requires a human to
         # retype the result has failed the product law before any message semantics matter.
+        #
+        # `capability=None`, changed by this correction. NDE1 used to be filed under
+        # RELEASED_RESULT_PUBLICATION, which was harmless while every passing row counted equally
+        # and became wrong once evidence strength mattered: NDE1 reads the subject's declared
+        # `requires_manual_duplicate_entry` rather than driving anything, so under the new rule it
+        # would drag RELEASED_RESULT_PUBLICATION down to DECLARED and make it permanently
+        # unqualifiable -- a scenario about workflow ergonomics silently blocking a capability the
+        # harness genuinely exercises. It belongs at the run level, which is where it always
+        # behaved: `all_passed` covers scenarios with no capability, so a connector that requires
+        # double entry still fails the whole run.
         results.append(
             ScenarioResult(
                 scenario="NDE1-no-double-entry",
-                capability=Capability.RELEASED_RESULT_PUBLICATION,
+                capability=None,
                 passed=not self._subject.requires_manual_duplicate_entry,
                 detail=(
                     None
@@ -298,6 +324,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ3-business-acceptance",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="capacité non déclarée par le connecteur",
                 )
@@ -311,6 +338,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ5-collection-event",
                     capability=Capability.COLLECTION_EVENT,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="capacité non déclarée ; sans elle aucun résultat ne peut être saisi",
                 )
@@ -324,6 +352,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ7-released-result",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="capacité non déclarée par le connecteur",
                 )
@@ -337,6 +366,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ10-amendment",
                     capability=Capability.AMENDMENT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="capacité non déclarée par le connecteur",
                 )
@@ -353,14 +383,21 @@ class LabQualificationHarness:
         # DH-CONNECT-AGENT-001's subject, not this ticket's -- there is no transport to push over.
         #
         # So this scenario records a declaration and nothing more. A PASS here means "the connector
-        # claims it can receive orders", not "we watched it receive one". That limitation is stated
-        # in the scenario name, in the evidence detail, and in docs/CONNECT-QUALIFICATION.md under
-        # what a PASS does not prove. It must not be quietly upgraded to look exercised.
+        # claims it can receive orders", not "we watched it receive one".
+        #
+        # The correction to this ticket made that structural rather than advisory. It used to be
+        # said in the scenario name, the detail prose, and the docs -- all of which the verdict
+        # ignored, so a declared ORDER_RECEIPT counted toward the required production bundle. It is
+        # now `evidence_level=DECLARED`, which the verdict reads, so a laboratory connector cannot
+        # be production-qualified until DH-CONNECT-AGENT-001 supplies a delivery path that can push
+        # an order into it and observe the acknowledgement. Stated explicitly here rather than left
+        # to the field default: this is the line somebody will be tempted to flip.
         declared_receipt = Capability.ORDER_RECEIPT in declared
         results.append(
             ScenarioResult(
                 scenario="LQ1-order-receipt-declared",
                 capability=Capability.ORDER_RECEIPT,
+                evidence_level=EvidenceLevel.DECLARED,
                 passed=declared_receipt,
                 detail=None if declared_receipt else "capacité non déclarée par le connecteur",
                 limitation=(
@@ -409,6 +446,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ2-technical-receipt-is-not-acceptance",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="un accusé de réception technique a modifié l'état de l'ordre",
                 )
@@ -423,6 +461,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ2-technical-receipt-is-not-acceptance",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=refused_correctly and untouched,
                     detail=None
                     if refused_correctly and untouched
@@ -450,6 +489,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ3-business-acceptance",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=accepted,
                     detail=None if accepted else "l'acceptation métier n'a pas atteint ACCEPTED",
                 )
@@ -459,6 +499,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ3-business-acceptance",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
@@ -471,6 +512,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="Q1-exact-replay",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=replay.replayed and not replay.applied,
                     detail=None if replay.replayed else "le rejeu a produit un second effet",
                 )
@@ -480,6 +522,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="Q1-exact-replay",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
@@ -498,6 +541,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="Q2-conflicting-replay",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="un contenu contradictoire a été accepté sous la même identité",
                 )
@@ -507,6 +551,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="Q2-conflicting-replay",
                     capability=Capability.BUSINESS_ACCEPTANCE,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=error.category is FailureCategory.CONFLICT,
                     detail=None
                     if error.category is FailureCategory.CONFLICT
@@ -536,6 +581,7 @@ class LabQualificationHarness:
             ScenarioResult(
                 scenario="LQ5a-collection-is-never-inferred",
                 capability=Capability.COLLECTION_EVENT,
+                evidence_level=EvidenceLevel.EXERCISED,
                 passed=pre_existing == 0,
                 detail=None
                 if pre_existing == 0
@@ -562,6 +608,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ5-collection-event",
                     capability=Capability.COLLECTION_EVENT,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=recorded == 1,
                     detail=None if recorded == 1 else f"{recorded} prélèvement(s) enregistré(s)",
                 )
@@ -571,6 +618,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ5-collection-event",
                     capability=Capability.COLLECTION_EVENT,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
@@ -618,6 +666,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ4-unmapped-code-fails-closed",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="un code sans correspondance a été accepté au lieu d'être refusé",
                 )
@@ -627,6 +676,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ4-unmapped-code-fails-closed",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=error.category is FailureCategory.MAPPING,
                     detail=None
                     if error.category is FailureCategory.MAPPING
@@ -653,6 +703,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ6-preliminary-is-not-released",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="un résultat non libéré à la source a été accepté comme libéré",
                 )
@@ -662,6 +713,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ6-preliminary-is-not-released",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=error.category is FailureCategory.UNSUPPORTED_WORKFLOW,
                     detail=None
                     if error.category is FailureCategory.UNSUPPORTED_WORKFLOW
@@ -692,6 +744,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ7-released-result",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=release_row is not None,
                     detail=None if release_row is not None else "aucune libération enregistrée",
                 )
@@ -701,6 +754,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ7-released-result",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
@@ -720,6 +774,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ8-release-replay",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=replay.replayed and count == 1,
                     detail=None if count == 1 else f"{count} libérations pour un seul ordre",
                 )
@@ -729,6 +784,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ8-release-replay",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
@@ -752,6 +808,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ9-conflicting-release",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail="un contenu contradictoire a écrasé une libération existante",
                 )
@@ -761,6 +818,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ9-conflicting-release",
                     capability=Capability.RELEASED_RESULT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=error.category is FailureCategory.CONFLICT,
                     detail=None
                     if error.category is FailureCategory.CONFLICT
@@ -812,6 +870,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ10-post-release-correction",
                     capability=Capability.AMENDMENT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=numbers == [1, 2],
                     detail=None if numbers == [1, 2] else f"versions présentes : {numbers}",
                 )
@@ -823,6 +882,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ11-original-remains-reconstructable",
                     capability=Capability.AMENDMENT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=v1 is not None and v1.lab_result_release_id is not None,
                     detail=None
                     if v1 is not None and v1.lab_result_release_id is not None
@@ -834,6 +894,7 @@ class LabQualificationHarness:
                 ScenarioResult(
                     scenario="LQ10-post-release-correction",
                     capability=Capability.AMENDMENT_PUBLICATION,
+                    evidence_level=EvidenceLevel.EXERCISED,
                     passed=False,
                     detail=f"{error.category.value}: {error}",
                 )
