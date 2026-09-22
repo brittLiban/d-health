@@ -1,5 +1,17 @@
 # Current State — Daher Health
 
+> **DHealth Connect, 2026-09-22 (DH-CONNECT-CONTRACT-001):** the integration **contract** and the
+> **qualification evidence model** are implemented and qualified against SQLite and real PostgreSQL
+> 18.6. The **transport is not built and has never run** — no FHIR client, HL7 parser, MLLP, SFTP
+> runtime, file watcher, webhook receiver, polling loop, on-premise agent or delivery worker exists,
+> and nothing in this repository has ever contacted an external EMR or LIS. **No connector exists
+> for any product and none has been qualified against a real system**; the harness runs against a
+> synthetic subject that contacts nothing. A CONNECT facility can now hold a registered, genuinely
+> qualified connector and still be **unroutable**, because `connector_operational` is
+> unconditionally false and blocking until DH-CONNECT-AGENT-001 supplies a real runtime. Provider
+> qualification and `ORDER_RECEIPT` are declared-only in this build. See `docs/CONNECT-CONTRACT.md`,
+> `docs/CONNECT-QUALIFICATION.md`, ADR-056.
+
 > **Current Exchange status (DH-EX-014B, 2026-09-14):** post-release amendment episodes,
 > immutable release-version history, provider exact-version reads, and version-bound review routes
 > are implemented and qualified against SQLite and real PostgreSQL. Real Keycloak qualification,

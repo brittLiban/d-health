@@ -141,18 +141,37 @@ cannot certify its own interface.
 
 ### Where Connect stops today
 
+**Updated 2026-09-22, DH-CONNECT-CONTRACT-001.** The last three lines used to be hardcoded and
+permanently unreachable. They are now real state, and they live in their own **Connecteur DHealth**
+section below discovery rather than at the end of the discovery list — a fixed *"Connecteur — à
+construire"* sitting above a registered connector would be a screen contradicting itself.
+
 ```
+── Système existant ──────────────────────────
 Système identifié            ✓ possible
 Interface signalée           ✓ possible
 Documentation obtenue        ✓ possible
 Interface vérifiée           ✓ possible
-Connecteur DHealth           ✗ à construire
-Qualification                ✗ non commencée
-Routage de production        ✗ désactivé
+
+── Connecteur DHealth ────────────────────────
+Connecteur enregistré        ✓ possible          ← real state
+Qualification                ✓ possible          ← real state, derived from evidence
+Exécution du connecteur      ✗ aucun runtime     ← unreachable in this release
+Routage de production        ✗ désactivé         ← consequently unreachable
 ```
 
-The last three are fixed. No interface state and no operator action can move them — that is
-DH-CONNECT-CONTRACT-001's work.
+A connector can now be registered and can genuinely qualify. **It still cannot be put into
+service.** `connector_operational` derives from a health state that is unconditionally *unknown*
+because nothing reports in, and it blocks routing. So the best state any Connect facility can reach
+today is *qualified and unroutable* — which is the honest state, not a bug to be tidied away. The
+runtime that would change it is DH-CONNECT-AGENT-001's work.
+
+What an operator can do on that section: register a connector, record that its configuration or
+test-code mapping changed (which makes a passing qualification *périmée*), suspend, restore, and
+retire. What nobody can do, anywhere, by any route: mark a connector qualified. Qualification is
+what running the suite produced.
+
+Full detail: `docs/CONNECT-CONTRACT.md` and `docs/CONNECT-QUALIFICATION.md`.
 
 ---
 
@@ -307,5 +326,10 @@ the writing transaction, so the refusal is newer than what the screen was showin
 
 No FHIR or HL7 transport. No SFTP runtime, webhook listener, Connect agent or VPN. No partner
 credential storage. No OpenELIS or OpenMRS binding. No automatic vendor detection, code mapping or
-patient matching. No connector health and no connector qualification. No email or WhatsApp
-invitations. No billing, contracts or CRM.
+patient matching. No connector health. No email or WhatsApp invitations. No billing, contracts or
+CRM.
+
+**Amended 2026-09-22, DH-CONNECT-CONTRACT-001.** "No connector qualification" was struck from that
+list: a qualification *model* now exists, and a connector can be registered and qualified against
+it. Everything else on the list is unchanged, and no connector exists to qualify — the harness runs
+against a synthetic subject that contacts nothing.

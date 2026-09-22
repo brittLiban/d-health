@@ -7324,3 +7324,152 @@ separations below are recorded rather than left to whichever screen is being wri
   prohibited activation nor replaces the truthful 409 with a misleading server error.
 - No DHealth Connect transport was built, and none may be inferred from this ADR. The connector
   contract and its qualification model are DH-CONNECT-CONTRACT-001's subject.
+
+---
+
+## ADR-056 — ACCEPTED / IMPLEMENTED (2026-09-22, DH-CONNECT-CONTRACT-001): a connector's contract and its qualification, as durable evidence rather than a stored flag
+
+**Date raised:** 2026-09-22, DH-CONNECT-CONTRACT-001 · **Status:** ACCEPTED, IMPLEMENTED ·
+**Ticket:** DH-CONNECT-CONTRACT-001.
+
+**Why this needed a decision.** ADR-055 left a CONNECT facility with `connector_qualified` as a
+hardcoded `False` and a truthful screen saying no connector exists. That was correct and
+unsustainable: the moment a real connector is built, somebody has to answer "does it work?", and
+the cheapest available answer is a boolean an operator ticks. Every guarantee downstream of
+`connector_qualified` would then degrade from evidence to assertion, silently, and the first person
+to notice would be a clinician whose result never arrived.
+
+This ADR fixes the contract a connector must obey and the shape of the proof that it did, **before**
+any connector exists, so the first one meets a standard it cannot negotiate.
+
+### Decisions
+
+1. **Exchange stays canonical; FHIR and HL7 are connector-side formats.** A connector translates
+   into the canonical messages in `connect/contract.py` and is refused if it cannot. No partner's
+   wire format reaches the Exchange schema.
+
+2. **The contract is versioned, and a different major is refused at the boundary.** No hopeful
+   parsing, no automatic carry-forward. A connector declaring contract 2.0 cannot register and
+   cannot send, and an installation whose contract major does not match yields the gap
+   `CONTRACT_MAJOR_MISMATCH` rather than a qualified verdict.
+
+3. **A technical acknowledgement is a different message type from a business acceptance.** Not a
+   flag, not a status field — a different class, with a different author and a different timestamp.
+   In HTTP both are a 200, and merging them tells a clinician a laboratory took their order when
+   all that happened is a server wrote bytes to disk.
+
+4. **Every external identity is scoped by four parts** — source organization, source system,
+   identity system, identity value — matching the Exchange's own `PatientReference` uniqueness.
+   `123` is not an identifier.
+
+5. **No fuzzy patient matching, enforced by a model that cannot express one.** `ScopedExternalId`
+   has no name, date of birth or phone field. Adding a fuzzy match would require adding the inputs
+   first, which is a visible change rather than a quiet one.
+
+6. **Mapping failures fail closed.** An observation whose source code matches no ordered item is
+   refused as `MAPPING`, never attached to the nearest candidate. The dangerous outcome is not a
+   refusal — it is a guess that produces a result for a test nobody ordered, under a patient who did
+   have something ordered.
+
+7. **Failure categories split retryable from not.** `TEMPORARY` and `REMOTE_UNAVAILABLE` are
+   retryable; `AUTHENTICATION`, `MAPPING`, `VALIDATION`, `CONFLICT` and `UNSUPPORTED_WORKFLOW` are
+   not. A connector that reports everything as `TEMPORARY` has a retry loop instead of an
+   integration, and retrying an unmappable code forever hides the problem from the person who could
+   fix it.
+
+8. **Idempotency is scoped to `(organization_id, source_system)` and keyed on the connector's own
+   `source_event_id`.** The millionth connector numbering its events from 1 must not collide with
+   the first. An exact replay has no second effect; the same event id with different content is a
+   `CONFLICT`, not a silent overwrite.
+
+9. **`source_occurred_at` and `sent_at` are both carried, always.** A connector draining a backlog
+   after an outage transmits today what happened last week. One field cannot carry both, and
+   collapsing them rewrites a week of clinical chronology as having happened at reconnection.
+
+10. **Capabilities are declared and qualified individually.** There is no `connected: true`. A
+    capability passes only if every scenario exercising it passed.
+
+11. **`COLLECTION_EVENT` is REQUIRED for a laboratory connector — and this reverses the first
+    design.** It was specified as optional. The Exchange refused: `LabWorkflowRepository` will not
+    move an order `ACCEPTED → IN_PROGRESS` without a recorded `LabSampleCollection` milestone
+    (DH-EX-011), and result entry refuses anything that is not `IN_PROGRESS`. A laboratory
+    connector that cannot report collection therefore cannot enter a result **at all**. The
+    consequence is stated rather than hidden: a partner LIS with no reliable collection signal
+    cannot have a qualified laboratory connector under contract 1.0. That is a real constraint on
+    which partners are integrable, and finding it at qualification time beats finding it after a
+    facility has been told it is going live.
+
+12. **Qualification is the output of running a harness, never an operator's opinion.** The scenarios
+    drive real Exchange mutations through the same repositories the Native workflow uses and read
+    the rows back. Nothing is asserted that could be executed.
+
+13. **There is no endpoint that records a qualification, and no UI control that marks one.** Not
+    `POST .../qualify`, not `{"qualified": true}`, not a `QUALIFIED` installation status. The
+    absence is pinned by tests (`CX1`, `CX2`) rather than left to code review, because this is
+    exactly the convenience that gets added later by someone who needs a demo to look finished.
+
+14. **There is no stored `qualified` column anywhere.** The verdict is derived on every read from
+    live rows. A stored boolean is a thing that can be written; a derivation is not.
+
+15. **A qualification applies only while the installation still matches it on all four pinned
+    fields** — contract version, connector version, configuration fingerprint, mapping fingerprint.
+    Change one and the verdict becomes `QUALIFICATION_STALE`, while the evidence row stays exactly
+    as it was: still PASSED, still truthful, now about a configuration nobody is running.
+
+16. **Qualification evidence is append-only and never rewritten.** A failed attempt stays failed
+    forever; a later success is a new row beside it. The pinned fields are *copied into* the
+    qualification row when the run completes, under a row lock, so the row keeps describing what it
+    was actually run against. Every foreign key is `ON DELETE RESTRICT`: a facility cannot be tidied
+    away along with its failures.
+
+17. **One live installation per facility, enforced by a partial unique index** on
+    `organization_id WHERE status <> 'RETIRED'`. Partial rather than plain so a retired installation
+    can stay in place forever — history — while a replacement is registered.
+
+18. **`connector_operational` is unconditionally FALSE, and blocking.** It derives from a health
+    state that is unconditionally `UNKNOWN` because nothing reports in. A CONNECT facility therefore
+    stays unroutable no matter how much qualification evidence exists. This is not a placeholder to
+    be flipped when convenient; it becomes reachable only when DH-CONNECT-AGENT-001 supplies a real
+    runtime and health mechanism. No heartbeat was faked to make a screen look finished.
+
+19. **No connector credential is accepted, stored, logged or audited.** DHealth holds a SHA-256
+    `configuration_fingerprint` computed by the partner's own operator — enough to detect that a
+    configuration changed, which is what invalidates a qualification, without DHealth ever being
+    worth attacking for a partner's LIS password.
+
+20. **Fingerprints are stable canonical digests, never Python's `hash()`**, which is randomized per
+    process and would make a stored fingerprint meaningless after a restart.
+
+21. **The harness states its own limits inside the evidence, not only in comments.** A scenario
+    carrying a `limitation` reports it on the stored capability row even when it passed.
+    `ORDER_RECEIPT` is the case that needed it: it is the only DHealth → connector capability, it
+    cannot be exercised without a transport, and it is therefore named
+    `LQ1-order-receipt-declared` and records that it proved a declaration. A qualification whose
+    weak spots live only in a source comment will eventually be read as stronger than it is.
+
+22. **A negative control found a real defect, and that is recorded rather than quietly fixed.**
+    `LQ2` originally only inspected the order's status *before* sending anything — trivially
+    not-ACCEPTED, because nothing had happened — so it passed regardless of how the bridge treated a
+    `TechnicalAck`. A control that made the bridge accept a technical acknowledgement left the whole
+    suite green. `LQ2` now sends one. This is the argument for executing negative controls rather
+    than reading green ticks.
+
+### Consequences
+
+- Migration `0027_connect_contract` adds three tables and extends the security-audit vocabulary with
+  six connector event types and one resource type. **It backfills nothing**: no existing facility
+  gains an installation, and no organization's readiness improves as a result of this migration.
+- `connector_qualified` stops being a hardcoded `False` and becomes derived — which creates a new
+  and more dangerous failure mode, a facility becoming routable because somebody produced
+  qualification rows. `connector_operational` exists to make that structurally impossible rather
+  than merely unlikely.
+- Provider-side qualification is **declared-only** in this build. There is a laboratory harness and
+  no provider harness, so a provider connector's PASS carries no more weight than its declaration.
+  Building one is future work and is stated as a limitation in `docs/CONNECT-QUALIFICATION.md`.
+- `ORDER_RECEIPT` is likewise declared-only, for the same structural reason: it is the one
+  capability that would require pushing a message to a connector, and nothing can push.
+- No transport, no delivery engine, no retries against a live system, no message log, and no real
+  connector to anything were built. Nothing in this repository has contacted an external EMR or LIS.
+- The platform UI gains a connector section on CONNECT facility detail and nothing on NATIVE ones. A
+  NATIVE facility needs no connector, and showing it an empty connector panel would invent a
+  deficiency it does not have.

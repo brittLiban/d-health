@@ -24,12 +24,14 @@ import type {
   BindPatientReferenceOutcome,
   CatalogEntry,
   ClinicPatientSummary,
+  ConnectorRegistrationRequest,
   CreateMembershipOutcome,
   DoctorReviewResponse,
   EntryCompletionResponse,
   EnrollmentBlockerCode,
   ExchangeErrorCode,
   ExchangeMeResponse,
+  FacilityConnector,
   FacilityEnrollment,
   FacilityEnrollmentCreated,
   FacilityReadiness,
@@ -1636,6 +1638,49 @@ export class ExchangeClient {
     return this.request<FacilityEnrollment>(
       `/organizations/${encodeURIComponent(organizationId)}/integration-profile/interfaces/${encodeURIComponent(interfaceType)}`,
       { method: "PUT", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /platform/facilities/{id}/connector -- installation, derived verdict, history.
+   *
+   * There is deliberately no `markConnectorQualified` beside this. Qualification is
+   * the output of running a harness against a connector, and the server exposes no
+   * endpoint that would let this client assert it.
+   */
+  async getFacilityConnector(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityConnector> {
+    return this.request<FacilityConnector>(
+      `/platform/facilities/${encodeURIComponent(organizationId)}/connector`,
+      { method: "GET", signal: options.signal },
+      options.token,
+    )
+  }
+
+  async registerFacilityConnector(
+    organizationId: string,
+    body: ConnectorRegistrationRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityConnector> {
+    return this.request<FacilityConnector>(
+      `/platform/facilities/${encodeURIComponent(organizationId)}/connector`,
+      { method: "POST", body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
+  async setFacilityConnectorStatus(
+    organizationId: string,
+    installationId: string,
+    status: "REGISTERED" | "SUSPENDED" | "RETIRED",
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityConnector> {
+    return this.request<FacilityConnector>(
+      `/platform/facilities/${encodeURIComponent(organizationId)}/connector/${encodeURIComponent(installationId)}/status`,
+      { method: "PUT", body: JSON.stringify({ status }), signal: options.signal },
       options.token,
     )
   }

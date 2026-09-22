@@ -6,6 +6,33 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-22, DH-CONNECT-CONTRACT-001, directly on `master`. The ticket is CLOSED.** Starting point
+was `master` at `80af8d4`. **DHealth Connect's transport is still not built** — no FHIR client, no
+HL7 parser, no MLLP, no SFTP runtime, no webhook receiver, no agent, no delivery worker, and nothing
+in this repository has ever contacted an external EMR or LIS. What exists now is the **contract**
+any future connector must obey and the **durable evidence model** that records whether one did:
+a versioned canonical message set (a technical acknowledgement is a *different message type* from a
+business acceptance, not a flag on it), four-part scoped external identities with no demographic
+field a fuzzy match could use, retryable-versus-not failure categories, fail-closed mapping, and a
+qualification harness that drives real Exchange mutations rather than asserting them. Evidence lives
+in three append-only tables (`0027_connect_contract`, backfilling nothing); **there is no `qualified`
+column anywhere**, no endpoint that records a qualification, and no UI control that marks one — the
+absences are pinned by tests. A CONNECT facility now carries two readiness findings where it carried
+one: `connector_qualified`, genuinely derived, and `connector_operational`, **unconditionally false
+and blocking**, so a fully qualified connector still leaves `production_routing_allowed` false. That
+pair is the whole point — qualification proves a build *could* work; only a runtime reporting in
+proves one *is* working, and no runtime exists until DH-CONNECT-AGENT-001. One design decision was
+**reversed by the code**: `COLLECTION_EVENT` is required, not optional, for a laboratory connector,
+because the Exchange refuses `ACCEPTED → IN_PROGRESS` without a recorded collection and refuses
+result entry on anything else — so a partner LIS with no reliable collection signal cannot have a
+qualified laboratory connector, which is a real constraint on who is integrable. Five negative
+controls were executed and reverted; one (a technical acknowledgement falling through to acceptance)
+left the suite green and exposed a scenario that was *asserting* rather than *exercising* — now
+fixed, and the control turns it red. Provider-side qualification and `ORDER_RECEIPT` are
+**declared-only** in this build, stated as limitations in the docs and carried into the stored
+evidence rather than left in a comment.
+
+
 **2026-09-22, DH-MVP-ONBOARD-001 closing change, directly on `master`. The ticket is CLOSED.** The
 last onboarding hole: `first_administrator` is optional at enrollment — correctly, since a partner
 is often signed up before the intended administrator has ever logged in — so a facility could exist

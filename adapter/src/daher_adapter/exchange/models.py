@@ -1684,7 +1684,13 @@ class ExchangeSecurityAuditEvent(Base):
             "'facility_enrollment_created', 'facility_participation_mode_changed', "
             "'facility_onboarding_status_changed', 'facility_technical_discovery_updated', "
             "'facility_interface_capability_recorded', 'facility_onboarding_blocked', "
-            "'facility_onboarding_unblocked', 'provider_lab_route_activation_refused'"
+            "'facility_onboarding_unblocked', 'provider_lab_route_activation_refused', "
+            # DH-CONNECT-CONTRACT-001: connector registration, lifecycle, and qualification
+            # evidence. One `connector_qualification_recorded` type for both results -- `outcome`
+            # already separates a pass from a failure, and a second type would be a synonym.
+            "'connector_registered', 'connector_suspended', 'connector_restored', "
+            "'connector_retired', 'connector_configuration_changed', "
+            "'connector_qualification_recorded'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1701,7 +1707,10 @@ class ExchangeSecurityAuditEvent(Base):
             "('catalog_entry', 'lab_directory_profile', 'lab_offering', 'lab_price', 'lab_order', "
             "'patient_access_grant', 'patient_reference', 'patient', 'provider_lab_route', "
             "'lab_result_template', 'facility_enrollment', "
-            "'facility_interface_capability', 'facility_enrollment_blocker')",
+            "'facility_interface_capability', 'facility_enrollment_blocker', "
+            # DH-CONNECT-CONTRACT-001: qualification hangs off an installation, so every connector
+            # event names the installation rather than the qualification or the capability row.
+            "'connector_installation')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

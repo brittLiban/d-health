@@ -26,6 +26,16 @@ const SCENES = [
   'platform-team',
   'platform-team-add',
   'platform-team-empty',
+  // DH-CONNECT-CONTRACT-001 §79. Seven, because the states differ on screen and
+  // the pair that matters -- qualified beside not-registered -- is only
+  // convincing if somebody can look at both.
+  'connector-none',
+  'connector-registered',
+  'connector-failed',
+  'connector-qualified',
+  'connector-stale',
+  'connector-suspended',
+  'connector-native-unchanged',
   'shell-provider',
   'shell-lab-dual',
   'shell-two-establishments',
@@ -49,6 +59,15 @@ const SCENE_ACTIONS = {
   'platform-native-ready': [/Laboratoire Nour/],
   'platform-team': [/Laboratoire Central/],
   'platform-team-empty': [/Laboratoire Central/],
+  // Every connector scene opens the same laboratory; the connector section sits
+  // below discovery on its detail screen.
+  'connector-none': [/Laboratoire Central/],
+  'connector-registered': [/Laboratoire Central/],
+  'connector-failed': [/Laboratoire Central/],
+  'connector-qualified': [/Laboratoire Central/],
+  'connector-stale': [/Laboratoire Central/],
+  'connector-suspended': [/Laboratoire Central/],
+  'connector-native-unchanged': [/Laboratoire Central/],
   // The add panel, open on somebody who is already on the team: the role she
   // holds is ticked and disabled, because nothing on this screen removes access.
   'platform-team-add': [

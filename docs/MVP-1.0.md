@@ -227,6 +227,14 @@ The integration layer for organizations that already have EMR/LIS software. The 
 > Use DHealth-native software **or** integrate the existing system — never maintain the same
 > transaction manually in both.
 
+**Dated update, 2026-09-22 (DH-CONNECT-CONTRACT-001).** The *contract* a connector must satisfy now
+exists — `docs/CONNECT-CONTRACT.md`, ADR-056 — together with a durable qualification model that
+records whether a given build satisfied it. The *transport* does not: no FHIR client, HL7 parser,
+MLLP, SFTP runtime, webhook receiver, polling loop, on-premise agent or delivery worker exists, and
+nothing in this repository has contacted an external EMR or LIS. A Connect facility can now hold a
+registered, qualified connector and remain **unroutable**, because `connector_operational` derives
+from a runtime that does not exist. That is DH-CONNECT-AGENT-001's subject.
+
 OpenMRS/OpenELIS (ADR-042) are the first reference connector track under this model, not an
 instance of DHealth Clinic/Lab. `CURRENT`: the OpenMRS/OpenELIS clinical stack and its adapter exist
 and run (see `CURRENT_STATE.md`); its connection to the *Exchange* core specifically (as opposed to
@@ -673,11 +681,19 @@ made.
 13. Assisted-digital/print/QR patient workflow (§7). Unchanged; reaffirmed by field evidence
     (§7, `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Findings 12–13).
 14. Provider UX speed/order-set requirements (Law 3 targets, §6). Unchanged.
-15. DHealth Connect no-double-entry integration contract (the concrete mechanism by which a
+15. ~~DHealth Connect no-double-entry integration contract (the concrete mechanism by which a
     connector satisfies Law 2 — not designed here). Unchanged; sharpened by field evidence that at
     least one real participating laboratory already runs software of some kind (§3 DHealth Connect,
     `docs/FIELD-DIAGNOSTIC-WORKFLOW.md` Finding 7) — still no specific LIS, protocol, or interface
-    claimed.
+    claimed.~~ **RESOLVED as a contract [DH-CONNECT-CONTRACT-001, 2026-09-22]** — `docs/CONNECT-
+    CONTRACT.md` and ADR-056 define the canonical message set, capability model, identity scoping,
+    failure semantics and fail-closed mapping rule a connector must satisfy, and
+    `docs/CONNECT-QUALIFICATION.md` defines the evidence that proves one did. Law 2 is enforced
+    *as a qualification requirement*, not a slogan: the `NDE1-no-double-entry` scenario fails a
+    connector whose workflow requires a human to enter the same result in two systems, whatever
+    else it passes. **Still no specific LIS, protocol, or interface claimed, and no connector
+    exists** — the transport remains unbuilt (DH-CONNECT-AGENT-001), and the harness runs against a
+    synthetic subject that contacts nothing.
 16. ~~**New [DH-FIELD-001, 2026-09-13].** Result correction (pre-release) and amendment
     (post-release) implementation — ADR-045's decision packet, not yet decided by Liban. **No
     longer paused behind item 17 [re-audited 2026-09-13, DH-EX-012C] — item 17 is resolved, but

@@ -124,6 +124,7 @@ const READINESS_FINDING: Record<string, string> = {
   lab_has_active_offering: 'Analyses actives proposées',
   lab_result_templates_active: 'Structures de résultat actives',
   connector_qualified: 'Connecteur DHealth qualifié',
+  connector_operational: 'Connecteur DHealth en service',
 }
 
 function lookup<T extends string>(map: Record<string, string>, value: T | null): string {
@@ -184,6 +185,7 @@ const READINESS_FINDING_MISSING: Record<string, string> = {
   lab_has_active_offering: 'Aucune analyse active proposée',
   lab_result_templates_active: 'Structures de résultat incomplètes',
   connector_qualified: 'Connecteur DHealth non qualifié',
+  connector_operational: 'Aucun connecteur DHealth en service',
 }
 
 /**
@@ -194,6 +196,17 @@ const READINESS_FINDING_MISSING: Record<string, string> = {
  */
 const READINESS_FINDING_BLOCKING: Record<string, string> = {
   lab_result_templates_active: 'Aucune structure de résultat active',
+  /**
+   * The blocking wording says what is missing and why nobody can fix it here.
+   *
+   * "Aucun connecteur DHealth en service" invites the reading that somebody
+   * forgot to switch one on. Nobody did: the runtime that would report a
+   * connector as operational does not exist yet, so this condition cannot be
+   * satisfied by any action on any screen in this release. An operator who
+   * spends an afternoon looking for the toggle has been misled by the interface.
+   */
+  connector_operational:
+    'Transport DHealth Connect non construit — aucun connecteur ne peut être en service',
 }
 
 export function readinessFindingLabel(code: string, satisfied = true, blocking = false): string {
@@ -275,4 +288,85 @@ const MEMBERSHIP_STATUS: Record<string, string> = {
 
 export function membershipStatusLabel(status: string): string {
   return MEMBERSHIP_STATUS[status] ?? status
+}
+
+/**
+ * DH-CONNECT-CONTRACT-001 — connector vocabulary.
+ *
+ * Every string here has to survive being read quickly by somebody who wants the
+ * answer to be yes. "Qualifié" must never appear anywhere near a facility that
+ * is not, and the one word this vocabulary does not contain is "connecté" — no
+ * state below means a connector is exchanging anything with anyone, because
+ * nothing in this release can.
+ */
+const CONNECTOR_INSTALLATION_STATUS: Record<string, string> = {
+  REGISTERED: 'Enregistré',
+  SUSPENDED: 'Suspendu',
+  RETIRED: 'Retiré',
+}
+
+export function connectorStatusLabel(status: string): string {
+  return CONNECTOR_INSTALLATION_STATUS[status] ?? status
+}
+
+/**
+ * Why a connector is not qualified, in one phrase per reason.
+ *
+ * The server sends the same vocabulary as its readiness gate uses, so the
+ * sentence on screen and the reason routing is refused cannot drift apart.
+ */
+const QUALIFICATION_GAP: Record<string, string> = {
+  NO_INSTALLATION: 'Aucun connecteur enregistré',
+  NEVER_QUALIFIED: 'Jamais qualifié',
+  LAST_ATTEMPT_FAILED: 'Dernière qualification échouée',
+  QUALIFICATION_STALE: 'Qualification périmée — la configuration a changé',
+  CONTRACT_MAJOR_MISMATCH: 'Contrat d’échange incompatible',
+  REQUIRED_CAPABILITY_MISSING: 'Capacité obligatoire non satisfaite',
+  SUSPENDED: 'Connecteur suspendu',
+  RETIRED: 'Connecteur retiré',
+}
+
+export function qualificationGapLabel(gap: string | null): string {
+  if (gap === null) return 'Aucun'
+  return QUALIFICATION_GAP[gap] ?? gap
+}
+
+/**
+ * What the contract asks a connector to be able to do.
+ *
+ * `COLLECTION_EVENT` is required for a laboratory rather than optional, which
+ * surprises people: without a recorded collection the Exchange refuses to start
+ * processing an order, so a connector that cannot report collection cannot enter
+ * a result at all.
+ */
+const CAPABILITY: Record<string, string> = {
+  ORDER_RECEIPT: 'Réception des ordres',
+  BUSINESS_ACCEPTANCE: 'Acceptation métier',
+  RELEASED_RESULT_PUBLICATION: 'Publication des résultats libérés',
+  AMENDMENT_PUBLICATION: 'Publication des rectificatifs',
+  COLLECTION_EVENT: 'Prélèvement signalé',
+  PROCESSING_EVENT: 'Mise en analyse signalée',
+  ORDER_SUBMISSION: 'Émission des ordres',
+  RELEASED_RESULT_RECEIPT: 'Réception des résultats libérés',
+  AMENDMENT_RECEIPT: 'Réception des rectificatifs',
+  REVIEW_REPORTING: 'Remontée des revues',
+}
+
+export function capabilityLabel(capability: string): string {
+  return CAPABILITY[capability] ?? capability
+}
+
+/**
+ * What a runtime is reporting. `UNKNOWN` is the only value reachable in this
+ * release, and it is the honest one: nothing reports in, so nothing is known.
+ */
+const HEALTH_STATE: Record<string, string> = {
+  UNKNOWN: 'Inconnu — aucun runtime ne remonte d’état',
+  HEALTHY: 'Sain',
+  DEGRADED: 'Dégradé',
+  UNAVAILABLE: 'Indisponible',
+}
+
+export function healthStateLabel(state: string): string {
+  return HEALTH_STATE[state] ?? state
 }

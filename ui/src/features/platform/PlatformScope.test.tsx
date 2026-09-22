@@ -71,7 +71,32 @@ function client(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       findings: [
         { code: 'lab_accepting_orders', satisfied: true, blocking: true, detail: null },
         { code: 'connector_qualified', satisfied: false, blocking: true, detail: null },
+        // DH-CONNECT-CONTRACT-001: the server emits both for a CONNECT facility now, and the
+        // second is the one that keeps it unroutable however the first turns out.
+        { code: 'connector_operational', satisfied: false, blocking: true, detail: null },
       ],
+    }),
+    // The connector section loads on every CONNECT facility detail. Left unstubbed, these tests
+    // would be asserting against a load-failure panel rather than the screen.
+    getFacilityConnector: vi.fn().mockResolvedValue({
+      organization_id: 'org-lab',
+      participation_mode: 'CONNECT',
+      installation: null,
+      installations: [],
+      verdict: {
+        qualified: false,
+        gap: 'NO_INSTALLATION',
+        detail: "aucun connecteur n'est enregistré pour cet établissement",
+        qualification_id: null,
+        completed_at: null,
+        missing_capabilities: [],
+        installed_contract_version: null,
+        current_contract_version: '1.0',
+      },
+      health_state: 'UNKNOWN',
+      operational: false,
+      transport_available: false,
+      qualification_history: [],
     }),
     ...overrides,
   } as unknown as ExchangeClient
@@ -228,8 +253,18 @@ describe('the connect facility, told truthfully', () => {
 
     await screen.findByRole('table', { name: /Interfaces signalées/ })
     expect(interfaceStatus(/FHIR/)).toHaveTextContent('Interface vérifiée')
-    expect(screen.getByText(/Connecteur DHealth — à construire/)).toBeInTheDocument()
-    expect(screen.getByText(/Qualification — non commencée/)).toBeInTheDocument()
+
+    // DH-CONNECT-CONTRACT-001 moved these three from hardcoded strings in the discovery list into
+    // the connector section, where they are real state. The property PS7 protects is unchanged and
+    // is the reason it exists: a VERIFIED interface is a statement about the partner's software,
+    // and no amount of it makes a connector exist, qualify, or become routable.
+    expect(
+      await screen.findByText(/Connecteur DHealth — non enregistré/),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Qualification — aucun connecteur enregistré/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Exécution du connecteur — aucun runtime dans cette version/),
+    ).toBeInTheDocument()
     expect(screen.getByText(/Routage de production — désactivé/)).toBeInTheDocument()
   })
 

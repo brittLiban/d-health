@@ -18526,3 +18526,142 @@ about where it is mounted, not a missing capability.
 **DH-MVP-ONBOARD-001 is closed.**
 
 `NEXT: DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model`
+
+---
+
+## DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model · 2026-09-22 · directly on `master`
+
+**DHealth Connect transport IS NOT BUILT.** No FHIR client, no HL7 parser, no MLLP, no SFTP
+runtime, no file watcher, no webhook receiver, no polling, no on-premise agent, no delivery worker.
+Nothing in this repository has ever contacted an external EMR or LIS. No connector exists for any
+product, none has been qualified against a real system, and no facility is production-routable
+through one. What this ticket built is the **contract** a connector must obey and the **evidence
+model** that records whether one did.
+
+### Why now, before any connector exists
+
+ADR-055 left `connector_qualified` as a hardcoded `False` with a truthful screen saying no
+connector exists. Correct, and unsustainable: the moment a real connector is built somebody has to
+answer "does it work?", and the cheapest available answer is a boolean an operator ticks. Every
+guarantee downstream of `connector_qualified` would then degrade from evidence to assertion,
+silently, and the first person to notice would be a clinician whose result never arrived. A
+contract written after the first connector describes that connector; written before, it constrains
+every one that follows.
+
+### What was built
+
+**Backend** — new package `adapter/src/daher_adapter/connect/`:
+
+- `contract.py` — `CONTRACT_VERSION = "1.0"`, the ten capabilities, the seven message types, the
+  `Envelope`, `ScopedExternalId`, `FailureCategory`/`RETRYABLE`, and stable canonical `fingerprint`.
+  Every model is `extra="forbid"` and frozen; a different contract **major** is refused at the
+  boundary; naive timestamps are refused; `source_occurred_at` and `sent_at` are both carried.
+- `models.py` — `connector_installations`, `connector_qualifications`,
+  `connector_qualification_capabilities`. **No `qualified` column anywhere**, deliberately.
+- `qualification.py` — the derived verdict and its eight-value gap vocabulary, plus
+  `health_state_in_session` (returns `UNKNOWN`, always, in this build) and
+  `connector_operational_in_session` (false for every facility).
+- `repository.py` — registration, lifecycle, and the one authorized path to a qualification row.
+  `record_qualification` copies the four pinned fields under a row lock and has no update path.
+- `apply.py` — `ConnectBridge`, which turns a canonical message into a real Exchange mutation
+  through the same repositories the Native workflow uses.
+- `harness.py` — the qualification scenarios, driven against a `SyntheticConnectorSubject` that
+  contacts nothing.
+
+**Migration** `0027_connect_contract` — three tables plus six connector security-audit event types
+and one resource type. **Backfills nothing**: no facility gains an installation and no
+organization's readiness improves because of it.
+
+**Readiness** — the CONNECT branch now emits two findings where it emitted one. `connector_qualified`
+is derived from real evidence; `connector_operational` is unconditionally false and blocking.
+
+**API** — `GET`/`POST /platform/facilities/{id}/connector`, plus `.../{iid}/status` and
+`.../{iid}/fingerprints`. Platform-admin only, including against the facility's own administrator.
+**There is no endpoint that records a qualification**, and `CX1`/`CX2` assert the absence of every
+plausible spelling of one.
+
+**UI** — a `ConnectorQualification` section below `ConnectDiscovery` on CONNECT facility detail, and
+nothing on NATIVE ones. The three hardcoded connector steps moved out of the discovery progress list
+into it, because a fixed "Connecteur — à construire" sitting above a registered connector would be a
+screen contradicting itself. French throughout, no raw enums, and no `[Marquer comme qualifié]`
+control.
+
+### The design decision that was reversed: COLLECTION_EVENT
+
+Specified as optional for a laboratory. It is **required**, because the Exchange refused otherwise:
+`LabWorkflowRepository` will not move an order `ACCEPTED → IN_PROGRESS` without a recorded
+`LabSampleCollection` milestone (DH-EX-011), and result entry refuses anything that is not
+`IN_PROGRESS`. A laboratory connector that cannot report collection therefore cannot enter a result
+**at all**.
+
+Stated rather than hidden: **a partner LIS with no reliable collection signal cannot have a
+qualified laboratory connector under contract 1.0.** That is a real constraint on which partners are
+integrable, and finding it at qualification time beats finding it after a facility has been told it
+is going live.
+
+### Negative controls (§71) — executed, and one found a real defect
+
+Each break was injected, the four connect test files re-run, and the break reverted. A control run
+after every revert confirms 62/62 green and `grep -c "NC[0-9] BREAK"` reports 0 in every file.
+
+| # | Break injected | What went red |
+|---|---|---|
+| NC1 | `applicable_qualification` stops comparing `mapping_fingerprint` | 2 failed — `CR6`, `AC` |
+| NC2 | a `TechnicalAck` falls through to `_accept` | **0 failed — see below** |
+| NC3 | an unmapped source code falls back to the first ordered item | 3 failed — `AC`, `AC2`, `AC6` |
+| NC4 | `connector_operational_in_session` returns `True` | 6 failed — `CR1`, `CR8`, `CA1`, `CA2`, `CA3`, `AC` |
+| NC5 | `_amend` applies the amendment as an original release | 3 failed — `AC`, `AC2`, `AC6` |
+
+**NC2 found a genuine hole.** `LQ2-technical-receipt-is-not-acceptance` was only *looking at* the
+order's status before any message was sent — trivially not-ACCEPTED, because nothing had happened —
+so it passed regardless of how the bridge treated a technical acknowledgement. It was an assertion
+where a scenario was claimed. `LQ2` now actually sends a `TechnicalAck` and requires it refused as
+`UNSUPPORTED_WORKFLOW` with the order unmoved; re-running NC2 against the fixed scenario turns 3
+tests red. This is the argument for executing negative controls rather than reading green ticks,
+and it is why §71 asks for them.
+
+NC3 also required adding the scenario it was meant to break: `LQ4-unmapped-code-fails-closed` did
+not exist, so the fail-closed mapping rule in `apply.py` was implemented and unexercised.
+
+### Real PostgreSQL qualification (§64)
+
+Against the native PostgreSQL 18.6 instance in the WSL2 sandbox, on a disposable
+`dhconnect001_qual` database:
+
+- `alembic upgrade head` through `0027_connect_contract`; `alembic current` == `alembic heads`.
+- The partial unique index landed with its predicate intact
+  (`UNIQUE, btree (organization_id) WHERE status::text <> 'RETIRED'::text`).
+- All CHECK constraints present, including the ten-capability vocabulary; every FK
+  `ON DELETE RESTRICT`.
+- The audit-vocabulary CHECK swap — a migration branch SQLite **never executes**, having no
+  `DROP CONSTRAINT` — verified to contain all six connector event types and the new resource type.
+- `alembic downgrade 0026_facility_enrollment` → 0 `connector_*` tables and 0 audit rows mentioning
+  `connector_registered`; re-upgrade → 3 tables, head restored.
+- `adapter/tests/integration/test_dhconnect001_postgres_qualification.py` — 8 tests, all passing:
+  schema, audit vocabulary, the two-live-installations refusal (through the repository *and* around
+  it, as an `IntegrityError`), invalid states refused, NATIVE refused, evidence surviving retirement
+  and an attempted facility delete, cross-facility isolation, and staleness.
+
+### Local qualification
+
+- **Adapter**: `1256 passed, 126 skipped`, whole suite, after every change in this ticket. The
+  baseline before it was `1194 passed / 118 skipped`; the arithmetic is exact — `+45` connect tests,
+  `+17` connector API tests, `+8` real-PostgreSQL tests that skip without the `DHCONNECT001_PG_*`
+  environment. Nothing is unaccounted for and no pre-existing test changed state.
+- `ruff check` — All checks passed. `ruff format --check` — 169 files already formatted.
+- **UI**: `tsc --noEmit` clean, `typecheck:e2e` clean, `oxlint` 0 errors, `ConnectorQualification`
+  13/13.
+- **Browser**: all seven connector scenes captured at 1280/768/390, `PROBLEMS: none`, captures
+  opened and read rather than assumed. Two defects were found *by looking*: a duplicated
+  "Progression vers la production" heading restarting at 1, and a readiness fixture whose reason
+  contradicted the panel below it. Both fixed.
+
+### What this ticket did not do
+
+No transport, no delivery engine, no retries against a live system, no durable message log, no real
+connector to anything. Provider-side qualification is **declared-only** — there is a laboratory
+harness and no provider harness. `ORDER_RECEIPT` is likewise declared-only, for the structural
+reason that it is the one capability requiring a push to the connector and nothing can push. Both
+limitations are stated in `docs/CONNECT-QUALIFICATION.md` and carried into the stored evidence.
+
+**DH-CONNECT-CONTRACT-001 is closed.**

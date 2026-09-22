@@ -36,6 +36,19 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Resp
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.connect.contract import CONTRACT_VERSION
+from daher_adapter.connect.qualification import (
+    connector_operational_in_session,
+    health_state_in_session,
+    qualification_verdict_in_session,
+)
+from daher_adapter.connect.repository import (
+    ConnectorAlreadyInstalled,
+    ConnectorInstallationNotFound,
+    ConnectorInstallationRepository,
+    FacilityNotConnect,
+    InstallationRetired,
+)
 from daher_adapter.exchange.audit import ExchangeAuditEvent, ExchangeAuditWriter
 from daher_adapter.exchange.authorization import (
     AuthenticatedPrincipal,
@@ -2240,6 +2253,164 @@ class IdentityLookupResponse(BaseModel):
     email: str | None
 
 
+# ── DH-CONNECT-CONTRACT-001 §48/§62: connector installation and qualification ────────────────
+#
+# What is deliberately absent from this section matters as much as what is in it. There is **no**
+# endpoint that records a qualification result, and none that accepts `{"qualified": true}` in any
+# shape (§42/§43). Qualification is the output of running the harness against a connector; an API
+# that let an operator assert it would turn the one fact in this system that is earned into one
+# that is typed, and every guarantee downstream of `connector_qualified` would become a claim.
+#
+# No field anywhere in this section carries a credential. A connector's endpoint URL, API key,
+# password, client secret or SFTP password is never sent to or stored by DHealth Exchange (§34);
+# `configuration_fingerprint` is a SHA-256 digest computed by the connector's own operator over
+# their configuration, which is how a configuration *change* is detectable without DHealth ever
+# holding the configuration.
+
+
+class ConnectorRegistrationRequest(BaseModel):
+    """Declare that a connector build is installed at a facility. Not a claim that it works.
+
+    Registration is bookkeeping: it says which build, against which contract version, over which
+    interface, with which configuration and mapping digests. Everything about whether it *behaves*
+    is a qualification question, answered elsewhere and never here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector_key: str = Field(min_length=1, max_length=64)
+    connector_version: str = Field(min_length=1, max_length=32)
+    source_system: str = Field(min_length=1, max_length=64)
+    source_system_version: str | None = Field(default=None, max_length=64)
+    interface_type: Literal[
+        "REST_API",
+        "FHIR",
+        "HL7_V2",
+        "WEBHOOK",
+        "SFTP",
+        "FILE_IMPORT_EXPORT",
+        "DATABASE_READ",
+        "OTHER",
+    ]
+    configuration_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    mapping_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    contract_version: str = Field(default=CONTRACT_VERSION, max_length=16)
+
+
+class ConnectorFingerprintRequest(BaseModel):
+    """Record that a connector's configuration or mapping changed.
+
+    This is the endpoint that makes a passing qualification stop applying, which is the point: a
+    connector requalifies after a configuration change rather than carrying an old pass forward.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    configuration_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mapping_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ConnectorStatusRequest(BaseModel):
+    """Suspend, restore or retire an installation. Lifecycle only, never a qualification verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["REGISTERED", "SUSPENDED", "RETIRED"]
+
+
+class ConnectorCapabilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capability: str
+    passed: bool
+    detail: str | None
+
+
+class ConnectorQualificationResponse(BaseModel):
+    """One completed attempt, with the build and configuration it was run against.
+
+    The version and fingerprint fields are copies taken when the run completed, not joins to the
+    installation's current values. That is what makes this evidence: it keeps saying what was true
+    then, even after the installation has moved on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    qualification_id: uuid.UUID
+    result: str
+    suite_version: str
+    started_at: datetime
+    completed_at: datetime
+    contract_version: str
+    connector_version: str
+    configuration_fingerprint: str
+    mapping_fingerprint: str
+    evidence_summary: str | None
+    capabilities: list[ConnectorCapabilityResponse]
+
+
+class ConnectorInstallationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    installation_id: uuid.UUID
+    organization_id: uuid.UUID
+    connector_key: str
+    connector_version: str
+    contract_version: str
+    source_system: str
+    source_system_version: str | None
+    interface_type: str
+    configuration_fingerprint: str
+    mapping_fingerprint: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectorQualificationVerdictResponse(BaseModel):
+    """Derived on every call from live rows. Never stored, never settable, never cached.
+
+    ``qualified`` is a present-tense answer about the installation as it stands right now, which is
+    why it can go false without anything being deleted: change the mapping and the stored PASS stops
+    applying. ``gap`` names the single reason it is false, and it is the same vocabulary §62 asks
+    the API to speak.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    qualified: bool
+    gap: str | None
+    detail: str
+    qualification_id: uuid.UUID | None
+    completed_at: datetime | None
+    missing_capabilities: list[str]
+    installed_contract_version: str | None
+    current_contract_version: str
+
+
+class FacilityConnectorResponse(BaseModel):
+    """Everything the platform knows about a facility's connector, in one read.
+
+    ``operational`` is separate from ``verdict.qualified`` and is **false for every facility in
+    this release**, with no way to make it true. Qualification proves a build could work; only a
+    runtime reporting in proves one is working, and no runtime exists until
+    DH-CONNECT-AGENT-001. Collapsing the two is precisely the mistake that would tell an operator
+    a facility is live because a test suite passed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: uuid.UUID
+    participation_mode: str
+    installation: ConnectorInstallationResponse | None
+    installations: list[ConnectorInstallationResponse]
+    verdict: ConnectorQualificationVerdictResponse
+    health_state: str
+    operational: bool
+    transport_available: bool
+    qualification_history: list[ConnectorQualificationResponse]
+
+
 logger = logging.getLogger("daher_adapter.exchange.api")
 
 
@@ -2280,6 +2451,7 @@ def build_exchange_router(
         sessions=session_factory,
         enrollments=facility_enrollments,
     )
+    connectors = ConnectorInstallationRepository(session_factory, security_audit=security_audit)
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -7270,6 +7442,256 @@ def build_exchange_router(
                 for f in findings
             ],
         )
+
+    # ── DH-CONNECT-CONTRACT-001 §48/§62: connector installation and qualification ────────────
+    #
+    # Platform-admin only, every one of them. A facility administrator does not register their own
+    # connector, does not change its lifecycle state, and above all does not qualify it -- and the
+    # endpoint that would let anybody qualify anything does not exist here or anywhere (§42/§43).
+    #
+    # There is also no endpoint carrying connector clinical traffic. An order, result or amendment
+    # arriving over a connector needs a transport and a durable delivery engine, neither of which
+    # this ticket builds; exposing a "submit a result as a connector" route now would be an
+    # unauthenticated-by-design hole waiting for a runtime that has not been designed yet.
+
+    def _to_installation_response(record) -> ConnectorInstallationResponse:
+        return ConnectorInstallationResponse(
+            installation_id=record.id,
+            organization_id=record.organization_id,
+            connector_key=record.connector_key,
+            connector_version=record.connector_version,
+            contract_version=record.contract_version,
+            source_system=record.source_system,
+            source_system_version=record.source_system_version,
+            interface_type=record.interface_type,
+            configuration_fingerprint=record.configuration_fingerprint,
+            mapping_fingerprint=record.mapping_fingerprint,
+            status=record.status,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    def _to_qualification_response(record) -> ConnectorQualificationResponse:
+        return ConnectorQualificationResponse(
+            qualification_id=record.id,
+            result=record.result,
+            suite_version=record.suite_version,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            contract_version=record.contract_version,
+            connector_version=record.connector_version,
+            configuration_fingerprint=record.configuration_fingerprint,
+            mapping_fingerprint=record.mapping_fingerprint,
+            evidence_summary=record.evidence_summary,
+            capabilities=[
+                ConnectorCapabilityResponse(
+                    capability=c.capability.value, passed=c.passed, detail=c.detail
+                )
+                for c in record.capabilities
+            ],
+        )
+
+    def _connector_view(organization_id: uuid.UUID) -> FacilityConnectorResponse:
+        """Assemble the whole connector picture for one facility, deriving nothing twice.
+
+        The verdict, the health state and the operational flag all come from the same helpers the
+        readiness evaluator calls, inside one session. A second implementation here is exactly how
+        a screen ends up disagreeing with the gate that actually refuses routing.
+        """
+        enrollment = facility_enrollments.get_for_organization(organization_id)
+        organization = organizations.get(organization_id)
+        installations = connectors.list_for_organization(organization_id)
+        live = next((i for i in installations if i.status != "RETIRED"), None)
+        with session_factory() as session:
+            verdict = qualification_verdict_in_session(
+                session, organization_id, OrganizationType(organization.org_type)
+            )
+            health = health_state_in_session(session, organization_id)
+            operational = connector_operational_in_session(session, organization_id)
+        history = connectors.qualification_history(live.id) if live is not None else []
+        return FacilityConnectorResponse(
+            organization_id=organization_id,
+            participation_mode=enrollment.participation_mode,
+            installation=_to_installation_response(live) if live is not None else None,
+            installations=[_to_installation_response(i) for i in installations],
+            verdict=ConnectorQualificationVerdictResponse(
+                qualified=verdict.qualified,
+                gap=verdict.gap.value if verdict.gap is not None else None,
+                detail=verdict.detail,
+                qualification_id=verdict.qualification_id,
+                completed_at=verdict.completed_at,
+                missing_capabilities=[c.value for c in verdict.missing_capabilities],
+                installed_contract_version=verdict.installed_contract_version,
+                current_contract_version=CONTRACT_VERSION,
+            ),
+            health_state=health.value,
+            operational=operational,
+            # Stated as a field rather than left for the reader to infer from `operational`:
+            # DHealth Connect's transport is not built. Nothing delivers a message to or from a
+            # connector in this release (§78).
+            transport_available=False,
+            qualification_history=[_to_qualification_response(q) for q in history],
+        )
+
+    @router.get(
+        "/platform/facilities/{organization_id}/connector",
+        response_model=FacilityConnectorResponse,
+    )
+    def get_facility_connector(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityConnectorResponse:
+        """§48: what connector is installed here, has it qualified, and against what.
+
+        Answers for a NATIVE facility too, and answers honestly: no installation, no qualification,
+        and a verdict saying so. A NATIVE facility is not a broken CONNECT one -- it needs no
+        connector at all -- and the screen reading this is responsible for not implying otherwise.
+        """
+        _require_platform(principal, organization_id)
+        try:
+            return _connector_view(organization_id)
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        except OrganizationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+
+    @router.post(
+        "/platform/facilities/{organization_id}/connector",
+        response_model=FacilityConnectorResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def register_facility_connector(
+        organization_id: uuid.UUID,
+        body: ConnectorRegistrationRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityConnectorResponse:
+        """Register a connector build at a CONNECT facility.
+
+        Registration grants nothing. The facility is no more routable after this call than before
+        it -- the response's own `verdict.qualified` will read false with gap NEVER_QUALIFIED, and
+        `operational` stays false regardless.
+        """
+        _require_platform(principal, organization_id)
+        try:
+            connectors.register(
+                organization_id=organization_id,
+                connector_key=body.connector_key,
+                connector_version=body.connector_version,
+                source_system=body.source_system,
+                source_system_version=body.source_system_version,
+                interface_type=body.interface_type,
+                configuration_fingerprint=body.configuration_fingerprint,
+                mapping_fingerprint=body.mapping_fingerprint,
+                contract_version=body.contract_version,
+                actor_identity_id=principal.identity_id,
+            )
+        except FacilityEnrollmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility enrollment not found"
+            ) from error
+        except FacilityNotConnect as error:
+            # 422, not 404: the facility exists and the caller may see it. What they asked for is
+            # meaningless for a NATIVE facility, and saying so plainly is more useful than a 404.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except ConnectorAlreadyInstalled as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ValueError as error:
+            # Contract-major mismatch: a connector built against a contract this build does not
+            # speak is refused at registration rather than allowed to fail later in traffic.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        return _connector_view(organization_id)
+
+    @router.put(
+        "/platform/facilities/{organization_id}/connector/{installation_id}/status",
+        response_model=FacilityConnectorResponse,
+    )
+    def set_facility_connector_status(
+        organization_id: uuid.UUID,
+        installation_id: uuid.UUID,
+        body: ConnectorStatusRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityConnectorResponse:
+        """Suspend, restore or retire an installation.
+
+        Note which direction is one-way. SUSPENDED and REGISTERED move freely between each other;
+        RETIRED does not come back, because retirement is what frees the facility to register a
+        replacement, and a resurrected installation would mean two live ones.
+        """
+        _require_platform(principal, organization_id)
+        try:
+            installation = connectors.list_for_organization(organization_id)
+            if not any(i.id == installation_id for i in installation):
+                raise ConnectorInstallationNotFound(str(installation_id))
+            if body.status == "SUSPENDED":
+                connectors.suspend(
+                    installation_id=installation_id, actor_identity_id=principal.identity_id
+                )
+            elif body.status == "REGISTERED":
+                connectors.restore(
+                    installation_id=installation_id, actor_identity_id=principal.identity_id
+                )
+            else:
+                connectors.retire(
+                    installation_id=installation_id, actor_identity_id=principal.identity_id
+                )
+        except ConnectorInstallationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="connector installation not found"
+            ) from error
+        except InstallationRetired as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _connector_view(organization_id)
+
+    @router.put(
+        "/platform/facilities/{organization_id}/connector/{installation_id}/fingerprints",
+        response_model=FacilityConnectorResponse,
+    )
+    def update_facility_connector_fingerprints(
+        organization_id: uuid.UUID,
+        installation_id: uuid.UUID,
+        body: ConnectorFingerprintRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityConnectorResponse:
+        """Record a configuration or mapping change, which invalidates any applicable qualification.
+
+        Nothing is deleted. The stored PASS stays exactly as it was and stays true about the
+        configuration it was run against; what changes is that it no longer describes what is
+        installed, so the derived verdict returns QUALIFICATION_STALE until a new run happens.
+
+        Only digests cross this boundary. DHealth never receives the configuration itself (§34).
+        """
+        _require_platform(principal, organization_id)
+        if body.configuration_fingerprint is None and body.mapping_fingerprint is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="at least one fingerprint must be supplied",
+            )
+        try:
+            if not any(
+                i.id == installation_id for i in connectors.list_for_organization(organization_id)
+            ):
+                raise ConnectorInstallationNotFound(str(installation_id))
+            connectors.update_fingerprints(
+                installation_id=installation_id,
+                configuration_fingerprint=body.configuration_fingerprint,
+                mapping_fingerprint=body.mapping_fingerprint,
+                actor_identity_id=principal.identity_id,
+            )
+        except ConnectorInstallationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="connector installation not found"
+            ) from error
+        except InstallationRetired as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _connector_view(organization_id)
 
     @router.get(
         "/platform/facilities/{provider_id}/lab-routes",

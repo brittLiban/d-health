@@ -128,6 +128,18 @@ SecurityEventType = Literal[
     "facility_onboarding_blocked",
     "facility_onboarding_unblocked",
     "provider_lab_route_activation_refused",
+    # DH-CONNECT-CONTRACT-001: connector registration, lifecycle and qualification evidence.
+    # `connector_qualification_recorded` is deliberately ONE event type for both outcomes -- the
+    # `outcome` column already distinguishes a pass ("created") from a failure ("refused"), and a
+    # second type would be a synonym that costs a migration to say the same thing twice.
+    # `connector_configuration_changed` exists because a fingerprint change is what silently
+    # invalidates a qualification, so the moment it happened must be recoverable.
+    "connector_registered",
+    "connector_suspended",
+    "connector_restored",
+    "connector_retired",
+    "connector_configuration_changed",
+    "connector_qualification_recorded",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
@@ -144,6 +156,9 @@ SecurityResourceType = Literal[
     "facility_enrollment",
     "facility_interface_capability",
     "facility_enrollment_blocker",
+    # DH-CONNECT-CONTRACT-001. Qualification rows hang off an installation, so every connector
+    # event names the installation -- audit stays installation-centric, never per-capability.
+    "connector_installation",
 ]
 
 

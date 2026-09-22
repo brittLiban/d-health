@@ -1069,3 +1069,94 @@ export interface CreateMembershipOutcome {
   membership: OrganizationMembership
   created: boolean
 }
+
+/**
+ * DH-CONNECT-CONTRACT-001 — a connector installation, and whether it qualified.
+ *
+ * Three facts that look like one and are not, kept as three fields on purpose:
+ * an installation exists, a qualification applies to it right now, and a runtime
+ * is reporting in. Only the third would make a facility routable, and in this
+ * release it is false everywhere because no runtime exists.
+ */
+export interface ConnectorInstallation {
+  installation_id: string
+  organization_id: string
+  connector_key: string
+  connector_version: string
+  contract_version: string
+  source_system: string
+  source_system_version: string | null
+  interface_type: string
+  /** A SHA-256 digest. Never the configuration itself -- DHealth never holds it. */
+  configuration_fingerprint: string
+  mapping_fingerprint: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectorCapabilityOutcome {
+  capability: string
+  passed: boolean
+  detail: string | null
+}
+
+/**
+ * One completed qualification attempt. Append-only: a failure is never replaced
+ * by a later success, and the fields here are copies taken when the run finished,
+ * so the row keeps describing what it was actually run against.
+ */
+export interface ConnectorQualificationRecord {
+  qualification_id: string
+  result: string
+  suite_version: string
+  started_at: string
+  completed_at: string
+  contract_version: string
+  connector_version: string
+  configuration_fingerprint: string
+  mapping_fingerprint: string
+  evidence_summary: string | null
+  capabilities: ConnectorCapabilityOutcome[]
+}
+
+/**
+ * Derived by the server on every read. There is no stored "qualified" column and
+ * no endpoint that sets one; `gap` names the single reason when it is false.
+ */
+export interface ConnectorQualificationVerdict {
+  qualified: boolean
+  gap: string | null
+  detail: string
+  qualification_id: string | null
+  completed_at: string | null
+  missing_capabilities: string[]
+  installed_contract_version: string | null
+  current_contract_version: string
+}
+
+export interface FacilityConnector {
+  organization_id: string
+  participation_mode: string
+  installation: ConnectorInstallation | null
+  installations: ConnectorInstallation[]
+  verdict: ConnectorQualificationVerdict
+  health_state: string
+  /** False for every facility in this release. See `transport_available`. */
+  operational: boolean
+  /** DHealth Connect's transport is not built. Always false here. */
+  transport_available: boolean
+  qualification_history: ConnectorQualificationRecord[]
+}
+
+/** The body of `POST /platform/facilities/{id}/connector`. No credential fields, by design. */
+export interface ConnectorRegistrationRequest {
+  connector_key: string
+  connector_version: string
+  source_system: string
+  source_system_version?: string | null
+  interface_type: string
+  configuration_fingerprint: string
+  mapping_fingerprint: string
+  contract_version?: string
+}

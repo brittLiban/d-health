@@ -17,6 +17,7 @@ import type { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
 import type { FacilityEnrollment, FacilityReadiness } from '../../api/exchangeTypes'
 import { Button, LoadingSkeleton } from '../../design-system'
 import { ConnectDiscovery } from './ConnectDiscovery'
+import { ConnectorQualification } from './ConnectorQualification'
 import { FacilityTeam } from './FacilityTeam'
 import { RouteNetwork } from './RouteNetwork'
 import {
@@ -185,14 +186,32 @@ export function FacilityDetail({
       ) : null}
 
       {isConnect ? (
-        <ConnectDiscovery
-          facility={facility}
-          client={client}
-          onChanged={() => {
-            onChanged()
-            void loadReadiness()
-          }}
-        />
+        <>
+          <ConnectDiscovery
+            facility={facility}
+            client={client}
+            onChanged={() => {
+              onChanged()
+              void loadReadiness()
+            }}
+          />
+          {/* Below discovery, not instead of it. Discovery is what DHealth knows
+              about the partner's existing software; this is what DHealth knows
+              about the connector built against it. The two answer different
+              questions and merging them is how "FHIR vérifié" starts reading as
+              "prêt". CONNECT facilities only: a NATIVE facility needs no
+              connector, and showing it an empty connector panel would invent a
+              deficiency it does not have. */}
+          <ConnectorQualification
+            organizationId={facility.organization_id}
+            integrationFeasibility={facility.integration_feasibility}
+            client={client}
+            onChanged={() => {
+              onChanged()
+              void loadReadiness()
+            }}
+          />
+        </>
       ) : (
         <section aria-labelledby="facility-native-heading">
           <h2 id="facility-native-heading" className={styles.sectionTitle}>

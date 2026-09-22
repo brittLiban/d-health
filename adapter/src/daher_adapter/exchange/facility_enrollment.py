@@ -36,6 +36,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+# DH-CONNECT-CONTRACT-001: importing the qualification module here also puts `connect.models` on
+# `Base.metadata`, so `create_all` and the Alembic chain both see the connector tables wherever
+# the Exchange is loaded.
+from daher_adapter.connect.qualification import (
+    connector_operational_in_session,
+    qualification_verdict_in_session,
+)
 from daher_adapter.exchange.models import (
     EnrollmentBlockerCode,
     FacilityEnrollment,
@@ -906,12 +913,33 @@ def operational_findings_in_session(
             findings.append(_native_template_finding(session, organization_id, active_offerings))
 
     if not is_native:
+        # DH-CONNECT-CONTRACT-001: two facts, not one. Before this ticket a single hardcoded
+        # `connector_qualified=False` stood in for the whole question, which was honest while no
+        # connector model existed. Now that one is derived and the other is still absent, and
+        # collapsing them would lose exactly the distinction that matters: a connector can have
+        # satisfied the contract in qualification and still not be running anywhere.
+        verdict = qualification_verdict_in_session(session, organization_id, organization.org_type)
         findings.append(
             ReadinessFinding(
                 code="connector_qualified",
-                satisfied=False,
+                satisfied=verdict.qualified,
                 blocking=True,
-                detail="aucun connecteur DHealth n'existe encore pour cet établissement",
+                detail=verdict.detail,
+            )
+        )
+        findings.append(
+            ReadinessFinding(
+                code="connector_operational",
+                # False for every facility in this build, and not as a placeholder: no connector
+                # runtime exists, so DHealth has observed nothing about reachability and says so.
+                # This is the finding that keeps a CONNECT facility unroutable no matter how much
+                # qualification evidence accumulates -- qualification proves a connector *could*
+                # work, only a runtime proves one *is* working, and DH-CONNECT-AGENT-001 builds the
+                # second. Removing this finding is how a future ticket would accidentally declare
+                # Connect live.
+                satisfied=connector_operational_in_session(session, organization_id),
+                blocking=True,
+                detail="aucun runtime connecteur n'est connecté à DHealth",
             )
         )
 

@@ -205,15 +205,19 @@ export function ConnectDiscovery({ facility, client, onChanged }: ConnectDiscove
         >
           Interface vérifiée
         </li>
-        {/* Fixed, and deliberately unreachable from this screen. No interface
-            state and no operator action here can make a connector exist. */}
-        <li className={styles.owed}>Connecteur DHealth — à construire</li>
-        <li className={styles.owed}>Qualification — non commencée</li>
-        <li className={styles.stopped}>Routage de production — désactivé</li>
       </ol>
+      {/* The connector steps used to be hardcoded here as three permanently
+          unreachable lines, which was truthful while no connector could exist.
+          DH-CONNECT-CONTRACT-001 made them real state, so they moved to the
+          section that reads that state -- a fixed "Connecteur — à construire"
+          sitting above a registered, qualified connector would be a screen
+          contradicting itself. What has not changed is that nothing on *this*
+          screen can advance them: no interface verification makes a connector
+          exist, and none of them unlocks routing. */}
       <p className={styles.nextStep}>
         <strong>Prochaine étape</strong> — construire et qualifier le connecteur DHealth pour ce
-        système. Aucune interface vérifiée ne permet à elle seule d'activer le routage.
+        système. Aucune interface vérifiée ne permet à elle seule d'activer le routage. L'état du
+        connecteur est présenté ci-dessous.
       </p>
     </section>
   )

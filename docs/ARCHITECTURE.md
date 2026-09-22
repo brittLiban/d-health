@@ -1903,3 +1903,98 @@ A successful attach re-reads `GET /organizations/{id}/enrollment/readiness`. Sta
 condition, so the blocker the operator just cleared has to disappear because the server says so —
 computing that in React would be the same rule duplication the readiness design forbids everywhere
 else.
+
+---
+
+## 22. The DHealth Connect contract and qualification model (DH-CONNECT-CONTRACT-001) — added 2026-09-22
+
+> **The transport is not built.** No FHIR client, no HL7 parser, no MLLP, no SFTP runtime, no file
+> watcher, no webhook receiver, no polling, no on-premise agent, no delivery worker. Nothing in this
+> repository has contacted an external EMR or LIS. This section describes a contract and an evidence
+> model, not a working integration.
+
+Full detail: `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-QUALIFICATION.md`, ADR-056.
+
+### Where it sits
+
+```
+   external EMR / LIS
+        │  (FHIR, HL7 v2, CSV, vendor JSON -- connector-side formats only)
+        │
+   ┌────┴─────────────────────┐
+   │  a connector             │   DOES NOT EXIST YET.
+   │  (someone else's code)   │   DH-CONNECT-AGENT-001 supplies the runtime it needs.
+   └────┬─────────────────────┘
+        │  canonical Envelope + one of seven message types
+        │  connect/contract.py -- extra="forbid", frozen, offset-aware, contract-major-checked
+        ▼
+   ConnectBridge  (connect/apply.py)
+        │  translates into Exchange mutations through the SAME repositories
+        │  the Native workflow uses -- LabWorkflowRepository, LabResultRepository,
+        │  LabResultReleaseRepository, LabResultAmendmentRepository
+        ▼
+   DHealth Exchange  ← canonical. No connector's wire shape reaches this schema.
+```
+
+### The three tables, and the one column that is absent
+
+```
+connector_installations
+    one live per facility, enforced by a PARTIAL unique index
+    (organization_id) WHERE status <> 'RETIRED'
+    partial so a retired installation stays forever -- history -- while a
+    replacement is registered
+
+connector_qualifications                       APPEND-ONLY
+    contract_version / connector_version / configuration_fingerprint /
+    mapping_fingerprint are COPIED IN when the run completes, under a row lock.
+    Copied, not joined: that is what makes the row evidence rather than a cache.
+    A failure is never replaced by a later success; both rows stand.
+
+connector_qualification_capabilities
+    per capability, passed or not, with detail -- including a scenario's
+    `limitation`, which survives a PASS and says what the pass did not cover
+```
+
+Every foreign key is `ON DELETE RESTRICT`. A facility cannot be tidied away along with its failures.
+
+**There is no `qualified` column anywhere.** The verdict is derived on every read by
+`qualification_verdict_in_session` from the live rows. A stored boolean is a thing that can be
+written; a derivation is not. There is correspondingly no endpoint that records a qualification and
+no UI control that marks one, and the absence is asserted by tests rather than left to code review.
+
+### The two findings a CONNECT facility now carries
+
+```
+connector_qualified    derived   ← can be TRUE
+connector_operational  FALSE     ← unconditionally, in this release, and blocking
+                                   derives from a health state that is always UNKNOWN,
+                                   because nothing reports in
+```
+
+Both blocking, so `production_routing_allowed` stays false for every CONNECT facility no matter how
+much qualification evidence exists. That separation is the point of the whole ticket: qualification
+proves a *build* satisfies the contract; only a runtime reporting in proves one *is working now*.
+`connector_operational` becomes reachable when DH-CONNECT-AGENT-001 supplies a real runtime and
+health mechanism — not before, and no heartbeat was faked to make a screen look finished.
+
+### Why the bridge reuses the Exchange's repositories
+
+Because the Exchange's rules are not negotiable by the route a message arrived on. A connector
+cannot start processing without a recorded collection milestone, cannot enter a result on an order
+that is not `IN_PROGRESS`, cannot release twice against one order, and cannot amend without a prior
+release — all because `LabWorkflowRepository` and `LabResultReleaseRepository` say so, not because
+`apply.py` re-implements them politely.
+
+This is also how the `COLLECTION_EVENT` requirement was discovered rather than designed: the
+Exchange refused `ACCEPTED → IN_PROGRESS` without a collection milestone, which makes collection
+reporting a precondition for a laboratory connector entering any result at all. See ADR-056
+decision 11.
+
+### Credentials
+
+`configuration_fingerprint` is a SHA-256 digest the partner's own operator computes over their
+configuration. DHealth stores the digest and never the configuration — enough to detect a change,
+which is what invalidates a qualification, without DHealth becoming a place worth attacking for a
+partner's LIS password. No endpoint in this section accepts a credential field, and `CX3` asserts
+that no response carries one either.
