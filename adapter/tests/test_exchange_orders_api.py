@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, func, select
@@ -178,7 +178,7 @@ def _referral_lab(
         listed=False,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     _configure_route(client, private_key, provider_id, lab.id)
     return lab
 

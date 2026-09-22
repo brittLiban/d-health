@@ -13,10 +13,11 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
@@ -24,6 +25,7 @@ from daher_adapter.exchange.audit import ExchangeAuditWriter
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.directory import LabDirectoryProfileRepository
 from daher_adapter.exchange.identity import PatientReferenceRepository
+from daher_adapter.exchange.models import LabResultTemplate
 from daher_adapter.exchange.organizations import OrganizationRepository
 
 TTL_HOURS = 168
@@ -153,11 +155,19 @@ def _build_in_progress_order(
     name: str,
     item_count: int = 1,
     configure_templates: bool = True,
+    retire_templates_after_assignment: bool = False,
 ):
     """Full journey: N catalog entries, one lab with N offerings (each with an active template
     unless `configure_templates=False`), a provider order requesting all N, provider-assigned
     routing, accept, collection, start-processing -> IN_PROGRESS. Returns (lab, order_id,
-    entries, offerings, lab_tech_token, admin_token)."""
+    entries, offerings, lab_tech_token, admin_token).
+
+    `retire_templates_after_assignment` reaches "this order has an item with no active template"
+    the only way DH-MVP-ONBOARD-001 leaves it reachable: the order was routed while the template
+    was active, and the laboratory retired it afterwards. Assignment itself now refuses an
+    untemplated Native offering outright, so an order can no longer *start* in that state -- but
+    an in-flight one can certainly end up there, and the plan read must still be truthful about
+    it."""
     provider, clinician_token = _setup_clinician(client, private_key, organizations, name)
     patient_record = patients.get_or_create(
         source_organization_id=provider.id,
@@ -186,7 +196,9 @@ def _build_in_progress_order(
     admin_token = _setup_org_admin_for(client, private_key, lab.id, name)
     offerings = []
     for entry in entries:
-        offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        offering, _ = make_offering(
+            catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id, templated=False
+        )
         offerings.append(offering)
         if configure_templates:
             created = client.post(
@@ -223,6 +235,19 @@ def _build_in_progress_order(
         json={"lab_organization_id": str(lab.id)},
     )
     assert assign.status_code == 201, assign.text
+
+    if retire_templates_after_assignment:
+        # The laboratory retired its template while this order was already in flight. Flipped
+        # directly because the repository exposes activation, not retirement -- and the state
+        # itself is real: nothing about an active order forces the template it was routed under
+        # to stay active.
+        with organizations._sessions() as session:  # noqa: SLF001 -- see comment above
+            session.execute(
+                sa_update(LabResultTemplate)
+                .where(LabResultTemplate.lab_offering_id.in_([o.id for o in offerings]))
+                .values(active=False)
+            )
+            session.commit()
 
     lab_tech_token = _setup_lab_tech_for(client, private_key, lab.id, name)
     accept = client.post(
@@ -309,7 +334,7 @@ def test_p4_missing_template_returns_null(
         directory,
         patients,
         name="P4",
-        configure_templates=False,
+        retire_templates_after_assignment=True,
     )
     response = client.get(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/result-entry-plan",
@@ -331,7 +356,7 @@ def test_p5_all_items_configured_false_when_any_missing(
         directory,
         patients,
         name="P5",
-        configure_templates=False,
+        retire_templates_after_assignment=True,
     )
     response = client.get(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/result-entry-plan",
@@ -510,7 +535,9 @@ def test_ps5_order_not_in_progress_returns_conflict(
         listed=False,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    # Templated: under DH-MVP-ONBOARD-001 an untemplated Native offering cannot be assigned at
+    # all, and this test is about a later conflict, not about that gate.
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _configure_route(client, private_key, provider.id, lab.id)
     create_response = client.post(
         f"/exchange/v1/organizations/{provider.id}/orders",

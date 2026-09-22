@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -167,7 +167,7 @@ def _production_ready_lab(organizations, directory, catalog, *, name: str):
         accepting_orders=True,
     )
     entry, _ = catalog.create_entry(code=f"RDY-{name[:12]}", display_name=f"Analyse {name}")
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     return lab
 
 
@@ -182,7 +182,7 @@ def _referral_lab(organizations, directory, catalog, *, name: str, entry_id, lis
         listed=listed,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     return lab
 
 

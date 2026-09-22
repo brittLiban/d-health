@@ -34,7 +34,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.exchange.facility_enrollment import is_operationally_ready_in_session
+from daher_adapter.exchange.facility_enrollment import (
+    is_operationally_ready_in_session,
+    untemplated_native_entries_in_session,
+)
 from daher_adapter.exchange.models import (
     LabDirectoryProfile,
     LabOffering,
@@ -290,10 +293,21 @@ class ProviderLabRouteRepository:
             # one place (`facility_enrollment.operational_findings_in_session`) so this read, the
             # assignment mutation, and the activation endpoint cannot drift apart. The candidate
             # list is already narrowed by route and offering, so this is a handful of rows.
+            #
+            # The second condition is the DH-MVP-ONBOARD-001 correction: for a NATIVE lab, holding
+            # an active offering is not the same as being able to finish the work. DHealth's own
+            # human result entry runs against a controlled active template, so an offering without
+            # one is a service that could be ordered and never completed. A lab missing a template
+            # for any *requested* entry is dropped for this order specifically -- it stays a
+            # perfectly good destination for orders covering only its templated services, and its
+            # configured route is untouched either way. Empty for CONNECT by construction.
             directory_by_lab = {
                 organization.id: (organization, profile)
                 for organization, profile in directory_rows
                 if is_operationally_ready_in_session(session, organization.id)
+                and not untemplated_native_entries_in_session(
+                    session, organization.id, catalog_entry_ids
+                )
             }
             if not directory_by_lab:
                 return []

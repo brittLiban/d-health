@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
@@ -218,7 +218,7 @@ def test_r7_route_deactivation_never_touches_a_historical_selection(
     lab = make_lab(organizations, name="R7Lab")
     entry, _ = catalog.create_entry(code="DH-R7", display_name="R7 Test")
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
@@ -295,7 +295,7 @@ def test_e1_active_everything_is_eligible(sessions: sessionmaker[Session]) -> No
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
@@ -309,7 +309,7 @@ def test_e2_no_route_is_not_eligible(sessions: sessionmaker[Session]) -> None:
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
 
     results = provider_lab_routes.find_whole_order_eligible_labs(provider.id, [entry.id])
     assert results == []
@@ -319,7 +319,7 @@ def test_e3_inactive_route_is_not_eligible(sessions: sessionmaker[Session]) -> N
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=False
     )
@@ -332,7 +332,7 @@ def test_e4_inactive_lab_organization_is_not_eligible(sessions: sessionmaker[Ses
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
@@ -357,7 +357,7 @@ def test_e5_not_accepting_orders_is_not_eligible(sessions: sessionmaker[Session]
         listed=False,
         accepting_orders=False,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
@@ -370,7 +370,7 @@ def test_e6_inactive_offering_is_not_eligible(sessions: sessionmaker[Session]) -
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     catalog.set_offering_active(offering.id, False)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
@@ -384,7 +384,7 @@ def test_e7_unlisted_lab_is_still_eligible(sessions: sessionmaker[Session]) -> N
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id, listed=False)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
     )
@@ -399,7 +399,7 @@ def test_e8_zero_price_rows_is_still_eligible(sessions: sessionmaker[Session]) -
     organizations, catalog, directory, provider_lab_routes = _build(sessions)
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     # Deliberately never call catalog.set_price.
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True
@@ -416,7 +416,7 @@ def test_e9_a_different_providers_route_does_not_leak_eligibility(
     provider, lab, entry = _order_setup(organizations, catalog, directory)
     other_provider = make_provider(organizations, name="E9OtherProvider")
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     provider_lab_routes.upsert(
         provider_organization_id=other_provider.id, lab_organization_id=lab.id, active=True
     )
@@ -433,7 +433,7 @@ def test_e11_partial_capability_lab_is_excluded_entirely(sessions: sessionmaker[
     entry_a, _ = catalog.create_entry(code="DH-E11-A", display_name="A")
     entry_b, _ = catalog.create_entry(code="DH-E11-B", display_name="B")
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_a.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_a.id)
     # No offering for entry_b.
     provider_lab_routes.upsert(
         provider_organization_id=provider.id, lab_organization_id=lab.id, active=True

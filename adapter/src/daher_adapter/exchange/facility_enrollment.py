@@ -27,7 +27,7 @@ administrator clicking "activate" in a browser, and that path goes through the e
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +47,7 @@ from daher_adapter.exchange.models import (
     InterfaceVerificationState,
     LabDirectoryProfile,
     LabOffering,
+    LabResultTemplate,
     OnboardingStatus,
     Organization,
     OrganizationMembership,
@@ -590,9 +591,20 @@ class ReadinessFinding:
 
     ``blocking`` separates the two questions §37 and §11 ask differently: whether production
     routing may be switched on *right now*, and whether the facility is fully configured for
-    people to work in. A lab with offerings and open doors but no technician yet is routable --
-    orders will arrive and wait in DHealth, which is where they belong -- and is not finished.
-    Reporting both, and marking which is which, is more useful than one boolean.
+    people to work in. Reporting both, and marking which is which, is more useful than one
+    boolean.
+
+    A NATIVE facility's operational authority is **blocking**, not advisory: a provider needs a
+    CLINICIAN, and a lab needs both a LAB_TECH and a LAB_RESULT_RELEASER. Entry and release are
+    separate authorities (ADR-044), so a lab with technicians and no releaser can accept an order,
+    enter every value, and be structurally incapable of releasing it -- work does not wait there,
+    it arrives somewhere it can never leave.
+
+    Non-blocking findings are the ones that genuinely leave work deliverable: no designated
+    administrator, and *partial* Native result-template coverage -- a lab that can complete nine
+    of its ten offerings is a real destination for the nine, and the order-scoped gates make the
+    tenth unroutable on its own. Zero template coverage is blocking, because a lab that can
+    complete nothing it offers is not a destination at all.
     """
 
     code: str
@@ -676,6 +688,108 @@ def active_roles_in_session(session: Session, organization_id: uuid.UUID) -> fro
         )
     ).all()
     return frozenset(row[0] for row in rows)
+
+
+def untemplated_native_entries_in_session(
+    session: Session,
+    lab_organization_id: uuid.UUID,
+    catalog_entry_ids: Sequence[uuid.UUID],
+) -> list[uuid.UUID]:
+    """Of these requested catalog entries, which ones this NATIVE lab could not actually finish.
+
+    A Native laboratory completes work *inside DHealth*, and DHealth's human result entry runs
+    against a controlled active template: `NativeResultEntryForm` renders `UNSTARTED_NO_TEMPLATE`
+    as "native result entry unavailable", by design (DH-LAB-003). So an active offering with no
+    active template is a service the lab appears to sell and cannot deliver here -- an order
+    routed against it would arrive and have no way to be entered, let alone released.
+
+    **Returns an empty list for a CONNECT laboratory, unconditionally.** That is the Connect
+    independence written as code rather than as a promise: the work happens in the partner's own
+    system, whose result structure DHealth neither owns nor requires, and the low-level Exchange
+    observation model stays as source-flexible as it was. A missing Native template is a statement
+    about the *Native human-entry workflow*, never about the Exchange data model.
+
+    Also empty for anything that is not a lab, and for a lab with no enrollment -- the broad
+    readiness check refuses those on its own, and answering a narrower question about them here
+    would be a true statement about the wrong thing.
+    """
+    if not catalog_entry_ids:
+        return []
+    organization = session.get(Organization, lab_organization_id)
+    if organization is None or organization.org_type != OrganizationType.LAB.value:
+        return []
+    enrollment = session.scalar(
+        select(FacilityEnrollment).where(FacilityEnrollment.organization_id == lab_organization_id)
+    )
+    if enrollment is None or enrollment.participation_mode != ParticipationMode.NATIVE.value:
+        return []
+
+    # One LEFT OUTER JOIN rather than a query per entry: the active offerings for the requested
+    # entries, with their active template if one exists. A NULL template id is the defect.
+    rows = session.execute(
+        select(LabOffering.catalog_entry_id, LabResultTemplate.id)
+        .outerjoin(
+            LabResultTemplate,
+            (LabResultTemplate.lab_offering_id == LabOffering.id)
+            & (LabResultTemplate.active.is_(True)),
+        )
+        .where(
+            LabOffering.lab_organization_id == lab_organization_id,
+            LabOffering.catalog_entry_id.in_(catalog_entry_ids),
+            LabOffering.active.is_(True),
+        )
+    ).all()
+    # An entry is completable if *any* active offering for it carries an active template.
+    templated: set[uuid.UUID] = {entry_id for entry_id, template_id in rows if template_id}
+    offered: set[uuid.UUID] = {entry_id for entry_id, _ in rows}
+    # Entries with no active offering at all are not reported here: "this lab does not offer that
+    # test" is a different refusal with its own message, and saying both would be noise.
+    return sorted(offered - templated, key=str)
+
+
+def _native_template_finding(
+    session: Session, organization_id: uuid.UUID, active_offerings: int | None
+) -> ReadinessFinding:
+    """Whether this NATIVE lab can complete, in DHealth, the work it advertises.
+
+    Blocking only when the lab offers something and **none** of it is completable. That is the
+    same fact `lab_has_active_offering` already blocks on -- "offers nothing" and "can complete
+    nothing it offers" are indistinguishable from an order's point of view, and a laboratory in
+    either state is not a destination.
+
+    Partial coverage is deliberately *not* blocking. A lab with nine templated offerings and a
+    tenth without one can do nine-tenths of its real work, and refusing to route any of it would
+    be a worse answer than refusing the tenth: the order-specific gates
+    (`untemplated_native_entries_in_session`, consulted by both the eligibility read and
+    `assign_by_provider`) already make that tenth service impossible to route, precisely and with
+    a reason. Blocking the whole facility would also push an operator toward deactivating the
+    untemplated offering to clear the flag, which is exactly the silent deactivation this rule
+    exists to avoid.
+    """
+    offering_rows = session.execute(
+        select(LabOffering.id, LabResultTemplate.id)
+        .outerjoin(
+            LabResultTemplate,
+            (LabResultTemplate.lab_offering_id == LabOffering.id)
+            & (LabResultTemplate.active.is_(True)),
+        )
+        .where(
+            LabOffering.lab_organization_id == organization_id,
+            LabOffering.active.is_(True),
+        )
+    ).all()
+    total = len(offering_rows)
+    templated = sum(1 for _offering_id, template_id in offering_rows if template_id)
+    return ReadinessFinding(
+        code="lab_result_templates_active",
+        satisfied=total > 0 and templated == total,
+        blocking=bool(active_offerings) and templated == 0,
+        detail=(
+            f"{templated}/{total} analyse(s) structurée(s)"
+            if total
+            else "aucune analyse active à structurer"
+        ),
+    )
 
 
 def operational_findings_in_session(
@@ -788,6 +902,8 @@ def operational_findings_in_session(
                 detail=f"{active_offerings or 0} analyse(s) active(s)",
             )
         )
+        if is_native:
+            findings.append(_native_template_finding(session, organization_id, active_offerings))
 
     if not is_native:
         findings.append(
@@ -839,7 +955,11 @@ class FacilityReadinessEvaluator:
     while no connector exists.
 
     *Non-blocking* findings are configuration completeness that does not make work undeliverable:
-    an administrator, and the controlled result templates a Native lab needs for structured entry.
+    a designated administrator, and *partial* Native result-template coverage. Template coverage
+    is the nuanced one -- a Native lab that can complete nine of its ten offerings remains a real
+    destination for those nine, so partial coverage does not block the facility, and the
+    order-scoped gates refuse the tenth service specifically. A Native lab with active offerings
+    and **no** active template blocks, because it can complete nothing it advertises.
 
     Staffing is blocking, and that placement is deliberate. Entry and release are separate
     authorities (ADR-044), so a Native lab holding LAB_TECH but no LAB_RESULT_RELEASER can receive
@@ -853,13 +973,14 @@ class FacilityReadinessEvaluator:
         *,
         sessions: SessionFactory,
         enrollments: FacilityEnrollmentRepository,
-        catalog=None,
-        templates=None,
     ) -> None:
+        # No catalog or template repository: every finding is now derived by
+        # `operational_findings_in_session` from the caller's own session. The two
+        # optional repositories this used to accept existed only for the separate
+        # template-finding method, and keeping them would advertise a dependency
+        # this class no longer has.
         self._sessions = sessions
         self._enrollments = enrollments
-        self._catalog = catalog
-        self._templates = templates
 
     def roles_present(self, organization_id: uuid.UUID) -> frozenset[str]:
         with self._sessions() as session:
@@ -870,43 +991,17 @@ class FacilityReadinessEvaluator:
     ) -> tuple[FacilityEnrollmentRecord, list[ReadinessFinding]]:
         enrollment = self._enrollments.get_for_organization(organization_id)
         with self._sessions() as session:
+            # Everything, from one implementation. The Native result-template finding used to be
+            # appended here from a separate method, which meant the facility screen and the route
+            # activation endpoint were answering from different sets of facts -- the screen could
+            # say "indisponible" while activation succeeded. It now lives in
+            # `operational_findings_in_session` with the rest, so all three paths agree.
             findings = operational_findings_in_session(session, organization_id)
-        findings.extend(self._template_findings(enrollment))
         return enrollment, findings
 
     def is_operationally_ready(self, organization_id: uuid.UUID) -> bool:
         with self._sessions() as session:
             return is_operationally_ready_in_session(session, organization_id)
-
-    def _template_findings(self, enrollment: FacilityEnrollmentRecord) -> list[ReadinessFinding]:
-        """Native structured result entry runs against controlled templates.
-
-        Non-blocking: a lab missing one can still receive orders and record results by the
-        pre-template path, so this is configuration completeness rather than deliverability. Never
-        evaluated for a CONNECT lab, which does not use Native entry at all.
-        """
-        if (
-            self._templates is None
-            or self._catalog is None
-            or enrollment.organization_type != OrganizationType.LAB.value
-            or enrollment.participation_mode != ParticipationMode.NATIVE.value
-        ):
-            return []
-        offerings = [
-            o for o in self._catalog.list_offerings_for_lab(enrollment.organization_id) if o.active
-        ]
-        offering_ids = [o.id for o in offerings]
-        active_templates = (
-            self._templates.get_active_templates_for_offerings(offering_ids) if offering_ids else {}
-        )
-        return [
-            ReadinessFinding(
-                code="lab_result_templates_active",
-                satisfied=bool(offering_ids) and len(active_templates) == len(offering_ids),
-                blocking=False,
-                detail=f"{len(active_templates)}/{len(offering_ids)} analyse(s) structurée(s)",
-            )
-        ]
 
     def evaluate_route_activation(
         self, *, provider_organization_id: uuid.UUID, lab_organization_id: uuid.UUID

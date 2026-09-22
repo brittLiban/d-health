@@ -7257,6 +7257,34 @@ separations below are recorded rather than left to whichever screen is being wri
     documented decision, never the default enrollment path.
 17. **Onboarding requires no real patient data.** Discovery records whether the source system *has* a
     patient identifier namespace or a release event, never any patient's data. Examples are synthetic.
+18. **A Native laboratory may only be sent work it can actually finish.** DHealth's own human result
+    entry runs against a controlled active result template — `NativeResultEntryForm` renders
+    `UNSTARTED_NO_TEMPLATE` as "native result entry unavailable" by design (DH-LAB-003) — so an
+    active offering with no active template is a service the lab appears to sell and cannot deliver
+    here. The rule is **per service**: an order requiring an untemplated offering is not an eligible
+    destination and direct assignment refuses it by name, while the lab's other services route
+    normally. Partial coverage deliberately does not block the facility — refusing the nine services
+    a lab *can* complete because of a tenth would deny real work and would pressure an operator into
+    deactivating that tenth offering to clear a flag. Zero coverage **is** blocking, because a lab
+    that can complete nothing it advertises is indistinguishable, from an order's point of view,
+    from a lab with no offerings at all — the condition §19 already blocks on. No offering is ever
+    silently deactivated, no template is ever fabricated, and there is no raw free-text human-entry
+    fallback.
+19. **That rule is Native-only and must stay that way.** `untemplated_native_entries_in_session`
+    returns nothing for a CONNECT facility, by construction rather than by a caller remembering to
+    ask. A Connect partner's results are produced in their own system, whose structure DHealth
+    neither owns nor requires; coupling a future connector to DHealth's Native entry templates would
+    be exactly the conflation ADR-055 exists to prevent. The low-level Exchange observation model
+    stays source-flexible, and a missing Native template says nothing about it.
+20. **The first administrator is attached in the same transaction that creates the facility.** Not by
+    a second request the wizard fires afterwards: that request can fail on its own, and the operator
+    would be left with a facility that exists, nobody able to administer it, and a screen that said
+    onboarding succeeded. Either the organization, its enrollment, the membership and every role
+    assignment all exist, or none of them do. Role legality is not restated at this endpoint or in
+    React — `OrganizationRoleAssignmentRepository.assign` already refuses a role invalid for the
+    organization type, and remains the single authority for every caller. The response reports the
+    administrator **read back from what was persisted**, so the completion screen can never claim an
+    attachment that no membership backs.
 
 ### Consequences
 

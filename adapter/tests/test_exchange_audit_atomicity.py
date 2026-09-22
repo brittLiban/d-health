@@ -20,7 +20,7 @@ from exchange_auth_support import (
     generate_keypair,
     make_token,
 )
-from exchange_support import make_provider
+from exchange_support import make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -384,7 +384,7 @@ def test_provider_lab_assignment_rolls_back_when_audit_insert_fails(
     orders_repo = LabOrderRepository(sessions, organizations, catalog)
 
     entry, _ = catalog.create_entry(code="DH-AUDIT-FAIL-ASSIGN", display_name="X")
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     directory.upsert(
         lab_organization_id=lab.id,
         public_address="X",

@@ -14,7 +14,9 @@ from decimal import Decimal
 
 import pytest
 from exchange_support import (
+    activate_result_template,
     make_lab,
+    make_offering,
     make_patient_reference,
     make_practitioner_reference,
     make_provider,
@@ -134,7 +136,7 @@ def test_provider_assigns_lab_with_zero_price_rows_succeeds(
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="ReferralLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
     # Deliberately never call catalog.set_price -- zero LabPrice rows exist anywhere for this lab.
 
@@ -176,7 +178,7 @@ def test_unlisted_but_accepting_lab_is_assignable_by_provider(
         listed=False,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
 
     record, created = selections.assign_by_provider(
@@ -208,7 +210,7 @@ def test_not_accepting_orders_lab_cannot_be_assigned(sessions: sessionmaker[Sess
         listed=True,
         accepting_orders=False,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
 
     with pytest.raises(LabCannotFulfillOrder):
@@ -232,7 +234,7 @@ def test_lab_with_no_directory_profile_cannot_be_assigned(
     ) = _build(sessions)
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="NoProfileLab")
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
     # No directory.upsert call at all -- no LabDirectoryProfile row exists.
 
@@ -256,7 +258,7 @@ def test_inactive_lab_organization_cannot_be_assigned(sessions: sessionmaker[Ses
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="InactiveLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
     with sessions() as session:
         org_row = session.get(Organization, lab.id)
@@ -356,7 +358,7 @@ def test_lab_missing_offering_for_one_item_cannot_be_assigned(
     ).order
     lab = make_lab(organizations, name="PartialLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_a.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_a.id)
     _route(provider_lab_routes, provider.id, lab.id)
     # No offering created for entry_b.
 
@@ -384,7 +386,7 @@ def test_inactive_offering_cannot_be_assigned(sessions: sessionmaker[Session]) -
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="InactiveOfferingLab")
     _accepting_unlisted(directory, lab.id)
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     catalog.set_offering_active(offering.id, False)
     _route(provider_lab_routes, provider.id, lab.id)
 
@@ -412,7 +414,7 @@ def test_inactive_catalog_entry_cannot_be_assigned(sessions: sessionmaker[Sessio
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="InactiveEntryLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
     with sessions() as session:
         entry_row = session.get(TestCatalogEntry, entry.id)
@@ -458,7 +460,7 @@ def test_non_synthetic_catalog_entry_cannot_be_assigned(sessions: sessionmaker[S
     ).order
     lab = make_lab(organizations, name="NonSynthLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
 
     with pytest.raises(LabCannotFulfillOrder):
@@ -481,7 +483,7 @@ def test_assign_same_lab_twice_is_idempotent_replay(sessions: sessionmaker[Sessi
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="ReplayLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
 
     first, first_created = selections.assign_by_provider(
@@ -513,8 +515,8 @@ def test_assign_different_lab_after_existing_assignment_is_refused(
     lab_b = make_lab(organizations, name="LabB")
     _accepting_unlisted(directory, lab_a.id)
     _accepting_unlisted(directory, lab_b.id)
-    catalog.create_offering(lab_organization_id=lab_a.id, catalog_entry_id=entry.id)
-    catalog.create_offering(lab_organization_id=lab_b.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab_a.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab_b.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab_a.id)
     # lab_b deliberately has no configured route -- irrelevant here, since the existing-different-
     # lab-selection conflict is detected before the route check ever runs for the second call.
@@ -550,7 +552,7 @@ def test_cannot_assign_order_owned_by_different_provider(sessions: sessionmaker[
     impostor_provider = make_provider(organizations, name="Impostor")
     lab = make_lab(organizations, name="TenantLab")
     _accepting_unlisted(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
 
     with pytest.raises(OrderNotFound):
         selections.assign_by_provider(
@@ -580,8 +582,8 @@ def test_cannot_assign_lab_for_order_not_awaiting_selection(
     lab_b = make_lab(organizations, name="SecondLab")
     _accepting_unlisted(directory, lab_a.id)
     _accepting_unlisted(directory, lab_b.id)
-    catalog.create_offering(lab_organization_id=lab_a.id, catalog_entry_id=entry.id)
-    catalog.create_offering(lab_organization_id=lab_b.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab_a.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab_b.id, catalog_entry_id=entry.id)
     orders.transition(order.id, LabOrderStatus.SELECTED)
     orders.transition(order.id, LabOrderStatus.REJECTED)
 
@@ -611,8 +613,8 @@ def test_provider_assignment_after_patient_selection_preserves_patient_selection
     ) = _build(sessions)
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="PatientChosenLab")
-    _listed_and_priced_offering = catalog.create_offering(
-        lab_organization_id=lab.id, catalog_entry_id=entry.id
+    _listed_and_priced_offering = make_offering(
+        catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id
     )[0]
     catalog.set_price(
         offering_id=_listed_and_priced_offering.id,
@@ -697,7 +699,7 @@ def test_provider_assignment_succeeds_after_all_price_rows_removed(
     provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
     lab = make_lab(organizations, name="PriceRemovedLab")
     _accepting_unlisted(directory, lab.id)
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
     catalog.set_price(
         offering_id=offering.id,
@@ -749,7 +751,7 @@ def test_lab_that_lost_its_releaser_cannot_be_assigned(sessions: sessionmaker[Se
         listed=True,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     _route(provider_lab_routes, provider.id, lab.id)
 
     with sessions() as session:
@@ -783,3 +785,62 @@ def test_lab_that_lost_its_releaser_cannot_be_assigned(sessions: sessionmaker[Se
             )
         )
         assert route is not None and route.active is True
+
+
+def test_native_offering_without_a_result_template_cannot_be_assigned(
+    sessions: sessionmaker[Session],
+) -> None:
+    """DH-MVP-ONBOARD-001 correction: the order-scoped Native template gate, on the mutation.
+
+    The laboratory here is enrolled, staffed, open, routed, and offers exactly the test that was
+    ordered. It is refused anyway, because DHealth's own human result entry runs against a
+    controlled active template and this offering has none -- the order would arrive and no value
+    could ever be entered against it, let alone released.
+
+    The refusal must name the test rather than the laboratory in general: an operator who reads
+    "Laboratoire X is unavailable" has nothing to act on, and one who reads the test name knows
+    exactly which template to publish.
+    """
+    (
+        organizations,
+        catalog,
+        patients,
+        practitioners,
+        orders,
+        selections,
+        directory,
+        provider_lab_routes,
+    ) = _build(sessions)
+    provider, order, entry = _create_order(organizations, catalog, patients, practitioners, orders)
+    lab = make_lab(organizations, name="UntemplatedLab")
+    _accepting_unlisted(directory, lab.id)
+    # A second, fully templated offering, so this laboratory has *partial* coverage. That matters:
+    # with zero coverage the facility-wide readiness rule would refuse the assignment on its own
+    # and this test would pass without the order-scoped gate existing at all. Partial coverage
+    # isolates the gate under test -- the facility is operationally ready, and this one service
+    # still cannot be completed here.
+    other, _ = catalog.create_entry(code="TPL-OK", display_name="Autre analyse")
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=other.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id, templated=False)
+    _route(provider_lab_routes, provider.id, lab.id)
+
+    with pytest.raises(LabCannotFulfillOrder) as refusal:
+        selections.assign_by_provider(
+            lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
+        )
+    assert "result template" in str(refusal.value)
+    assert entry.display_name in str(refusal.value)
+
+    # And nothing was written: a refused assignment must not leave a selection behind.
+    assert orders.get(order.id).status == LabOrderStatus.AWAITING_LAB_SELECTION.value
+
+    # Publishing the template makes the very same configured route work, with nothing recreated.
+    offering = next(
+        o for o in catalog.list_offerings_for_lab(lab.id) if o.catalog_entry_id == entry.id
+    )
+    activate_result_template(catalog, offering_id=offering.id)
+    record, created = selections.assign_by_provider(
+        lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
+    )
+    assert created is True
+    assert record.lab_organization_id == lab.id

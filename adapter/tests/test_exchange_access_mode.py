@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -177,7 +177,7 @@ def _referral_lab(
         listed=listed,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     if client is not None:
         _configure_route(client, private_key, provider_id, lab.id)
     return lab
@@ -319,7 +319,7 @@ def test_expired_grant_replacement_after_selection_is_order_read(
         client, private_key, organizations, catalog, patients, name="ExpireReplace"
     )
     lab = make_lab(organizations, name="ExpireReplaceLab")
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     catalog.set_price(
         offering_id=offering.id,
         amount=Decimal("300.00"),
@@ -527,7 +527,7 @@ def test_select_refuses_order_read_grant_bypassing_the_route_layer(
         client, private_key, organizations, catalog, patients, name="DomainCapability"
     )
     lab = make_lab(organizations, name="DomainCapabilityLab")
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     catalog.set_price(
         offering_id=offering.id,
         amount=Decimal("100.00"),

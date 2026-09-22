@@ -76,6 +76,35 @@ releases is a real and permitted configuration.
 **`Administration` implies nothing operational.** An `ORG_ADMIN` administers the facility. They are
 not thereby a clinician, a technician, or a releaser.
 
+### A Native laboratory must be able to finish what it offers
+
+DHealth's own human result entry runs against a **controlled active result template**. Without one,
+the Native entry screen says so and offers nothing — that is DHealth Lab's deliberate design, not a
+gap. So an active offering with no active template is a service the laboratory appears to sell and
+cannot deliver inside DHealth: an order routed against it would arrive, and no value could ever be
+entered against it, let alone released.
+
+The rule is therefore **per service, not per facility**:
+
+| Situation | What happens |
+|---|---|
+| Every active offering has an active template | Nothing is restricted. |
+| Some do, some do not | Orders for the templated services route normally. An order requiring an untemplated one is **not eligible** for this laboratory and direct assignment is refused, naming the test. |
+| No active offering has one | The laboratory is **blocked** for production routing entirely — it can complete nothing it advertises, which is the same fact as having no offerings at all. |
+
+Partial coverage deliberately does not block the whole facility. A laboratory that can complete
+nine of its ten services is a real destination for those nine, and blocking it outright would both
+refuse work it can genuinely do and push an operator toward deactivating the tenth offering to
+clear a flag. Nothing here ever deactivates an offering, and no template is ever fabricated.
+
+Publishing and activating the missing template makes the same configured route usable again. **The
+route is never recreated** — exactly as with staffing.
+
+**This is a Native-workflow rule and reaches no further.** A CONNECT laboratory is entirely
+unaffected: its results are produced in the partner's own system, whose structure DHealth neither
+owns nor requires, and the Exchange observation model stays as source-flexible as it was for the
+connector work to come.
+
 ---
 
 ## Connect technical discovery
@@ -143,6 +172,16 @@ There is **no invitation system** in this release, and no account provisioning. 
 2. That materialises their `ExchangeIdentity` — which grants zero access on its own.
 3. A platform administrator searches for them by name or email.
 4. They select the person and grant explicit roles.
+5. Creating the facility **also creates their membership and role assignments, in one transaction**.
+
+Step 5 is atomic on purpose. If any part fails — an illegal role for this facility type, a person
+who has never signed in — **nothing is created at all**, and the screen says so. There is no state
+in which the facility exists and the person meant to run it was never granted anything, and so no
+partial outcome for an operator to untangle.
+
+Valid roles are `ORG_ADMIN` and `CLINICIAN` for a care facility; `ORG_ADMIN`, `LAB_TECH` and
+`LAB_RESULT_RELEASER` for a laboratory. One laboratory person may hold all three. That rule is
+enforced in the backend for every caller, not by which checkboxes a screen happens to show.
 
 If they cannot be found, the reason is almost always that they have never signed in. The screen says
 so rather than leaving an operator wondering.
@@ -158,7 +197,9 @@ grants nothing**, and an email address is never authorization.
 Two questions with different answers:
 
 - **Ce qui empêche la mise en service** — conditions that block production routing right now.
-- **Configuration à compléter** — things still to set up that do not make work undeliverable.
+- **Configuration à compléter** — things still to set up that do not stop the facility being a
+  destination. A partially templated laboratory appears here: it can take orders for the services
+  it can complete, and orders for the others will simply never be routed to it.
 
 Both come from the server, evaluated from live rows on every read. The interface displays them and
 never computes its own version: a copy of the rule in the browser would drift from the backend, and

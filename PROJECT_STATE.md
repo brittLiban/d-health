@@ -18276,11 +18276,120 @@ left in source.
   under a real engine at three widths; it is not the same as somebody enrolling a facility.
 - **No E2E run**, no live stack, no real Keycloak. `typecheck:e2e` passes and is not part of CI.
 - **No CI conclusion.** See above.
-- **The first administrator is found but not yet attached.** The bootstrap still requires the
-  intended administrator to sign in once — there is no invitation system and no Keycloak
-  provisioning, by scope — and the wizard's step for them performs a real lookup without yet
-  creating the membership or assigning the roles. That attachment is DH-MVP-ONBOARD-001's one
-  remaining gap, recorded here rather than implied as done.
+- The bootstrap still requires the intended administrator to **sign in once** before they can be
+  attached: there is no invitation system and no Keycloak provisioning, by scope. (The attachment
+  itself is no longer a gap — see the correction entry below.)
+- **Attaching an administrator to a facility that already exists has API but no platform screen.**
+  `POST /organizations/{id}/memberships` does it and is used by the acceptance journey; the
+  platform UI offers it only during enrollment.
+
+---
+
+## DH-MVP-ONBOARD-001 — correction · 2026-09-21 · directly on `master`
+
+Two ticket-owned gaps, closed. No migration; head stays `0026_facility_enrollment`.
+
+### 1. The wizard offered an action it did not perform
+
+`NewFacilityWizard` let an operator search a person, select them, and tick roles — and then called
+`enrolFacility()` alone. The selected identity and roles went nowhere. That is precisely the defect
+this ticket was written against, sitting inside the ticket itself.
+
+`POST /platform/facilities` now takes an optional `first_administrator: {identity_id, roles}` and
+creates the membership and role assignments **inside the transaction that already covered the
+organization and the enrollment**. A second request would have been simpler and wrong: it can fail
+on its own, leaving a facility nobody can administer behind a screen that said onboarding
+succeeded. Either all of it exists or none of it does.
+
+Three things were deliberately *not* done. Role legality is not re-implemented — `assign` already
+refuses a role invalid for the organization type, and stays the single authority for every caller,
+HTTP or script. No new audit event types were invented: `membership_created` and `role_assigned`
+already exist, and inventing synonyms would have forced a migration to say the same thing twice.
+And the completion screen reports the administrator **read back from what was persisted**, never
+from the operator's selection — `FW3` mocks a null `first_administrator` against a filled selection
+and asserts the screen says nobody is attached.
+
+The review step also promised *"À rattacher après création"*, a screen that does not exist. It now
+says what is true: no administrator will be attached.
+
+### 2. A Native laboratory could be sent work DHealth cannot finish
+
+`lab_result_templates_active` was non-blocking and described a "pre-template path". There is no
+such path: `NativeResultEntryForm` renders `UNSTARTED_NO_TEMPLATE` as *native result entry
+unavailable*, by DH-LAB-003's deliberate design. An active offering with no active template is a
+service a lab appears to sell and cannot deliver, and an order routed against it would arrive with
+no way to enter a single value, let alone release one.
+
+The rule is **per service**, which is the part worth defending:
+
+| Coverage | Behaviour |
+|---|---|
+| Full | Nothing restricted. |
+| Partial | The templated services route normally; an order needing an untemplated one is not eligible and `assign_by_provider` refuses it *by test name*. |
+| Zero | The facility blocks — it can complete nothing it advertises, the same fact `lab_has_active_offering` already blocks on. |
+
+Blocking the whole facility on partial coverage was rejected twice over: it would refuse the nine
+services a lab genuinely can complete because of a tenth, and it would push an operator toward
+deactivating that tenth offering to clear a flag — trading a real capability for a green
+indicator. Nothing here deactivates an offering or fabricates a template.
+
+`untemplated_native_entries_in_session` returns empty for CONNECT **by construction**, not by each
+caller remembering. Coupling a future connector to DHealth's own entry templates would be the
+conflation ADR-055 exists to prevent, and the Exchange observation model stays source-flexible.
+
+`_template_findings` was also moved off the evaluator class into
+`operational_findings_in_session`. It had been appended only by the single-facility read, so the
+facility screen and the activation endpoint were answering from different sets of facts — the
+screen could have said *indisponible* while activation succeeded.
+
+### Fixture correction, not gate weakening
+
+The template rule broke **81 existing tests** that created a Native offering with no template and
+expected assignment to work. They were right before and wrong now, so the fixtures changed: a
+shared `make_offering(catalog, ..., templated=True)` creates the offering *and* activates a minimal
+synthetic template, the same choice `make_lab(operational=True)` already makes for staffing. 102
+call sites moved mechanically; `templated=False` is how a test builds the defective state on
+purpose. `demo_seed` already creates and activates a template per offering, so the demo was never
+at risk — checked before writing anything.
+
+`test_exchange_result_entry_plan.py` needed more than a fixture flag. Its P4/P5 reach "an order
+item with no active template", which fresh assignment can no longer produce. They now reach it the
+way production still can: the order is routed while the template is active and the laboratory
+retires it afterwards.
+
+### Negative controls executed
+
+- **NC-TEMPLATE-ELIG** — filter removed from `find_whole_order_eligible_labs` → the untemplated lab
+  reappeared as a destination (TP2, TP3, TP6 failed).
+- **NC-TEMPLATE-ASSIGN** — check removed from `assign_by_provider` → **DID NOT RAISE**; the
+  prohibited assignment succeeded. Worth noting how this control was sharpened: with a lab that had
+  *zero* templates the facility-wide rule caught it anyway and the control proved nothing about the
+  order-scoped gate. The fixture was changed to partial coverage, which isolates it.
+- **NC-ATOMIC** — the role refusal swallowed inside the transaction → `201 Created` with
+  `"roles":[]`: a facility created, an administrator who administers nothing, and the operator told
+  it worked.
+- **NC-FIRSTADMIN** — `first_administrator` dropped from the wizard's request → FW1, FW2 and FW6
+  failed, reproducing the original defect exactly.
+
+### Evidence
+
+- **Adapter: 1189 passed, 118 skipped** (1168 before this correction). `ruff check` and
+  `ruff format --check` clean across 156 files.
+- New backend tests: **TP1–TP8** (template readiness, both scopes, Connect exemption asserted as an
+  absence), **FB1–FB12** (the bootstrap, its refusals, its audit rows, and the organization's
+  absence after each refusal), one assignment-gate test, and **`test_AC_the_whole_correction_end_to_end`**
+  — the ticket's §6 acceptance journey over HTTP, both halves, in one test.
+- New frontend tests: **FW1–FW8** in `FirstAdministrator.test.tsx`.
+- Ten platform scenes at 1280/768/390, `PROBLEMS: none`, including `platform-first-admin` (reached
+  by a real eight-gesture interaction, which required teaching the harness to fill inputs and click
+  radios, not just buttons), `platform-native-no-template` and `platform-native-ready`.
+- One defect the browser caught: the first-admin scene named the facility "Laboratoire Central"
+  while leaving its type as a care facility, so it offered *Clinicien* — a screenshot documenting
+  something the product would never produce. Same class as the `platform-native-blocked` defect
+  found earlier in this ticket.
+- One wording defect fixed from the capture: the zero-template blocker read *"Structures de résultat
+  incomplètes"*, which understates having none. Blocking findings may now carry their own stronger
+  wording — *"Aucune structure de résultat active"* — while the partial case keeps the softer one.
 
 ### Confirmations
 

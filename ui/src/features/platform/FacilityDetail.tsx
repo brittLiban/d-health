@@ -136,7 +136,7 @@ export function FacilityDetail({
                 <ul className={styles.findingList}>
                   {blocking.map((finding) => (
                     <li key={finding.code} className={styles.findingBlocking}>
-                      {readinessFindingLabel(finding.code, finding.satisfied)}
+                      {readinessFindingLabel(finding.code, finding.satisfied, true)}
                       {finding.detail ? (
                         <span className={styles.findingDetail}> — {finding.detail}</span>
                       ) : null}

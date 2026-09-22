@@ -996,6 +996,25 @@ export interface FacilityReadiness {
 }
 
 /**
+ * What the server actually persisted for a new facility's first administrator.
+ *
+ * Present only when a membership was really created. The wizard reports
+ * attachment from this field and never from its own selection state: the two can
+ * disagree, and only one of them is true.
+ */
+export interface FirstAdministrator {
+  identity_id: string
+  membership_id: string
+  display_name: string | null
+  roles: string[]
+}
+
+/** The create-facility response. Only this endpoint carries `first_administrator`. */
+export interface FacilityEnrollmentCreated extends FacilityEnrollment {
+  first_administrator: FirstAdministrator | null
+}
+
+/**
  * The body of a 409 from `PUT .../lab-routes/{labId}`.
  *
  * Each reason names the side and the code separately. The side is a field rather

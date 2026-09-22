@@ -6,6 +6,19 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-21, DH-MVP-ONBOARD-001 correction, directly on `master`.** Two ticket-owned gaps closed,
+from `1621ca6`. **The wizard's first-administrator step now performs the action it offered**: the
+selected person's membership and role assignments are created in the *same transaction* as the
+organization and its enrollment, so there is no state where a facility exists and nobody can
+administer it. An illegal role for the facility type, or a person who has never signed in, creates
+nothing at all. Role legality stays in `OrganizationRoleAssignmentRepository` — not restated in the
+endpoint and not in React. **And a Native laboratory may now only be sent work it can finish**:
+DHealth's human result entry runs against a controlled active template, so an active offering
+without one is refused *per service* — not eligible, and direct assignment refused by test name —
+while the lab's other services route normally. Zero template coverage blocks the facility outright,
+because a lab that can complete nothing it advertises is not a destination. CONNECT is untouched by
+that rule, by construction rather than by convention.
+
 **2026-09-21, DH-MVP-ONBOARD-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `85f2cba` (DH-MVP-POLISH-001's final commit). This
 ticket builds the **facility enrollment control plane**: a platform operator can enrol a clinic or
@@ -56,8 +69,8 @@ does not.
 
 **Not proven:** no DHealth Connect transport exists and none was built; no real browser has been used
 by a person; no E2E ran; no CI conclusion; and the first-administrator bootstrap still requires the
-person to sign in once (no invitation system, by scope) — the wizard finds them and does not yet
-create the membership.
+person to sign in once (no invitation system, by scope). *Corrected 2026-09-21: the wizard now
+creates that membership and its roles atomically — see the correction entry above.*
 
 **2026-09-20, DH-MVP-POLISH-001, directly on `master`** (this ticket's own explicit instruction: no
 branch, no PR). Starting point was `master` at `50a7eac` (DH-PATIENT-001's own final commit), verified

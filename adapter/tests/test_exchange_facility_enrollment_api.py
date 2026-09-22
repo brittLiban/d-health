@@ -19,7 +19,7 @@ from exchange_auth_support import (
     generate_keypair,
     make_token,
 )
-from exchange_support import make_lab, make_provider
+from exchange_support import activate_result_template, make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -27,13 +27,28 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.api import build_exchange_router
 from daher_adapter.exchange.audit import ExchangeAuditWriter
+from daher_adapter.exchange.catalog import CatalogRepository
+from daher_adapter.exchange.directory import LabDirectoryProfileRepository
+from daher_adapter.exchange.identity import (
+    PatientReferenceRepository,
+    PractitionerReferenceRepository,
+)
 from daher_adapter.exchange.membership import (
     ExchangeIdentityRepository,
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
 )
-from daher_adapter.exchange.models import ExchangeSecurityAuditEvent, OrganizationRole
+from daher_adapter.exchange.models import (
+    ExchangeSecurityAuditEvent,
+    Organization,
+    OrganizationMembership,
+    OrganizationRole,
+    OrganizationRoleAssignment,
+)
+from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
+from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepository
+from daher_adapter.exchange.selection import LabCannotFulfillOrder, LabSelectionRepository
 
 
 @pytest.fixture
@@ -616,3 +631,456 @@ def test_RT3_an_unknown_organization_is_404_not_an_empty_list(client, keypair) -
         headers=_auth(_platform_token(private_key)),
     )
     assert missing.status_code == 404, missing.text
+
+
+# ── FB: the first facility administrator, attached in the act that creates the facility ──────
+
+
+def _signed_in_identity(sessions, subject: str, display_name: str) -> uuid.UUID:
+    """Somebody who has signed into DHealth once. That is the whole bootstrap: there is no
+    invitation system and no account provisioning, so an ExchangeIdentity is what a platform
+    operator can actually find and attach."""
+    identity, _ = ExchangeIdentityRepository(sessions).get_or_create(
+        issuer=ISSUER,
+        subject=subject,
+        display_name=display_name,
+        email=f"{subject}@example.test",
+    )
+    return identity.id
+
+
+def _roles_at(sessions, organization_id: uuid.UUID, identity_id: uuid.UUID) -> list[str]:
+    """What the database actually holds -- never what the request asked for."""
+    with sessions() as session:
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.identity_id == identity_id,
+            )
+        )
+        if membership is None:
+            return []
+        return sorted(
+            session.scalars(
+                select(OrganizationRoleAssignment.role).where(
+                    OrganizationRoleAssignment.membership_id == membership.id
+                )
+            ).all()
+        )
+
+
+def _enrol_with_admin(client, private_key, *, name, org_type, mode, identity_id, roles):
+    return client.post(
+        "/exchange/v1/platform/facilities",
+        headers=_auth(_platform_token(private_key)),
+        json={
+            "name": name,
+            "organization_type": org_type,
+            "participation_mode": mode,
+            "first_administrator": {"identity_id": str(identity_id), "roles": roles},
+        },
+    )
+
+
+def test_FB1_platform_admin_creates_a_provider_with_its_first_administrator(
+    client, keypair, sessions
+) -> None:
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa1-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Al Rahma",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "CLINICIAN"],
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    organization_id = uuid.UUID(body["organization_id"])
+    # The response reports what was persisted, read back from the membership that now exists.
+    assert body["first_administrator"]["identity_id"] == str(ahmed)
+    assert body["first_administrator"]["display_name"] == "Ahmed Ismail"
+    assert body["first_administrator"]["roles"] == ["CLINICIAN", "ORG_ADMIN"]
+    # And the database agrees, which is the claim that actually matters.
+    assert _roles_at(sessions, organization_id, ahmed) == ["CLINICIAN", "ORG_ADMIN"]
+
+
+def test_FB2_platform_admin_creates_a_lab_with_all_three_laboratory_roles(
+    client, keypair, sessions
+) -> None:
+    # One person holding entry and release is a real small-laboratory configuration (ADR-044
+    # declines to force a second human), and administration on top of it is ordinary.
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa2-ahmed", "Ahmed Osman")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Laboratoire Central",
+        org_type="LAB",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "LAB_TECH", "LAB_RESULT_RELEASER"],
+    )
+
+    assert response.status_code == 201, response.text
+    organization_id = uuid.UUID(response.json()["organization_id"])
+    assert _roles_at(sessions, organization_id, ahmed) == [
+        "LAB_RESULT_RELEASER",
+        "LAB_TECH",
+        "ORG_ADMIN",
+    ]
+
+
+def test_FB3_a_facility_may_still_be_created_with_no_administrator(client, keypair, sessions):
+    # Attaching somebody is optional, and omitting them must not fabricate a membership. The
+    # readiness read is what then reports the facility as having no designated administrator.
+    private_key, _ = keypair
+    response = _enrol(
+        client, private_key, name="Clinique Sans Responsable", org_type="PROVIDER", mode="NATIVE"
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["first_administrator"] is None
+    organization_id = uuid.UUID(response.json()["organization_id"])
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(OrganizationMembership).where(
+                    OrganizationMembership.organization_id == organization_id
+                )
+            ).all()
+            == []
+        )
+
+
+def test_FB4_a_provider_cannot_be_given_a_laboratory_role(client, keypair, sessions) -> None:
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa4-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Invalide",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "LAB_TECH"],
+    )
+
+    assert response.status_code == 422, response.text
+    # Atomicity is the claim, and the 422 alone does not prove it: the organization must not
+    # exist either. A facility created without the administrator the request was about is exactly
+    # the half-done state this endpoint exists to prevent.
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(Organization).where(Organization.name == "Clinique Invalide")
+            ).all()
+            == []
+        )
+
+
+def test_FB5_a_laboratory_cannot_be_given_the_clinician_role(client, keypair, sessions) -> None:
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa5-ahmed", "Ahmed Osman")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Laboratoire Invalide",
+        org_type="LAB",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["CLINICIAN"],
+    )
+
+    assert response.status_code == 422, response.text
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(Organization).where(Organization.name == "Laboratoire Invalide")
+            ).all()
+            == []
+        )
+
+
+def test_FB7_somebody_who_never_signed_in_cannot_be_attached(client, keypair, sessions) -> None:
+    """The bootstrap's one precondition, stated rather than surfaced as a database error.
+
+    There is no invitation system and no Keycloak provisioning by scope, so an identity that
+    resolves to nothing means an operator named somebody who has never signed into DHealth.
+    """
+    private_key, _ = keypair
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Fantome",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=uuid.uuid4(),
+        roles=["ORG_ADMIN"],
+    )
+
+    assert response.status_code == 422, response.text
+    assert "sign in" in response.json()["detail"]
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(Organization).where(Organization.name == "Clinique Fantome")
+            ).all()
+            == []
+        )
+
+
+def test_FB8_a_repeated_role_is_absorbed_rather_than_duplicated(client, keypair, sessions) -> None:
+    # A replayed or duplicated grant must stay safe: the repository's own duplicate handling
+    # resolves it to the existing row, and the response describes the grant, not the request.
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa8-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Repetee",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "ORG_ADMIN", "CLINICIAN"],
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["first_administrator"]["roles"] == ["CLINICIAN", "ORG_ADMIN"]
+    organization_id = uuid.UUID(response.json()["organization_id"])
+    assert _roles_at(sessions, organization_id, ahmed) == ["CLINICIAN", "ORG_ADMIN"]
+
+
+def test_FB9_an_ordinary_user_cannot_perform_the_platform_bootstrap(
+    client, keypair, sessions
+) -> None:
+    # Not hidden UI: the gate is on the server. Somebody who has signed in holds no platform
+    # authority by virtue of existing, and cannot create a facility or grant themselves anything.
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa9-ahmed", "Ahmed Ismail")
+
+    response = client.post(
+        "/exchange/v1/platform/facilities",
+        headers=_auth(_plain_token(private_key, "fa9-ahmed")),
+        json={
+            "name": "Clinique Usurpee",
+            "organization_type": "PROVIDER",
+            "participation_mode": "NATIVE",
+            "first_administrator": {"identity_id": str(ahmed), "roles": ["ORG_ADMIN"]},
+        },
+    )
+
+    assert response.status_code == 403, response.text
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(Organization).where(Organization.name == "Clinique Usurpee")
+            ).all()
+            == []
+        )
+
+
+def test_FB10_an_unknown_role_is_refused_by_validation(client, keypair, sessions) -> None:
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa10-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Inventee",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["SUPER_ADMIN"],
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_FB11_an_empty_role_list_is_refused(client, keypair, sessions) -> None:
+    # Selecting a person and granting them nothing is not an attachment. Refused rather than
+    # silently creating a membership that authorizes nothing and looks like it authorizes
+    # something.
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa11-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Vide",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=[],
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_FB12_the_attachment_is_audited_as_membership_and_role_events(
+    client, keypair, sessions
+) -> None:
+    # Reuses the event types the membership endpoint already records, deliberately: the audit
+    # vocabulary is constrained by a CHECK constraint, and a bootstrap that invented its own
+    # strings would have needed a migration to say the same thing twice.
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "fa12-ahmed", "Ahmed Ismail")
+
+    response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Clinique Auditee",
+        org_type="PROVIDER",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "CLINICIAN"],
+    )
+    assert response.status_code == 201, response.text
+    organization_id = uuid.UUID(response.json()["organization_id"])
+
+    membership_events = [
+        e for e in _audit(sessions, "membership_created") if e.organization_id == organization_id
+    ]
+    role_events = [
+        e for e in _audit(sessions, "role_assigned") if e.organization_id == organization_id
+    ]
+    assert len(membership_events) == 1
+    assert {e.role for e in role_events} == {"ORG_ADMIN", "CLINICIAN"}
+    assert all(e.subject_identity_id == ahmed for e in membership_events + role_events)
+
+
+def test_AC_the_whole_correction_end_to_end(client, keypair, sessions) -> None:
+    """DH-MVP-ONBOARD-001 §6, both halves, as one journey over HTTP.
+
+    Create Laboratoire Central -> find Ahmed -> grant Administration, Analyse and Liberation ->
+    Ahmed actually holds that membership and those roles.
+
+    Then: that lab is Native, staffed, and offers CBC with no active result template. A clinic
+    orders CBC and the lab must not be an eligible destination, nor accept a direct assignment.
+    Activate an approved CBC template and the same configured route becomes usable, with nothing
+    recreated.
+    """
+    private_key, _ = keypair
+    ahmed = _signed_in_identity(sessions, "ac-ahmed", "Ahmed Osman")
+
+    # ── enrolment and the first administrator, in one act ────────────────────────────────────
+    lab_response = _enrol_with_admin(
+        client,
+        private_key,
+        name="Laboratoire Central",
+        org_type="LAB",
+        mode="NATIVE",
+        identity_id=ahmed,
+        roles=["ORG_ADMIN", "LAB_TECH", "LAB_RESULT_RELEASER"],
+    )
+    assert lab_response.status_code == 201, lab_response.text
+    lab_id = uuid.UUID(lab_response.json()["organization_id"])
+    assert _roles_at(sessions, lab_id, ahmed) == [
+        "LAB_RESULT_RELEASER",
+        "LAB_TECH",
+        "ORG_ADMIN",
+    ]
+
+    provider_response = _enrol(
+        client, private_key, name="Clinique Al Rahma", org_type="PROVIDER", mode="NATIVE"
+    )
+    provider_id = uuid.UUID(provider_response.json()["organization_id"])
+    halima = _signed_in_identity(sessions, "ac-halima", "Dr Halima Farah")
+    _attach(client, private_key, provider_id, halima, ["CLINICIAN"])
+
+    # ── an offering DHealth cannot complete ──────────────────────────────────────────────────
+    organizations = OrganizationRepository(sessions)
+    catalog = CatalogRepository(sessions, organizations)
+    directory = LabDirectoryProfileRepository(sessions, organizations)
+    routes = ProviderLabRouteRepository(sessions, organizations)
+    directory.upsert(
+        lab_organization_id=lab_id,
+        public_address="Avenue 13, Djibouti",
+        latitude=None,
+        longitude=None,
+        public_phone=None,
+        listed=False,
+        accepting_orders=True,
+    )
+    cbc, _ = catalog.create_entry(code="AC-CBC", display_name="Numération formule sanguine")
+    offering, _ = make_offering(
+        catalog, lab_organization_id=lab_id, catalog_entry_id=cbc.id, templated=False
+    )
+    route, _created, _changed = routes.upsert(
+        provider_organization_id=provider_id, lab_organization_id=lab_id, active=True
+    )
+
+    # The clinic orders CBC. Everything else about this laboratory is in order.
+    assert routes.find_whole_order_eligible_labs(provider_id, [cbc.id]) == [], (
+        "a Native lab with no active result template for the ordered test must not be offered "
+        "as a destination"
+    )
+    selections = LabSelectionRepository(sessions, organizations)
+    orders = LabOrderRepository(sessions, organizations, catalog)
+    patients = PatientReferenceRepository(sessions)
+    patient = patients.get_or_create(
+        source_organization_id=provider_id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-patient-id",
+        source_identity_value="AC-PATIENT-1",
+        display_name="Synthetic Patient",
+    )
+    practitioner = PractitionerReferenceRepository(sessions).get_or_create(
+        source_organization_id=provider_id,
+        source_system="dhealth_provider_portal",
+        source_identity_system="urn:daher-health:provider-portal-practitioner-id",
+        source_identity_value="AC-DOCTOR-1",
+        display_name="Dr Synthetic",
+    )
+    order = orders.create(
+        idempotency_key="ac-order-1",
+        provider_organization_id=provider_id,
+        patient_reference_id=patient.id,
+        practitioner_reference_id=practitioner.id,
+        items=[OrderItemInput(catalog_entry_id=cbc.id)],
+    ).order
+    with pytest.raises(LabCannotFulfillOrder) as refusal:
+        selections.assign_by_provider(
+            lab_order_id=order.id,
+            lab_organization_id=lab_id,
+            provider_organization_id=provider_id,
+        )
+    assert "result template" in str(refusal.value)
+    assert "Numération formule sanguine" in str(refusal.value)
+
+    # ── publish and activate the template ────────────────────────────────────────────────────
+    activate_result_template(catalog, offering_id=offering.id)
+
+    eligible = routes.find_whole_order_eligible_labs(provider_id, [cbc.id])
+    assert [e.lab_organization_id for e in eligible] == [lab_id]
+    record, created = selections.assign_by_provider(
+        lab_order_id=order.id, lab_organization_id=lab_id, provider_organization_id=provider_id
+    )
+    assert created is True
+    assert record.lab_organization_id == lab_id
+
+    # Nothing about the relationship was recreated: same route row, same state throughout.
+    surviving = routes.list_for_provider(provider_id, active_only=False)
+    assert [(r.id, r.active) for r in surviving] == [(route.id, True)]
+
+
+def _attach(client, private_key, organization_id, identity_id, roles):
+    """Attach somebody to a facility that already exists, through the membership endpoint.
+
+    The enrollment endpoint attaches the *first* administrator atomically; this is the ordinary
+    path for everybody after that, and the acceptance journey uses it for the clinic's clinician.
+    """
+    response = client.post(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+        json={"identity_id": str(identity_id), "roles": roles},
+    )
+    assert response.status_code in (200, 201), response.text

@@ -30,6 +30,7 @@ import type {
   ExchangeErrorCode,
   ExchangeMeResponse,
   FacilityEnrollment,
+  FacilityEnrollmentCreated,
   FacilityReadiness,
   IdentityLookupResult,
   InterfaceType,
@@ -1483,10 +1484,23 @@ export class ExchangeClient {
 
   /** POST /exchange/v1/platform/facilities -- organization and enrollment, one transaction. */
   async enrolFacility(
-    body: { name: string; organization_type: "PROVIDER" | "LAB"; participation_mode: ParticipationMode },
+    body: {
+      name: string
+      organization_type: "PROVIDER" | "LAB"
+      participation_mode: ParticipationMode
+      /**
+       * Attached in the same transaction that creates the facility, so there is
+       * no state where the organization exists and the person meant to run it
+       * was never granted anything. Omit it to enrol without an administrator.
+       *
+       * Roles are sent as chosen; which roles are legal for which organization
+       * type is the server's rule, never re-implemented here.
+       */
+      first_administrator?: { identity_id: string; roles: string[] }
+    },
     options: { token?: string; signal?: AbortSignal } = {},
-  ): Promise<FacilityEnrollment> {
-    return this.request<FacilityEnrollment>(
+  ): Promise<FacilityEnrollmentCreated> {
+    return this.request<FacilityEnrollmentCreated>(
       "/platform/facilities",
       { method: "POST", body: JSON.stringify(body), signal: options.signal },
       options.token,

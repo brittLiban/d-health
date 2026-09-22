@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -172,7 +172,7 @@ def _referral_lab(
         listed=listed,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     if client is not None:
         _configure_route(client, private_key, provider_id, lab.id)
     return lab
@@ -556,7 +556,7 @@ def test_patient_response_still_shows_real_total_for_patient_selection(
         client, private_key, organizations, catalog, patients, name="RealPrice"
     )
     lab = make_lab(organizations, name="RealPriceLab")
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     catalog.set_price(
         offering_id=offering.id,
         amount=Decimal("500.00"),
@@ -660,7 +660,7 @@ def test_provider_assignment_after_patient_selection_preserves_patient_receipt(
         client, private_key, organizations, catalog, patients, name="ReverseOrder"
     )
     lab = make_lab(organizations, name="ReverseOrderLab")
-    offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     catalog.set_price(
         offering_id=offering.id,
         amount=Decimal("750.00"),

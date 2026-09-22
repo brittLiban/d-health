@@ -276,6 +276,27 @@ const NATIVE_BLOCKED_READINESS: FacilityReadiness = {
   ],
 }
 
+/**
+ * A Native lab that offers work DHealth cannot complete: active offerings, no
+ * active result template. Blocking, because it can finish none of what it sells.
+ */
+const NATIVE_NO_TEMPLATE_READINESS: FacilityReadiness = {
+  organization_id: 'org-untemplated',
+  participation_mode: 'NATIVE',
+  onboarding_status: 'ORGANIZATION_READY',
+  production_routing_allowed: false,
+  findings: [
+    { code: 'organization_active', satisfied: true, blocking: true, detail: null },
+    { code: 'enrollment_not_blocked', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_accepting_orders', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_has_active_offering', satisfied: true, blocking: true, detail: '2 analyse(s) active(s)' },
+    { code: 'lab_technician_present', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_releaser_present', satisfied: true, blocking: true, detail: null },
+    { code: 'lab_result_templates_active', satisfied: false, blocking: true, detail: '0/2 analyse(s) structurée(s)' },
+    { code: 'administrator_present', satisfied: true, blocking: false, detail: null },
+  ],
+}
+
 /** A provider that may order, for the routing scene. */
 const PROVIDER_READY_READINESS: FacilityReadiness = {
   organization_id: 'org-native-provider',
@@ -396,6 +417,54 @@ const SCENES: Record<string, () => ReactElement> = {
   'platform-zero-membership': () => <PlatformScene />,
   'platform-facility-list': () => <PlatformScene />,
   'platform-new-facility': () => <PlatformScene />,
+  // The first-administrator step: a person found, selected, and three laboratory
+  // roles ticked. The scene the wizard existed to offer and did not perform.
+  'platform-first-admin': () => <PlatformScene />,
+  // A Native laboratory blocked because it can complete none of what it offers:
+  // active offerings, no active result template, so DHealth could enter nothing.
+  'platform-native-no-template': () => (
+    <PlatformScene
+      facilities={[
+        facilityFixture({
+          organization_id: 'org-untemplated',
+          organization_name: 'Laboratoire Bahr',
+          participation_mode: 'NATIVE',
+          onboarding_status: 'ORGANIZATION_READY',
+          integration_feasibility: null,
+          existing_system_name: null,
+          existing_system_vendor: null,
+          existing_system_version: null,
+          hosting_model: null,
+          technical_contact: null,
+          vendor_contact: null,
+          interfaces: [],
+        }),
+      ]}
+      readiness={NATIVE_NO_TEMPLATE_READINESS}
+    />
+  ),
+  // The same laboratory once its templates are published: nothing else changed.
+  'platform-native-ready': () => (
+    <PlatformScene
+      facilities={[
+        facilityFixture({
+          organization_id: 'org-1',
+          organization_name: 'Laboratoire Nour',
+          participation_mode: 'NATIVE',
+          onboarding_status: 'READY_FOR_ROUTING',
+          integration_feasibility: null,
+          existing_system_name: null,
+          existing_system_vendor: null,
+          existing_system_version: null,
+          hosting_model: null,
+          technical_contact: null,
+          vendor_contact: null,
+          interfaces: [],
+        }),
+      ]}
+      readiness={LAB_READY_READINESS}
+    />
+  ),
   'platform-with-membership': () => (
     <PlatformScene memberships={[membership('PROVIDER', 'Clinique Al Rahma', ['CLINICIAN'])]} />
   ),

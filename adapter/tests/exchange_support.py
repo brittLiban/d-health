@@ -18,6 +18,10 @@ from daher_adapter.exchange.identity import (
     PractitionerReferenceRecord,
     PractitionerReferenceRepository,
 )
+from daher_adapter.exchange.lab_result_templates import (
+    LabResultTemplateRepository,
+    TemplateObservationDefinitionInput,
+)
 from daher_adapter.exchange.membership import (
     ExchangeIdentityRepository,
     OrganizationMembershipRepository,
@@ -152,3 +156,70 @@ def make_priced_offering(
     if not active:
         catalog.set_offering_active(offering.id, False)
     return entry, offering
+
+
+def make_offering(
+    catalog: CatalogRepository,
+    *,
+    lab_organization_id: uuid.UUID,
+    catalog_entry_id: uuid.UUID,
+    templated: bool = True,
+) -> tuple[LabOfferingRecord, bool]:
+    """An active offering a NATIVE laboratory can actually complete in DHealth.
+
+    Drop-in for ``catalog.create_offering`` -- same arguments, same ``(record, created)`` return.
+
+    DH-MVP-ONBOARD-001's correction makes an untemplated offering unroutable for a NATIVE lab:
+    DHealth's own human result entry runs against a controlled active template, so an offering
+    without one is a service that could be ordered and never completed. That is a real product
+    rule, so the fixture satisfies it rather than the gate being weakened to accommodate fixtures
+    -- the same choice ``make_lab(operational=True)`` already makes for staffing.
+
+    Pass ``templated=False`` to build the defective state deliberately, which is what the tests
+    of this rule need.
+
+    Reaches ``catalog._sessions`` to construct the template repository, following the convention
+    ``_enrol_and_staff`` above already established in this module: a test helper composing several
+    repositories over one session factory, rather than every call site threading four fixtures.
+    """
+    offering, created = catalog.create_offering(
+        lab_organization_id=lab_organization_id, catalog_entry_id=catalog_entry_id
+    )
+    if templated:
+        activate_result_template(catalog, offering_id=offering.id)
+    return offering, created
+
+
+def activate_result_template(
+    catalog: CatalogRepository, *, offering_id: uuid.UUID, version: int = 1
+) -> None:
+    """Create and activate one minimal, synthetic result template for an offering.
+
+    One required NUMERIC observation -- the smallest shape the repository accepts (it demands at
+    least one definition and at least one required one). Nothing clinical is invented here: the
+    label and code are obviously synthetic placeholders, exactly as every other fixture value in
+    this module is.
+    """
+    templates = LabResultTemplateRepository(catalog._sessions)  # noqa: SLF001 -- see make_offering
+    template, _created = templates.create_template(
+        lab_offering_id=offering_id,
+        version=version,
+        observations=[
+            TemplateObservationDefinitionInput(
+                source_code="SYNTH-OBS-1",
+                display_label="Valeur synthétique",
+                result_type="NUMERIC",
+                numeric_unit="u",
+                required=True,
+                sort_order=0,
+            )
+        ],
+    )
+    current = templates.get_active_templates_for_offerings([offering_id]).get(offering_id)
+    if current is not None and current.id == template.id:
+        return
+    templates.activate_template(
+        lab_offering_id=offering_id,
+        template_id=template.id,
+        expected_current_template_id=current.id if current else None,
+    )

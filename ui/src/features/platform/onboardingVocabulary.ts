@@ -186,9 +186,20 @@ const READINESS_FINDING_MISSING: Record<string, string> = {
   connector_qualified: 'Connecteur DHealth non qualifié',
 }
 
-export function readinessFindingLabel(code: string, satisfied = true): string {
-  if (!satisfied) return READINESS_FINDING_MISSING[code] ?? READINESS_FINDING[code] ?? code
-  return READINESS_FINDING[code] ?? code
+/**
+ * A few findings block only in their most severe form, and the general wording is
+ * too soft for it. A Native laboratory with *no* active result template is not
+ * "incomplete": it can complete nothing it offers, which is why that case blocks
+ * and partial coverage does not.
+ */
+const READINESS_FINDING_BLOCKING: Record<string, string> = {
+  lab_result_templates_active: 'Aucune structure de résultat active',
+}
+
+export function readinessFindingLabel(code: string, satisfied = true, blocking = false): string {
+  if (satisfied) return READINESS_FINDING[code] ?? code
+  if (blocking && READINESS_FINDING_BLOCKING[code]) return READINESS_FINDING_BLOCKING[code]
+  return READINESS_FINDING_MISSING[code] ?? READINESS_FINDING[code] ?? code
 }
 
 /**
@@ -232,4 +243,17 @@ export const ROLE_CHOICES_BY_TYPE: Record<string, { role: string; label: string 
     { role: 'LAB_TECH', label: 'Analyse' },
     { role: 'LAB_RESULT_RELEASER', label: 'Libération' },
   ],
+}
+
+/**
+ * One role's French label for a given organization type.
+ *
+ * A presentation lookup over the same list the checkboxes render, never a rule:
+ * whether a role may actually be granted to this facility type is decided by the
+ * server, which refuses an illegal pairing regardless of what this screen showed.
+ * An unknown role falls back to its raw value rather than disappearing.
+ */
+export function roleLabel(organizationType: string, role: string): string {
+  const choices = ROLE_CHOICES_BY_TYPE[organizationType] ?? []
+  return choices.find((choice) => choice.role === role)?.label ?? role
 }

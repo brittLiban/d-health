@@ -19,6 +19,9 @@ const SCENES = [
   'platform-native-blocked',
   'platform-not-integrable',
   'platform-route-activation',
+  'platform-first-admin',
+  'platform-native-no-template',
+  'platform-native-ready',
   'platform-new-facility',
   'shell-provider',
   'shell-lab-dual',
@@ -39,6 +42,21 @@ const SCENE_ACTIONS = {
   // then press Activer. The scene is the restatement an operator reads before
   // switching production routing on, not the button that leads to it.
   'platform-route-activation': [/Clinique Al Rahma/, /^Activer$/],
+  'platform-native-no-template': [/Laboratoire Bahr/],
+  'platform-native-ready': [/Laboratoire Nour/],
+  // Four gestures to reach the step this correction was about: open the wizard,
+  // name the facility, choose Native, then find and select the person.
+  'platform-first-admin': [
+    { click: /Enregistrer un établissement/ },
+    { fill: { label: /Nom de l'établissement/, value: 'Laboratoire Central' } },
+    { click: /Laboratoire d'analyses/, role: 'radio' },
+    { click: /^Continuer$/ },
+    { click: /Utiliser DHealth/, role: 'radio' },
+    { click: /^Continuer$/ },
+    { fill: { label: /Rechercher une personne/, value: 'Ahmed' } },
+    { click: /^Rechercher$/ },
+    { click: /Ahmed Osman/ },
+  ],
 }
 
 // Phone width is the patient surface's case. Platform work is desktop and tablet,
@@ -102,8 +120,18 @@ for (const viewport of WIDTHS) {
     // Some scenes are about a screen you reach by doing something. Capturing the
     // list and calling the file "connect-readiness" would be a screenshot that
     // documents the wrong thing, so the capture performs the real interaction.
-    for (const control of SCENE_ACTIONS[scene] ?? []) {
-      await page.getByRole('button', { name: control }).first().click()
+    // A step is a regex (click that button) or {click} / {fill}. The wizard needs
+    // fill: its later steps are unreachable until the earlier ones are answered,
+    // and a screenshot of a step nobody could reach documents nothing.
+    for (const step of SCENE_ACTIONS[scene] ?? []) {
+      if (step instanceof RegExp || step.click) {
+        await page
+          .getByRole(step.role ?? 'button', { name: step instanceof RegExp ? step : step.click })
+          .first()
+          .click()
+      } else if (step.fill) {
+        await page.getByLabel(step.fill.label).first().fill(step.fill.value)
+      }
       await page.waitForTimeout(300)
     }
 

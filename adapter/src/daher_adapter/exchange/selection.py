@@ -49,7 +49,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.exchange.facility_enrollment import is_operationally_ready_in_session
+from daher_adapter.exchange.facility_enrollment import (
+    is_operationally_ready_in_session,
+    untemplated_native_entries_in_session,
+)
 from daher_adapter.exchange.models import (
     LabDirectoryProfile,
     LabOffering,
@@ -68,6 +71,21 @@ from daher_adapter.exchange.models import (
 from daher_adapter.exchange.orders import InvalidOrderTransition, OrderNotFound
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.models import utc_now
+
+
+def _catalog_entry_names(session: Session, catalog_entry_ids: Sequence[uuid.UUID]) -> list[str]:
+    """Display names for a refusal message, so an operator reads test names rather than uuids.
+
+    Falls back to the id for anything that cannot be resolved: a refusal that names the tests
+    imprecisely is still more actionable than one that names none of them.
+    """
+    rows = session.execute(
+        select(TestCatalogEntry.id, TestCatalogEntry.display_name).where(
+            TestCatalogEntry.id.in_(catalog_entry_ids)
+        )
+    ).all()
+    by_id = {entry_id: name for entry_id, name in rows}
+    return [str(by_id.get(entry_id, entry_id)) for entry_id in catalog_entry_ids]
 
 
 def _aware(value: datetime) -> datetime:
@@ -540,6 +558,28 @@ class LabSelectionRepository:
             raise LabCannotFulfillOrder(
                 f"lab {lab_organization_id} does not have an active offering for every "
                 f"requested item -- refusing partial assignment"
+            )
+
+        # DH-MVP-ONBOARD-001 correction: the lab offers every requested test, and for a NATIVE lab
+        # that is not yet the same as being able to finish them. DHealth's own human result entry
+        # runs against a controlled active template -- `NativeResultEntryForm` renders
+        # UNSTARTED_NO_TEMPLATE as "native result entry unavailable" by design -- so an active
+        # offering with no active template is a service the lab appears to sell and cannot deliver
+        # here. Routed against it, the order would arrive and no result could ever be entered.
+        #
+        # Specific before generic, the same ordering discipline as the checks above: this names
+        # the exact tests at fault, where the broad readiness check below would only say the lab
+        # is unavailable. Empty for a CONNECT lab by construction -- the work happens in the
+        # partner's system, whose result structure DHealth does not own.
+        untemplated = untemplated_native_entries_in_session(
+            session, lab_organization_id, sorted(required_entry_ids, key=str)
+        )
+        if untemplated:
+            names = _catalog_entry_names(session, untemplated)
+            raise LabCannotFulfillOrder(
+                f"lab {lab_organization_id} has no active DHealth result template for: "
+                f"{', '.join(names)} -- an order could arrive there and no result could be "
+                f"entered, so it is refused rather than stranded"
             )
 
         # DH-MVP-ONBOARD-001: last, deliberately. Every check above diagnoses one specific defect

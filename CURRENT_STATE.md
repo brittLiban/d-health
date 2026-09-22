@@ -1816,3 +1816,20 @@ to be increased."* Repository code was never evaluated, so there is no CI conclu
 either direction. Local qualification is the authoritative evidence: adapter 1168 passed / 118
 skipped, 811 UI tests across all 54 files, migration re-qualified against real PostgreSQL 18, and
 five negative controls executed and reverted. This is not a pilot-readiness claim.
+
+**DH-MVP-ONBOARD-001 correction (2026-09-21):** two gaps the ticket itself had left open are closed.
+**The enrollment wizard now performs the first-administrator attachment it was offering** — the
+membership and role assignments are created in the same transaction as the organization and its
+enrollment, so a failure creates nothing at all rather than a facility nobody can administer; the
+completion screen reports the administrator read back from what was persisted, never from what was
+selected. **And a Native laboratory can only be sent work DHealth can finish**: an active offering
+with no active result template is refused per service (not an eligible destination, and direct
+assignment refused naming the test), while the laboratory's other services route normally; a
+laboratory with no templated offering at all is blocked outright. Partial coverage deliberately does
+not block the facility, and nothing deactivates an offering or fabricates a template. **CONNECT is
+unaffected by that rule by construction** — a partner's results are produced in their own system and
+the Exchange observation model stays source-flexible for the connector work to come. Adapter tests
+1168 → **1189 passed, 118 skipped**; four further negative controls executed and reverted; ten
+platform scenes captured at 1280/768/390 with `PROBLEMS: none`. No migration. Still not run, still
+not claimed: no real browser used by a person, no E2E, no live stack, no real Keycloak, and no CI
+conclusion — GitHub Actions remains blocked before step execution by the account billing condition.

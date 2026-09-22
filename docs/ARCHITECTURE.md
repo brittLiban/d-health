@@ -1828,6 +1828,25 @@ accept an order, enter every value, and never be able to release it.
    find_whole_order_eligible_labs      unready labs dropped from the candidate set
 ```
 
+**Two scopes, because the questions differ.** Staffing and enrollment are facility-wide: a lab with
+no releaser can finish nothing, ever. Native result templates are per offering, so they get a
+second, order-scoped rule:
+
+```
+   operational_findings_in_session(session, org)
+       facility-wide -- staffing, enrollment, open doors, offerings, connector
+       plus: zero templated offerings blocks (the lab can complete nothing it offers)
+
+   untemplated_native_entries_in_session(session, lab, entry_ids)
+       order-scoped -- which of *these* requested tests this lab could not finish
+       empty for CONNECT, by construction
+```
+
+Partial template coverage therefore leaves the facility routable and makes one service unroutable.
+Blocking the whole lab instead would refuse the nine services it can complete because of a tenth,
+and would pressure an operator into deactivating that tenth offering to clear a flag — a silent
+capability loss traded for a green indicator.
+
 `ProviderLabRouteRepository.upsert` stays the low-level persistence primitive with no policy in it.
 That is deliberate: `demo_seed` activates its route before creating the lab's offerings, and the
 DH-CLINIC-006 concurrency tests construct routes directly, so a gate inside the primitive would make

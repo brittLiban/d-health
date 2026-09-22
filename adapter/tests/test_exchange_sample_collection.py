@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
@@ -177,7 +177,7 @@ def _referral_lab(
         listed=False,
         accepting_orders=True,
     )
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
     if client is not None:
         _configure_route(client, private_key, provider_id, lab.id)
     return lab
@@ -475,7 +475,7 @@ def _seed_lab_with_n_orders(
         if lab is None:
             lab = _referral_lab(organizations, directory, catalog, name=lab_name, entry_id=entry_id)
         else:
-            catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
+            make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry_id)
         # Each iteration uses a distinct provider (a fresh `_create_order` call) but the same lab
         # -- a route must be configured per provider->lab pair, not just once for the shared lab.
         _configure_route(client, private_key, provider.id, lab.id)
@@ -544,7 +544,7 @@ def _seed_n_orders_for_one_lab(
         entry, _ = catalog.create_entry(
             code=f"N1-{lab.name}-{i}", display_name=f"N1 Test {lab.name} {i}"
         )
-        offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        offering, _ = make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
         catalog.set_price(
             offering_id=offering.id,
             amount=Decimal("100"),

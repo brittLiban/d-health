@@ -102,6 +102,7 @@ from daher_adapter.exchange.membership import (
 )
 from daher_adapter.exchange.models import (
     DoctorReviewStatus,
+    ExchangeIdentity,
     LabOrderStatus,
     LabResultType,
     OnboardingStatus,
@@ -234,6 +235,13 @@ _CANONICAL_UUID4_PATTERN = re.compile(
 # DH-EX-005R: `secrets.token_urlsafe(32)` produces exactly 43 characters -- generously bounded so
 # an attacker-controlled Authorization header cannot force unbounded hashing/DB-lookup work.
 _MAX_PATIENT_BEARER_TOKEN_LENGTH = 512
+
+
+class _UnknownFirstAdministrator(Exception):
+    """Internal-only signal: the identity named as a new facility's first administrator does not
+    exist. Raised inside the enrollment transaction so that it rolls back -- the organization and
+    the enrollment must not survive a request whose whole point was to give them an administrator
+    -- then caught outside and turned into a 422 that says why."""
 
 
 class _InactiveMembershipReplay(Exception):
@@ -1995,6 +2003,22 @@ class DoctorReviewResponse(BaseModel):
 # ── DH-MVP-ONBOARD-001: facility enrollment, discovery and readiness ─────────────────────────
 
 
+class FirstAdministratorRequest(BaseModel):
+    """The person who will run this facility, attached in the same act that creates it.
+
+    An identity id, never an email address: the lookup endpoint returns ids for people who have
+    already authenticated, and an email address is not authorization. Roles are typed as the
+    `OrganizationRole` enum, so an unknown role is a 422 from validation -- but whether a *known*
+    role is legal for this organization type stays where it already lives, in
+    `OrganizationRoleAssignmentRepository`, rather than being restated here and in React.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity_id: uuid.UUID
+    roles: list[OrganizationRole] = Field(min_length=1)
+
+
 class FacilityEnrollmentCreateRequest(BaseModel):
     """Enrol a facility: create the organization and its enrollment as one act.
 
@@ -2008,6 +2032,7 @@ class FacilityEnrollmentCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=256)
     organization_type: Literal["PROVIDER", "LAB"]
     participation_mode: Literal["NATIVE", "CONNECT"]
+    first_administrator: FirstAdministratorRequest | None = None
 
 
 class ParticipationModeChangeRequest(BaseModel):
@@ -2150,6 +2175,30 @@ class FacilityEnrollmentResponse(BaseModel):
     open_blockers: list[BlockerResponse]
 
 
+class FirstAdministratorResponse(BaseModel):
+    """What was actually persisted, read back from the membership that now exists."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity_id: uuid.UUID
+    membership_id: uuid.UUID
+    display_name: str | None
+    roles: list[str]
+
+
+class FacilityEnrollmentCreatedResponse(FacilityEnrollmentResponse):
+    """The create endpoint's response only.
+
+    `first_administrator` is present exactly when a membership was created, and is read back from
+    the database rather than echoed from the request. That is what lets the wizard say "rattaché"
+    truthfully: it reports what the server persisted, never what the operator selected. A separate
+    response model rather than a field on the shared one, so the list and detail reads are not
+    quietly obliged to go and fetch memberships they have no reason to.
+    """
+
+    first_administrator: FirstAdministratorResponse | None = None
+
+
 class ReadinessFindingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2230,8 +2279,6 @@ def build_exchange_router(
     facility_readiness = FacilityReadinessEvaluator(
         sessions=session_factory,
         enrollments=facility_enrollments,
-        catalog=catalog,
-        templates=result_templates,
     )
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
@@ -6812,21 +6859,34 @@ def build_exchange_router(
 
     @router.post(
         "/platform/facilities",
-        response_model=FacilityEnrollmentResponse,
+        response_model=FacilityEnrollmentCreatedResponse,
         status_code=status.HTTP_201_CREATED,
     )
     def enrol_facility(
         body: FacilityEnrollmentCreateRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
-    ) -> FacilityEnrollmentResponse:
-        """Create an organization and its enrollment together, or neither.
+    ) -> FacilityEnrollmentCreatedResponse:
+        """Create an organization, its enrollment and its first administrator together, or none.
 
-        §72: one transaction covering the organization, the enrollment and both audit rows. A
-        half-created facility -- an organization with no enrollment -- is exactly the fail-open
-        state the readiness gate refuses to treat as routable, so it must not be reachable by a
-        request that failed halfway through.
+        §72: one transaction covering the organization, the enrollment, the first administrator's
+        membership and role assignments, and every audit row. A half-created facility -- an
+        organization with no enrollment -- is exactly the fail-open state the readiness gate
+        refuses to treat as routable, so it must not be reachable by a request that failed
+        halfway through.
+
+        DH-MVP-ONBOARD-001 correction: the first administrator is attached *here*, inside that
+        same transaction, rather than by a second request the wizard fires afterwards. A second
+        request can fail on its own, and the operator would be left with a facility that exists
+        and nobody who can administer it, having been told onboarding succeeded. Either the whole
+        thing happened or none of it did, and there is no partial state to explain.
+
+        Role legality is not re-implemented here. `OrganizationRoleAssignmentRepository.assign`
+        already refuses a role that is invalid for the organization type, and that one
+        implementation stays the authority -- a CLINICIAN on a laboratory is refused by the same
+        code whether the request came from this endpoint, the membership endpoint, or a script.
         """
         _require_platform(principal, None)
+        first_admin: FirstAdministratorResponse | None = None
         try:
             with session_factory.begin() as session:
                 organization = organizations.create(
@@ -6854,11 +6914,76 @@ def build_exchange_router(
                     resource_type="facility_enrollment",
                     resource_id=enrollment.id,
                 )
+
+                if body.first_administrator is not None:
+                    # The person must already exist as an ExchangeIdentity, which means they have
+                    # signed into DHealth at least once. There is no invitation system and no
+                    # account provisioning (by scope), so an id that resolves to nothing is an
+                    # operator naming somebody who has never signed in -- said plainly, rather
+                    # than surfacing as a foreign-key error.
+                    target = session.get(ExchangeIdentity, body.first_administrator.identity_id)
+                    if target is None:
+                        raise _UnknownFirstAdministrator(body.first_administrator.identity_id)
+                    membership, membership_created = memberships.create(
+                        organization_id=organization.id,
+                        identity_id=target.id,
+                        session=session,
+                    )
+                    security_audit.record(
+                        session,
+                        event_type="membership_created",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=organization.id,
+                        subject_identity_id=target.id,
+                        membership_id=membership.id,
+                        outcome="created" if membership_created else "returned_existing",
+                    )
+                    granted: list[str] = []
+                    for role in body.first_administrator.roles:
+                        _, role_created = role_assignments.assign(
+                            membership_id=membership.id, role=role, session=session
+                        )
+                        granted.append(role.value)
+                        security_audit.record(
+                            session,
+                            event_type="role_assigned",
+                            actor_identity_id=principal.identity_id,
+                            organization_id=organization.id,
+                            subject_identity_id=target.id,
+                            membership_id=membership.id,
+                            role=role.value,
+                            outcome="created" if role_created else "returned_existing",
+                        )
+                    # A repeated role in one request is absorbed by the repository's own
+                    # duplicate handling; reported sorted and deduplicated so the response
+                    # describes the grant rather than the request.
+                    first_admin = FirstAdministratorResponse(
+                        identity_id=target.id,
+                        membership_id=membership.id,
+                        display_name=target.display_name,
+                        roles=sorted(set(granted)),
+                    )
+        except _UnknownFirstAdministrator as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    "the selected person is not known to DHealth -- they must sign in once "
+                    "before they can be attached to a facility"
+                ),
+            ) from error
+        except InvalidRoleForOrganizationType as error:
+            # Nothing was created: the whole transaction, organization included, has rolled back.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
         except (InvalidOrganizationType, ValueError) as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
-        return _enrollment_response(facility_enrollments.get_for_organization(organization.id))
+        record = facility_enrollments.get_for_organization(organization.id)
+        return FacilityEnrollmentCreatedResponse(
+            **_enrollment_response(record).model_dump(), first_administrator=first_admin
+        )
 
     @router.get("/platform/facilities", response_model=list[FacilityEnrollmentResponse])
     def list_facilities(

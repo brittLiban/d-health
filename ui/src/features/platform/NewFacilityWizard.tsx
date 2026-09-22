@@ -15,6 +15,7 @@ import { useState } from 'react'
 import type { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
 import type {
   FacilityEnrollment,
+  FacilityEnrollmentCreated,
   IdentityLookupResult,
   ParticipationMode,
 } from '../../api/exchangeTypes'
@@ -23,6 +24,7 @@ import {
   ROLE_CHOICES_BY_TYPE,
   organizationTypeLabel,
   participationModeDescription,
+  roleLabel,
 } from './onboardingVocabulary'
 import styles from './Platform.module.css'
 
@@ -50,6 +52,9 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
   const [participationMode, setParticipationMode] = useState<ParticipationMode | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set only from a successful response, and everything it renders comes from
+  // that response rather than from this component's own form state.
+  const [enrolled, setEnrolled] = useState<FacilityEnrollmentCreated | null>(null)
 
   // Step 2's identity lookup. The search finds people who have already signed in;
   // it grants nothing, and this wizard makes that explicit by treating selection
@@ -82,18 +87,39 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
     setSubmitting(true)
     setError(null)
     try {
+      // One request, one transaction. The first administrator is attached by the
+      // same call that creates the facility, so there is no window in which the
+      // organization exists and the person meant to run it was never granted
+      // anything -- and no partial outcome for this screen to explain.
+      //
+      // The roles go up exactly as chosen. Which roles are legal for which
+      // organization type is the server's rule; restating it here would be a
+      // second copy to drift, and hiding a control is not a gate anyway.
       const facility = await client.enrolFacility({
         name: name.trim(),
         organization_type: organizationType,
         participation_mode: participationMode,
+        ...(selected && roles.length > 0
+          ? { first_administrator: { identity_id: selected.identity_id, roles } }
+          : {}),
       })
-      onEnrolled(facility)
+      // Deliberately not handing straight off to the facility screen. This is the
+      // one moment the operator learns whether the person they selected actually
+      // became an administrator, and it is reported from `facility` -- what the
+      // server persisted -- never from `selected`, which is only what was asked
+      // for. The two can disagree, and only one of them is true.
+      setEnrolled(facility)
     } catch (err) {
       const apiError = err as ExchangeApiError
       setError(
         apiError?.status === 403
           ? "Votre compte ne dispose pas des autorisations d'administration de la plateforme."
-          : "L'établissement n'a pas pu être enregistré. Vous pouvez réessayer.",
+          : apiError?.status === 422
+            ? // The server refused something specific -- an illegal role for this
+              // facility type, or a person who has never signed in. Its own words
+              // are more useful than a generic failure, and nothing was created.
+              `${apiError.detail} Aucun établissement n'a été créé.`
+            : "L'établissement n'a pas pu être enregistré. Vous pouvez réessayer.",
       )
     } finally {
       setSubmitting(false)
@@ -102,6 +128,48 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
 
   const index = STEP_ORDER.indexOf(step)
   const roleChoices = ROLE_CHOICES_BY_TYPE[organizationType] ?? []
+
+  if (enrolled) {
+    const attached = enrolled.first_administrator
+    return (
+      <section className={styles.page} aria-labelledby="wizard-done-heading">
+        <h1 id="wizard-done-heading" className={styles.pageTitle}>
+          {enrolled.organization_name} est enregistré
+        </h1>
+        <dl className={styles.definitionList}>
+          <div>
+            <dt>Responsable</dt>
+            <dd>
+              {attached ? (
+                <>
+                  <strong className={styles.done}>
+                    {attached.display_name ?? 'Personne rattachée'} est rattaché
+                  </strong>
+                  {' — '}
+                  {attached.roles
+                    .map((role) => roleLabel(enrolled.organization_type, role))
+                    .join(' · ')}
+                </>
+              ) : (
+                // Never "rattaché" without a membership behind it. If the server
+                // did not create one, this says so, whatever the operator
+                // selected on the way here.
+                <span className={styles.owed}>Aucun responsable n'est rattaché</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+        <p>
+          L'établissement n'est pas encore prêt à recevoir des ordres : sa disponibilité dépend de
+          sa configuration et, pour un système existant, d'un connecteur DHealth qualifié. La fiche
+          de l'établissement indique ce qu'il reste à faire.
+        </p>
+        <div className={styles.wizardActions}>
+          <Button onClick={() => onEnrolled(enrolled)}>Ouvrir la fiche de l'établissement</Button>
+        </div>
+      </section>
+    )
+  }
 
   return (
     <section className={styles.page} aria-labelledby="wizard-heading">
@@ -286,9 +354,32 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
             </div>
             <div>
               <dt>Responsable</dt>
-              <dd>{selected?.display_name ?? 'À rattacher après création'}</dd>
+              {/* Not "à rattacher après création": there is no screen that does
+                  that, and promising one would be the same defect as offering an
+                  action the product does not perform. What is true is that the
+                  facility will have no designated administrator, which its own
+                  readiness then reports. */}
+              <dd>
+                {selected ? (
+                  <>
+                    {selected.display_name ?? selected.email ?? 'Personne sélectionnée'}
+                    {' — '}
+                    {roles.length > 0
+                      ? roles.map((role) => roleLabel(organizationType, role)).join(' · ')
+                      : 'aucun rôle sélectionné'}
+                  </>
+                ) : (
+                  'Aucun responsable ne sera rattaché'
+                )}
+              </dd>
             </div>
           </dl>
+          {selected && roles.length === 0 ? (
+            <p className={styles.errorText}>
+              Sélectionnez au moins un rôle, ou revenez en arrière : une personne sans rôle ne
+              serait rattachée à rien.
+            </p>
+          ) : null}
           <p>
             L'établissement sera créé avec un dossier d'adhésion ouvert. Il ne sera pas
             immédiatement prêt à recevoir des ordres : sa disponibilité dépend de sa configuration
