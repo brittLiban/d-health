@@ -1872,3 +1872,34 @@ system. Recording an interface as VERIFIED changes no status and unlocks no rout
 claim, DHealth's verification, and a qualified connector are three different facts and the UI words
 them so they cannot be mistaken for each other. Connector transport and qualification are
 DH-CONNECT-CONTRACT-001's subject and none of it is built here.
+
+**Membership is one path, reached from two places.** Attaching the first administrator during
+enrollment and attaching somebody to a facility that already exists are the same end state — a
+membership with role assignments — so they are not two mechanisms:
+
+```
+   POST /platform/facilities            { ..., first_administrator? }
+       one transaction: organization + enrollment + membership + role assignments
+       atomic because a second request can fail alone and leave a facility
+       nobody administers behind a screen that said onboarding succeeded
+
+   POST /organizations/{id}/memberships { identity_id, roles }
+       the ordinary org-admin path, used by everybody after that
+       require_org_admin -> require_role -> require_membership
+       platform admin passes with no membership (via_platform_admin)
+       stranger gets 404, not 403 -- existence is not confirmed to outsiders
+       201 = person joined     200 = roles added to somebody already there
+```
+
+The second is **ensure/add**, never replace: a role absent from a request body is not a removal
+request, and this API has no endpoint that revokes a role or a membership. The `Équipe et accès`
+section on the facility detail is built to that shape rather than around it — held roles render
+ticked and disabled, inactive memberships are listed but not editable, and there is no control whose
+label implies a removal the server would not perform. `PersonRolePicker` is shared by the wizard and
+that section for the same reason the endpoints are shared: two copies of a search-select-roles panel
+would drift, and the drift would be in what an operator is told a role means.
+
+A successful attach re-reads `GET /organizations/{id}/enrollment/readiness`. Staffing is a readiness
+condition, so the blocker the operator just cleared has to disappear because the server says so —
+computing that in React would be the same rule duplication the readiness design forbids everywhere
+else.

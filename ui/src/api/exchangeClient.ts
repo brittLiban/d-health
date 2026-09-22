@@ -24,6 +24,7 @@ import type {
   BindPatientReferenceOutcome,
   CatalogEntry,
   ClinicPatientSummary,
+  CreateMembershipOutcome,
   DoctorReviewResponse,
   EntryCompletionResponse,
   EnrollmentBlockerCode,
@@ -36,6 +37,8 @@ import type {
   InterfaceType,
   InterfaceVerificationState,
   OnboardingStatus,
+  OrganizationMembership,
+  OrganizationMembershipCreateRequest,
   ParticipationMode,
   LabAssignmentResponse,
   LabCollectionResponse,
@@ -1675,6 +1678,54 @@ export class ExchangeClient {
       { method: "GET", signal: options.signal },
       options.token,
     )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{organizationId}/memberships -- who belongs to
+   * this organization and what each of them may do.
+   *
+   * Organization-admin authority, which a platform administrator also satisfies
+   * without holding a membership of their own. A caller with neither gets 404,
+   * not 403: the API does not confirm that an organization exists to somebody who
+   * has no business there.
+   */
+  async listMemberships(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership[]> {
+    return this.request<OrganizationMembership[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{organizationId}/memberships.
+   *
+   * Get-or-create on the membership, ensure/add on the roles. 201 means the
+   * person was not in this organization before; 200 means they already were and
+   * the listed roles were added to what they hold. The distinction is returned
+   * rather than collapsed because the two are different sentences to put in front
+   * of an operator, and saying "ajouté" about somebody who was already there
+   * would misdescribe what happened.
+   */
+  async createMembershipWithOutcome(
+    organizationId: string,
+    body: OrganizationMembershipCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<CreateMembershipOutcome> {
+    const { data, status } = await this.requestWithResponse<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { membership: data, created: status === 201 }
   }
 }
 

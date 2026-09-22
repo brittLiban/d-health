@@ -20,7 +20,7 @@ facility identity verified
         ↓
 organization enrolled          ← creates the organization and its enrollment together
         ↓
-first administrator attached
+first administrator attached   ← optional here; attachable later from Équipe et accès
         ↓
 NATIVE or CONNECT chosen       ← explicit, never inferred
         ↓
@@ -164,31 +164,83 @@ mode. A partner DHealth cannot serve today is not a record to erase.
 
 ---
 
-## Attaching the first administrator
+## Attaching people
 
-There is **no invitation system** in this release, and no account provisioning. The bootstrap is:
+Two routes, one endpoint's worth of meaning: a membership with roles. Which route you take depends
+only on whether the facility exists yet.
 
-1. The intended administrator signs into DHealth once.
+| When | Where | What happens |
+|---|---|---|
+| While enrolling | The wizard's **Responsable** step | The membership and its roles are created **inside the same transaction** as the organization and its enrollment |
+| Any time after | The facility's **Équipe et accès** section | `POST /organizations/{id}/memberships` — the ordinary organization-admin path |
+
+Neither is a shortcut around the other. `first_administrator` is optional at enrollment on purpose:
+a partner is often signed up before the person meant to run the facility has logged in for the first
+time, and refusing to enrol them until somebody had would invent a prerequisite the business does
+not have. The consequence is that a facility can exist with nobody able to administer it — which is
+why the second route has to exist, and why its absence was a real hole rather than a convenience gap.
+
+### The bootstrap, unchanged
+
+There is **no invitation system** in this release, and no account provisioning:
+
+1. The intended person signs into DHealth once.
 2. That materialises their `ExchangeIdentity` — which grants zero access on its own.
-3. A platform administrator searches for them by name or email.
+3. An administrator searches for them by name or email.
 4. They select the person and grant explicit roles.
-5. Creating the facility **also creates their membership and role assignments, in one transaction**.
+5. The membership and role assignments are created.
 
-Step 5 is atomic on purpose. If any part fails — an illegal role for this facility type, a person
-who has never signed in — **nothing is created at all**, and the screen says so. There is no state
-in which the facility exists and the person meant to run it was never granted anything, and so no
-partial outcome for an operator to untangle.
+At enrollment, step 5 is atomic with the facility's own creation. If any part fails — an illegal
+role for this facility type, a person who has never signed in — **nothing is created at all**, and
+the screen says so. There is no state in which the facility exists and the person meant to run it
+was never granted anything, and so no partial outcome for an operator to untangle.
 
-Valid roles are `ORG_ADMIN` and `CLINICIAN` for a care facility; `ORG_ADMIN`, `LAB_TECH` and
-`LAB_RESULT_RELEASER` for a laboratory. One laboratory person may hold all three. That rule is
-enforced in the backend for every caller, not by which checkboxes a screen happens to show.
-
-If they cannot be found, the reason is almost always that they have never signed in. The screen says
-so rather than leaving an operator wondering.
+If somebody cannot be found, the reason is almost always that they have never signed in. Both
+screens say so rather than leaving an operator wondering.
 
 The lookup is platform-admin-only, needs at least three characters, caps its results, matches by
 prefix rather than fuzzily, and returns only identity id, display name and email. **Finding somebody
 grants nothing**, and an email address is never authorization.
+
+### Valid roles
+
+`ORG_ADMIN` and `CLINICIAN` for a care facility; `ORG_ADMIN`, `LAB_TECH` and `LAB_RESULT_RELEASER`
+for a laboratory. One laboratory person may hold all three. That rule is enforced in the backend for
+every caller, not by which checkboxes a screen happens to show — the checkboxes are presentation,
+and a role the server will refuse is refused whether or not a screen offered it.
+
+### Équipe et accès
+
+Every facility's detail screen lists who belongs to it, what each of them may do, and whether that
+access is live. It is the answer to the three ordinary situations onboarding otherwise had no screen
+for: *we hired another technician*, *our old administrator left and somebody else is taking over*,
+and *the person we enrolled this facility for has now signed in*.
+
+Attaching somebody re-reads the facility's readiness, so `administrator_present` and the staffing
+findings above update as a consequence of the change rather than on the next visit.
+
+**This screen only grants.** `POST .../memberships` is ensure/add on the server: a role left out of
+a request body is never a removal request, and no endpoint in this API revokes a role or a
+membership. So:
+
+- There is no **Retirer**, no **Désactiver**, and no reactivation control. A button that quietly did
+  nothing would be worse than its absence.
+- A role the selected person already holds shows **ticked and disabled**. A control that visibly
+  cannot be switched off says "not from here"; a hidden one says nothing.
+- An `INACTIVE` membership is still **listed**, with its status. Somebody looking for a person who
+  used to have access must be able to find them and see why they no longer do. Attempting to add
+  roles to such a membership is refused, on screen before the request and by the server's 409 if the
+  list was stale.
+
+Revocation is a real requirement and deliberately not part of this release: whoever takes it has to
+decide what happens to that person's in-flight orders and unreleased results first, which is a
+clinical question rather than a UI one.
+
+### Who may use it
+
+`require_org_admin`, which a **platform administrator satisfies without holding any membership** —
+`require_membership` returns early for them with `via_platform_admin`. A caller who is neither gets
+**404**, not 403: the API does not confirm that an organization exists to somebody outside it.
 
 ---
 

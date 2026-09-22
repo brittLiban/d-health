@@ -23,6 +23,9 @@ const SCENES = [
   'platform-native-no-template',
   'platform-native-ready',
   'platform-new-facility',
+  'platform-team',
+  'platform-team-add',
+  'platform-team-empty',
   'shell-provider',
   'shell-lab-dual',
   'shell-two-establishments',
@@ -44,6 +47,17 @@ const SCENE_ACTIONS = {
   'platform-route-activation': [/Clinique Al Rahma/, /^Activer$/],
   'platform-native-no-template': [/Laboratoire Bahr/],
   'platform-native-ready': [/Laboratoire Nour/],
+  'platform-team': [/Laboratoire Central/],
+  'platform-team-empty': [/Laboratoire Central/],
+  // The add panel, open on somebody who is already on the team: the role she
+  // holds is ticked and disabled, because nothing on this screen removes access.
+  'platform-team-add': [
+    { click: /Laboratoire Central/ },
+    { click: /^Ajouter une personne$/ },
+    { fill: { label: /Rechercher une personne/, value: 'Fatou' } },
+    { click: /^Rechercher$/ },
+    { click: /Fatou Hassan/ },
+  ],
   // Four gestures to reach the step this correction was about: open the wizard,
   // name the facility, choose Native, then find and select the person.
   'platform-first-admin': [

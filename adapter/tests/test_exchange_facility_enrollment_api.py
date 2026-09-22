@@ -1084,3 +1084,167 @@ def _attach(client, private_key, organization_id, identity_id, roles):
         json={"identity_id": str(identity_id), "roles": roles},
     )
     assert response.status_code in (200, 201), response.text
+
+
+# -- TM: the membership endpoints the platform team screen stands on -------------------------
+
+# DH-MVP-ONBOARD-001: a facility can be enrolled with no administrator, and somebody has to be
+# able to attach one afterwards without a REST client and a copied UUID. The screen that does it
+# calls these two endpoints as a platform administrator who holds no membership anywhere. These
+# tests pin that reachability down, because the UI would otherwise be built on an assumption
+# about `via_platform_admin` rather than on a measured fact.
+
+
+def _signed_in_person(sessions, subject: str, display_name: str) -> uuid.UUID:
+    """Somebody who has authenticated once, and belongs to nothing yet."""
+    identity, _ = ExchangeIdentityRepository(sessions).get_or_create(
+        issuer=ISSUER,
+        subject=subject,
+        display_name=display_name,
+        email=f"{subject}@example.test",
+    )
+    return identity.id
+
+
+def test_TM1_platform_admin_with_no_membership_can_read_and_staff_a_facility(
+    client, keypair, sessions
+) -> None:
+    private_key, _ = keypair
+    enrolled = _enrol(
+        client, private_key, name="Laboratoire Central", org_type="LAB", mode="NATIVE"
+    )
+    organization_id = enrolled.json()["organization_id"]
+    fatou = _signed_in_person(sessions, "fatou", "Fatou Hassan")
+
+    # Reading first: the screen lists the team before it offers to add to it, and an enrolled
+    # facility with nobody on it must answer with an empty list rather than a refusal.
+    listed = client.get(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == []
+
+    created = client.post(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+        json={"identity_id": str(fatou), "roles": ["ORG_ADMIN", "LAB_TECH"]},
+    )
+    assert created.status_code == 201, created.text
+
+    after = client.get(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+    ).json()
+    assert len(after) == 1
+    assert after[0]["display_name"] == "Fatou Hassan"
+    assert after[0]["status"] == "ACTIVE"
+    assert sorted(after[0]["roles"]) == ["LAB_TECH", "ORG_ADMIN"]
+
+
+def test_TM2_readiness_reflects_an_administrator_attached_after_enrollment(
+    client, keypair, sessions
+) -> None:
+    """The loop the screen closes: attach somebody, and the facility's own verdict changes.
+
+    Without this the team section could succeed and the readiness panel above it would go on
+    reporting "Aucun responsable désigné" -- the operator would have fixed the thing and been
+    told they had not.
+    """
+    private_key, _ = keypair
+    enrolled = _enrol(
+        client, private_key, name="Clinique Al Rahma", org_type="PROVIDER", mode="NATIVE"
+    )
+    organization_id = enrolled.json()["organization_id"]
+
+    def administrator_present() -> bool:
+        readiness = client.get(
+            f"/exchange/v1/organizations/{organization_id}/enrollment/readiness",
+            headers=_auth(_platform_token(private_key)),
+        ).json()
+        return next(
+            f["satisfied"] for f in readiness["findings"] if f["code"] == "administrator_present"
+        )
+
+    assert administrator_present() is False
+    _attach(
+        client,
+        private_key,
+        organization_id,
+        _signed_in_person(sessions, "ahmed", "Ahmed Ismail"),
+        ["ORG_ADMIN"],
+    )
+    assert administrator_present() is True
+
+
+def test_TM3_a_stranger_cannot_enumerate_a_facility_team(client, keypair, sessions) -> None:
+    """404, not 403: the API does not confirm an organization exists to somebody outside it."""
+    private_key, _ = keypair
+    enrolled = _enrol(client, private_key, name="Laboratoire Nord", org_type="LAB", mode="NATIVE")
+    organization_id = enrolled.json()["organization_id"]
+
+    response = client.get(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_plain_token(private_key)),
+    )
+    assert response.status_code == 404, response.text
+    # And the refusal says nothing about the facility itself -- not its name, not its type.
+    assert "Laboratoire Nord" not in response.text
+
+
+def test_TM4_adding_a_role_later_adds_and_never_replaces(client, keypair, sessions) -> None:
+    """ "We hired another technician" and "Fatou is taking over" are the same request shape.
+
+    The second POST names only the new role, and what the person already held survives it. This
+    is what lets the screen send only the newly ticked boxes without that omission reading as a
+    removal request -- there is no endpoint here that removes anything.
+    """
+    private_key, _ = keypair
+    enrolled = _enrol(
+        client, private_key, name="Laboratoire Central", org_type="LAB", mode="NATIVE"
+    )
+    organization_id = enrolled.json()["organization_id"]
+    fatou = _signed_in_person(sessions, "fatou", "Fatou Hassan")
+
+    first = client.post(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+        json={"identity_id": str(fatou), "roles": ["LAB_TECH"]},
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+        json={"identity_id": str(fatou), "roles": ["LAB_RESULT_RELEASER"]},
+    )
+    # 200, not 201: she was already here. The screen says "Rôles ajoutés" on this, never
+    # "fait maintenant partie de l'équipe".
+    assert second.status_code == 200, second.text
+    assert sorted(second.json()["roles"]) == ["LAB_RESULT_RELEASER", "LAB_TECH"]
+
+
+def test_TM5_an_illegal_role_is_refused_by_the_server_not_by_the_screen(client, keypair, sessions):
+    """The React role checkboxes are presentation. This is the rule."""
+    private_key, _ = keypair
+    enrolled = _enrol(
+        client, private_key, name="Clinique Al Rahma", org_type="PROVIDER", mode="NATIVE"
+    )
+    organization_id = enrolled.json()["organization_id"]
+
+    response = client.post(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+        json={
+            "identity_id": str(_signed_in_person(sessions, "khadija", "Khadija Aden")),
+            "roles": ["LAB_RESULT_RELEASER"],
+        },
+    )
+    assert response.status_code == 422, response.text
+
+    # And nothing partial was left behind by the refusal.
+    after = client.get(
+        f"/exchange/v1/organizations/{organization_id}/memberships",
+        headers=_auth(_platform_token(private_key)),
+    ).json()
+    assert after == []

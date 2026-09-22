@@ -1833,3 +1833,27 @@ the Exchange observation model stays source-flexible for the connector work to c
 platform scenes captured at 1280/768/390 with `PROBLEMS: none`. No migration. Still not run, still
 not claimed: no real browser used by a person, no E2E, no live stack, no real Keycloak, and no CI
 conclusion — GitHub Actions remains blocked before step execution by the account billing condition.
+
+**DH-MVP-ONBOARD-001 closed (2026-09-22):** the last onboarding hole is shut. `first_administrator`
+is optional at enrollment on purpose — a partner is routinely signed up before the person meant to
+run the facility has ever logged in — but that left a facility that **nobody could administer and no
+screen could fix**, reachable only through the API with somebody's identity UUID. Every facility
+detail now has an **Équipe et accès** section: who belongs here, what each of them may do, whether
+that access is live, and *Ajouter une personne* → search → select → roles → membership, after which
+the facility's readiness is re-read so the `administrator_present` blocker clears from the server's
+answer rather than from React's guess. **This is frontend work only** — it calls the
+`GET`/`POST /organizations/{id}/memberships` pair that already existed, which a platform
+administrator reaches through `require_membership`'s `via_platform_admin` bypass; no new endpoint,
+no new model, no new audit vocabulary, no migration. The search/select/roles panel was extracted
+from the enrollment wizard rather than copied, so the two routes to a membership cannot drift.
+**Nothing on the screen removes access:** `POST .../memberships` is ensure/add and this API revokes
+nothing, so a role already held renders ticked and disabled, an inactive membership is listed but
+not editable, and no control carries a label implying a removal the server would refuse. Adapter
+1189 → **1194 passed, 118 skipped** (TM1–TM5 pin the platform-admin reachability, the
+attach-then-readiness loop, the 404 for a stranger, the add-never-replace semantics and the
+server-side role refusal); UI 56 of 56 test files accounted for, **831 passed, 0 failed**; two
+negative controls executed and reverted; thirteen platform scenes at 1280/768/390 with
+`PROBLEMS: none`. Deliberately still absent, by this ticket's scope: invitations,
+Keycloak account provisioning, role removal, membership reactivation. Still not run, still not
+claimed: no real browser used by a person, no E2E, no live stack, no real Keycloak, and no CI
+conclusion.

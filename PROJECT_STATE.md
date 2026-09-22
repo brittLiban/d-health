@@ -18279,9 +18279,10 @@ left in source.
 - The bootstrap still requires the intended administrator to **sign in once** before they can be
   attached: there is no invitation system and no Keycloak provisioning, by scope. (The attachment
   itself is no longer a gap — see the correction entry below.)
-- **Attaching an administrator to a facility that already exists has API but no platform screen.**
-  `POST /organizations/{id}/memberships` does it and is used by the acceptance journey; the
-  platform UI offers it only during enrollment.
+- ~~**Attaching an administrator to a facility that already exists has API but no platform
+  screen.**~~ Closed 2026-09-22 by the **Équipe et accès** section on the facility detail screen —
+  see the second correction entry below. No new endpoint: it calls the same
+  `GET`/`POST /organizations/{id}/memberships` the acceptance journey already used.
 
 ---
 
@@ -18407,5 +18408,121 @@ retires it afterwards.
 ### Confirmation no branch, no PR
 
 Every change landed as focused commits directly on `master`, per this ticket's own instruction.
+
+---
+
+## DH-MVP-ONBOARD-001 — closing entry · 2026-09-22 · directly on `master`
+
+The last onboarding hole: a facility could exist with nobody able to administer it, and there was
+no screen to attach anybody afterwards.
+
+`first_administrator` is optional at enrollment, deliberately — a partner is often signed up before
+the person meant to run the facility has ever logged in, and refusing to enrol them until somebody
+had would be inventing a prerequisite the business does not have. But after that, "we hired another
+technician", "our old administrator left and Fatou is taking over", and "the administrator has now
+signed in" all had the same answer: use the API directly, with that person's identity UUID. That is
+not onboarding, it is a workaround, and it is the same class of defect as the wizard that offered
+an action it did not perform.
+
+### What was built
+
+**Frontend only.** No new endpoint, no new model, no migration; head stays `0026_facility_enrollment`.
+
+- `FacilityTeam` — an **Équipe et accès** section on every facility detail, both organization types.
+  It lists what `GET /organizations/{id}/memberships` returns: each person, their roles in French,
+  and their membership status. `Ajouter une personne` opens a search-select-roles panel and calls
+  `POST /organizations/{id}/memberships`.
+- `PersonRolePicker` — the search/select/role-tick panel, **extracted** from `NewFacilityWizard`
+  rather than copied. Enrollment's first administrator and a later hire are the same three gestures
+  ending in the same thing, so they are one component; the wizard's FW tests exercise it unchanged.
+- `listMemberships` and `createMembershipWithOutcome` on `ExchangeClient`. The second returns
+  `{membership, created}` rather than collapsing the status code, because 201 and 200 are different
+  events: 201 is a person joining, 200 is roles added to somebody already there.
+
+### Why platform authority already reaches it
+
+`require_org_admin` → `require_role` → `require_membership`, and `require_membership` returns early
+on `principal.platform_admin` with `via_platform_admin=True`. A platform administrator holding no
+membership anywhere therefore passes both endpoints. This was verified before any UI was written
+rather than assumed, and TM1 pins it down so a future change to that bypass fails a test instead of
+silently removing the screen's only caller.
+
+### What it deliberately does not do
+
+Scope held exactly where the ticket put it: no invitations, no Keycloak provisioning, no role
+removal, no deactivation redesign, no HR management.
+
+- **Nothing on this screen removes access.** `POST .../memberships` is ensure/add on the server and
+  no endpoint in this API revokes a role or a membership, so there is no `Retirer` button that would
+  quietly do nothing. The section says so in its own lede. A role the selected person already holds
+  renders **ticked and disabled** — a checkbox that cannot be unticked states "this cannot be taken
+  away here" more honestly than the role's absence would.
+- **Nothing reactivates.** An `INACTIVE` membership is *listed* — losing the record of somebody who
+  used to have access is worse than showing an access that is switched off — but the add control is
+  refused for them, with the reason on screen. The server's 409 is still handled, because the list
+  can be stale.
+- **Role legality is still only the server's.** The checkboxes come from `ROLE_CHOICES_BY_TYPE`,
+  which is presentation; `ALLOWED_ROLES_BY_ORG_TYPE` refuses an illegal pairing regardless of what
+  the screen offered. TM5 asserts the refusal and that nothing partial survives it.
+
+### The loop closes
+
+The request's last step is "readiness updates", and it is the one that proves the section is real: a
+successful attach reloads the team **and** re-reads readiness, so `administrator_present` flips and
+the blocker above disappears. Without it an operator would fix the thing and be told they had not.
+TM2 asserts that end-to-end over HTTP; FT4 asserts the screen asks for it.
+
+### Negative controls executed
+
+- **NC-TEAM-READINESS** — `onChanged()` dropped from the success path → FT4 failed
+  (`expected "vi.fn()" to be called at least once`). The readiness refresh is load-bearing, not
+  decorative.
+- **NC-TEAM-HELD** — held roles re-sent alongside the new ones → FT5 failed on the request body. The
+  screen sends what was ticked, not a restatement of what the person already has.
+
+Both reverted.
+
+### Evidence
+
+- **Adapter**: 1194 passed / 118 skipped (from 1189), including TM1–TM5. `ruff check` clean and
+  `ruff format --check` clean across 156 files.
+- **UI**: **56 of 56 test files on disk accounted for, 831 tests passed, 0 failed.** FT1–FT11 plus
+  FT6b are new; FW1–FW8 are unchanged and pass after the `PersonRolePicker` extraction, which is
+  the point of extracting rather than copying. `tsc` clean, `typecheck:e2e` clean, `oxlint`
+  0 errors, `npm run build` clean with `No secrets found across 28 built file(s)`.
+
+  Getting that count honestly took work, and the method matters more than the number. A whole-suite
+  run reported **17 of 56 files passing with 39 unhandled errors** — every one of them
+  `[vitest-pool]: Failed to start forks worker ... Timeout waiting for worker to respond` at 60s,
+  which vitest reports as an *error count*, never as a test failure. A run like that looks green
+  while having executed a third of the suite. So: batches of seven, each retried up to three times
+  when `Test Files N passed (N)` came back smaller than the batch, then the six files that stayed
+  stuck re-run under `--pool=threads`, where all six passed (90 tests). Reconciliation is by
+  **count**, not by parsing filenames out of the output — the requested file list is echoed inside
+  the error text too, so a name-based diff reports everything present when nothing ran, which is how
+  an earlier attempt in this session produced a false clean reconcile.
+- **Browser**: thirteen platform scenes at 1280/768/390, `PROBLEMS: none`. Two defects the captures
+  found, both the same class as the earlier `platform-native-blocked` and first-admin scene defects
+  — a screenshot of a state the product cannot produce:
+  - `platform-team-empty` inherited `READY_FOR_ROUTING` from its base fixture while its readiness
+    listed three blockers.
+  - **Every** detail scene got one shared team, so `platform-route-activation` — a *clinic* — showed
+    `Administration · LAB_TECH · LAB_RESULT_RELEASER`. `roleLabel` is right to fall back to the raw
+    value for a role the facility type cannot grant (silently dropping it would be worse); the
+    fixture was wrong to hand a laboratory's team to a care facility. `listMemberships` in the
+    harness now answers per organization. Worth noting that `PROBLEMS: none` does not scan for enum
+    text — only opening the capture found this, which is the argument for opening them.
+
+### What is still not there, by scope
+
+The bootstrap is unchanged: a person must **sign in once** before they can be attached, because
+there is no invitation system and no Keycloak provisioning. The screen says this in plain French
+rather than letting a search mysteriously find nobody.
+
+The same section would work in organization scope — a facility's own `ORG_ADMIN` satisfies
+`require_org_admin` too — but it is mounted only on the platform facility detail. That is a fact
+about where it is mounted, not a missing capability.
+
+**DH-MVP-ONBOARD-001 is closed.**
 
 `NEXT: DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model`

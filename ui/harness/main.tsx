@@ -27,6 +27,7 @@ import type {
   ExchangeMeResponse,
   FacilityEnrollment,
   FacilityReadiness,
+  OrganizationMembership,
   ProviderLabRoute,
   PatientOrder,
 } from '../src/api/exchangeTypes'
@@ -327,15 +328,118 @@ const LAB_READY_READINESS: FacilityReadiness = {
   ],
 }
 
+/** A Native laboratory, staffed, so the team section is the subject of the scene. */
+const TEAM_LAB: FacilityEnrollment = facilityFixture({
+  organization_id: 'org-1',
+  organization_name: 'Laboratoire Central',
+  participation_mode: 'NATIVE',
+  onboarding_status: 'READY_FOR_ROUTING',
+  integration_feasibility: null,
+  existing_system_name: null,
+  existing_system_vendor: null,
+  existing_system_version: null,
+  hosting_model: null,
+  technical_contact: null,
+  vendor_contact: null,
+  interfaces: [],
+})
+
+/** The same laboratory with nobody able to administer it. */
+const NO_ADMIN_READINESS: FacilityReadiness = {
+  ...LAB_READY_READINESS,
+  onboarding_status: 'ORGANIZATION_READY',
+  production_routing_allowed: false,
+  findings: [
+    ...LAB_READY_READINESS.findings.filter(
+      (finding) => finding.code !== 'lab_technician_present' && finding.code !== 'lab_releaser_present',
+    ),
+    { code: 'administrator_present', satisfied: false, blocking: true, detail: null },
+    { code: 'lab_technician_present', satisfied: false, blocking: true, detail: null },
+    { code: 'lab_releaser_present', satisfied: false, blocking: true, detail: null },
+  ],
+}
+
+/**
+ * A laboratory's team, in the shape the facility screen lists it: one person with
+ * every authority, one with a single one, and one whose access is switched off
+ * but whose record is still there. The third is the case that has to be looked
+ * at -- it must read as "no longer has access", never as a row to be tidied away.
+ */
+const DEFAULT_TEAM: OrganizationMembership[] = [
+  {
+    membership_id: 'mem-1',
+    identity_id: 'id-1',
+    display_name: 'Ahmed Ismail',
+    email: 'ahmed@example.test',
+    status: 'ACTIVE',
+    roles: ['ORG_ADMIN', 'LAB_TECH', 'LAB_RESULT_RELEASER'],
+  },
+  {
+    membership_id: 'mem-2',
+    identity_id: 'id-3',
+    display_name: 'Fatou Hassan',
+    email: 'fatou@example.test',
+    status: 'ACTIVE',
+    roles: ['LAB_TECH'],
+  },
+  {
+    membership_id: 'mem-3',
+    identity_id: 'id-4',
+    display_name: 'Omar Warsame',
+    email: 'omar@example.test',
+    status: 'INACTIVE',
+    roles: ['ORG_ADMIN'],
+  },
+]
+
+/** A care facility's team. Different roles exist here, which is the whole point. */
+const PROVIDER_TEAM: OrganizationMembership[] = [
+  {
+    membership_id: 'mem-p1',
+    identity_id: 'id-5',
+    display_name: 'Dr. Halima Farah',
+    email: 'halima@example.test',
+    status: 'ACTIVE',
+    roles: ['ORG_ADMIN', 'CLINICIAN'],
+  },
+  {
+    membership_id: 'mem-p2',
+    identity_id: 'id-6',
+    display_name: 'Dr. Saïd Abdi',
+    email: 'said@example.test',
+    status: 'ACTIVE',
+    roles: ['CLINICIAN'],
+  },
+]
+
 function platformClient(
   facilities: FacilityEnrollment[],
   readiness: FacilityReadiness,
   readinessByOrg: Record<string, FacilityReadiness> = {},
   routes: ProviderLabRoute[] = [],
+  team: OrganizationMembership[] = DEFAULT_TEAM,
 ): ExchangeClient {
   return {
     getMe: () => Promise.resolve(platformMe()),
     listFacilities: () => Promise.resolve(facilities),
+    // Every facility detail has a team section, so this answers for all of them.
+    // A scene that left it unstubbed would be a picture of a load failure.
+    //
+    // Per organization, not one shared answer: a care facility's team holds
+    // CLINICIAN and a laboratory's holds LAB_TECH, and `roleLabel` falls back to
+    // the raw enum for a role the facility type cannot grant. A single team for
+    // both therefore put `LAB_RESULT_RELEASER` on a clinic -- a screenshot of
+    // something the product cannot produce, which is what these captures exist
+    // to catch.
+    listMemberships: (organizationId: string) =>
+      Promise.resolve(
+        facilities.find((facility) => facility.organization_id === organizationId)
+          ?.organization_type === 'PROVIDER'
+          ? PROVIDER_TEAM
+          : team,
+      ),
+    createMembershipWithOutcome: () =>
+      Promise.reject(new Error('the harness never writes; scenes are captured before the write')),
     // Per-organization when a scene needs several facilities to differ -- the
     // routing scene shows one ready laboratory beside one that is not, and a
     // single shared answer would make that scene a picture of something the
@@ -355,6 +459,9 @@ function platformClient(
       Promise.resolve([
         { identity_id: 'id-1', display_name: 'Ahmed Ismail', email: 'ahmed@example.test' },
         { identity_id: 'id-2', display_name: 'Ahmed Osman', email: 'a.osman@example.test' },
+        // Already on `DEFAULT_TEAM` with one role, which is what makes the add
+        // panel show a held role locked beside two that can still be granted.
+        { identity_id: 'id-3', display_name: 'Fatou Hassan', email: 'fatou@example.test' },
       ]),
   } as unknown as ExchangeClient
 }
@@ -365,15 +472,17 @@ function PlatformScene({
   readinessByOrg = {},
   routes = [],
   memberships = [],
+  team = DEFAULT_TEAM,
 }: {
   facilities?: FacilityEnrollment[]
   readiness?: FacilityReadiness
   readinessByOrg?: Record<string, FacilityReadiness>
   routes?: ProviderLabRoute[]
   memberships?: ExchangeMembershipSummary[]
+  team?: OrganizationMembership[]
 }) {
   const client = {
-    ...platformClient(facilities, readiness, readinessByOrg, routes),
+    ...platformClient(facilities, readiness, readinessByOrg, routes, team),
     getMe: () => Promise.resolve(platformMe(memberships)),
   } as unknown as ExchangeClient
   return (
@@ -420,6 +529,30 @@ const SCENES: Record<string, () => ReactElement> = {
   // The first-administrator step: a person found, selected, and three laboratory
   // roles ticked. The scene the wizard existed to offer and did not perform.
   'platform-first-admin': () => <PlatformScene />,
+  // §65: the team of a facility that already exists. The hole this closes is
+  // "our old administrator left and Fatou is taking over" -- until this section
+  // there was no screen for it, only the API and somebody's identity UUID.
+  'platform-team': () => (
+    <PlatformScene facilities={[TEAM_LAB]} readiness={LAB_READY_READINESS} />
+  ),
+  // The same screen with the add panel open on somebody already on the team: the
+  // role she holds is ticked and locked, because nothing here removes access.
+  'platform-team-add': () => (
+    <PlatformScene facilities={[TEAM_LAB]} readiness={LAB_READY_READINESS} />
+  ),
+  // A facility nobody administers -- enrolled before the person meant to run it
+  // had ever signed in. The readiness blocker and the empty team are the same
+  // fact stated twice, and the action that fixes it is on this screen.
+  'platform-team-empty': () => (
+    <PlatformScene
+      // Its own onboarding status, not TEAM_LAB's: a facility nobody can
+      // administer is not "Prêt pour le routage", and a scene showing that
+      // header above three blockers would be a picture of an impossible state.
+      facilities={[{ ...TEAM_LAB, onboarding_status: 'ORGANIZATION_READY' }]}
+      readiness={NO_ADMIN_READINESS}
+      team={[]}
+    />
+  ),
   // A Native laboratory blocked because it can complete none of what it offers:
   // active offerings, no active result template, so DHealth could enter nothing.
   'platform-native-no-template': () => (

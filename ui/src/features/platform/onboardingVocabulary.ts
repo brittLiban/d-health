@@ -257,3 +257,22 @@ export function roleLabel(organizationType: string, role: string): string {
   const choices = ROLE_CHOICES_BY_TYPE[organizationType] ?? []
   return choices.find((choice) => choice.role === role)?.label ?? role
 }
+
+/**
+ * A membership's own status, which is not the same fact as the person existing.
+ *
+ * `INACTIVE` and `REVOKED` rows are still listed, deliberately: an operator
+ * looking for somebody who "used to have access" needs to find them and see why
+ * they no longer do, rather than conclude the record was lost. Neither wording
+ * suggests the row can be switched back on from this screen -- nothing in this
+ * ticket reactivates a membership.
+ */
+const MEMBERSHIP_STATUS: Record<string, string> = {
+  ACTIVE: 'Actif',
+  INACTIVE: 'Inactif',
+  REVOKED: 'Accès retiré',
+}
+
+export function membershipStatusLabel(status: string): string {
+  return MEMBERSHIP_STATUS[status] ?? status
+}

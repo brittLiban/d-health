@@ -7285,6 +7285,30 @@ separations below are recorded rather than left to whichever screen is being wri
     organization type, and remains the single authority for every caller. The response reports the
     administrator **read back from what was persisted**, so the completion screen can never claim an
     attachment that no membership backs.
+21. **Attaching somebody later uses the ordinary organization-admin path, and nothing more.** A
+    facility may legitimately be enrolled before the person meant to run it has ever signed in, so
+    `first_administrator` is optional — which means a facility can exist that nobody administers, and
+    something has to be able to fix that afterwards. It is the *same* endpoint pair the rest of the
+    product uses (`GET`/`POST /organizations/{id}/memberships`): a platform administrator satisfies
+    `require_org_admin` through `require_membership`'s `via_platform_admin` bypass, so no second
+    authority model, no platform-only membership endpoint, and no new audit vocabulary were
+    introduced for it. What was missing was never a capability; it was a screen.
+22. **Granting access and removing it are not the same screen, and this one only grants.** `POST
+    .../memberships` is ensure/add: a role omitted from a request body is never a removal request,
+    and no endpoint in this API revokes a role or a membership. The facility's **Équipe et accès**
+    section therefore offers no `Retirer`, no `Désactiver` and no reactivation, and a role the
+    selected person already holds renders ticked and **disabled** rather than hidden — a control
+    that visibly cannot be switched off says "not from here" where an absent control would say
+    nothing. An `INACTIVE` membership stays listed for the same reason: an operator looking for
+    somebody who used to have access must find them and see why they no longer do, rather than
+    conclude the record was lost. Revocation is a real requirement and deliberately not this
+    ticket's; whoever takes it must decide what happens to that person's in-flight work first.
+23. **Attaching somebody re-reads readiness rather than assuming the effect.** Staffing is a
+    readiness condition, so a successful attach is exactly what clears `administrator_present`. The
+    screen reloads the team *and* asks the server for the facility's verdict again. Optimistically
+    flipping the blocker in React would be exactly the readiness-rule duplication this ADR's
+    Consequences already forbid, and leaving it stale would tell an operator they had not fixed the
+    thing they had just fixed.
 
 ### Consequences
 

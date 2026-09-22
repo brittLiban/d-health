@@ -1031,3 +1031,41 @@ export interface IdentityLookupResult {
   display_name: string | null
   email: string | null
 }
+
+/**
+ * One person's place in one organization, as `GET .../memberships` returns it.
+ *
+ * `roles` is what the server holds for this membership right now -- the complete
+ * set, not a delta. `status` is the membership's own status (`ACTIVE`,
+ * `INACTIVE`, `REVOKED`): a row can be listed and still grant nothing, which is
+ * why the status travels with it instead of being inferred from presence.
+ */
+export interface OrganizationMembership {
+  membership_id: string
+  identity_id: string
+  display_name: string | null
+  email: string | null
+  status: string
+  roles: string[]
+}
+
+/**
+ * The body of `POST .../memberships`.
+ *
+ * `roles` is an ensure/add list, never a replace-with list: omitting a role the
+ * person already holds does not remove it, and no endpoint in this API removes
+ * one. Anything sending this must not present it as "the roles they will have".
+ */
+export interface OrganizationMembershipCreateRequest {
+  identity_id: string
+  roles: string[]
+}
+
+/**
+ * Whether the POST created a membership (201) or found one already there and
+ * added roles to it (200). Two different sentences on screen, one endpoint.
+ */
+export interface CreateMembershipOutcome {
+  membership: OrganizationMembership
+  created: boolean
+}

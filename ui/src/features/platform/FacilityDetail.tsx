@@ -17,6 +17,7 @@ import type { ExchangeApiError, ExchangeClient } from '../../api/exchangeClient'
 import type { FacilityEnrollment, FacilityReadiness } from '../../api/exchangeTypes'
 import { Button, LoadingSkeleton } from '../../design-system'
 import { ConnectDiscovery } from './ConnectDiscovery'
+import { FacilityTeam } from './FacilityTeam'
 import { RouteNetwork } from './RouteNetwork'
 import {
   blockerLabel,
@@ -203,6 +204,18 @@ export function FacilityDetail({
           </p>
         </section>
       )}
+
+      {/* Both facility types: a clinic taking on a second clinician is the same
+          story as a laboratory taking on a second technician, and staffing is a
+          readiness condition for both. */}
+      <FacilityTeam
+        facility={facility}
+        client={client}
+        onChanged={() => {
+          onChanged()
+          void loadReadiness()
+        }}
+      />
 
       {facility.organization_type === 'PROVIDER' ? (
         <RouteNetwork

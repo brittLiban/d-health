@@ -20,6 +20,7 @@ import type {
   ParticipationMode,
 } from '../../api/exchangeTypes'
 import { Button, TextInput } from '../../design-system'
+import { PersonRolePicker } from './PersonRolePicker'
 import {
   ROLE_CHOICES_BY_TYPE,
   organizationTypeLabel,
@@ -56,31 +57,12 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
   // that response rather than from this component's own form state.
   const [enrolled, setEnrolled] = useState<FacilityEnrollmentCreated | null>(null)
 
-  // Step 2's identity lookup. The search finds people who have already signed in;
-  // it grants nothing, and this wizard makes that explicit by treating selection
-  // as "who we will attach once the facility exists", never as access.
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<IdentityLookupResult[] | null>(null)
-  const [searching, setSearching] = useState(false)
+  // Step 3's identity lookup, in the same component the facility screen uses to
+  // add somebody later. The search finds people who have already signed in; it
+  // grants nothing, and this wizard makes that explicit by treating selection as
+  // "who we will attach once the facility exists", never as access.
   const [selected, setSelected] = useState<IdentityLookupResult | null>(null)
   const [roles, setRoles] = useState<string[]>(['ORG_ADMIN'])
-
-  const search = async () => {
-    if (query.trim().length < 3) {
-      setResults(null)
-      setError('Saisissez au moins trois caractères pour rechercher une personne.')
-      return
-    }
-    setSearching(true)
-    setError(null)
-    try {
-      setResults(await client.lookupIdentities(query.trim()))
-    } catch {
-      setError("La recherche n'a pas abouti. Vous pouvez réessayer.")
-    } finally {
-      setSearching(false)
-    }
-  }
 
   const submit = async () => {
     if (!participationMode) return
@@ -254,80 +236,15 @@ export function NewFacilityWizard({ client, onCancel, onEnrolled }: NewFacilityW
       {step === 'responsible' ? (
         <div className={styles.stepBody}>
           <h2 className={styles.subTitle}>Ajouter un responsable</h2>
-          {/* The bootstrap this ticket does not automate: there is no invitation
-              system and no account provisioning, so the person must have signed in
-              once before they can be attached. Saying so plainly is better than a
-              search that mysteriously finds nobody. */}
-          <p>
-            Cette personne doit se connecter à DHealth une première fois avant de pouvoir être
-            ajoutée. DHealth n'envoie pas d'invitation par courriel.
-          </p>
-          <div className={styles.searchRow}>
-            <TextInput
-              label="Rechercher une personne"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            <Button variant="secondary" onClick={() => void search()} disabled={searching}>
-              Rechercher
-            </Button>
-          </div>
-
-          {results !== null ? (
-            results.length === 0 ? (
-              <p>
-                Aucune personne trouvée. Si elle ne s'est jamais connectée à DHealth, elle doit le
-                faire une première fois.
-              </p>
-            ) : (
-              <ul className={styles.resultList}>
-                {results.map((result) => (
-                  <li key={result.identity_id}>
-                    <button
-                      type="button"
-                      className={
-                        selected?.identity_id === result.identity_id
-                          ? styles.resultSelected
-                          : styles.resultRow
-                      }
-                      onClick={() => setSelected(result)}
-                    >
-                      <span>{result.display_name ?? 'Nom non renseigné'}</span>
-                      <span className={styles.facilityMeta}>{result.email ?? ''}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )
-          ) : null}
-
-          {selected ? (
-            <fieldset className={styles.fieldset}>
-              <legend>Rôles pour {selected.display_name ?? 'cette personne'}</legend>
-              {roleChoices.map((choice) => (
-                <label key={choice.role} className={styles.radioRow}>
-                  <input
-                    type="checkbox"
-                    checked={roles.includes(choice.role)}
-                    onChange={(event) =>
-                      setRoles((current) =>
-                        event.target.checked
-                          ? [...current, choice.role]
-                          : current.filter((r) => r !== choice.role),
-                      )
-                    }
-                  />
-                  {choice.label}
-                </label>
-              ))}
-              {/* Administration is not an operational authority, and the wording
-                  says so rather than leaving an operator to assume otherwise. */}
-              <p className={styles.facilityMeta}>
-                « Administration » permet de gérer l'établissement. Elle ne donne aucun droit
-                clinique ni de laboratoire.
-              </p>
-            </fieldset>
-          ) : null}
+          <PersonRolePicker
+            client={client}
+            roleChoices={roleChoices}
+            selected={selected}
+            onSelect={setSelected}
+            roles={roles}
+            onRolesChange={setRoles}
+            onError={setError}
+          />
         </div>
       ) : null}
 

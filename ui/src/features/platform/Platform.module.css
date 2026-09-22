@@ -477,3 +477,27 @@
 .routeRow > [role='alert'] {
   flex-basis: 100%;
 }
+
+/* The team list. Same row shape as the routing list -- one person, what they may
+   do, and whether that access is live -- so the two sections on a facility read
+   as the same kind of list rather than two different inventions. */
+.teamList {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.teamRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}

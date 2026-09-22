@@ -6,6 +6,23 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-22, DH-MVP-ONBOARD-001 closing change, directly on `master`. The ticket is CLOSED.** The
+last onboarding hole: `first_administrator` is optional at enrollment — correctly, since a partner
+is often signed up before the intended administrator has ever logged in — so a facility could exist
+that **nobody could administer, with no screen to fix it**. Attaching somebody afterwards meant the
+API and that person's identity UUID. Every facility detail now carries an **Équipe et accès**
+section listing who belongs to it, what each may do, and whether that access is live, with
+*Ajouter une personne* → search → select → roles → membership. **Frontend only**: it calls the
+`GET`/`POST /organizations/{id}/memberships` pair that already existed, which a platform
+administrator reaches through `require_membership`'s `via_platform_admin` bypass — no new endpoint,
+no new model, no migration. The search/select/roles panel was **extracted** from the enrollment
+wizard rather than copied, so both routes to a membership stay one implementation. A successful
+attach re-reads readiness, so the `administrator_present` blocker clears because the server says so.
+**Nothing on the screen removes access**: `POST .../memberships` is ensure/add and this API revokes
+nothing, so held roles render ticked and disabled, inactive memberships are listed but not editable,
+and there is no control whose label implies a removal the server would refuse. Revocation,
+invitations and Keycloak provisioning remain out of scope and unbuilt.
+
 **2026-09-21, DH-MVP-ONBOARD-001 correction, directly on `master`.** Two ticket-owned gaps closed,
 from `1621ca6`. **The wizard's first-administrator step now performs the action it offered**: the
 selected person's membership and role assignments are created in the *same transaction* as the
@@ -437,8 +454,9 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 - **Facility enrollment and integration readiness** (`adapter/.../facility_enrollment.py`,
   `ui/src/features/platform/`, DH-MVP-ONBOARD-001) — the control plane for joining the network.
   A platform operator enrols an organization and its enrollment in one transaction, attaches a first
-  administrator found through a bounded platform-only identity lookup, records `NATIVE` or `CONNECT`
-  explicitly, captures a Connect facility's software/vendor/version/hosting and the interfaces it
+  administrator found through a bounded platform-only identity lookup — or attaches people later
+  from the facility's **Équipe et accès** section, which grants access and never removes it —
+  records `NATIVE` or `CONNECT` explicitly, captures a Connect facility's software/vendor/version/hosting and the interfaces it
   reports, and reads a server-derived answer to whether production orders may be routed there.
   **Four facts stay separate**: enrolled, configured, operationally ready, production-routable.
   Native routing requires an active CLINICIAN (provider) or an active LAB_TECH *and*
