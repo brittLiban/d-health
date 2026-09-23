@@ -60,13 +60,18 @@ Three specific limits worth naming individually:
    verdict refuses to count it. The synthetic laboratory suite therefore ends at
    **`connector_qualified = false`, gap `REQUIRED_CAPABILITY_UNEXERCISED`, naming `ORDER_RECEIPT`**
    — which is more truthful than what the first version of this ticket reported.
-2. **Provider qualification is declared-only in this build, and therefore never qualifies.** There
-   is a laboratory harness (`LabQualificationHarness`). There is no provider harness, so every
-   provider capability row is a recorded declaration and `ORDER_SUBMISSION`,
-   `RELEASED_RESULT_RECEIPT` and `AMENDMENT_RECEIPT` are all `DECLARED`. A provider connector is
-   consequently `connector_qualified = false` under this contract until a real provider harness
-   exists. The declarations are kept — they are how DHealth records what a partner says it
-   implements, which is what the next conversation with that partner is about.
+2. ~~**Provider qualification is declared-only in this build, and therefore never qualifies.**~~
+   **Superseded by DH-CONNECT-AGENT-001 (provider side), 2026-09-23.** A provider harness now
+   exists (`ProviderQualificationHarness`, driven by `connect/provider_qualification.py`), and
+   `ORDER_SUBMISSION`, `RELEASED_RESULT_RECEIPT` and `AMENDMENT_RECEIPT` are exercisable against the
+   synthetic provider adapter through the real runtime. A provider connector can reach
+   `connector_qualified = true`.
+
+   What stayed true: a provider connector with **no runtime** still records all three as `DECLARED`
+   and does not qualify, and a qualified provider facility still cannot reach `READY_FOR_ROUTING`
+   (§6/§86 — the far end is synthetic). `REVIEW_REPORTING` remains `DECLARED`: it is optional,
+   nothing in DHealth consumes a connector-reported review yet, and inventing a scenario for it
+   would manufacture evidence for a capability no facility can use.
 3. **Nothing here was run against a real EMR or LIS.** The subject is
    `SyntheticConnectorSubject`, which talks to nothing. The Exchange effects are real — real rows,
    real repositories, real constraints — but the connector side is synthetic.

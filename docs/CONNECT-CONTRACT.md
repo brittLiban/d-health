@@ -73,6 +73,22 @@ missing.
 | `CollectionEvent` | connector → DHealth | a specimen was collected |
 | `ReleasedResult` | connector → DHealth | a professionally released result |
 | `ReleasedAmendment` | connector → DHealth | a correction to an already-released result |
+| `OrderNotification` | DHealth → connector | this laboratory has been given work (1.1) |
+| `ResultNotification` | DHealth → connector | a report this provider ordered was released (1.2) |
+| `AmendmentNotification` | DHealth → connector | that report has been corrected (1.2) |
+
+The three outbound types were added after 1.0, which described only the inbound direction. That was
+not an oversight about direction — it was the shape of a build with no runtime, and it is why
+`ORDER_RECEIPT`, `RELEASED_RESULT_RECEIPT` and `AMENDMENT_RECEIPT` were all unexercisable by
+construction until DH-CONNECT-AGENT-001. Both bumps are **minor**: an addition in a direction the
+previous version could not express invalidates no existing connector, so nothing requalifies on the
+strength of the version number alone.
+
+`ResultNotification` and `AmendmentNotification` both carry the **provider's own**
+`external_order_id`, resolved through the correlation their submission created, and it is required.
+A released report for an order that did not come through this connector is not sent at all — see
+`docs/CONNECT-AGENT.md` on why that is better than sending a DHealth identifier the receiving system
+has never seen.
 
 ### The envelope
 
@@ -183,7 +199,8 @@ whose status is not `IN_PROGRESS`. So a laboratory connector that cannot report 
 enter a result **at all** — not "with reduced fidelity", not at all.
 
 The consequence is stated rather than hidden: **a partner LIS with no reliable collection signal
-cannot have a qualified laboratory connector under contract 1.0.** That is a real constraint on
+cannot have a qualified laboratory connector under this contract.** Unchanged by 1.1 and 1.2, which
+added directions rather than relaxing a requirement. That is a real constraint on
 which partners are integrable, and discovering it at qualification time is far better than
 discovering it after a facility has been told it is going live.
 

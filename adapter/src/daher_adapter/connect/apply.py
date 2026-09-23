@@ -32,6 +32,7 @@ from daher_adapter.connect.contract import (
     CollectionEvent,
     Envelope,
     FailureCategory,
+    OrderSubmission,
     ReceiptStore,
     ReleasedAmendment,
     ReleasedResult,
@@ -42,6 +43,7 @@ from daher_adapter.exchange.models import (
     LabOrder,
     LabOrderItem,
     LabResultType,
+    TestCatalogEntry,
 )
 from daher_adapter.exchange.results import _effective_observation_rows
 
@@ -67,6 +69,11 @@ class ApplyOutcome:
     applied: bool
     replayed: bool = False
     detail: str | None = None
+    #: The DHealth order this message created, for ``ORDER_SUBMISSION`` only. The inbound applier
+    #: binds the correlation from it, in the same transaction as the order itself -- an order whose
+    #: correlation was written by a second, later transaction is an order whose results cannot be
+    #: filed if that second transaction never runs.
+    lab_order_id: uuid.UUID | None = None
 
 
 def _guard_binding(envelope: Envelope, installation_organization_id: uuid.UUID) -> None:
@@ -158,6 +165,9 @@ class ConnectBridge:
         receipts: ReceiptStore,
         installation_organization_id: uuid.UUID,
         service_identity_id: uuid.UUID,
+        orders=None,  # LabOrderRepository -- provider side only
+        patients=None,  # PatientReferenceRepository -- provider side only
+        practitioners=None,  # PractitionerReferenceRepository -- provider side only
     ) -> None:
         self._workflow = workflow
         self._results = results
@@ -165,6 +175,15 @@ class ConnectBridge:
         self._amendments = amendments
         self._receipts = receipts
         self._organization_id = installation_organization_id
+        # -- provider side, added by DH-CONNECT-AGENT-001 -------------------------------------
+        #
+        # Optional because a *laboratory* connector never submits an order, and requiring a
+        # laboratory's bridge to be handed three repositories it will never call would be three more
+        # things to wire wrongly. A provider bridge without them refuses ORDER_SUBMISSION with
+        # UNSUPPORTED_WORKFLOW rather than half-creating something -- the fail-closed direction.
+        self._orders = orders
+        self._patients = patients
+        self._practitioners = practitioners
         #: The identity every Exchange row this bridge writes is attributed to. A placeholder for
         #: the service identity DH-CONNECT-AGENT-001 will issue -- see the module docstring.
         self._identity_id = service_identity_id
@@ -178,7 +197,9 @@ class ConnectBridge:
             return ApplyOutcome(applied=False, replayed=True, detail="already applied")
 
         payload = envelope.payload
-        if isinstance(payload, BusinessAcceptance):
+        if isinstance(payload, OrderSubmission):
+            outcome = self._submit_order(session, envelope, payload)
+        elif isinstance(payload, BusinessAcceptance):
             outcome = self._accept(session, envelope, payload)
         elif isinstance(payload, BusinessRejection):
             outcome = self._reject(session, envelope, payload)
@@ -201,6 +222,159 @@ class ConnectBridge:
             envelope.replay_scope(), envelope.source_event_id, envelope.content_fingerprint()
         )
         return outcome
+
+    # -- provider side -----------------------------------------------------------------------
+
+    def _submit_order(
+        self, session: Session, envelope: Envelope, payload: OrderSubmission
+    ) -> ApplyOutcome:
+        """A provider's own system asking DHealth for diagnostic work.
+
+        The only message that *creates* rather than advances, which makes it the only one where
+        getting the identity wrong invents a patient instead of misfiling a result. So every
+        identifier is taken exactly as the provider asserted it and bound through the Exchange's own
+        repository — no inference, no demographic matching, no creation of a second identity for a
+        patient the provider already has one for.
+
+        **The whole submission fails, or none of it does.** An unmapped test code refuses the order
+        rather than creating it with the codes that did map: a laboratory that runs four of five
+        requested tests and reports four results has produced a clinically misleading report, and
+        nothing downstream would know a test had been dropped. That is §42's fail-closed rule, and
+        the reason this method resolves *every* code before it writes anything.
+
+        Idempotent on the source event. A retried submission converges on the order the first one
+        created rather than making a second — the replay check above catches the ordinary case, and
+        the idempotency key carries the rest.
+        """
+        # Locally imported for the same reason ``_resolve_items`` imports ``OrderItemInput``
+        # locally: ``exchange.facility_enrollment`` imports ``connect.qualification``, so a
+        # module-level reach into the Exchange's order package from here closes a cycle.
+        from daher_adapter.exchange.orders import DuplicateOrderItems, EmptyOrder
+        from daher_adapter.exchange.organizations import InvalidOrganizationType
+
+        if self._orders is None or self._patients is None or self._practitioners is None:
+            raise ConnectApplyError(
+                FailureCategory.UNSUPPORTED_WORKFLOW,
+                "this connector installation is not configured to submit orders",
+            )
+
+        # The identity the provider asserts must be the provider's own. A submission carrying a
+        # patient scoped to a *different* organization is a cross-tenant identity assertion, and
+        # `_guard_binding` above only checked the envelope -- not what is inside it.
+        for label, reference in (
+            ("patient", payload.patient),
+            ("practitioner", payload.practitioner),
+        ):
+            if reference.source_organization_id != self._organization_id:
+                raise ConnectApplyError(
+                    FailureCategory.VALIDATION,
+                    f"the {label} identity is scoped to another organization; a connector may only "
+                    "assert identities for the facility it is installed at",
+                )
+
+        items = self._resolve_items(session, payload.source_test_codes)
+
+        # Every call below is about **one** organization -- this installation's -- because the loop
+        # above refused any identity scoped elsewhere. So an ``InvalidOrganizationType`` from any of
+        # them says the same thing: this facility is not a provider. Catching them together is
+        # therefore accurate rather than convenient; were the identities allowed to name other
+        # organizations, this would have to distinguish which one was rejected.
+        try:
+            patient, _ = self._patients.get_or_create_with_outcome(
+                source_organization_id=self._organization_id,
+                source_system=payload.patient.source_system,
+                source_identity_system=payload.patient.source_identity_system,
+                source_identity_value=payload.patient.source_identity_value,
+                session=session,
+            )
+            practitioner = self._practitioners.get_or_create(
+                source_organization_id=self._organization_id,
+                source_system=payload.practitioner.source_system,
+                source_identity_system=payload.practitioner.source_identity_system,
+                source_identity_value=payload.practitioner.source_identity_value,
+                session=session,
+            )
+            created = self._create_order(session, envelope, patient, practitioner, items)
+        except InvalidOrganizationType as error:
+            # A *laboratory* installation submitting an order, or a suspended facility submitting
+            # one. Terminal rather than retryable: the Exchange's own provider check is what refuses
+            # it, one layer below this file, and no amount of retrying turns a laboratory into a
+            # provider. The refusal happens before any identity row is written, so nothing partial
+            # survives even if the applier's rollback were ever removed.
+            raise ConnectApplyError(FailureCategory.UNSUPPORTED_WORKFLOW, str(error)) from None
+        except (DuplicateOrderItems, EmptyOrder) as error:
+            raise ConnectApplyError(FailureCategory.VALIDATION, str(error)) from None
+        return ApplyOutcome(
+            applied=created.created,
+            replayed=not created.created,
+            detail=None if created.created else "commande déjà créée pour cet événement source",
+            lab_order_id=created.order.id,
+        )
+
+    def _create_order(self, session, envelope, patient, practitioner, items):
+        """The ``LabOrderRepository.create`` call, split out only so the caller's ``try`` is narrow.
+
+        A wide ``try`` around the identity resolution above would catch an
+        ``InvalidOrganizationType`` raised about a *patient's* organization and report it as "this
+        connector cannot submit orders", which is a different and misleading fact.
+        """
+        if self._orders is None:  # pragma: no cover - the caller refuses before reaching here
+            raise ConnectApplyError(
+                FailureCategory.UNSUPPORTED_WORKFLOW,
+                "this connector installation is not configured to submit orders",
+            )
+        return self._orders.create(
+            # Scoped to the replay scope rather than the bare event id: two facilities numbering
+            # their events from 1 would otherwise share an idempotency key, which is the same
+            # collision `Envelope.replay_scope` exists to prevent one layer up.
+            idempotency_key=f"connect:{envelope.replay_scope()}:{envelope.source_event_id}",
+            provider_organization_id=self._organization_id,
+            patient_reference_id=patient.id,
+            practitioner_reference_id=practitioner.id,
+            items=items,
+            session=session,
+        )
+
+    def _resolve_items(self, session: Session, source_test_codes: tuple[str, ...]):
+        """DHealth catalog codes to catalog entries. Every code, before anything is written.
+
+        **Translation is the connector's job, not DHealth's** -- symmetric with the laboratory
+        direction, where a released result's ``source_code`` is matched against the order item's
+        ``catalog_code_snapshot`` and a code that is not one is refused. The agent holds the
+        qualified mapping, applies it on the partner's own hardware, and sends DHealth catalog
+        codes; DHealth stores only the mapping's fingerprint, so it could not do the translation
+        even if this method wanted to.
+
+        An unrecognised code names itself in the refusal so the partner can fix their mapping
+        rather than being told "something was wrong", and refuses the *whole* submission.
+        """
+        from daher_adapter.exchange.orders import OrderItemInput
+
+        wanted = set(source_test_codes)
+        rows = (
+            session.query(TestCatalogEntry)
+            .filter(TestCatalogEntry.code.in_(wanted), TestCatalogEntry.active.is_(True))
+            .all()
+        )
+        # (code, version) is unique, so a code can have several rows. The current one is the highest
+        # active version -- never a superseded one, which would order a test the catalog has
+        # moved on from.
+        by_code: dict[str, TestCatalogEntry] = {}
+        for row in rows:
+            held = by_code.get(row.code)
+            if held is None or row.version > held.version:
+                by_code[row.code] = row
+
+        unknown = sorted(wanted - set(by_code))
+        if unknown:
+            raise ConnectApplyError(
+                FailureCategory.MAPPING,
+                f"not an active DHealth catalog code: {', '.join(unknown)}; the whole submission "
+                "is refused rather than partially created",
+            )
+        return [OrderItemInput(catalog_entry_id=by_code[code].id) for code in source_test_codes]
+
+    # -- laboratory side ---------------------------------------------------------------------
 
     def _accept(
         self, session: Session, envelope: Envelope, payload: BusinessAcceptance

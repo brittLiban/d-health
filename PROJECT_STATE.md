@@ -18907,3 +18907,105 @@ recording as a habit rather than an incident.
 
 **DH-CONNECT-AGENT-001 is closed.** No vendor adapter exists, no real EMR or LIS has been qualified,
 and no facility is live through Connect.
+
+---
+
+## DH-CONNECT-AGENT-001 — provider side (2026-09-23, same ticket reopened)
+
+The ticket closed with a runtime that is symmetric by construction and was exercised in one
+direction only. A provider connector could declare `ORDER_SUBMISSION`, `RELEASED_RESULT_RECEIPT` and
+`AMENDMENT_RECEIPT` and exercise none of them — the same shape of hole `ORDER_RECEIPT` was in before
+the runtime existed, and for the same reason: nothing could try.
+
+Three things were built, and one design error was found and corrected before any of them.
+
+### The design error, found before it shipped
+
+`_submit_order` resolved the submission's test codes through a `TestMapping` revision held by the
+bridge. **That collection can never be populated**: §34 has DHealth store the mapping's fingerprint
+and never the mapping, so `build_default_bridge_factory` had nothing to pass and every submission
+through the real runtime would have failed `MAPPING` — while the unit tests, which constructed the
+bridge with mappings by hand, passed.
+
+The laboratory direction had already answered the question correctly: the connector translates on its
+own hardware and DHealth receives catalog codes. The submission now does the same, resolved against
+the **active** catalog. `mappings` was removed from `ConnectBridge` entirely.
+
+Two more defects in the same path, found with it:
+
+- `patients.get_or_create` opened its **own** transaction inside the applier's. Invisible under the
+  unit tests, whose in-memory receipt store never touched the database before that call; through
+  `inbound._apply_one` it would have broken the one-transaction-per-message guarantee. Now
+  `get_or_create_with_outcome(..., session=session)`.
+- **Nothing bound a correlation for a submission.** `_bind_correlations` runs before the bridge and
+  skips when `lab_order_id is None`, which it always is for a submission. So the order existed and
+  the EMR's own name for it did not — an order whose results could never be filed back.
+
+All three were caught by writing **`OS10`**, which submits through the real `/submit` endpoint and
+asserts the order *and* the correlation. `tests/test_connect_order_submission.py`'s nine unit tests
+passed throughout.
+
+### What was built
+
+| | |
+|---|---|
+| Contract **1.2** | `RESULT_NOTIFICATION`, `AMENDMENT_NOTIFICATION`, both DHealth → connector. Additive; major unchanged |
+| `0030_connect_provider` | 21 chars. Rewrites `ck_connector_deliveries_message_type` to admit them |
+| `connect/result_hook.py` | queues the notification inside `release` / `release_amendment`, same transaction |
+| `SyntheticProviderAdapter` | with `handle_result_calls` / `handle_amendment_calls` counters from the start |
+| `connect/provider_qualification.py` | three drives, each checking three independent places |
+| `ProviderQualificationHarness` | assembles a recordable `QualificationRun` from finished drives |
+
+`QUALIFICATION_SUITE_VERSION` deliberately **does not move** — no scenario an existing connector was
+qualified against changed, and no provider connector has ever recorded a PASS, so there is nothing
+stale to invalidate. Recorded in ADR-057 decision 30 so the absence reads as a decision.
+
+### Tests
+
+`tests/test_connect_provider_qualification.py` — PQ1–PQ12, 12 tests. The suite drives one journey:
+the synthetic EMR emits an order, the agent submits it, a **native** laboratory accepts, collects,
+enters and releases, the release hook queues the notification, the agent delivers it, then the same
+for an amendment. Nothing in the file calls `handle_result` or `handle_amendment` — §41.
+
+| | |
+|---|---|
+| PQ1 | a submitted order becomes a DHealth order **with its correlation** |
+| PQ2 | a released result reaches the provider's own system, exactly once |
+| PQ3 | an amendment arrives as a correction, not a second result; the original stays readable |
+| PQ4 | values and units relayed exactly as released |
+| PQ5 | DHealth's own release versions and the notifications agree |
+| PQ6–PQ7 | three `EXERCISED` scenarios make a passing run; the synthetic limitation survives every pass |
+| PQ8 | no runtime → all three `DECLARED`, and it does not qualify |
+| PQ9 | an undeclared required capability fails rather than being skipped |
+| PQ10 | a natively placed order notifies nobody |
+| PQ11 | **a provider connector reaches `connector_qualified = true`** — the first time |
+| PQ12 | and is still refused `READY_FOR_ROUTING` |
+
+Plus `OS10`/`OS11` end to end through `/submit`, `OS5` rewritten to drive a *laboratory*
+installation through the production wiring (the old version tested a bridge shape that no longer
+exists), and `IR1`/`IR2` on heartbeat-driven inbound retry.
+
+### Negative controls
+
+Four run, all reverted:
+
+| | |
+|---|---|
+| NC1 | correlation binding disabled → `OS10`/`OS11` fail |
+| NC2 | `orders=None` in the production factory → `OS10`/`OS11` fail |
+| NC-P1 | amendments routed to `handle_result` → `PQ3`, `PQ6`, `PQ7` fail |
+| NC-P2 | correlation requirement removed → **stayed green**, then failed once rewritten |
+
+NC-P2 is the one worth recording. Deleting the `external_order_id is None` check left every test
+green — because a `None` identifier fails the contract's own validator and the release hook's
+`except ValueError` guard swallows it, so nothing is sent either way. The check is therefore belt
+rather than braces, and the control only bit once rewritten as the failure the docstring actually
+warns about: substituting the DHealth order id. `PQ10` then failed. A control that stays green
+because a *different* guard caught it is not the same as a control that stays green because nothing
+was checking — but it is worth knowing which one you have.
+
+### What is still not true
+
+No vendor adapter. No real EMR or LIS qualified. No facility live through Connect. Both synthetic
+suites now reach `connector_qualified = true`; neither facility can reach `READY_FOR_ROUTING`, and
+`PQ12` and `RQ8` pin that from both sides.

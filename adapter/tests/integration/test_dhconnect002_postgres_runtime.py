@@ -698,3 +698,52 @@ def test_PG21_a_dead_lettered_delivery_keeps_its_payload(sessions, installation)
     assert row.payload and row.payload != ""
     assert Envelope.model_validate_json(row.payload).source_event_id == "pg21"
     assert total >= 1, "a dead letter is never deleted"
+
+
+def test_PG22_the_message_type_check_admits_contract_1_2s_provider_notifications(sessions):
+    """0030 dropped and recreated ``ck_connector_deliveries_message_type``.
+
+    The SQLite suite builds its schema from ``Base.metadata.create_all``, so updating the model's
+    ``CheckConstraint`` alone makes every fast test pass while a real deployment rejects the first
+    result notification it is asked to queue. That divergence is the same class as 0028's over-long
+    revision id: real only on the database nothing in CI runs. This is the assertion that the
+    *migration* ran, not just the model.
+    """
+    with sessions() as session:
+        definition = session.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_connector_deliveries_message_type'"
+            )
+        ).scalar_one()
+    for admitted in ("RESULT_NOTIFICATION", "AMENDMENT_NOTIFICATION"):
+        assert admitted in definition, "0030 has not been applied to this database"
+    # The 1.0/1.1 vocabulary is intact: 0030 widened the constraint rather than replacing it.
+    for kept in ("ORDER_SUBMISSION", "ORDER_NOTIFICATION", "RELEASED_AMENDMENT"):
+        assert kept in definition
+
+
+def test_PG23_a_message_type_outside_the_contract_is_refused_by_the_database(
+    sessions, installation
+):
+    """The reason the column is enumerated at all, as a fact rather than an intention.
+
+    A durable row carrying a type the applier cannot dispatch is accepted, permanent and
+    undeliverable, and nothing would notice until an operator went looking for a message that never
+    arrived. SQLite does enforce this CHECK, but only against the *model*; here it is the migration
+    that is under test.
+    """
+    installation_id = installation.installation_id
+    with pytest.raises(IntegrityError), sessions.begin() as session:
+        session.add(
+            ConnectorDelivery(
+                connector_installation_id=installation_id,
+                direction=Direction.DHEALTH_TO_CONNECTOR.value,
+                message_type="RESULT_NOTIFICATION_V2",
+                state=DeliveryState.PENDING.value,
+                replay_scope="pg23",
+                source_event_id="pg23",
+                payload="{}",
+                content_fingerprint="pg23",
+            )
+        )

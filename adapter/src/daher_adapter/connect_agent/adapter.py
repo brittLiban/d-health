@@ -6,19 +6,30 @@ here, and the runtime must stay protocol-neutral. The way to make that a structu
 a promise is to define the narrowest interface the runtime actually needs and then never look past
 it:
 
-    handle_order(notification)  ->  the partner's system now has this order
-    poll_events()               ->  whatever the partner's system has produced since last time
-    probe()                     ->  is the partner's system reachable at all
+    handle_order(notification)      ->  the partner's system now has this order
+    handle_result(notification)     ->  the partner's system now has this released report
+    handle_amendment(notification)  ->  the partner's system now has this correction
+    poll_events()                   ->  whatever the partner's system produced since last time
+    probe()                         ->  is the partner's system reachable at all
 
-Three methods. Nothing about transport, nothing about formats, nothing about authentication to the
+Five methods. Nothing about transport, nothing about formats, nothing about authentication to the
 partner's system -- all of that lives inside an implementation, which is DH-CONNECT-ADAPTER-001's
 subject. The runner below imports this module and never imports an implementation.
 
-``SyntheticLabAdapter`` is the only implementation that ships, it is **not** a partner integration,
-and §82 forbids letting it look like one. It exists so the delivery path can be exercised end to
-end: §41 is explicit that calling an adapter directly and marking ``ORDER_RECEIPT`` exercised is an
-invalid qualification, so the qualification has to drive *this* object through the real runtime, and
-this object has to be real enough that driving it proves something.
+**One protocol for both sides, not two.** A laboratory connector receives orders and refuses
+results; a provider connector receives results and refuses orders. Splitting the protocol in two
+would put that difference in the type system, where it reads well -- and would mean the runtime had
+to know which kind of connector it was driving in order to dispatch, which is exactly the knowledge
+§3 says it must not have. What a connector may do is decided by its declared capabilities and its
+qualification; the refusal is a message, ``UNSUPPORTED_WORKFLOW``, that dead-letters in front of an
+operator saying which connector was asked for what.
+
+``SyntheticLabAdapter`` and ``SyntheticProviderAdapter`` are the only implementations that ship,
+neither is a partner integration, and §82 forbids letting either look like one. They exist so the
+delivery path can be exercised end to end: §41 is explicit that calling an adapter directly and
+marking a capability exercised is an invalid qualification, so the qualification suites have to
+drive *these* objects through the real runtime, and they have to be real enough that driving them
+proves something.
 """
 
 from __future__ import annotations
@@ -28,7 +39,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from daher_adapter.connect.contract import Envelope, OrderNotification
+from daher_adapter.connect.contract import (
+    AmendmentNotification,
+    Envelope,
+    OrderNotification,
+    ResultNotification,
+    ResultObservation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +80,57 @@ class AdapterOrder:
             practitioner_identity_value=payload.practitioner.source_identity_value,
             catalog_codes=payload.catalog_codes,
             ordered_at=envelope.source_occurred_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterResult:
+    """One released report, as the provider's own system will be told about it.
+
+    ``external_order_id`` is the identifier *the partner gave DHealth* when it submitted the order,
+    resolved back through the correlation. It is the whole reason this message can be filed: an EMR
+    has no idea what a DHealth order id is, and a result it cannot attach to one of its own orders
+    is a result that did not arrive.
+
+    ``is_amendment`` and ``corrects_release_version`` are populated only for an amendment. They are
+    on this one class rather than split across two because the *adapter* work is the same shape in
+    both cases -- write values against an order -- while the two message types stay distinct on the
+    wire, where confusing them would be a clinical error rather than an inconvenience.
+    """
+
+    lab_order_id: uuid.UUID
+    external_order_id: str
+    release_version: int
+    observations: tuple[ResultObservation, ...]
+    released_at: datetime
+    is_amendment: bool = False
+    corrects_release_version: int | None = None
+
+    @classmethod
+    def from_envelope(cls, envelope: Envelope) -> AdapterResult:
+        payload = envelope.payload
+        if envelope.lab_order_id is None:  # pragma: no cover - the envelope validator requires it
+            raise ValueError("a result notification must carry lab_order_id")
+        if isinstance(payload, ResultNotification):
+            return cls(
+                lab_order_id=envelope.lab_order_id,
+                external_order_id=payload.external_order_id,
+                release_version=payload.release_version,
+                observations=payload.observations,
+                released_at=envelope.source_occurred_at,
+            )
+        if isinstance(payload, AmendmentNotification):
+            return cls(
+                lab_order_id=envelope.lab_order_id,
+                external_order_id=payload.external_order_id,
+                release_version=payload.release_version,
+                observations=payload.observations,
+                released_at=envelope.source_occurred_at,
+                is_amendment=True,
+                corrects_release_version=payload.corrects_release_version,
+            )
+        raise TypeError(  # pragma: no cover - guarded by the runner
+            f"{payload.message_type.value} is not a result notification"
         )
 
 
@@ -120,6 +188,26 @@ class ConnectorAdapter(Protocol):
         Must be **idempotent on ``lab_order_id``**: the runtime persists before calling and
         acknowledges after, so a crash in between means this is called again with the same order.
         Raise ``AdapterUnavailable`` for anything retryable and ``AdapterRefused`` for anything not.
+        """
+        ...
+
+    def handle_result(self, result: AdapterResult) -> None:
+        """File this released report into the partner's system, against their own order id.
+
+        Idempotent on ``(external_order_id, release_version)`` for the same reason
+        ``handle_order`` is idempotent on ``lab_order_id``: the runtime persists before calling and
+        acknowledges after. A laboratory connector has no provider-side chart to file into and
+        raises ``AdapterRefused(UNSUPPORTED_WORKFLOW)``.
+        """
+        ...
+
+    def handle_amendment(self, result: AdapterResult) -> None:
+        """File a **correction** to a report the partner's system already has.
+
+        Separate from ``handle_result`` because the partner's system almost certainly does something
+        different with it -- supersede a version, re-flag a chart, re-notify a clinician -- and an
+        adapter that handled both identically would silently file a correction as a second
+        independent result. ``corrects_release_version`` names what is being superseded.
         """
         ...
 
@@ -190,6 +278,19 @@ class SyntheticLabAdapter:
             return
         self.received_orders.append(order)
 
+    def handle_result(self, result: AdapterResult) -> None:
+        """A laboratory does not receive results; it produces them."""
+        raise AdapterRefused(
+            "UNSUPPORTED_WORKFLOW",
+            f"{self.connector_key} is a laboratory connector and does not receive released results",
+        )
+
+    def handle_amendment(self, result: AdapterResult) -> None:
+        raise AdapterRefused(
+            "UNSUPPORTED_WORKFLOW",
+            f"{self.connector_key} is a laboratory connector and does not receive amendments",
+        )
+
     def poll_events(self) -> list[AdapterEvent]:
         if self.unavailable:
             raise AdapterUnavailable("synthetic source system is unreachable")
@@ -203,3 +304,74 @@ class SyntheticLabAdapter:
 
     def has_order(self, lab_order_id: uuid.UUID) -> bool:
         return any(order.lab_order_id == lab_order_id for order in self.received_orders)
+
+
+@dataclass
+class SyntheticProviderAdapter:
+    """A provider-side adapter that is honest about being synthetic. **Not a partner integration.**
+
+    The mirror of ``SyntheticLabAdapter``, and it exists for the mirror of that class's reason: a
+    provider connector declares ``ORDER_SUBMISSION``, ``RELEASED_RESULT_RECEIPT`` and
+    ``AMENDMENT_RECEIPT``, and before this existed all three were permanently ``DECLARED`` because
+    nothing could exercise them. §41 forbids marking a capability exercised by calling the adapter
+    directly, so the qualification drives this object through the real durable delivery path, and
+    this object has to be real enough that driving it proves something.
+
+    It stands in for an EMR: it emits orders and receives reports. Everything it holds is in memory,
+    it has no network, no formats and no configuration, and §82 forbids letting it appear in a real
+    facility's onboarding as though it were their production connector.
+    """
+
+    connector_key: str = "synthetic-emr"
+    #: Reports filed, keyed ``(external_order_id, release_version)`` -- the EMR's own chart, near
+    #: enough. A correction lands as a *new version* beside the original rather than replacing it,
+    #: because that is what a system holding a clinical record must do: the superseded value stays
+    #: readable, which is the whole difference between an amendment and an overwrite.
+    filed_reports: dict[tuple[str, int], AdapterResult] = field(default_factory=dict)
+    #: Call counts, not list lengths. This adapter is idempotent, so the lists cannot distinguish
+    #: "delivered once" from "redelivered and deduplicated" -- and that distinction is precisely
+    #: what the runtime's exactly-once claim is about. NC-RUNTIME-4 found this the hard way on the
+    #: laboratory side; the provider side is built with the counters from the start.
+    handle_result_calls: int = 0
+    handle_amendment_calls: int = 0
+    queued_events: list[AdapterEvent] = field(default_factory=list)
+    fail_next: str | None = None
+    unavailable: bool = False
+
+    def handle_order(self, order: AdapterOrder) -> None:
+        """A provider's system places orders; it does not receive them."""
+        raise AdapterRefused(
+            "UNSUPPORTED_WORKFLOW",
+            f"{self.connector_key} is a provider connector and does not receive orders",
+        )
+
+    def handle_result(self, result: AdapterResult) -> None:
+        self.handle_result_calls += 1
+        self._file(result)
+
+    def handle_amendment(self, result: AdapterResult) -> None:
+        self.handle_amendment_calls += 1
+        self._file(result)
+
+    def _file(self, result: AdapterResult) -> None:
+        if self.unavailable:
+            raise AdapterUnavailable("synthetic provider system is unreachable")
+        if self.fail_next is not None:
+            category, self.fail_next = self.fail_next, None
+            raise AdapterRefused(category, "synthetic provider system refused the report")
+        # Idempotent on the pair the protocol names, as every implementation must be.
+        self.filed_reports.setdefault((result.external_order_id, result.release_version), result)
+
+    def poll_events(self) -> list[AdapterEvent]:
+        if self.unavailable:
+            raise AdapterUnavailable("synthetic provider system is unreachable")
+        events, self.queued_events = self.queued_events, []
+        return events
+
+    def probe(self) -> bool:
+        return not self.unavailable
+
+    # -- test affordances, and named so nobody mistakes them for protocol ----------------------
+
+    def report_for(self, external_order_id: str, release_version: int) -> AdapterResult | None:
+        return self.filed_reports.get((external_order_id, release_version))

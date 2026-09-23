@@ -7756,3 +7756,106 @@ behaviour. It does **not** build a vendor adapter, and nothing in it makes a rea
   the applier's own tests cannot express: that the model has no demographic column a similarity
   match could use. That file is the direct test of §43, which until then was only tested through
   the code paths that happen to call it.
+
+### Provider side — added 2026-09-23, same ticket
+
+The runtime above is symmetric by construction and was, for a week, used in one direction only. A
+provider connector could declare `ORDER_SUBMISSION`, `RELEASED_RESULT_RECEIPT` and
+`AMENDMENT_RECEIPT` and never exercise any of them, which is the same hole `ORDER_RECEIPT` was in
+before this ticket — a capability permanently `DECLARED` not because it failed but because nothing
+could try it.
+
+23. **Translation is the connector's job in both directions.** The first version of `_submit_order`
+    resolved `source_test_codes` through a `TestMapping` revision held by the bridge, which could
+    never be populated: §34 has DHealth store the mapping's *fingerprint* and never the mapping, so
+    `build_default_bridge_factory` had nothing to pass and every submission through the real runtime
+    would have failed `MAPPING`. The laboratory direction had already answered this — a released
+    result's `source_code` is matched against the order item's catalog code snapshot — so the
+    submission now does the same: `source_test_codes` are DHealth catalog codes the connector has
+    already translated under its qualified mapping, resolved against the **active** catalog, and an
+    unrecognised or retired code refuses the whole submission.
+
+    The whole-or-nothing rule is unchanged and is the important half. A laboratory that runs four of
+    five requested tests and reports four results has produced a clinically misleading report, and
+    nothing downstream would know a test was dropped.
+
+24. **The correlation is bound in the same transaction as the order it names.** `ORDER_SUBMISSION`
+    is the exception to "correlate before mutating": the DHealth order does not exist until the
+    bridge creates it, so there is nothing to bind to beforehand. `ApplyOutcome` therefore carries
+    the created `lab_order_id` and `inbound._apply_one` binds immediately after, in the same
+    transaction. A submitted order with no correlation is an order whose results can never be filed
+    back into the EMR that asked for them, and a correlation written by a second, later transaction
+    is one that a crash can lose.
+
+25. **A released result is notified through the release hook, never hand-enqueued.**
+    `connect/result_hook.py` runs inside `LabResultReleaseRepository.release` and
+    `LabResultAmendmentRepository.release_amendment`, in the caller's session, exactly as the
+    assignment hook runs inside selection. Same silence rules: a NATIVE provider, a provider with no
+    connector, a suspended installation and — the new one — **an order the provider's own system
+    never submitted** all produce no delivery and no exception.
+
+    That last case is the one worth stating. The notification carries the provider's own
+    `external_order_id`, resolved through the correlation; an order placed natively in DHealth has
+    no such binding, and sending a DHealth id the receiving system has never seen would be a message
+    it cannot file. That is worse than silence, because it looks delivered.
+
+26. **The release commits even when the notification cannot be built.** Payload and envelope
+    construction are wrapped, narrowly, in `except ValueError` — which is pydantic's own validation
+    error and nothing else, so a genuine programming fault still surfaces. A professional released a
+    result; refusing that clinical act because a Connect message would not validate inverts the
+    priority the whole module is arranged around.
+
+27. **An amendment notification reads which version it corrects rather than computing it.**
+    `version_number - 1` is correct today: `release_amendment` raises
+    `AmendmentBaseVersionSuperseded` unless the amendment's base is still the latest version. But
+    that invariant lives in another module, and §77 forbids DHealth rewriting clinical chronology —
+    an amendment naming the wrong predecessor tells the receiving system to supersede a report that
+    was never corrected. The base version is read through the amendment; the arithmetic survives
+    only as an unreachable fallback.
+
+28. **One adapter protocol for both sides, not two.** `handle_result` and `handle_amendment` join
+    `handle_order`; a laboratory adapter refuses the first two and a provider adapter refuses the
+    third, each with `UNSUPPORTED_WORKFLOW`. Splitting the protocol would read better in the type
+    system and would require the runtime to know which kind of connector it is driving in order to
+    dispatch — exactly the knowledge §3 says it must not have. What a connector may do is decided by
+    its declared capabilities and its qualification.
+
+    `handle_amendment` is separate from `handle_result` for the opposite reason: the partner's system
+    almost certainly does something different with a correction, and an adapter that handled both
+    identically would file a correction as a second independent result.
+
+29. **`SyntheticProviderAdapter` ships with call counters from the start.** NC-RUNTIME-4 found that
+    an idempotent synthetic adapter makes "the report is filed" stay true across a redelivery that
+    should never have happened, so a test asserting on stored state alone passes with the agent's
+    replay check deleted. `handle_result_calls` and `handle_amendment_calls` are what the provider
+    qualification asserts on; exactly one call is the claim.
+
+30. **`QUALIFICATION_SUITE_VERSION` deliberately does not move.** No scenario any existing connector
+    was qualified against changed, and no provider connector has ever recorded a PASS, so there is
+    nothing stale to invalidate. Moving it would report `SUITE_VERSION_OUTDATED` against every
+    qualified laboratory for a change that cannot affect a laboratory. Recorded here so the absence
+    reads as a decision rather than an omission.
+
+31. **`REVIEW_REPORTING` stays `DECLARED`.** It is optional, nothing in DHealth consumes a
+    connector-reported review yet, and a scenario for it would manufacture evidence for a capability
+    no facility can currently use.
+
+### Consequences — provider side
+
+- Contract **1.2**, additive: `RESULT_NOTIFICATION` and `AMENDMENT_NOTIFICATION`, both
+  DHealth → connector. Major unchanged, so no installation is invalidated by the bump.
+- Migration `0030_connect_provider` (21 characters) rewrites
+  `ck_connector_deliveries_message_type` to admit them. Stated twice on purpose — once in the model,
+  once in the migration — because the SQLite suite builds from `create_all` and would pass with the
+  migration stale while every PostgreSQL deployment rejected the first notification it was asked to
+  queue.
+- `build_default_bridge_factory` now wires `LabOrderRepository`, `PatientReferenceRepository` and
+  `PractitionerReferenceRepository` unconditionally. A laboratory installation that submits an order
+  is refused by the Exchange's own `require_type(PROVIDER)` — before any identity row is written —
+  rather than by a missing object.
+- `docs/CONNECT-QUALIFICATION.md`'s limitation 2 and `CURRENT_STATE.md`'s "provider connectors cannot
+  either" are superseded and marked as such rather than edited away.
+- **Nothing about routing changed.** `test_PQ12_qualified_is_still_not_production_routable` pins the
+  provider half of what `test_RQ8` pins for laboratories: a qualified connector with a healthy agent
+  is still refused `READY_FOR_ROUTING`, because the far end is synthetic and no vendor adapter
+  exists.

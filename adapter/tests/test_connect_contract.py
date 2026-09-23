@@ -358,16 +358,19 @@ class TestDirectionAndOutboundNotification:
         for message_type in MessageType:
             assert message_direction(message_type) in set(Direction)
 
-    def test_DI2_contract_1_1_is_a_minor_bump_so_nothing_requalifies(self):
-        """§49: a contract *major* mismatch fails closed. 1.0 -> 1.1 must not be one.
+    def test_DI2_every_bump_so_far_is_minor_so_nothing_requalifies(self):
+        """§49: a contract *major* mismatch fails closed. Neither bump so far may be one.
 
-        A connector built against 1.0 keeps working; it simply cannot receive orders, which was
-        already true. Had this been 2.0, every existing installation would have gone
-        ``CONTRACT_MAJOR_MISMATCH`` on the strength of an added field nobody had to implement.
+        A connector built against 1.0 keeps working: 1.1 gave it the ability to *receive* orders and
+        1.2 the ability to receive released results, and a connector that implements neither is in
+        exactly the position it was already in. Had either been 2.0, every existing installation
+        would have gone ``CONTRACT_MAJOR_MISMATCH`` on the strength of additions nobody had to
+        implement.
         """
-        assert CONTRACT_VERSION == "1.1"
-        assert contract_major("1.0") == contract_major(CONTRACT_VERSION)
-        _envelope(contract_version="1.0")
+        assert CONTRACT_VERSION == "1.2"
+        for shipped in ("1.0", "1.1"):
+            assert contract_major(shipped) == contract_major(CONTRACT_VERSION)
+            _envelope(contract_version=shipped)
 
     def test_DI3_the_seven_1_0_message_types_still_travel_inbound(self):
         """The version bump added a direction; it did not re-point an existing one."""

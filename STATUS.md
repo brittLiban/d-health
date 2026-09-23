@@ -29,7 +29,31 @@ a non-idempotent partner adapter would be safe too. Real PostgreSQL 18.6 covered
 SQLite structurally cannot: two concurrent `claim`s under `FOR UPDATE SKIP LOCKED` never take the
 same message. **No vendor adapter exists, no real EMR or LIS has been qualified, and no facility is
 live through Connect** — a CONNECT facility still cannot reach `READY_FOR_ROUTING`, and the refusal
-now names the real reason instead of the one that became false. Next: DH-CONNECT-ADAPTER-001.
+now names the real reason instead of the one that became false.
+
+**2026-09-23, same ticket, provider side.** The runtime is symmetric by construction and had been
+exercised in one direction only, leaving `ORDER_SUBMISSION`, `RELEASED_RESULT_RECEIPT` and
+`AMENDMENT_RECEIPT` permanently `DECLARED` — the same hole `ORDER_RECEIPT` was in, for the same
+reason. Contract **1.2** adds `RESULT_NOTIFICATION` and `AMENDMENT_NOTIFICATION` (additive; major
+unchanged, so nothing requalifies), migration `0030_connect_provider` admits them, and a release hook
+queues the notification **inside the release transaction** — so a released result and the ordering
+EMR not being told cannot disagree. A provider connector now reaches `connector_qualified = true`
+through a journey nothing shortcuts: the synthetic EMR emits an order, the agent submits it, a native
+laboratory does the work and releases, the hook fires, the agent delivers, and an amendment follows
+the same path as a *correction* rather than a second result.
+
+Writing the end-to-end test found three defects the nine unit tests had passed over, one of them a
+design error: DHealth was doing the code translation, which §34 makes impossible because it stores
+the mapping's fingerprint and never the mapping. Translation is the connector's job in both
+directions, as the laboratory side already had it. The other two: a patient reference opening its own
+transaction inside the applier's, and no correlation being bound for a submission at all — an order
+whose results could never be filed back into the system that asked for them.
+`QUALIFICATION_SUITE_VERSION` deliberately did **not** move: no existing scenario changed and no
+provider connector has ever recorded a PASS, so there was nothing stale to invalidate.
+
+**Nothing about routing changed.** No vendor adapter, no real EMR or LIS qualified, no facility live
+through Connect; a qualified CONNECT facility of either kind still cannot reach `READY_FOR_ROUTING`,
+pinned from both sides by `RQ8` and `PQ12`. Next: DH-CONNECT-ADAPTER-001.
 
 **2026-09-22, DH-CONNECT-CONTRACT-001 correction, directly on `master`.** From `a7e4d5e`. A hole in
 the ticket above: `ORDER_RECEIPT` was recorded as a passing required capability with "declaration

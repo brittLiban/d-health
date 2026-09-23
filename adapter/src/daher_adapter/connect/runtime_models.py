@@ -217,7 +217,11 @@ class ConnectorDelivery(Base):
             "message_type IN ("
             "'ORDER_SUBMISSION', 'ORDER_NOTIFICATION', 'TECHNICAL_ACK', "
             "'BUSINESS_ACCEPTANCE', 'BUSINESS_REJECTION', 'COLLECTION_EVENT', "
-            "'RELEASED_RESULT', 'RELEASED_AMENDMENT')",
+            "'RELEASED_RESULT', 'RELEASED_AMENDMENT', "
+            # Contract 1.2, migration 0030. Enumerated rather than left open because the column is
+            # what a replay reads back: a type nothing recognises would be a durable row the applier
+            # cannot dispatch, and it would be written before anybody noticed.
+            "'RESULT_NOTIFICATION', 'AMENDMENT_NOTIFICATION')",
             name="ck_connector_deliveries_message_type",
         ),
         CheckConstraint("attempt_count >= 0", name="ck_connector_deliveries_attempt_count"),

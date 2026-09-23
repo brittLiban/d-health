@@ -35,6 +35,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.connect.apply import ApplyOutcome, ConnectApplyError
 from daher_adapter.connect.contract import (
     CONTRACT_VERSION,
     BusinessAcceptance,
@@ -66,6 +67,7 @@ from daher_adapter.connect.runtime_api import build_connect_runtime_router
 from daher_adapter.connect.runtime_health import (
     DEFAULT_HEALTH_POLICY,
     RuntimeHealthPolicy,
+    aware_utc,
     derive_health,
     runtime_health_in_session,
 )
@@ -1278,3 +1280,140 @@ class TestDurableDelivery:
             health = runtime_health_in_session(session, installation, now=clock.now)
         assert health.state is HealthState.HEALTHY
         assert health.pending_deliveries == 0
+
+
+class TestInboundRetry:
+    """§52 — an inbound message that failed retryably has to be tried again by *something*.
+
+    The something is the heartbeat. ``submit`` drains only what it just enqueued, so a message
+    whose bridge application failed and backed off would otherwise sit ``PENDING`` with its attempt
+    time in the past forever: durable, and never applied. Driving the retry from the agent's own
+    cadence is the honest arrangement — no agent means no inbound traffic, so nothing to retry.
+
+    This class exists because that path shipped untested. ``apply_pending_inbound`` is called from
+    two places in ``runtime_api`` and was exercised by neither test file, which is exactly the shape
+    of defect this ticket's own qualification model is about: a mechanism that reads well and that
+    nothing checks.
+    """
+
+    def test_IR1_a_retryable_bridge_failure_is_retried_by_a_later_heartbeat(
+        self, sessions, keypair, clock, installation
+    ):
+        """Fail once, back off, heartbeat, succeed. The whole loop, driven.
+
+        The bridge is injected and fails only its first call, so the retry is observed rather than
+        assumed: a test that used a permanently failing bridge could not tell "retried and failed
+        again" from "never retried at all".
+        """
+        applied: list[str] = []
+
+        class _FailsOnce:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def apply(self, session, envelope):  # noqa: ANN001, ARG002
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectApplyError(
+                        FailureCategory.REMOTE_UNAVAILABLE, "source system briefly unreachable"
+                    )
+                applied.append(envelope.source_event_id)
+                return ApplyOutcome(applied=True)
+
+        bridge = _FailsOnce()
+        client = _runtime_client_with_bridge(sessions, keypair, clock, lambda *_a: bridge)
+        private_key, _ = keypair
+
+        envelope = _envelope(installation, payload=CollectionEvent(external_order_id="EXT-1"))
+        response = client.post(
+            "/exchange/v1/connect/runtime/submit",
+            headers=_auth(_agent_token(private_key)),
+            json={"envelope": envelope.model_dump(mode="json")},
+        )
+        assert response.status_code == 200, response.text
+
+        # First pass failed and backed off: still owned by DHealth, scheduled, not dead.
+        with sessions() as session:
+            delivery = session.scalar(select(ConnectorDelivery))
+        assert bridge.calls == 1
+        assert applied == []
+        assert delivery.state == DeliveryState.PENDING.value
+        assert delivery.last_failure_category == FailureCategory.REMOTE_UNAVAILABLE.value
+        # aware_utc because SQLite hands back a naive datetime for DateTime(timezone=True), so the
+        # bare comparison raises TypeError rather than failing an assertion -- the same trap the
+        # production code carries this helper for.
+        assert aware_utc(delivery.next_attempt_at) > clock.now
+
+        # A heartbeat *before* the backoff expires must not retry it -- otherwise the backoff is
+        # decorative and a failing integration is hammered once per poll.
+        _beat(client, _agent_token(private_key))
+        assert bridge.calls == 1
+
+        clock.advance(DEFAULT_RETRY_POLICY.max_delay + timedelta(seconds=1))
+        _beat(client, _agent_token(private_key))
+
+        assert bridge.calls == 2
+        assert applied == [envelope.source_event_id]
+        with sessions() as session:
+            delivery = session.scalar(select(ConnectorDelivery))
+        assert delivery.state == DeliveryState.DELIVERED.value
+        assert delivery.delivered_at is not None
+
+    def test_IR2_a_terminal_bridge_failure_is_not_retried_by_the_heartbeat(
+        self, sessions, keypair, clock, installation
+    ):
+        """A dead letter stays a dead letter. Heartbeats must not resurrect one.
+
+        ``claim`` only returns PENDING or expired-CLAIMED rows, so a DEAD_LETTER row is unreachable
+        — asserted rather than assumed, because "the retry loop quietly re-tries something an
+        operator was told to look at" is the failure this separation exists to prevent.
+        """
+        calls: list[int] = []
+
+        class _AlwaysTerminal:
+            def apply(self, session, envelope):  # noqa: ANN001, ARG002
+                calls.append(1)
+                raise ConnectApplyError(FailureCategory.MAPPING, "code inconnu")
+
+        client = _runtime_client_with_bridge(
+            sessions, keypair, clock, lambda *_a: _AlwaysTerminal()
+        )
+        private_key, _ = keypair
+
+        envelope = _envelope(installation, payload=CollectionEvent(external_order_id="EXT-1"))
+        client.post(
+            "/exchange/v1/connect/runtime/submit",
+            headers=_auth(_agent_token(private_key)),
+            json={"envelope": envelope.model_dump(mode="json")},
+        )
+        assert len(calls) == 1
+        with sessions() as session:
+            assert (
+                session.scalar(select(ConnectorDelivery)).state == DeliveryState.DEAD_LETTER.value
+            )
+
+        clock.advance(timedelta(hours=1))
+        _beat(client, _agent_token(private_key))
+
+        assert len(calls) == 1, "a dead letter must not be re-applied by the retry loop"
+
+
+def _runtime_client_with_bridge(sessions, keypair, clock, bridge_factory) -> TestClient:
+    """A runtime router whose inbound applier uses an injected bridge.
+
+    Separate from the ``runtime_client`` fixture because these tests are about what the *applier*
+    does with a bridge that fails, and the real bridge reaches the whole Exchange domain — which
+    would make the interesting failures hard to produce and the assertions about something else.
+    """
+    _, public_key = keypair
+    app = FastAPI()
+    app.include_router(
+        build_connect_runtime_router(
+            session_factory=sessions,
+            runtime_token_validator=build_validator(public_key, audience=RUNTIME_AUDIENCE),
+            platform_admin_role=PLATFORM_ADMIN_ROLE,
+            bridge_factory=bridge_factory,
+            now=clock,
+        )
+    )
+    return TestClient(app)

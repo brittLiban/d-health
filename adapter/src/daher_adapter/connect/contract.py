@@ -50,7 +50,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 #: exactly what was true of it before. The major component is therefore unchanged, and no
 #: qualification is invalidated by the version bump itself. (The qualification *suite* version is a
 #: separate number and does move; see ``qualification.QUALIFICATION_SUITE_VERSION``.)
-CONTRACT_VERSION = "1.1"
+#:
+#: **1.1 -> 1.2 (DH-CONNECT-AGENT-001, provider side).** Additive only, and for the same reason:
+#: ``RESULT_NOTIFICATION`` and ``AMENDMENT_NOTIFICATION`` carry a released report *out* to the
+#: provider's own system, which is the half of the provider workflow 1.1 could not express. Without
+#: them a provider connector could submit an order and then never be told the answer, which makes
+#: ``RELEASED_RESULT_RECEIPT`` and ``AMENDMENT_RECEIPT`` unexercisable by construction -- exactly
+#: the hole ``ORDER_RECEIPT`` was in before 1.1. No existing message type changed. The qualification
+#: suite version deliberately does **not** move: no scenario an existing connector was qualified
+#: against changed, and no provider connector has ever recorded a PASS, so there is nothing stale to
+#: invalidate. Moving it would report SUITE_VERSION_OUTDATED against every qualified laboratory for
+#: a change that cannot affect a laboratory.
+CONTRACT_VERSION = "1.2"
 
 
 def contract_major(version: str) -> int:
@@ -363,6 +374,13 @@ class MessageType(StrEnum):
     RELEASED_AMENDMENT = "RELEASED_AMENDMENT"
     #: Added in contract 1.1 (DH-CONNECT-AGENT-001). The first message that travels *outward*.
     ORDER_NOTIFICATION = "ORDER_NOTIFICATION"
+    #: Added in contract 1.2. Outward, to the *provider* that submitted the order: the released
+    #: report, and a correction to one. Separate types rather than a flag on one, for the same
+    #: reason ``RELEASED_RESULT`` and ``RELEASED_AMENDMENT`` are separate -- an amendment names what
+    #: it corrects, and a type that is "a result, unless this field is set" is a type whose two
+    #: meanings get confused at exactly the moment a corrected value matters.
+    RESULT_NOTIFICATION = "RESULT_NOTIFICATION"
+    AMENDMENT_NOTIFICATION = "AMENDMENT_NOTIFICATION"
 
 
 class Direction(StrEnum):
@@ -393,6 +411,8 @@ _DIRECTIONS: Mapping[MessageType, Direction] = {
     MessageType.RELEASED_RESULT: Direction.CONNECTOR_TO_DHEALTH,
     MessageType.RELEASED_AMENDMENT: Direction.CONNECTOR_TO_DHEALTH,
     MessageType.ORDER_NOTIFICATION: Direction.DHEALTH_TO_CONNECTOR,
+    MessageType.RESULT_NOTIFICATION: Direction.DHEALTH_TO_CONNECTOR,
+    MessageType.AMENDMENT_NOTIFICATION: Direction.DHEALTH_TO_CONNECTOR,
 }
 
 
@@ -431,8 +451,14 @@ class OrderSubmission(BaseModel):
     patient: ScopedExternalId
     practitioner: SourcePractitionerRef
     external_order_id: str = Field(min_length=1, max_length=128)
-    #: Source orderable codes, not DHealth catalog ids. Mapping happens at the boundary, under an
-    #: explicit mapping revision, and an unmapped code refuses the whole submission.
+    #: **DHealth catalog codes**, already translated from the source system's own orderable codes by
+    #: the connector, under its qualified mapping revision. Not catalog ids: a code survives a
+    #: re-versioned catalog entry and an id does not.
+    #:
+    #: Translation is the connector's job in both directions -- a released result's ``source_code``
+    #: is likewise matched against the order item's catalog code. DHealth stores only the mapping's
+    #: fingerprint (§34), never the mapping, so it could not translate on the partner's behalf even
+    #: if it wanted to. A code DHealth's catalog does not recognise refuses the whole submission.
     source_test_codes: tuple[str, ...] = Field(min_length=1)
 
 
@@ -590,9 +616,74 @@ class OrderNotification(BaseModel):
     catalog_codes: tuple[str, ...] = Field(min_length=1)
 
 
+class ResultNotification(BaseModel):
+    """DHealth telling a provider's connector that a report it ordered has been released.
+
+    The other half of ``OrderSubmission``. Without it a provider connector can ask for work and
+    never be told the answer, and its declared ``RELEASED_RESULT_RECEIPT`` capability is
+    unexercisable by construction -- the same shape of hole ``ORDER_RECEIPT`` was in before 1.1.
+
+    ``external_order_id`` is **the provider's own identifier**, resolved through the correlation
+    the submission bound, and it is required rather than optional. A result the receiving EMR cannot
+    file against one of its own orders is a result that did not arrive, whatever the delivery table
+    says -- so a released report for an order that did not come through this connector is not sent
+    at all, rather than sent with a DHealth id the EMR has never seen.
+
+    ``release_version`` is DHealth's version of the report, which is what makes an amendment
+    recognisable as a correction of *this* rather than a second, independent result.
+
+    **Values and labels, and nothing else.** No demographics, no interpretation, no normal/abnormal
+    flag DHealth was not given: the observations are relayed exactly as the laboratory released
+    them, in the laboratory's own codes and units, exactly as ``ReleasedResult`` carried them
+    inward. ADR-056 decision 5.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_type: Literal[MessageType.RESULT_NOTIFICATION] = MessageType.RESULT_NOTIFICATION
+    #: What the *provider's* system calls this order. Never a DHealth id.
+    external_order_id: str = Field(min_length=1, max_length=128)
+    release_version: int = Field(ge=1)
+    observations: tuple[ResultObservation, ...] = Field(min_length=1)
+
+
+class AmendmentNotification(BaseModel):
+    """A corrected report going back out to the provider that ordered it.
+
+    ``corrects_release_version`` names the version being corrected, so the receiving system files a
+    new version against the report it already has rather than a second, unrelated result beside it.
+    Two results where there should be one version-two is the clinical failure this field exists to
+    prevent: a clinician reading the chart would see both values and have nothing telling them which
+    one superseded the other.
+
+    A distinct type from ``ResultNotification`` rather than a flag on it -- see ``MessageType``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_type: Literal[MessageType.AMENDMENT_NOTIFICATION] = MessageType.AMENDMENT_NOTIFICATION
+    external_order_id: str = Field(min_length=1, max_length=128)
+    release_version: int = Field(ge=2)
+    #: Always lower than ``release_version``. An amendment that claims to correct a later version
+    #: than itself is a chronology DHealth would be rewriting, which §77 forbids.
+    corrects_release_version: int = Field(ge=1)
+    observations: tuple[ResultObservation, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _corrects_an_earlier_version(self) -> AmendmentNotification:
+        if self.corrects_release_version >= self.release_version:
+            raise ValueError(
+                f"amendment version {self.release_version} cannot correct version "
+                f"{self.corrects_release_version}; a correction comes after what it corrects"
+            )
+        return self
+
+
 ConnectMessage = Annotated[
     OrderSubmission
     | OrderNotification
+    | ResultNotification
+    | AmendmentNotification
     | TechnicalAck
     | BusinessAcceptance
     | BusinessRejection
@@ -657,6 +748,8 @@ class Envelope(BaseModel):
         """
         needs_order = {
             MessageType.ORDER_NOTIFICATION,
+            MessageType.RESULT_NOTIFICATION,
+            MessageType.AMENDMENT_NOTIFICATION,
             MessageType.TECHNICAL_ACK,
             MessageType.BUSINESS_ACCEPTANCE,
             MessageType.BUSINESS_REJECTION,

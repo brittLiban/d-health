@@ -73,9 +73,37 @@ connector whose agent stopped an hour ago is `UNAVAILABLE` and still qualified.
   └──────────────────────────────────────────────────────────────┘
 ```
 
-Everything vendor-specific lives behind `ConnectorAdapter`, which has three methods:
-`handle_order`, `poll_events`, `probe`. The runtime never branches on `connector_key`; a future
-FHIR or HL7 adapter implements that protocol and nothing in the runtime changes.
+Everything vendor-specific lives behind `ConnectorAdapter`, which has five methods:
+`handle_order`, `handle_result`, `handle_amendment`, `poll_events`, `probe`. The runtime never
+branches on `connector_key`; a future FHIR or HL7 adapter implements that protocol and nothing in the
+runtime changes.
+
+One protocol covers both sides rather than two. A laboratory adapter refuses `handle_result` and
+`handle_amendment`; a provider adapter refuses `handle_order`; each refusal is
+`UNSUPPORTED_WORKFLOW`, which dead-letters in front of an operator naming which connector was asked
+for what. Splitting the protocol would read better in the type system and would oblige the runtime
+to know which kind of connector it is driving in order to dispatch — precisely the knowledge §3 says
+it must not have. What a connector may do is decided by its declared capabilities and its
+qualification, not by which methods its class happens to have.
+
+`handle_amendment` is separate from `handle_result` for the opposite reason: a receiving system
+almost certainly does something different with a correction — supersede a version, re-flag a chart,
+re-notify a clinician — and an adapter that handled both identically would file a correction as a
+second independent result, leaving a clinician reading both values with nothing to say which
+superseded the other.
+
+### Filing a result back into the provider's system
+
+A `ResultNotification` carries the **provider's own** `external_order_id`, resolved through the
+correlation their `ORDER_SUBMISSION` created. It is required, and the hook sends nothing when there
+is no correlation — an order placed natively in DHealth by a facility that also runs a connector was
+never asked for by that EMR and has no identifier there. A message carrying a DHealth id the
+receiving system has never seen is one it cannot file, which is worse than no message: it looks
+delivered.
+
+The release itself always commits. A notification that cannot be built is logged and dropped; a
+professional released a result, and refusing that clinical act because a Connect message would not
+validate inverts the priority.
 
 ---
 

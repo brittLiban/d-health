@@ -37,6 +37,14 @@
 > either (there is no provider harness). The synthetic suite still passes every scenario it can run;
 > "the suite passed" and "production qualification is complete" are now separate statements. See
 > ADR-056 decision 23.
+>
+> **Superseded 2026-09-23 by DH-CONNECT-AGENT-001.** Both halves of that sentence are now false: the
+> runtime exists and `ORDER_RECEIPT` is exercised through it, and a provider harness exists so all
+> three provider capabilities are exercisable too. Both synthetic suites reach
+> `connector_qualified = true`. **Nothing about routing changed** — a qualified CONNECT facility
+> still cannot reach `READY_FOR_ROUTING`, because the far end of both suites is a synthetic adapter
+> and no vendor adapter exists. A connector with no runtime still records `DECLARED` and still does
+> not qualify. See ADR-057.
 
 > **Current Exchange status (DH-EX-014B, 2026-09-14):** post-release amendment episodes,
 > immutable release-version history, provider exact-version reads, and version-bound review routes

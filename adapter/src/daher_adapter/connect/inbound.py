@@ -37,6 +37,7 @@ from daher_adapter.connect.contract import (
     Direction,
     Envelope,
     FailureCategory,
+    OrderSubmission,
     ReleasedAmendment,
     ReleasedResult,
 )
@@ -130,7 +131,13 @@ def build_default_bridge_factory(session_factory: sessionmaker[Session]) -> Brid
     def factory(
         session: Session, organization_id: uuid.UUID, identity_id: uuid.UUID
     ) -> ConnectBridge:
+        from daher_adapter.exchange.catalog import CatalogRepository
+        from daher_adapter.exchange.identity import (
+            PatientReferenceRepository,
+            PractitionerReferenceRepository,
+        )
         from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
+        from daher_adapter.exchange.orders import LabOrderRepository
         from daher_adapter.exchange.organizations import OrganizationRepository
         from daher_adapter.exchange.results import (
             LabResultAmendmentRepository,
@@ -139,6 +146,7 @@ def build_default_bridge_factory(session_factory: sessionmaker[Session]) -> Brid
         )
 
         organizations = OrganizationRepository(session_factory)
+        catalog = CatalogRepository(session_factory, organizations)
         return ConnectBridge(
             workflow=LabWorkflowRepository(session_factory, organizations),
             results=LabResultRepository(session_factory),
@@ -147,6 +155,13 @@ def build_default_bridge_factory(session_factory: sessionmaker[Session]) -> Brid
             receipts=DurableReceiptStore(session),
             installation_organization_id=organization_id,
             service_identity_id=identity_id,
+            # The provider side. Wired unconditionally rather than per installation kind: what a
+            # connector may do is decided by its declared capabilities and its qualification, not by
+            # which repositories happened to be handed to the bridge. A laboratory installation that
+            # submits an order is refused by the contract, not by a missing object.
+            orders=LabOrderRepository(session_factory, organizations, catalog),
+            patients=PatientReferenceRepository(session_factory, organizations),
+            practitioners=PractitionerReferenceRepository(session_factory),
         )
 
     return factory
@@ -260,6 +275,18 @@ def _apply_one(
             # DHealth noticed it was claimed for a different order.
             _bind_correlations(session, delivery.connector_installation_id, envelope)
             outcome = bridge.apply(session, envelope)
+            # ORDER_SUBMISSION is the exception to "correlation first": the DHealth order does not
+            # exist until the bridge creates it, so there is nothing to bind *to* beforehand. Bound
+            # here, in the same transaction, because a submitted order with no correlation is an
+            # order whose results can never be filed back into the EMR that asked for them.
+            if isinstance(envelope.payload, OrderSubmission) and outcome.lab_order_id is not None:
+                CorrelationRepository().bind_order(
+                    session,
+                    installation_id=delivery.connector_installation_id,
+                    external_order_id=envelope.payload.external_order_id,
+                    lab_order_id=outcome.lab_order_id,
+                    source_system=envelope.source_system,
+                )
         except CorrelationConflict as error:
             conflict = FailureCategory.CONFLICT
             return _fail(session, repository, delivery, conflict, str(error), moment)

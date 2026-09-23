@@ -2075,6 +2075,28 @@ class LabResultRepository:
         )
 
 
+def _notify_provider_connector(
+    session: Session, lab_order_id: uuid.UUID, release_version_id: uuid.UUID
+) -> None:
+    """DH-CONNECT-AGENT-001: queue the released report for the ordering provider's connector.
+
+    In **this** session, so the delivery commits with the release. A release recorded and the
+    ordering EMR not told are two facts that must never be able to disagree, and a separate commit
+    afterwards is exactly the window where they can.
+
+    Does nothing -- and never raises -- for a NATIVE provider, a provider with no registered
+    connector, or an order the provider's own system never submitted and therefore has no identifier
+    for. Release is a clinical act by a named professional; it does not fail because an EMR
+    integration is down. Imported inside the function so this module keeps no import-time dependency
+    on the connect package, matching ``exchange/selection.py``'s treatment of the same boundary.
+    """
+    from daher_adapter.connect.result_hook import notify_provider_of_release
+
+    notify_provider_of_release(
+        session, lab_order_id=lab_order_id, release_version_id=release_version_id
+    )
+
+
 class LabResultReleaseRepository:
     """DH-EX-012/ADR-044, extended by DH-EX-012C, extended by DH-EX-014A/ADR-048: the sole
     supported production way to move a ``LabOrder`` from ``IN_PROGRESS`` to ``COMPLETED`` -- see
@@ -2248,6 +2270,7 @@ class LabResultReleaseRepository:
 
         order.status = LabOrderStatus.COMPLETED.value
         session.flush()
+        _notify_provider_connector(session, order_id, version.id)
         return _to_release_record(release), True
 
     def list_release_candidates(
@@ -3254,6 +3277,7 @@ class LabResultAmendmentRepository:
         session.add(review)
         session.flush()
 
+        _notify_provider_connector(session, order_id, version.id)
         return _to_release_version_record(version), True
 
     # -- release queue ----------------------------------------------------------------------------

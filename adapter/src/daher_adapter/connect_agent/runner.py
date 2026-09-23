@@ -50,6 +50,7 @@ from daher_adapter.connect_agent.adapter import (
     AdapterEvent,
     AdapterOrder,
     AdapterRefused,
+    AdapterResult,
     AdapterUnavailable,
     ConnectorAdapter,
 )
@@ -286,12 +287,22 @@ class AgentRunner:
             return
 
         try:
-            if envelope.payload.message_type is MessageType.ORDER_NOTIFICATION:
+            kind = envelope.payload.message_type
+            if kind is MessageType.ORDER_NOTIFICATION:
                 self._adapter.handle_order(AdapterOrder.from_envelope(envelope))
-            else:  # pragma: no cover - the direction check above leaves only notifications today
+            elif kind is MessageType.RESULT_NOTIFICATION:
+                self._adapter.handle_result(AdapterResult.from_envelope(envelope))
+            elif kind is MessageType.AMENDMENT_NOTIFICATION:
+                self._adapter.handle_amendment(AdapterResult.from_envelope(envelope))
+            else:
+                # Reachable: the direction check above admits every DHEALTH_TO_CONNECTOR type, so a
+                # contract that adds one without adding a branch here lands exactly here. Refusing
+                # by name dead-letters it in front of an operator, which is the fail-closed answer
+                # -- an agent that quietly acknowledged a message it never handed to the adapter
+                # would report a clinical message delivered that nothing ever received.
                 raise AdapterRefused(
                     FailureCategory.UNSUPPORTED_WORKFLOW.value,
-                    f"no adapter handler for {envelope.payload.message_type.value}",
+                    f"no adapter handler for {kind.value}",
                 )
         except AdapterUnavailable as error:
             self._reject(row.delivery_id, FailureCategory.REMOTE_UNAVAILABLE, str(error), report)

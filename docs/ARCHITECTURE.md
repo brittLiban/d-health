@@ -2060,3 +2060,34 @@ skew and never consulted.
 there is now a runtime, and there is still no qualified vendor adapter — and the rule did not. A
 fully qualified connector with a healthy agent is still refused, and a test pins that so the next
 ticket cannot lift the block by accident.
+
+### Both directions, added the same day
+
+The section above describes a runtime that is symmetric by construction and was, at first, driven
+one way. The provider half closes that:
+
+```
+  provider's EMR ──adapter──► agent ──submit──► ORDER_SUBMISSION ──► DHealth order
+                                                                          │
+                                                                    correlation
+                                                                  (EMR's own id)
+                                                                          │
+  laboratory releases ──► result_hook ──► RESULT_NOTIFICATION ──► agent ──► EMR
+                              │                                     (filed against that id)
+                        same transaction
+```
+
+Contract **1.2** adds `RESULT_NOTIFICATION` and `AMENDMENT_NOTIFICATION`; migration
+`0030_connect_provider` admits them to the delivery queue. The correlation created by a submission
+is what makes the return trip filable — a released report carries the provider's own order
+identifier, never a DHealth one, and an order that did not come through the connector produces no
+notification at all rather than one the receiving system cannot place.
+
+Translation stays on the partner's hardware in **both** directions. DHealth holds the mapping's
+fingerprint and never the mapping (§34), so a submission arrives already expressed in DHealth
+catalog codes, exactly as a released result arrives expressed against the order item's catalog code
+snapshot. A design where DHealth translated would have nothing to translate with.
+
+Nothing about routing changed. Both synthetic suites now reach `connector_qualified = true`, and
+`RQ8` and `PQ12` pin from both sides that a qualified facility is still refused
+`READY_FOR_ROUTING`.
