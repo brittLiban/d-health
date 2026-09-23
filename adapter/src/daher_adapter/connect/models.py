@@ -125,6 +125,15 @@ class ConnectorInstallation(Base):
     there is deliberately not a generic JSON column that could be used to smuggle one in. If a
     future runtime needs a credential it stores a non-secret handle elsewhere and resolves it
     outside the Exchange database.
+
+    DH-CONNECT-AGENT-001 needed exactly that handle and added ``service_client_id``, which is the
+    promise above being kept rather than bent. It holds the OIDC client *identifier* an agent's
+    access token carries in ``azp`` -- a public name, the same class of fact as a username, and the
+    thing a token proves possession of a secret *for*. The secret itself is issued and verified by
+    the identity provider and never travels through DHealth: this column cannot be used to
+    authenticate anything on its own, which is the property that makes storing it safe. §9's
+    preference for "a safe verifier/reference rather than recoverable plaintext" is satisfied
+    trivially, because there is no plaintext to recover.
     """
 
     __tablename__ = "connector_installations"
@@ -155,6 +164,18 @@ class ConnectorInstallation(Base):
             name="ck_connector_installations_status",
         ),
         Index("ix_connector_installations_organization_id", "organization_id"),
+        # DH-CONNECT-AGENT-001 §8. Globally unique, including across retired rows: one OIDC client
+        # authenticates for exactly one installation, forever. Were it merely unique among live
+        # rows, retiring an installation would free its client id for reuse, and a credential that
+        # still worked would then resolve to a *different* facility -- the cross-tenant path §8
+        # exists to forbid. Retiring an installation must invalidate its identity, not recycle it.
+        Index(
+            "uq_connector_installations_service_client",
+            "service_client_id",
+            unique=True,
+            postgresql_where=text("service_client_id IS NOT NULL"),
+            sqlite_where=text("service_client_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -176,6 +197,12 @@ class ConnectorInstallation(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default=ConnectorInstallationStatus.REGISTERED.value
     )
+    #: The OIDC client identifier this installation's agent authenticates as, or ``None`` while no
+    #: service identity has been issued. Nullable because registering a connector and provisioning
+    #: its credential are separate acts by separate people, and a registration that cannot exist
+    #: until the identity provider is ready would push platform admins toward placeholder values.
+    #: **Not a secret** -- see the class docstring.
+    service_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

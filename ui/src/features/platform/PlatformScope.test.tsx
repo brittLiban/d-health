@@ -97,7 +97,21 @@ function client(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
       },
       health_state: 'UNKNOWN',
       operational: false,
-      transport_available: false,
+      transport_available: true,
+      // DH-CONNECT-AGENT-001. This fixture reaches the component through
+      // 'as unknown as ExchangeClient', so TypeScript does not check it -- which is exactly how a
+      // missing 'runtime' got past the build and only showed up as five tests failing to find a
+      // table, because the panel threw before rendering anything.
+      runtime: {
+        runtime_instance_id: null,
+        agent_version: null,
+        last_seen_at: null,
+        adapter_reachable: null,
+        pending_deliveries: 0,
+        dead_letters: 0,
+        oldest_pending_seconds: null,
+        reasons: ["Aucun agent ne s'est jamais annoncé pour ce connecteur."],
+      },
       qualification_history: [],
     }),
     ...overrides,
@@ -267,7 +281,7 @@ describe('the connect facility, told truthfully', () => {
       screen.getByText(/Qualification de production — aucun connecteur enregistré/),
     ).toBeInTheDocument()
     expect(
-      screen.getByText(/Exécution du connecteur — aucun runtime dans cette version/),
+      screen.getByText(/Exécution du connecteur — inconnu/i),
     ).toBeInTheDocument()
     expect(screen.getByText(/Routage de production — désactivé/)).toBeInTheDocument()
   })

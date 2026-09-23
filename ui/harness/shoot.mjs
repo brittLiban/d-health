@@ -34,6 +34,11 @@ const SCENES = [
   'connector-failed',
   'connector-suite-passed',
   'connector-qualified',
+  // DH-CONNECT-AGENT-001: the three states DHealth can now actually observe. The healthy one is
+  // the capture most likely to be over-read, which is exactly why it is in the set.
+  'connector-runtime-healthy',
+  'connector-runtime-degraded',
+  'connector-runtime-unavailable',
   'connector-stale',
   'connector-suspended',
   'connector-native-unchanged',
@@ -67,6 +72,11 @@ const SCENE_ACTIONS = {
   'connector-failed': [/Laboratoire Central/],
   'connector-suite-passed': [/Laboratoire Central/],
   'connector-qualified': [/Laboratoire Central/],
+  // The runtime states live on the facility detail, same as every other connector scene. Without
+  // the click these capture the facility *list*, which documents nothing about the runtime.
+  'connector-runtime-healthy': [/Laboratoire Central/],
+  'connector-runtime-degraded': [/Laboratoire Central/],
+  'connector-runtime-unavailable': [/Laboratoire Central/],
   'connector-stale': [/Laboratoire Central/],
   'connector-suspended': [/Laboratoire Central/],
   'connector-native-unchanged': [/Laboratoire Central/],

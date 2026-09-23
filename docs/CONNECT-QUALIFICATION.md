@@ -4,9 +4,10 @@
 `docs/CONNECT-CONTRACT.md`, what the resulting evidence means, and — at length, because this is the
 part that gets misread — what it does **not** mean. Decisions: `DECISIONS.md` ADR-056.
 
-> **DHealth Connect transport IS NOT BUILT.** No connector exists, none has been qualified against
-> a real external system, and no facility is production-routable through one. The harness described
-> here runs against a synthetic connector subject that contacts nothing.
+> **No real external system has been qualified.** DH-CONNECT-AGENT-001 built the runtime, and the
+> suite now drives `ORDER_RECEIPT` through it end to end — but the far end is a synthetic adapter
+> that contacts nothing. No vendor adapter exists, no real EMR or LIS has been qualified, and no
+> facility is production-routable through Connect. See `docs/CONNECT-AGENT.md`.
 
 ---
 
@@ -195,12 +196,21 @@ The state this whole ticket is built around, and the one an operator will most w
 
 ```
 connector_qualified   = TRUE
-connector_operational = FALSE      ← no runtime exists, in any release yet shipped
+connector_operational = FALSE      ← no agent is reporting in for this facility
 production_routing_allowed = FALSE
 ```
 
-**And in this build, nothing reaches even the first line.** After the evidence-level correction, the
-best a real CONNECT laboratory can reach is:
+DH-CONNECT-AGENT-001 made the first line reachable: the synthetic laboratory suite now exercises
+`ORDER_RECEIPT` through the real delivery path and reaches `connector_qualified = true` — the first
+time anything in this codebase has. It also made the second line reachable, by running an agent.
+
+**And a facility with all three of those satisfied is still not production-routable**, because
+routing additionally requires a qualified *vendor* adapter and none exists. That refusal lives in
+`exchange/facility_enrollment.py` and is pinned by
+`test_RQ8_qualified_is_still_not_production_routable`.
+
+Before that ticket, nothing reached even the first line. After the evidence-level correction and
+before the runtime, the best a real CONNECT laboratory could reach was:
 
 ```
 suite de qualification     RÉUSSIE     ← every scenario the suite could run behaved correctly

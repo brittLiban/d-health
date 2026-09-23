@@ -5,12 +5,14 @@ and DHealth Exchange must obey. Decisions and their reasoning: `DECISIONS.md` AD
 connector proves it obeys this: `docs/CONNECT-QUALIFICATION.md`. Architecture: `docs/ARCHITECTURE.md`
 §22.
 
-> **DHealth Connect transport IS NOT BUILT.** There is no FHIR client, no HL7 parser, no MLLP
-> listener, no SFTP runtime, no file watcher, no webhook receiver, no polling loop, no on-premise
-> agent, and no delivery worker. Nothing in this repository has ever contacted an external EMR or
-> LIS. No connector exists for any product, none has been qualified, and no facility can be
-> production-routed through one. This document defines the contract a connector will have to meet;
-> it does not describe a connector that exists.
+> **DHealth Connect has a runtime; it has no qualified vendor adapter.**
+> DH-CONNECT-AGENT-001 built the generic runtime: a durable delivery engine, a service-identity
+> boundary, an on-premises agent, retries, dead letters and health derived from behaviour. There is
+> still no FHIR client, no HL7 parser, no MLLP listener, no SFTP runtime, no file watcher, no webhook
+> receiver and **no vendor adapter of any kind** — the only adapter that exists is synthetic and
+> contacts nothing. Nothing in this repository has ever contacted a real external EMR or LIS, no real
+> system has been qualified, and no facility is production-routable through Connect. See
+> `docs/CONNECT-AGENT.md`.
 
 ---
 
@@ -189,9 +191,13 @@ discovering it after a facility has been told it is going live.
 
 ## Operational
 
-`connector_operational` is **false for every facility in this release, with no way to make it
-true.** It derives from a health state that is unconditionally `UNKNOWN`, because nothing reports
-in: there is no runtime, no heartbeat, and no transport.
+`connector_operational` is derived from a health state that is itself derived from observations —
+when DHealth last heard from an agent, whether that agent could reach its source system, and how much
+work is aging in its queue. **There is no column holding it, no endpoint that sets one, and no UI
+control offering one.**
+
+Before DH-CONNECT-AGENT-001 it was unconditionally false, because nothing reported in. It is now
+reachable, and reaching it requires an agent to actually be running at the facility and working.
 
 This is not a placeholder to be flipped when convenient. `production_routing_allowed` for a CONNECT
 facility depends on it, so a CONNECT facility stays unroutable no matter how much qualification

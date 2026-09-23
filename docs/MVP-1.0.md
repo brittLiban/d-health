@@ -241,6 +241,15 @@ runtime that does not exist. That is DH-CONNECT-AGENT-001's subject.
 `connector_qualified = true` at all**; the synthetic suite passes every scenario it can run and
 production qualification stays incomplete. Two claims, stated separately.
 
+**Dated update, 2026-09-23 (DH-CONNECT-AGENT-001).** The *runtime* now exists: a durable delivery
+engine, a service-identity boundary, an on-premises agent, retries, dead letters and health derived
+from what an agent reports. `ORDER_RECEIPT` is exercised by delivering a real order through it, so
+**the synthetic laboratory suite reaches `connector_qualified = true` for the first time** — and a
+Connect facility with a qualified connector *and* a healthy agent is **still unroutable**, because
+routing additionally requires a qualified vendor adapter and none exists. The two paragraphs above
+describe what was true before this; what changed is the runtime, not the product's availability.
+DH-CONNECT-ADAPTER-001 is the ticket that would change that.
+
 OpenMRS/OpenELIS (ADR-042) are the first reference connector track under this model, not an
 instance of DHealth Clinic/Lab. `CURRENT`: the OpenMRS/OpenELIS clinical stack and its adapter exist
 and run (see `CURRENT_STATE.md`); its connection to the *Exchange* core specifically (as opposed to

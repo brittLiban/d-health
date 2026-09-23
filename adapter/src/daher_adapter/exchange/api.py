@@ -39,8 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from daher_adapter.connect.contract import CONTRACT_VERSION
 from daher_adapter.connect.qualification import (
     QUALIFICATION_SUITE_VERSION,
-    connector_operational_in_session,
-    health_state_in_session,
+    active_installation_in_session,
     qualification_verdict_in_session,
 )
 from daher_adapter.connect.repository import (
@@ -49,7 +48,9 @@ from daher_adapter.connect.repository import (
     ConnectorInstallationRepository,
     FacilityNotConnect,
     InstallationRetired,
+    ServiceClientAlreadyBound,
 )
+from daher_adapter.connect.runtime_health import runtime_health_in_session
 from daher_adapter.exchange.audit import ExchangeAuditEvent, ExchangeAuditWriter
 from daher_adapter.exchange.authorization import (
     AuthenticatedPrincipal,
@@ -2311,6 +2312,29 @@ class ConnectorFingerprintRequest(BaseModel):
     mapping_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class ConnectorServiceIdentityRequest(BaseModel):
+    """Bind, or clear, the OIDC client this installation's agent authenticates as. §8/§9.
+
+    **An identifier, never a credential.** There is no ``client_secret`` field here and there will
+    not be one: the secret is issued and verified by the identity provider, DHealth never receives
+    it, and a field that could carry one would be a field somebody eventually pastes one into. What
+    crosses this boundary is a public name -- the same class of fact as a username -- which on its
+    own authenticates nothing.
+
+    ``None`` clears the binding. That case is the point rather than an edge: it is how an operator
+    stops an agent working without depending on somebody also deleting the client in Keycloak. The
+    agent's token stays perfectly valid and resolves to no installation, which is refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Deliberately constrained in shape but not in vocabulary -- DHealth does not get to decide
+    #: what an identity provider names its clients. Whitespace-only is refused because it is the
+    #: shape a cleared field arrives in when somebody meant to clear it and the form sent ""
+    #: instead; that ambiguity is resolved by ``None`` being the only way to say "clear".
+    service_client_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class ConnectorStatusRequest(BaseModel):
     """Suspend, restore or retire an installation. Lifecycle only, never a qualification verdict."""
 
@@ -2367,6 +2391,11 @@ class ConnectorInstallationResponse(BaseModel):
     configuration_fingerprint: str
     mapping_fingerprint: str
     status: str
+    #: DH-CONNECT-AGENT-001: the bound OIDC client, or ``None`` when no service identity has been
+    #: issued. Not a secret -- see ``ConnectorServiceIdentityRequest``. Returned because "has this
+    #: connector been given credentials yet" is the first question when an agent is not reporting
+    #: in.
+    service_client_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -2398,14 +2427,52 @@ class ConnectorQualificationVerdictResponse(BaseModel):
     current_suite_version: str
 
 
+class ConnectorRuntimeResponse(BaseModel):
+    """What DHealth has observed about this connector's agent. Observations, never a verdict.
+
+    Every field here is something that happened or something that was counted. There is no
+    ``set_health`` anywhere in this API and no field on this model an operator could write --
+    §12's rule that health derives from runtime behaviour is expressed by the *absence* of a way to
+    say otherwise.
+
+    ``reasons`` is the derived state's own explanation, in French, produced server-side for the
+    same reason every other readiness sentence is: the reason comes from the same observations as
+    the state, and splitting them would let the two drift.
+
+    No PHI. Counts, versions, timestamps and short sentences (§13, §54, §57).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``None`` when no agent has ever reported in for this installation.
+    runtime_instance_id: str | None
+    agent_version: str | None
+    #: **DHealth's** receive time, never the agent's own clock (§14).
+    last_seen_at: datetime | None
+    adapter_reachable: bool | None
+    pending_deliveries: int
+    dead_letters: int
+    oldest_pending_seconds: int | None
+    reasons: list[str]
+
+
 class FacilityConnectorResponse(BaseModel):
     """Everything the platform knows about a facility's connector, in one read.
 
-    ``operational`` is separate from ``verdict.qualified`` and is **false for every facility in
-    this release**, with no way to make it true. Qualification proves a build could work; only a
-    runtime reporting in proves one is working, and no runtime exists until
-    DH-CONNECT-AGENT-001. Collapsing the two is precisely the mistake that would tell an operator
-    a facility is live because a test suite passed.
+    ``operational`` is separate from ``verdict.qualified``, and DH-CONNECT-AGENT-001 made it
+    reachable: an agent reporting in with a reachable source system and no aged backlog is
+    operational. It is still derived from observations and still has no setter.
+
+    The three fields answer three different questions and collapsing any two is the mistake that
+    would tell an operator a facility is live because a test suite passed:
+
+        transport_available   DHealth has a delivery runtime at all. True since this ticket.
+        verdict.qualified     this connector proved it implements the contract.
+        operational           an agent is reporting in right now and can reach its source system.
+
+    None of them is "this facility may take real clinical work". That additionally requires a
+    qualified **vendor** adapter, which does not exist -- see
+    ``exchange/facility_enrollment.py``'s ``READY_FOR_ROUTING`` refusal.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -2418,6 +2485,7 @@ class FacilityConnectorResponse(BaseModel):
     health_state: str
     operational: bool
     transport_available: bool
+    runtime: ConnectorRuntimeResponse
     qualification_history: list[ConnectorQualificationResponse]
 
 
@@ -7477,6 +7545,7 @@ def build_exchange_router(
             configuration_fingerprint=record.configuration_fingerprint,
             mapping_fingerprint=record.mapping_fingerprint,
             status=record.status,
+            service_client_id=record.service_client_id,
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
@@ -7519,8 +7588,14 @@ def build_exchange_router(
             verdict = qualification_verdict_in_session(
                 session, organization_id, OrganizationType(organization.org_type)
             )
-            health = health_state_in_session(session, organization_id)
-            operational = connector_operational_in_session(session, organization_id)
+            # One derivation, read three ways. `health_state_in_session` and
+            # `connector_operational_in_session` both call this underneath, and calling it once
+            # here means the state, the operational flag and the reasons on screen cannot
+            # disagree with each other -- three reads of a live system can.
+            active = active_installation_in_session(session, organization_id)
+            runtime = runtime_health_in_session(session, active)
+            health = runtime.state
+            operational = runtime.is_operational
         history = connectors.qualification_history(live.id) if live is not None else []
         return FacilityConnectorResponse(
             organization_id=organization_id,
@@ -7540,11 +7615,27 @@ def build_exchange_router(
                 current_suite_version=QUALIFICATION_SUITE_VERSION,
             ),
             health_state=health.value,
+            runtime=ConnectorRuntimeResponse(
+                runtime_instance_id=runtime.runtime_instance_id,
+                agent_version=runtime.agent_version,
+                last_seen_at=runtime.last_seen_at,
+                adapter_reachable=runtime.adapter_reachable,
+                pending_deliveries=runtime.pending_deliveries,
+                dead_letters=runtime.dead_letters,
+                oldest_pending_seconds=(
+                    None
+                    if runtime.oldest_pending_age is None
+                    else int(runtime.oldest_pending_age.total_seconds())
+                ),
+                reasons=list(runtime.reasons),
+            ),
             operational=operational,
-            # Stated as a field rather than left for the reader to infer from `operational`:
-            # DHealth Connect's transport is not built. Nothing delivers a message to or from a
-            # connector in this release (§78).
-            transport_available=False,
+            # DH-CONNECT-AGENT-001 made this true: a durable delivery engine, a runtime API and
+            # an agent now exist, and messages really do travel. It is deliberately **not** the same
+            # claim as "this facility can take clinical work" -- `operational` answers that, and
+            # `verdict.qualified` answers whether the connector has proved it should. Transport
+            # existing is a fact about DHealth; the other two are facts about this facility.
+            transport_available=True,
             qualification_history=[_to_qualification_response(q) for q in history],
         )
 
@@ -7662,6 +7753,50 @@ def build_exchange_router(
                 status_code=status.HTTP_404_NOT_FOUND, detail="connector installation not found"
             ) from error
         except InstallationRetired as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _connector_view(organization_id)
+
+    @router.put(
+        "/platform/facilities/{organization_id}/connector/{installation_id}/service-identity",
+        response_model=FacilityConnectorResponse,
+    )
+    def set_facility_connector_service_identity(
+        organization_id: uuid.UUID,
+        installation_id: uuid.UUID,
+        body: ConnectorServiceIdentityRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityConnectorResponse:
+        """Bind or clear the OIDC client this installation's agent authenticates as. §8/§9.
+
+        Platform admin only, and that is not a convenience: this binding is the entire mechanism by
+        which a credential resolves to a facility, so being able to set it is being able to decide
+        which facility an agent acts for. It belongs with the person who registered the connector.
+
+        No secret crosses this boundary, is stored, or is returned. DHealth records a public client
+        identifier; the credential behind it is the identity provider's, and the deliberate absence
+        of any Keycloak administration here is §9's instruction, not an omission.
+        """
+        _require_platform(principal, organization_id)
+        try:
+            if not any(
+                i.id == installation_id for i in connectors.list_for_organization(organization_id)
+            ):
+                raise ConnectorInstallationNotFound(str(installation_id))
+            connectors.set_service_identity(
+                installation_id=installation_id,
+                service_client_id=body.service_client_id,
+                actor_identity_id=principal.identity_id,
+            )
+        except ConnectorInstallationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="connector installation not found"
+            ) from error
+        except InstallationRetired as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ServiceClientAlreadyBound as error:
+            # 409 rather than 422: the request is well-formed and the operator is not wrong about
+            # the shape of anything -- the conflict is with another installation's existing binding,
+            # and they need to know that rather than be told their input was invalid.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         return _connector_view(organization_id)
 

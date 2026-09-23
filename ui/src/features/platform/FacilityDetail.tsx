@@ -146,8 +146,25 @@ export function FacilityDetail({
                   ))}
                 </ul>
               </>
-            ) : (
+            ) : readiness.production_routing_allowed ? (
               <p>Toutes les conditions de routage sont réunies.</p>
+            ) : (
+              // Every listed condition is met and routing is still refused, which happens to a
+              // CONNECT facility because the refusal is not one of these findings: DHealth Connect
+              // has no qualified vendor adapter, so no CONNECT facility may reach
+              // READY_FOR_ROUTING at all.
+              //
+              // Saying "toutes les conditions sont réunies" under "Routage de production —
+              // Indisponible" would be the panel contradicting itself, and would send an operator
+              // hunting a toggle that does not exist. Found by looking at the capture rather than
+              // by reading the code, which is the whole argument for capturing it.
+              <p className={styles.owed}>
+                Toutes les conditions listées sont réunies, et le routage reste indisponible&nbsp;:
+                {readiness.participation_mode === 'CONNECT'
+                  ? " DHealth Connect ne dispose d'aucun adaptateur éditeur qualifié, " +
+                    "aucun établissement Connect ne peut donc être mis en service."
+                  : " l'établissement n'a pas encore été déclaré prêt pour le routage."}
+              </p>
             )}
 
             {outstanding.length > 0 ? (

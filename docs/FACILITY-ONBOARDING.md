@@ -4,10 +4,12 @@
 reading what DHealth is telling you about one. Decisions and their reasoning: `DECISIONS.md`
 ADR-055. Architecture: `docs/ARCHITECTURE.md` §21.
 
-> **DHealth Connect transport is not implemented.** No connector to any external EMR or LIS exists,
-> none has been qualified, and nothing in this document describes working integration. A facility
-> in Connect mode can be fully enrolled, fully discovered and still unable to receive a single
-> production order — that is the truthful state of the product today, and the screens say so.
+> **DHealth Connect has a runtime and no qualified vendor adapter.** DH-CONNECT-AGENT-001 built the
+> delivery engine and the on-premises agent; the only adapter behind them is synthetic and contacts
+> nothing. No connector to any real external EMR or LIS exists, none has been qualified, and a
+> facility in Connect mode can be fully enrolled, fully discovered, hold a genuinely qualified
+> connector with a healthy agent, and still be unable to receive a single production order — that is
+> the truthful state of the product today, and the screens say so.
 
 ---
 
@@ -30,7 +32,7 @@ readiness evaluated            ← server-derived, from live rows
         ↓
 network relationship configured
         ↓
-connector qualification        ← Connect only; does not exist yet
+connector qualification        ← Connect only; real, and reachable
         ↓
 production routing activated   ← platform-level, readiness-gated
 ```
@@ -156,9 +158,18 @@ Interface vérifiée           ✓ possible
 ── Connecteur DHealth ────────────────────────
 Connecteur enregistré        ✓ possible          ← real state
 Qualification                ✓ possible          ← real state, derived from evidence
-Exécution du connecteur      ✗ aucun runtime     ← unreachable in this release
-Routage de production        ✗ désactivé         ← consequently unreachable
+Exécution du connecteur      ✓ possible          ← real state, derived from an agent  (2026-09-23)
+Routage de production        ✗ désactivé         ← still unreachable, for a different reason
 ```
+
+**Updated 2026-09-23, DH-CONNECT-AGENT-001.** The third line became reachable: an agent running at
+the facility reports in, and health is derived from what it reports. The fourth did not, and its
+reason changed rather than disappearing — routing requires a qualified **vendor** adapter, and the
+only adapter that exists is synthetic. A Connect facility can now be registered, genuinely qualified,
+and observed healthy, and still not take a single production order.
+
+The paragraph below describes the state between DH-CONNECT-CONTRACT-001 and that ticket, and is kept
+because the distinction it draws is still the one that matters — only its last clause has moved.
 
 A connector can now be registered and can genuinely qualify. **It still cannot be put into
 service.** `connector_operational` derives from a health state that is unconditionally *unknown*

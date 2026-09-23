@@ -7551,3 +7551,208 @@ mattered.
 - `connector_operational` is unchanged and still unconditionally false. This correction changed what
   qualification *means*, not what DHealth can observe, and no heartbeat, runtime, agent, transport
   or delivery worker was added.
+
+## ADR-057 — ACCEPTED / IMPLEMENTED (2026-09-23, DH-CONNECT-AGENT-001): a connector runtime whose health is derived and whose identity is a credential
+
+**Context.** ADR-056 built the contract and the qualification model and deliberately stopped there:
+there was no transport, `connector_operational` was unconditionally false, and `ORDER_RECEIPT` could
+only ever be recorded `DECLARED` because nothing could deliver an order. That ticket's own correction
+said as much — the ticket which supplies the runtime is the one that must earn `EXERCISED`.
+
+This is that ticket. It builds the **generic** runtime: durable delivery, a service-identity
+boundary, an on-premises agent, correlation, retries, dead letters, and health derived from
+behaviour. It does **not** build a vendor adapter, and nothing in it makes a real facility routable.
+
+### Decisions
+
+1. **The installation is derived from the credential and from nothing else.** The chain runs
+   `token → azp → connector_installations.service_client_id → installation → organization`. There is
+   no `organization_id` or `connector_installation_id` parameter on any runtime endpoint — not
+   optional, not validated, *absent*. A model that cannot express a field cannot be talked into
+   honouring it.
+
+   The envelope still carries an organization, and it is **compared** rather than consumed: a
+   mismatch is refused with a 409, audited as `connector_message_refused`, and produces no delivery
+   row. Not reconciled — quietly substituting the credential's value would accept a message from a
+   sender confused about which facility it serves, and that confusion eventually sends a result to
+   the wrong one.
+
+2. **A connector agent is its own principal class.** `ConnectorServicePrincipal` is a separate
+   dataclass, not `AuthenticatedPrincipal` with a flag. A function taking one cannot be handed the
+   other; the type system does the remembering rather than every future authorization check. A token
+   carrying the platform-admin realm role is refused outright — a credential that worked in both
+   worlds is the conflation this type exists to prevent, and the safe direction is that a
+   misconfigured client works nowhere rather than everywhere.
+
+3. **A second OIDC audience, same issuer and keys.** Human tokens and agent tokens differ only by
+   `aud`, validated by two `TokenValidator` instances. A clinician's token does not validate on the
+   runtime router and an agent's does not validate on the clinical one. `connect_runtime_oidc_configured`
+   additionally refuses to consider the runtime configured when the two audiences are equal: setting
+   both to the same string would silently reunite the principal classes, and it is the kind of
+   mistake that looks like it works.
+
+4. **DHealth stores an identifier, never a credential.** `service_client_id` is a public name — the
+   same class of fact as a username — and cannot authenticate anything on its own. §9's preference
+   for "a safe verifier rather than recoverable plaintext" is satisfied by there being no plaintext:
+   the secret is issued and verified by the identity provider and never enters DHealth. No Keycloak
+   administration subsystem was built. Setting the binding to `null` is the revocation path, and it
+   exists so an operator can stop an agent without depending on somebody also deleting the client.
+
+5. **Health is derived and has no write path.** Four states from observations only. There is no
+   column holding health, no endpoint accepting one, and no UI control offering one — and the
+   absence is the decision. A health flag somebody can set is a health flag somebody will set, at
+   2 a.m., to make an alarm stop; the facility it unblocks then takes clinical work through a
+   connector nobody has heard from.
+
+6. **`DEGRADED` blocks routing exactly as `UNAVAILABLE` does.** An agent that is alive and cannot
+   reach its LIS will accept an order and strand it, which is worse than refusing it because the
+   clinician believes it arrived. The distinction between the two states is for the operator reading
+   the screen, not for the routing decision.
+
+7. **Server receive time is authoritative for liveness; the agent's clock is recorded and never
+   consulted.** `reported_at` exists so an operator can see skew. Without this an agent with a fast
+   clock could claim to have been heard from in the future and never go stale.
+
+8. **`UNKNOWN` carries its own reason.** A suspended installation reports `UNKNOWN` while its agent
+   may be beating perfectly, because DHealth deliberately stops consulting it — and saying "no agent
+   has ever reported in" there would be false and would send an operator hunting a problem they
+   created on purpose. Same discipline as `QualificationGap`: a finding that lies about *why* is
+   worse than one that says nothing.
+
+9. **Claim leases, not locks.** A claim expires; nothing has to be released. An agent that dies
+   holding work blocks it for one lease rather than forever, with no operator gesture and no
+   cleanup job at all.
+
+   A `release_expired_claims` sweeper was written and then **deleted before this ticket closed**.
+   `claim` already treats an expired lease as claimable, so the sweeper changed no outcome and
+   nothing called it — and an unexercised method that looks like part of the recovery story is
+   worse than its absence, because the next reader would reasonably assume recovery depends on
+   scheduling it. A recovery path that works only when a cleanup job is scheduled is a recovery
+   path that fails on the deployment where somebody forgot.
+
+10. **One delivery table, both directions, one idempotency key.** The failure semantics are
+    identical — persist, hand over, confirm, retry, dead-letter, never lose — and two tables would
+    mean writing that logic twice and having it diverge on the third bug. The key is
+    `(installation, direction, replay_scope, source_event_id)`, deliberately **not** `message_id`:
+    an honest retry of the same event carries a new message id, which is the case the key exists to
+    collapse.
+
+11. **The payload is stored, not reconstructed from a fingerprint.** A fingerprint proves a payload
+    was seen, not what it said. It is clinical data: it stays in the Exchange database inside the
+    same boundary as the order it references, and is never copied into audit rows, telemetry or
+    logs. Retention follows the `LabOrder`.
+
+12. **A dead letter is unresolved, never deleted and never a cancellation.** §56. DHealth does not
+    invent a cancellation on a partner's behalf, and an agent going offline never causes an
+    already-assigned order to be cancelled. On the agent side a terminal outbound refusal stops the
+    *resubmission* without deleting the row — a 4xx retried every cycle writes one security-audit
+    refusal per cycle forever, which is §64's noise problem seen from the other side.
+
+13. **Heartbeats are never audited.** The security table gains exactly three runtime event types:
+    `connector_service_identity_set`, `connector_runtime_connected` (once per genuinely new runtime
+    instance, not per beat) and `connector_message_refused`. Runtime history lives in
+    `connector_runtime_instances`, which is queryable and holds no PHI.
+
+14. **Contract 1.1 is additive, and the major version did not move.** One new message type,
+    `ORDER_NOTIFICATION`, in a direction contract 1.0 could not express at all. No existing type
+    changed a field, a name, a meaning or a validation rule, so a connector written against 1.0
+    remains correct — it simply cannot receive orders, which was already true of it. Had this been
+    2.0, every existing installation would have gone `CONTRACT_MAJOR_MISMATCH` over a field nobody
+    had to implement.
+
+    `OrderNotification` carries the patient's and practitioner's scoped identifiers and the ordered
+    catalog codes. **No demographics, no diagnosis, no free text.** It is the first message DHealth
+    *composes* rather than receives, which makes it the first place DHealth could volunteer patient
+    data nobody asked for; ADR-056 decision 5 holds, and a partner who needs more raises it in
+    DH-CONNECT-ADAPTER-001 with a named system and a stated purpose.
+
+15. **`QUALIFICATION_SUITE_VERSION` moves 2 → 3, and every suite-2 PASS stops applying.** Suite 2's
+    `LQ1` asserted that a connector *declared* it could receive an order; suite 3's delivers one
+    through the durable path and checks three independent places that it arrived. Those are
+    materially different claims about the same connector, so an old PASS reports
+    `SUITE_VERSION_OUTDATED` until requalification. Nothing is deleted and nothing is re-credited: a
+    suite-2 run remains exactly as true about what suite 2 tested.
+
+16. **`ORDER_RECEIPT` is proved through the runtime or not at all.** §41 names the invalid version
+    explicitly — calling `synthetic_adapter.handle_order(order)` and marking the capability exercised
+    would bypass the very thing this ticket exists to prove. The driver queues a real notification
+    through `DeliveryRepository`, runs a real agent cycle over the real runtime API, and requires all
+    three of: the adapter holds the order, the central row is `DELIVERED`, the agent's own inbox row
+    is `ACKNOWLEDGED`. Any one alone could be true while the path is broken.
+
+    Evidence level is `EXERCISED` **whether it passed or failed**: the level says how the claim was
+    tested, not whether it succeeded. Recording a driven-and-refused connector as `DECLARED` would
+    lose the fact that DHealth actually tried.
+
+17. **The runtime is protocol-neutral, and the seam is three methods.** `ConnectorAdapter` has
+    `handle_order`, `poll_events` and `probe`. Nothing about transport, formats or partner
+    authentication crosses it, and the runtime never branches on `connector_key`. §1 and §3 forbid a
+    FHIR, HL7, OpenELIS, OpenMRS or vendor REST adapter in this ticket, and the narrow interface is
+    what makes that a structural fact rather than a promise.
+
+18. **The agent is synchronous, single-writer, and stores its state in stdlib SQLite.** Every
+    interesting property here is about what survives a process death mid-sequence, and the tests that
+    prove it need to interrupt the sequence at an exact point; async would have bought concurrency
+    this workload does not need and made those tests harder to believe. §26 forbids browser storage
+    and flat files as the authoritative queue and forbids requiring partner PostgreSQL — SQLite is
+    what remains that is actually transactional.
+
+    Its schema advances through an ordered, append-only `MIGRATIONS` list rather than a second
+    Alembic environment: an agent is upgraded by replacing a binary, not by someone running a
+    migration tool over SSH. A store written by a newer agent is **refused**, never rewritten.
+
+19. **Persist before acting, acknowledge after.** The ordering closes every crash window: a crash
+    before persisting loses nothing because DHealth still holds the row; a crash after the adapter
+    and before the acknowledgement finds the work already recorded, so the adapter is not called
+    again. The receipt and the state change commit in one transaction, which is the window that
+    would otherwise let an agent apply a message it does not remember applying.
+
+20. **The agent CLI has two commands and no destructive one.** Following `daher_adapter/cli.py`'s
+    precedent, guarded by a test that inspects the parser. The reason is specific rather than
+    cautious: the agent's store holds undelivered clinical messages that exist nowhere else on the
+    partner's premises, and a `purge` on a stuck queue is a command that deletes an order somebody is
+    waiting for — reached for at exactly the moment a stuck queue makes anyone want to try anything.
+
+21. **The order-notification hook rides the assignment's own transaction.** An order assigned and a
+    laboratory not told are two facts that must never disagree; enqueueing afterwards would leave a
+    crash window in which an order sits at a laboratory that has no idea it exists. Wired into
+    *both* selection paths — the patient's price-consent selection and the provider's clinical
+    assignment — because wiring one would produce a facility whose orders arrive only some of the
+    time.
+
+    It checks the installation's **status** and deliberately not its health. A suspended installation
+    is a human decision to stop it carrying traffic; an unhealthy one is expected back, and the queue
+    is precisely the mechanism that lets it catch up. Refusing to enqueue during a five-minute outage
+    would turn that outage into permanently lost orders.
+
+22. **A real facility is still not routable, and the refusal now names the real reason.** The
+    `READY_FOR_ROUTING` block stays. Its message used to say no connector existed; that became false
+    with this ticket, so it now says what is actually true — DHealth Connect has a runtime and no
+    qualified vendor adapter, and the only adapter that exists is synthetic.
+    `test_RQ8_qualified_is_still_not_production_routable` pins it, so a later ticket cannot lift the
+    block by accident while editing something nearby.
+
+### Consequences
+
+- Migration `0029_connect_runtime` (20 characters — see ADR-056's note on `alembic_version.version_num`)
+  adds `connector_runtime_instances`, `connector_deliveries`, `connector_message_receipts`,
+  `connector_correlations` and `connector_installations.service_client_id`. **No backfill and no
+  synthesised runtime row:** every existing installation derives `UNKNOWN` and stays
+  non-operational until a real agent connects. Inventing a row would be inventing an observation.
+- `tests/test_migration_hygiene.py` now measures every revision identifier in the tree against
+  `VARCHAR(32)`. ADR-056 recorded that lesson in a docstring; this makes it a test, because
+  remembering is what failed the first time.
+- `connector_operational` is no longer unconditionally false, and `transport_available` is no longer
+  false. Both were true statements that this ticket made false, and both were corrected in the API,
+  the UI, the readiness vocabulary and the docs rather than left to read well and mislead.
+- `httpx` moved from development to runtime dependencies: the agent is production code and needs an
+  HTTP client. Until now its only consumer was `starlette`'s `TestClient`.
+- The synthetic laboratory suite reaches `connector_qualified = true` for the first time in this
+  codebase — and the facility remains unroutable, which is the claim the next ticket must not
+  quietly undo.
+- Two methods shipped with no caller and were given one rather than left as decoration.
+  `CorrelationRepository.resolve_order` and `external_order_id_for` are the read half of the
+  correlation table, exercised by `tests/test_connect_correlation.py` — which also pins the thing
+  the applier's own tests cannot express: that the model has no demographic column a similarity
+  match could use. That file is the direct test of §43, which until then was only tested through
+  the code paths that happen to call it.

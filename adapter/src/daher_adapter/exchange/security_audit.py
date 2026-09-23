@@ -140,6 +140,18 @@ SecurityEventType = Literal[
     "connector_retired",
     "connector_configuration_changed",
     "connector_qualification_recorded",
+    # DH-CONNECT-AGENT-001: the runtime's security events, and only those. `connector_heartbeat` is
+    # deliberately absent -- §64: heartbeat is operational telemetry, not a security mutation, and a
+    # table holding one row per agent poll would bury the events that matter under its own noise.
+    # Runtime history lives in `connector_runtime_instances`, which is queryable and has no PHI.
+    # `connector_runtime_connected` fires once per genuinely new runtime instance, not per beat.
+    # `connector_message_refused` is a refusal, following `provider_lab_route_activation_refused`'s
+    # precedent: the caller was authenticated, so this is not an authorization denial gated on a
+    # database write -- it is a record that a credentialed party asked for something it may not
+    # have.
+    "connector_service_identity_set",
+    "connector_runtime_connected",
+    "connector_message_refused",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[

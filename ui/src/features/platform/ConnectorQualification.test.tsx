@@ -36,6 +36,7 @@ const INSTALLATION: ConnectorInstallation = {
   configuration_fingerprint: FP_CONFIG,
   mapping_fingerprint: FP_MAPPING,
   status: 'REGISTERED',
+  service_client_id: null,
   created_at: '2026-09-01T08:00:00Z',
   updated_at: '2026-09-01T08:00:00Z',
 }
@@ -90,7 +91,19 @@ const NO_CONNECTOR: FacilityConnector = {
   },
   health_state: 'UNKNOWN',
   operational: false,
-  transport_available: false,
+  // True since DH-CONNECT-AGENT-001: DHealth has a delivery runtime. Still says nothing about
+  // whether *this* facility may take clinical work.
+  transport_available: true,
+  runtime: {
+    runtime_instance_id: null,
+    agent_version: null,
+    last_seen_at: null,
+    adapter_reachable: null,
+    pending_deliveries: 0,
+    dead_letters: 0,
+    oldest_pending_seconds: null,
+    reasons: ["Aucun agent ne s'est jamais annoncé pour ce connecteur."],
+  },
   qualification_history: [],
 }
 
@@ -239,14 +252,63 @@ function mount(connector: FacilityConnector | FacilityConnector[], overrides = {
   return { api, onChanged }
 }
 
+/**
+ * A connector whose agent is reporting in and whose source system answers.
+ *
+ * Built on the *unqualified* fixture deliberately. Health and qualification are separate questions
+ * (§16), and a fixture that could only be healthy while qualified would quietly make them one --
+ * which is exactly the conflation these screens exist to prevent.
+ */
+const HEALTHY_RUNTIME: FacilityConnector = {
+  ...REGISTERED_UNQUALIFIED,
+  health_state: 'HEALTHY',
+  operational: true,
+  runtime: {
+    runtime_instance_id: 'agent-7f31c0',
+    agent_version: '0.1.0',
+    last_seen_at: '2026-09-23T08:00:00Z',
+    adapter_reachable: true,
+    pending_deliveries: 0,
+    dead_letters: 0,
+    oldest_pending_seconds: null,
+    reasons: [],
+  },
+}
+
+/** Alive, answering, and unable to reach its LIS. Not operational -- §63. */
+const DEGRADED_RUNTIME: FacilityConnector = {
+  ...HEALTHY_RUNTIME,
+  health_state: 'DEGRADED',
+  operational: false,
+  runtime: {
+    ...HEALTHY_RUNTIME.runtime,
+    adapter_reachable: false,
+    pending_deliveries: 4,
+    dead_letters: 1,
+    oldest_pending_seconds: 900,
+    reasons: [
+      "L'agent ne joint pas le système source.",
+      '4 message(s) en attente, le plus ancien depuis 15 min.',
+      '1 message(s) non livrable(s) en attente de décision.',
+    ],
+  },
+}
+
 describe('ConnectorQualification', () => {
-  it('CQ1 states that the transport is not built, before anything else', async () => {
+  it('CQ1 states the real limit first: no qualified vendor adapter', async () => {
     mount(NO_CONNECTOR)
-    // §78. This sentence is true for every state this component can render, so it
-    // must not be conditional on any of them -- including the qualified one.
+    // This sentence is true for every state this component can render, so it must not be
+    // conditional on any of them -- including the qualified one with a healthy agent.
+    //
+    // It replaces "le transport n'est pas construit", which DH-CONNECT-AGENT-001 made false: a
+    // durable delivery runtime now exists. The limit moved rather than disappearing, and the
+    // assertion moved with it. Pinning the *claim* rather than the old phrasing is the point --
+    // a test asserting a sentence that is no longer true would have to be deleted, and deleting a
+    // test is how a guarantee quietly stops being checked.
     expect(
-      await screen.findByText(/transport DHealth Connect n'est pas construit/i),
+      await screen.findByText(/aucun adaptateur éditeur qualifié n'existe/i),
     ).toBeInTheDocument()
+    expect(screen.getByText(/il ne se connecte à aucun système réel/i)).toBeInTheDocument()
   })
 
   it('CQ2 says plainly when no connector is registered', async () => {
@@ -271,8 +333,11 @@ describe('ConnectorQualification', () => {
     // screen has to be able to hold both without one implying the other.
     mount(QUALIFIED)
     expect(await screen.findByText('Qualifiée')).toBeInTheDocument()
-    expect(screen.getByText(/En service/)).toBeInTheDocument()
-    expect(screen.getByText(/Aucun runtime ne remonte/i)).toBeInTheDocument()
+    // "En service — Non", read off the definition row rather than a sentence. This fixture has no
+    // agent at all, which since DH-CONNECT-AGENT-001 is one of the reasons a connector is not in
+    // service rather than the only one -- so the assertion pins the *answer*, not the wording.
+    expect(screen.getByText('En service').nextElementSibling?.textContent).toBe('Non')
+    expect(screen.getByText(/jamais annoncé pour ce connecteur/i)).toBeInTheDocument()
     expect(screen.getByText(/Routage de production — désactivé/)).toBeInTheDocument()
     expect(screen.queryByText(/^Connecté$/)).not.toBeInTheDocument()
   })
@@ -490,5 +555,54 @@ describe('ConnectorQualification', () => {
     )
     await screen.findByText('Incomplète')
     expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('CQ20 shows the derived runtime state and the observations behind it', async () => {
+    mount(HEALTHY_RUNTIME)
+    expect(await screen.findByText('Sain')).toBeInTheDocument()
+    expect(screen.getByText(/version 0\.1\.0/)).toBeInTheDocument()
+    expect(screen.getByText(/heure de réception DHealth/i)).toBeInTheDocument()
+  })
+
+  it('CQ21 labels the heartbeat time as DHealth\u2019s own, not the agent\u2019s', async () => {
+    // §14. An agent with a skewed clock must not be able to look recent, and an operator comparing
+    // two facilities needs one clock rather than each partner's.
+    mount(HEALTHY_RUNTIME)
+    expect(await screen.findByText(/heure de réception DHealth/i)).toBeInTheDocument()
+  })
+
+  it('CQ22 reports a degraded runtime as not in service, with its reasons', async () => {
+    mount(DEGRADED_RUNTIME)
+    expect(
+      await screen.findByText(/L'agent ne joint pas le système source\./),
+    ).toBeInTheDocument()
+    // The definition row, not a sentence: DEGRADED is deliberately not operational (§63).
+    expect(screen.getByText('En service').nextElementSibling?.textContent).toBe('Non')
+    expect(
+      screen.getByText(/1 message\(s\) non livrable\(s\) en attente de décision\./),
+    ).toBeInTheDocument()
+  })
+
+  it('CQ23 offers no control that sets health', async () => {
+    // §12/§81. The whole reason health is derived. A button here would be pressed at 2 a.m. to make
+    // an alarm stop, and the facility it unblocked would take clinical work through a connector
+    // nobody has heard from.
+    mount(DEGRADED_RUNTIME)
+    await screen.findByText(/L'agent ne joint pas le système source\./)
+    for (const name of [/marquer comme sain/i, /forcer/i, /réinitialiser l'état/i]) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+  })
+
+  it('CQ24 a healthy agent does not make an unqualified connector qualified', async () => {
+    // §16, on screen. The agent is reporting in perfectly and the connector has never passed the
+    // suite; both sentences must be present and neither may soften the other.
+    mount(HEALTHY_RUNTIME)
+    expect(await screen.findByText('Sain')).toBeInTheDocument()
+    // Several elements mention production qualification; what matters is that none of them says
+    // this connector has it. getAllByText rather than getByText -- a test that fails because a
+    // phrase appears twice is a test asserting layout, not meaning.
+    expect(screen.getAllByText(/Qualification de production/).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/connecteur qualifié pour cette configuration/i)).toBeNull()
   })
 })

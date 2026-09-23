@@ -118,6 +118,17 @@ class Settings:
     exchange_oidc_issuer: str | None = None
     exchange_oidc_audience: str | None = None
     exchange_oidc_jwks_url: str | None = None
+    # DH-CONNECT-AGENT-001 §8/§10: a **second audience**, for connector agents only. Same issuer and
+    # same signing keys; a different `aud`, validated by a separate `TokenValidator` mounted on the
+    # runtime router alone.  One audience for both would mean a clinician's browser token was
+    # accepted by the runtime endpoints and an agent's service token by the clinical ones -- two
+    # principal classes behind one credential, which is exactly what §7 says an agent must not be.
+    # The audience is the cheapest place to make that structural: a token minted for humans simply
+    # does not validate here, and nothing has to remember to check.  Unset means the runtime
+    # endpoints fail closed on every request, the same way the Exchange API does when its own OIDC
+    # is unconfigured. A deployment that has not provisioned agent credentials has no agents, so
+    # refusing every runtime call is the correct behaviour rather than a limitation.
+    exchange_connect_runtime_audience: str | None = None
     # Keycloak realm role name (relayed via the standard `realm_access.roles` claim) that grants
     # DHealth platform-admin authority. Never inferred from an organization role -- see
     # exchange/authorization.py.
@@ -163,6 +174,9 @@ class Settings:
             exchange_oidc_issuer=env.get("EXCHANGE_OIDC_ISSUER", "").strip() or None,
             exchange_oidc_audience=env.get("EXCHANGE_OIDC_AUDIENCE", "").strip() or None,
             exchange_oidc_jwks_url=env.get("EXCHANGE_OIDC_JWKS_URL", "").strip() or None,
+            exchange_connect_runtime_audience=(
+                env.get("EXCHANGE_CONNECT_RUNTIME_AUDIENCE", "").strip() or None
+            ),
             exchange_platform_admin_role=(
                 env.get("EXCHANGE_PLATFORM_ADMIN_ROLE", "").strip() or "dhealth-platform-admin"
             ),
@@ -201,6 +215,22 @@ class Settings:
             self.exchange_oidc_issuer
             and self.exchange_oidc_audience
             and self.exchange_oidc_jwks_url
+        )
+
+    @property
+    def connect_runtime_oidc_configured(self) -> bool:
+        """`False` means every DHealth Connect runtime endpoint must fail closed.
+
+        Requires the Exchange's own OIDC *and* a distinct runtime audience. Distinct, checked here
+        rather than trusted: setting both to the same string would silently reunite the two
+        principal classes the second audience exists to separate, and it is the kind of
+        configuration mistake that looks like it works -- agents authenticate, humans authenticate,
+        and each can do the other's job.
+        """
+        return bool(
+            self.exchange_oidc_configured
+            and self.exchange_connect_runtime_audience
+            and self.exchange_connect_runtime_audience != self.exchange_oidc_audience
         )
 
     @property

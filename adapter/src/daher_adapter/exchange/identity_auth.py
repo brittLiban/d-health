@@ -38,6 +38,14 @@ class ValidatedToken:
     email: str | None
     display_name: str | None
     roles: frozenset[str]
+    #: DH-CONNECT-AGENT-001: the OIDC ``azp`` ("authorized party") claim -- the client the token was
+    #: issued to. For a human's browser login this is the web client and carries no authority; for a
+    #: connector agent's client-credentials token it is the *only* thing that says which
+    #: installation is calling, which is why §8 can insist the installation never comes from a
+    #: request body.  Defaulted to ``None`` so nothing that constructed a ``ValidatedToken`` before
+    #: this ticket changed meaning. ``client_id`` is accepted as a fallback because some providers
+    #: emit that instead; both are the same fact under two names.
+    authorized_party: str | None = None
 
     def has_role(self, role: str) -> bool:
         return role in self.roles
@@ -152,6 +160,7 @@ class TokenValidator:
             email=claims.get("email"),
             display_name=claims.get("name"),
             roles=_extract_realm_roles(claims),
+            authorized_party=_extract_authorized_party(claims),
         )
 
     @staticmethod
@@ -174,3 +183,22 @@ def _extract_realm_roles(claims: dict[str, object]) -> frozenset[str]:
     if not isinstance(roles, list):
         return frozenset()
     return frozenset(role for role in roles if isinstance(role, str))
+
+
+def _extract_authorized_party(claims: dict[str, object]) -> str | None:
+    """The ``azp`` claim, or ``client_id`` where a provider emits that instead.
+
+    Absent or malformed means ``None``, never an error -- the same discipline
+    ``_extract_realm_roles`` follows. A token without it is simply not a connector service token,
+    and the caller that needs one refuses it there rather than here; failing validation outright
+    would turn every ordinary human login into a 401 the moment a provider stopped sending ``azp``.
+
+    A non-string value is discarded rather than coerced. ``str()`` on whatever arrived would turn a
+    JSON list into a client id nobody registered -- most likely matching nothing, but the failure
+    mode being "probably harmless" is not the standard for something that selects a tenant.
+    """
+    for claim in ("azp", "client_id"):
+        value = claims.get(claim)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None

@@ -235,7 +235,12 @@ def test_EN8_connect_cannot_be_declared_ready_for_routing(client, keypair) -> No
         json={"onboarding_status": "READY_FOR_ROUTING"},
     )
     assert response.status_code == 422, response.text
-    assert "connector" in response.text.lower()
+    # The refusal must say why, and the why changed with DH-CONNECT-AGENT-001: a runtime now exists
+    # and a qualified vendor adapter still does not. Asserting on the reason rather than on the word
+    # "connector" is what keeps this test honest across that change -- the previous wording claimed
+    # no connector existed at all, which is no longer true.
+    assert "vendor adapter" in response.text.lower()
+    assert "dh-connect-adapter-001" in response.text.lower()
 
     # AWAITING_CONNECTOR is the truthful state for the same facility, and it is permitted.
     ok = client.put(

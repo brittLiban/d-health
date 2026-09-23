@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.connect.contract import CONTRACT_VERSION, Capability, contract_major
@@ -55,6 +56,16 @@ class ConnectorAlreadyInstalled(RuntimeError):
     Retire the existing one first. Two live installations would make "which connector is this
     facility's" a question answered by creation order, and an authority decided by recency is the
     race the qualification model is built to avoid.
+    """
+
+
+class ServiceClientAlreadyBound(RuntimeError):
+    """This OIDC client already authenticates for a different installation.
+
+    A refusal rather than a reassignment, and the reason is the whole of §8: a credential that can
+    be moved between installations is a credential that can be pointed at another facility. The bind
+    is global and includes retired rows -- retiring a connector must invalidate its identity, never
+    recycle it, or a still-valid token would silently start resolving somewhere new.
     """
 
 
@@ -99,6 +110,12 @@ class ConnectorInstallationRecord:
     configuration_fingerprint: str
     mapping_fingerprint: str
     status: str
+    #: DH-CONNECT-AGENT-001: the OIDC client this installation's agent authenticates as, or ``None``
+    #: while no service identity has been issued. **Not a secret** -- see ``ConnectorInstallation``.
+    #: Surfaced on the record because "has this connector been given credentials yet" is the first
+    #: question an operator asks when an agent is not reporting in, and deriving it from a separate
+    #: query would leave the screen able to disagree with the row.
+    service_client_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -132,6 +149,7 @@ def _to_installation_record(row: ConnectorInstallation) -> ConnectorInstallation
         configuration_fingerprint=row.configuration_fingerprint,
         mapping_fingerprint=row.mapping_fingerprint,
         status=row.status,
+        service_client_id=row.service_client_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -296,6 +314,107 @@ class ConnectorInstallationRepository:
         self._audit.record(
             session,
             event_type=event_type,  # type: ignore[arg-type]
+            actor_identity_id=actor_identity_id,
+            organization_id=row.organization_id,
+            outcome="updated",
+            resource_type="connector_installation",
+            resource_id=row.id,
+        )
+        return _to_installation_record(row)
+
+    def set_service_identity(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        service_client_id: str | None,
+        actor_identity_id: uuid.UUID,
+        session: Session | None = None,
+    ) -> ConnectorInstallationRecord:
+        """Bind (or clear) the OIDC client this installation's agent authenticates as. §8/§9.
+
+        **This writes an identifier, never a credential.** The secret is issued by the identity
+        provider and verified by it; DHealth never holds it, cannot log it, and could not display it
+        if asked. What is stored here is a public name -- the same class of fact as a username --
+        and on its own it authenticates nothing. That is why §9's ban on storing raw credentials is
+        satisfied without a vault: there is no plaintext to protect.
+
+        ``None`` clears the binding, and the clearing case is not an afterthought. Retiring a
+        connector should stop its agent working, and the way to guarantee that without depending on
+        somebody also deleting the Keycloak client is to remove the mapping the server resolves
+        through. An agent presenting a perfectly valid token then resolves to no installation and is
+        refused -- fail closed.
+
+        Refused on a RETIRED installation. A retired connector cannot carry traffic, so issuing it
+        an identity would create a credential whose only possible use is to be refused later; better
+        to say so now than to leave a live-looking credential attached to a dead registration.
+        """
+        if session is not None:
+            return self._set_service_identity_in_session(
+                session,
+                installation_id=installation_id,
+                service_client_id=service_client_id,
+                actor_identity_id=actor_identity_id,
+            )
+        with self._sessions.begin() as owned:
+            return self._set_service_identity_in_session(
+                owned,
+                installation_id=installation_id,
+                service_client_id=service_client_id,
+                actor_identity_id=actor_identity_id,
+            )
+
+    def _set_service_identity_in_session(
+        self,
+        session: Session,
+        *,
+        installation_id: uuid.UUID,
+        service_client_id: str | None,
+        actor_identity_id: uuid.UUID,
+    ) -> ConnectorInstallationRecord:
+        row = session.get(ConnectorInstallation, installation_id, with_for_update=True)
+        if row is None:
+            raise ConnectorInstallationNotFound(f"connector installation {installation_id}")
+        if row.status == ConnectorInstallationStatus.RETIRED.value:
+            raise InstallationRetired(
+                f"connector installation {installation_id} is retired and cannot be changed"
+            )
+
+        normalized = (service_client_id or "").strip() or None
+        if normalized == row.service_client_id:
+            # Idempotent replay: the binding already says this. No mutation, no audit row -- the
+            # same discipline `_set_status` follows, and for the same reason: an event describing a
+            # change that did not happen is noise in the one table an investigation reads.
+            return _to_installation_record(row)
+
+        if normalized is not None:
+            # Checked explicitly as well as by the unique index. The index is the guarantee; this is
+            # the message -- an operator who pasted the wrong client id needs to be told that, not
+            # handed a constraint name.
+            clash = session.scalar(
+                select(ConnectorInstallation).where(
+                    ConnectorInstallation.service_client_id == normalized,
+                    ConnectorInstallation.id != installation_id,
+                )
+            )
+            if clash is not None:
+                raise ServiceClientAlreadyBound(
+                    f"client {normalized!r} already authenticates for another installation"
+                )
+
+        row.service_client_id = normalized
+        row.updated_at = utc_now()
+        try:
+            session.flush()
+        except IntegrityError as error:
+            # The read-then-write above is not atomic; the unique index is. Translating it here
+            # means a concurrent bind produces the same refusal as a sequential one.
+            raise ServiceClientAlreadyBound(
+                f"client {normalized!r} was bound concurrently to another installation"
+            ) from error
+
+        self._audit.record(
+            session,
+            event_type="connector_service_identity_set",
             actor_identity_id=actor_identity_id,
             organization_id=row.organization_id,
             outcome="updated",

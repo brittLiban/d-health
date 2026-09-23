@@ -9,10 +9,16 @@ The separation is the point. A network that conflates them tells an operator a f
 connected when all it really knows is that somebody typed a name into a form.
 
 **What this module refuses to do.** It will not let a CONNECT facility reach ``READY_FOR_ROUTING``.
-No connector exists yet -- that is DH-CONNECT-CONTRACT-001's subject -- so a CONNECT facility
-declared routable would mean DHealth sending a production order into nothing. The restriction is
-enforced here, in the repository, rather than at the API layer, because an invariant that only one
-caller checks is an invariant one refactor away from being gone.
+
+The reason has changed once and the refusal has not. Under DH-CONNECT-CONTRACT-001 there was no
+connector model at all; under DH-CONNECT-AGENT-001 there is a working runtime, a durable delivery
+engine and an agent -- and still no qualified vendor adapter, so the only thing at the far end of
+that machinery is a synthetic test double. A CONNECT facility declared routable would mean DHealth
+sending a real clinical order into it. §6 says so directly: a generic agent working against a
+synthetic adapter does not make real Connect routing generally available.
+
+The restriction is enforced here, in the repository, rather than at the API layer, because an
+invariant that only one caller checks is an invariant one refactor away from being gone.
 
 **Where the route-activation gate is not.** ``ProviderLabRouteRepository.upsert`` stays a
 primitive: it writes the row and enforces organization types, exactly as it did before this ticket.
@@ -139,8 +145,10 @@ class FacilityEnrollmentRecord:
     open_blockers: tuple[BlockerRecord, ...] = ()
 
 
-# A CONNECT facility cannot be declared routable while no connector exists. Everything else in the
-# state model is reachable by either mode.
+# A CONNECT facility cannot be declared routable. The *reason* changed with DH-CONNECT-AGENT-001
+# and the rule did not: there is now a runtime, and there is still no qualified vendor adapter, so
+# nothing exists that could carry a real facility's clinical work. §6 and §107 are explicit that a
+# working generic agent against a synthetic adapter does not make real Connect routing available.
 CONNECT_FORBIDDEN_STATUSES = frozenset({OnboardingStatus.READY_FOR_ROUTING.value})
 
 # Discovery states belong to CONNECT: a Native facility has no external system to discover, and
@@ -160,8 +168,10 @@ def _require_status_allowed(participation_mode: str, onboarding_status: str) -> 
         and onboarding_status in CONNECT_FORBIDDEN_STATUSES
     ):
         raise InvalidOnboardingTransition(
-            f"a CONNECT facility cannot be {onboarding_status}: no DHealth connector exists yet, "
-            "so production routing to it would deliver nowhere (DH-CONNECT-CONTRACT-001)"
+            f"a CONNECT facility cannot be {onboarding_status}: DHealth Connect has a runtime but "
+            "no qualified vendor adapter, and the only adapter that exists is synthetic -- so "
+            "production routing to a real facility would deliver nowhere "
+            "(DH-CONNECT-AGENT-001 §6; the next ticket is DH-CONNECT-ADAPTER-001)"
         )
     if (
         participation_mode == ParticipationMode.NATIVE.value
@@ -930,20 +940,47 @@ def operational_findings_in_session(
         findings.append(
             ReadinessFinding(
                 code="connector_operational",
-                # False for every facility in this build, and not as a placeholder: no connector
-                # runtime exists, so DHealth has observed nothing about reachability and says so.
-                # This is the finding that keeps a CONNECT facility unroutable no matter how much
-                # qualification evidence accumulates -- qualification proves a connector *could*
-                # work, only a runtime proves one *is* working, and DH-CONNECT-AGENT-001 builds the
-                # second. Removing this finding is how a future ticket would accidentally declare
-                # Connect live.
+                # DH-CONNECT-AGENT-001 made this finding capable of being satisfied. Until then it
+                # was false for every facility, and not as a placeholder: no connector runtime
+                # existed, so DHealth had observed nothing about reachability and said so.
+                #
+                # It is still the finding that keeps a CONNECT facility unroutable no matter how
+                # much qualification evidence accumulates -- qualification proves a connector
+                # *could* work, only a runtime proves one *is* working. Removing it is still how a
+                # future ticket would accidentally declare Connect live, and satisfying it now
+                # requires a real agent to have reported in recently, with a reachable source system
+                # and no aged backlog. There is no gesture that sets it.
                 satisfied=connector_operational_in_session(session, organization_id),
                 blocking=True,
-                detail="aucun runtime connecteur n'est connecté à DHealth",
+                detail=_connector_operational_detail(session, organization_id),
             )
         )
 
     return findings
+
+
+def _connector_operational_detail(session: Session, organization_id: uuid.UUID) -> str:
+    """One French sentence naming the actual runtime state, not a fixed string.
+
+    Before DH-CONNECT-AGENT-001 this finding read "aucun runtime connecteur n'est connecté à
+    DHealth" unconditionally, which was true of every facility because it was true of the whole
+    build. It is now sometimes false, and a finding that keeps saying it would be a finding that
+    lies about *why* a facility is blocked -- an operator whose agent is running but cannot reach
+    its LIS would be sent to check a connection that is fine.
+
+    The state's own reasons are reused verbatim. Rewriting them here would give the same fact two
+    French spellings, and the one on this screen would be the one nobody updated.
+    """
+    from daher_adapter.connect.qualification import active_installation_in_session
+    from daher_adapter.connect.runtime_health import runtime_health_in_session
+
+    installation = active_installation_in_session(session, organization_id)
+    health = runtime_health_in_session(session, installation)
+    if health.is_operational:
+        return f"agent {health.agent_version or '?'} actif et joignable"
+    if health.reasons:
+        return " ".join(health.reasons)
+    return "aucun runtime connecteur n'est connecté à DHealth"
 
 
 def is_operationally_ready_in_session(session: Session, organization_id: uuid.UUID) -> bool:

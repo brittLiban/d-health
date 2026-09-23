@@ -1091,6 +1091,8 @@ export interface ConnectorInstallation {
   configuration_fingerprint: string
   mapping_fingerprint: string
   status: string
+  /** The bound OIDC client, or `null` while no service identity has been issued. Not a secret. */
+  service_client_id: string | null
   created_at: string
   updated_at: string
 }
@@ -1157,18 +1159,56 @@ export interface ConnectorQualificationVerdict {
   current_suite_version: string
 }
 
+/**
+ * What DHealth has observed about this connector's agent. Observations, never a verdict.
+ *
+ * There is nothing writable here and no endpoint that sets health -- the state is derived from
+ * these fields server-side, and the absence of a setter is how that rule is kept rather than
+ * merely stated. `reasons` is the derivation's own explanation, in French, composed by the server
+ * so the sentence and the state cannot drift apart.
+ *
+ * No patient data: counts, versions, timestamps and short sentences only.
+ */
+export interface ConnectorRuntime {
+  /** `null` when no agent has ever reported in for this installation. */
+  runtime_instance_id: string | null
+  agent_version: string | null
+  /** DHealth's own receive time, never the agent's clock. */
+  last_seen_at: string | null
+  adapter_reachable: boolean | null
+  pending_deliveries: number
+  dead_letters: number
+  oldest_pending_seconds: number | null
+  reasons: string[]
+}
+
 export interface FacilityConnector {
   organization_id: string
   participation_mode: string
   installation: ConnectorInstallation | null
   installations: ConnectorInstallation[]
   verdict: ConnectorQualificationVerdict
+  /** UNKNOWN | HEALTHY | DEGRADED | UNAVAILABLE, derived from `runtime`. */
   health_state: string
-  /** False for every facility in this release. See `transport_available`. */
+  /**
+   * Whether a live runtime is carrying this facility's traffic right now. `HEALTHY` and nothing
+   * else -- DEGRADED is deliberately not operational.
+   *
+   * Reachable as of DH-CONNECT-AGENT-001, and still not the same question as "may this facility
+   * take real clinical work": that also needs a qualified *vendor* adapter, which does not exist.
+   */
   operational: boolean
-  /** DHealth Connect's transport is not built. Always false here. */
+  /** True since DH-CONNECT-AGENT-001: DHealth has a delivery runtime. A fact about DHealth, not
+   * about this facility. */
   transport_available: boolean
+  runtime: ConnectorRuntime
   qualification_history: ConnectorQualificationRecord[]
+}
+
+/** The body of `PUT .../connector/{id}/service-identity`. An identifier, never a secret. */
+export interface ConnectorServiceIdentityRequest {
+  /** The OIDC client the agent authenticates as, or `null` to clear the binding. */
+  service_client_id: string | null
 }
 
 /** The body of `POST /platform/facilities/{id}/connector`. No credential fields, by design. */

@@ -1690,7 +1690,17 @@ class ExchangeSecurityAuditEvent(Base):
             # already separates a pass from a failure, and a second type would be a synonym.
             "'connector_registered', 'connector_suspended', 'connector_restored', "
             "'connector_retired', 'connector_configuration_changed', "
-            "'connector_qualification_recorded'"
+            "'connector_qualification_recorded', "
+            # DH-CONNECT-AGENT-001: the runtime's *security* events, and deliberately only those.
+            # A heartbeat is not here -- §64 is explicit that heartbeat is operational telemetry,
+            # not a security mutation, and auditing thousands of them a day would bury the handful
+            # of rows that matter. What is here: a service identity being issued or cleared, a
+            # runtime instance authenticating for the first time (a new principal appearing), and a
+            # message refused at the trust boundary. The last mirrors
+            # `provider_lab_route_activation_refused` above: a refusal recorded because "who tried
+            # to send us this, for which facility, and when" is the question an operator asks.
+            "'connector_service_identity_set', 'connector_runtime_connected', "
+            "'connector_message_refused'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1710,6 +1720,9 @@ class ExchangeSecurityAuditEvent(Base):
             "'facility_interface_capability', 'facility_enrollment_blocker', "
             # DH-CONNECT-CONTRACT-001: qualification hangs off an installation, so every connector
             # event names the installation rather than the qualification or the capability row.
+            # DH-CONNECT-AGENT-001 keeps that convention -- a refused message names the
+            # installation it claimed to be, not the delivery row, because a refused message has no
+            # delivery row: refusing it is precisely the decision not to create one.
             "'connector_installation')",
             name="ck_exchange_security_audit_events_resource_type",
         ),

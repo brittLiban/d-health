@@ -8,9 +8,15 @@ gesture that can set one.
     operational= a live runtime is reachable and working right now
     routable   = both, plus everything else the facility's readiness already requires
 
-Those are three different questions, and this module answers only the first. The second has no
-answer in this build because no runtime exists, which is why ``connector_operational`` is
-unconditionally false and says so in plain words rather than being quietly omitted.
+Those are three different questions, and this module answers only the first. The second is answered
+by ``connect.runtime_health`` as of DH-CONNECT-AGENT-001 -- before that ticket it had no answer at
+all, because no runtime existed, and ``connector_operational`` was unconditionally false.
+
+**The bump from "always false" to "derived" did not merge the two questions**, and §16 is explicit
+that it must not. A heartbeat is not qualification evidence: an agent beating perfectly in front of
+an unqualified connector is ``HEALTHY`` and still unroutable, and a qualified connector whose agent
+has stopped is ``UNAVAILABLE`` and still qualified. Nothing in this module reads a heartbeat and
+nothing in ``runtime_health`` reads a qualification.
 """
 
 from __future__ import annotations
@@ -39,6 +45,10 @@ from daher_adapter.connect.models import (
     QualificationResult,
 )
 
+# DH-CONNECT-AGENT-001: importing this also puts `connect.runtime_models` on `Base.metadata`, the
+# same way `exchange.facility_enrollment` importing this module puts `connect.models` there.
+from daher_adapter.connect.runtime_health import runtime_health_in_session
+
 #: The revision of the qualification scenario set. Bump when a scenario is added or changed, so an
 #: older PASS is not credited with having proved something that did not exist when it ran.
 #:
@@ -46,7 +56,14 @@ from daher_adapter.connect.models import (
 #: satisfied required capability; suite 2 records evidence strength and refuses to. Those are
 #: materially different claims about the same connector, so a suite-1 PASS must not be readable as
 #: a suite-2 result -- see ``applicable_qualification``, which now compares this value.
-QUALIFICATION_SUITE_VERSION = "2"
+#:
+#: **"3" as of DH-CONNECT-AGENT-001.** Suite 2's ``LQ1`` asserted that the connector *declared* it
+#: could receive an order; suite 3's ``LQ1`` delivers one through the durable path and checks three
+#: independent places that it arrived. Again materially different claims about the same connector,
+#: and again the honest consequence is that every suite-2 PASS stops applying and reports
+#: ``SUITE_VERSION_OUTDATED`` until the connector is requalified. Nothing is deleted and nothing is
+#: re-credited: a suite-2 run remains exactly as true about what suite 2 tested.
+QUALIFICATION_SUITE_VERSION = "3"
 
 
 class QualificationGap(StrEnum):
@@ -405,32 +422,37 @@ def qualification_verdict_in_session(
     )
 
 
-def health_state_in_session(
-    session: Session,  # noqa: ARG001 -- signature is the contract; no runtime exists to query yet
-    organization_id: uuid.UUID,  # noqa: ARG001
-) -> HealthState:
+def health_state_in_session(session: Session, organization_id: uuid.UUID) -> HealthState:
     """How the connector is doing right now.
 
-    ``UNKNOWN``, always, in this build -- and that is the honest answer rather than a stub. There
-    is no connector runtime, no heartbeat, no health endpoint and no agent, so DHealth has no
-    evidence about reachability and says so. DH-CONNECT-AGENT-001 replaces this body with a real
-    query; until it does, nothing in the system may report a connector as ``HEALTHY``, because
-    nothing in the system has observed one.
+    Until DH-CONNECT-AGENT-001 this returned ``UNKNOWN`` unconditionally, because there was no
+    runtime to observe and saying so was the honest answer. It now derives a real state from real
+    observations -- see ``runtime_health.derive_health`` for the rule and
+    ``RuntimeHealthPolicy`` for every threshold it uses.
 
-    The signature exists now so the readiness rule that consumes it is written against the real
-    shape, and so turning it on later is a change to one function rather than to every caller.
+    What did **not** change: health is still derived, never stored and never set. There is no column
+    behind this function and no endpoint that writes one, so the only way for a connector to be
+    reported ``HEALTHY`` is for an agent to actually be reporting in and working.
+
+    Still separate from qualification, in both directions (§16). A qualified connector whose agent
+    has stopped is ``UNAVAILABLE`` and unroutable; an unqualified connector whose agent is beating
+    perfectly is ``HEALTHY`` and *also* unroutable. Neither answer is evidence about the other.
     """
-    return HealthState.UNKNOWN
+    installation = active_installation_in_session(session, organization_id)
+    return runtime_health_in_session(session, installation).state
 
 
 def connector_operational_in_session(session: Session, organization_id: uuid.UUID) -> bool:
     """Whether a live runtime is currently carrying this facility's traffic.
 
-    False while health is anything but ``HEALTHY``. Since health is unconditionally ``UNKNOWN``
-    today, this is false for every CONNECT facility in this build -- which is exactly why a CONNECT
-    facility remains unroutable no matter how much qualification evidence exists. Qualification
-    proves a connector *could* work; only a runtime proves one *is* working, and this ticket builds
-    the first without pretending to the second.
+    ``HEALTHY`` and nothing else, unchanged from the day this function was written -- what changed
+    is that ``HEALTHY`` is now reachable. ``DEGRADED`` is deliberately not operational (§63): an
+    agent that is alive and cannot reach its LIS will accept an order and then fail to deliver it,
+    which is worse than refusing it, because the clinician believes it arrived.
+
+    This is still only one of the conditions production routing requires. Qualification is the
+    other, and neither substitutes for the other: see
+    ``exchange.facility_enrollment.is_operationally_ready_in_session``, which requires both.
     """
     return health_state_in_session(session, organization_id) == HealthState.HEALTHY
 

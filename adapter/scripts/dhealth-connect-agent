@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# DH-CONNECT-AGENT-001 §71 — the operator-facing command for the DHealth Connect agent.
+#
+# A thin wrapper, deliberately. This repository has no console-script entry points (there is no
+# `[project]` table in `pyproject.toml`), and `scripts/daher_adapter_admin.py` already established
+# the pattern: a small host-side launcher rather than a packaging change that would disturb the
+# existing editable install.
+#
+# It adds nothing of its own. No flags are injected, no identity is fabricated, and nothing is
+# defaulted — every value the agent needs comes from the environment and is validated by
+# `AgentSettings.from_env`, which refuses to start rather than run half-configured.
+#
+#   dhealth-connect-agent run          the delivery loop, until interrupted
+#   dhealth-connect-agent run --once   one cycle, for verification after installation
+#   dhealth-connect-agent status       local queue state; contacts nothing
+#
+# There is no destructive subcommand and none may be added without a Human Decision (AGENTS.md).
+# The agent's store holds undelivered clinical messages that exist nowhere else on the partner's
+# premises. `tests/test_connect_agent.py` inspects the registered subcommands rather than trusting
+# this comment.
+set -euo pipefail
+
+# `exec` so signals reach the agent directly: an operator's Ctrl-C must stop the poll loop itself,
+# which handles it as an ordinary shutdown with nothing lost, rather than killing a parent shell and
+# leaving the child to be terminated less gracefully.
+exec "${DHEALTH_CONNECT_PYTHON:-python3}" -m daher_adapter.connect_agent.cli "$@"

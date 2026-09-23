@@ -211,9 +211,16 @@ class QualificationRun:
         passed = sum(1 for r in self.scenarios if r.passed)
         total = len(self.scenarios)
         limited = [r.scenario for r in self.scenarios if r.passed and r.limitation]
-        # A summary that reads "tous satisfaits" while some scenarios only checked a declaration
+        # A summary that reads "tous satisfaits" while some scenarios proved less than the others
         # would overstate the run. Name them.
-        caveat = f" ; déclaration seule : {', '.join(limited)}" if limited else ""
+        #
+        # The word is "réserve", not "déclaration seule". It used to be the latter, which was true
+        # while the only limited scenario was a declaration-only ORDER_RECEIPT and became false with
+        # DH-CONNECT-AGENT-001: that scenario now genuinely delivers an order, and its limitation is
+        # that the far end is a synthetic adapter. Calling that "déclaration seule" would understate
+        # a real delivery as an assertion -- the opposite error from the one the original wording
+        # was guarding against, and just as wrong.
+        caveat = f" ; réserve(s) : {', '.join(limited)}" if limited else ""
         if passed == total:
             return f"{total} scénario(s) exécuté(s), tous satisfaits{caveat}"
         failed = [r.scenario for r in self.scenarios if not r.passed]
@@ -283,8 +290,25 @@ class LabQualificationHarness:
         *,
         order_id: uuid.UUID,
         observations: Sequence[ResultObservation] | None = None,
+        order_receipt: ScenarioResult | None = None,
     ) -> QualificationRun:
-        """Execute the laboratory scenario set against one prepared order."""
+        """Execute the laboratory scenario set against one prepared order.
+
+        ``order_receipt`` is DH-CONNECT-AGENT-001's addition: the result of having actually
+        delivered an order through the durable path, produced by
+        ``runtime_qualification.drive_order_receipt`` and passed in already finished. It replaces
+        the declaration-only ``LQ1``.
+
+        It arrives pre-computed rather than being driven here for a concrete reason. The delivery
+        needs committed transactions on both sides -- DHealth enqueues, the agent claims and
+        acknowledges, each on its own session -- and this method runs inside one long transaction
+        the caller owns. Driving the agent from in here would deadlock on SQLite and, on PostgreSQL,
+        would simply not see the agent's committed rows.
+
+        Omitting it falls back to the declaration-only scenario, which is still the truthful answer
+        for a caller with no runtime: it records ``DECLARED`` and the connector does not reach
+        production qualification.
+        """
         started = datetime.now(UTC)
         results: list[ScenarioResult] = []
         obs = tuple(observations or (_numeric("GLU", "5.4"),))
@@ -393,21 +417,39 @@ class LabQualificationHarness:
         # an order into it and observe the acknowledgement. Stated explicitly here rather than left
         # to the field default: this is the line somebody will be tempted to flip.
         declared_receipt = Capability.ORDER_RECEIPT in declared
-        results.append(
-            ScenarioResult(
-                scenario="LQ1-order-receipt-declared",
-                capability=Capability.ORDER_RECEIPT,
-                evidence_level=EvidenceLevel.DECLARED,
-                passed=declared_receipt,
-                detail=None if declared_receipt else "capacité non déclarée par le connecteur",
-                limitation=(
-                    "déclaration seule : la réception d'une commande n'est pas exercée dans cette "
-                    "version (aucun transport n'existe pour la livrer)"
-                    if declared_receipt
-                    else None
-                ),
+        if order_receipt is not None:
+            # Driven for real. The caller delivered an order through the runtime and is handing over
+            # what it observed -- see `runtime_qualification` for the three independent checks a
+            # pass requires. Note the connector must still *declare* the capability: a connector
+            # that received an order it never claimed it could receive is a connector whose
+            # declaration and behaviour disagree, and crediting the behaviour would hide that.
+            results.append(
+                order_receipt
+                if declared_receipt
+                else ScenarioResult(
+                    scenario=order_receipt.scenario,
+                    capability=Capability.ORDER_RECEIPT,
+                    evidence_level=order_receipt.evidence_level,
+                    passed=False,
+                    detail="capacité non déclarée par le connecteur",
+                )
             )
-        )
+        else:
+            results.append(
+                ScenarioResult(
+                    scenario="LQ1-order-receipt-declared",
+                    capability=Capability.ORDER_RECEIPT,
+                    evidence_level=EvidenceLevel.DECLARED,
+                    passed=declared_receipt,
+                    detail=None if declared_receipt else "capacité non déclarée par le connecteur",
+                    limitation=(
+                        "déclaration seule : aucune livraison n'a été effectuée pour cette "
+                        "exécution (aucun agent n'a été fourni au harnais)"
+                        if declared_receipt
+                        else None
+                    ),
+                )
+            )
 
         return QualificationRun(
             started_at=started,

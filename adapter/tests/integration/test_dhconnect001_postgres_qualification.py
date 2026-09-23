@@ -217,10 +217,27 @@ def test_PG1_the_migration_produced_the_schema_the_model_expects(engine):
                 )
             ).scalars()
         )
+        # 0027's three tables, asserted as a subset rather than as the whole set.
+        #
+        # It used to be an equality, which was right while 0027 was the only migration creating
+        # 'connector%' tables and became wrong the moment DH-CONNECT-AGENT-001's 0029 added four
+        # more. Loosening it to a subset keeps what this test is actually about -- that the
+        # qualification-evidence schema exists on real PostgreSQL -- while the line below still
+        # pins the runtime tables by name, so a later migration cannot add a table here unnoticed.
+        assert {
+            "connector_installations",
+            "connector_qualifications",
+            "connector_qualification_capabilities",
+        } <= tables
         assert tables == {
             "connector_installations",
             "connector_qualifications",
             "connector_qualification_capabilities",
+            # DH-CONNECT-AGENT-001, 0029_connect_runtime.
+            "connector_runtime_instances",
+            "connector_deliveries",
+            "connector_message_receipts",
+            "connector_correlations",
         }
 
         index_def = conn.execute(

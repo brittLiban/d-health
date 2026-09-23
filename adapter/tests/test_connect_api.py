@@ -194,7 +194,10 @@ def test_CA1_a_connect_facility_with_no_connector_says_so_plainly(client, keypai
     assert body["verdict"]["gap"] == "NO_INSTALLATION"
     assert body["qualification_history"] == []
     assert body["operational"] is False
-    assert body["transport_available"] is False
+    # True since DH-CONNECT-AGENT-001: DHealth has a delivery runtime. Deliberately asserted
+    # alongside the two fields it must not be confused with -- transport existing is a fact about
+    # DHealth, while `operational` and `verdict.qualified` are facts about this facility.
+    assert body["transport_available"] is True
 
 
 def test_CA2_registering_a_connector_does_not_qualify_it(client, keypair, sessions) -> None:
@@ -244,7 +247,10 @@ def test_CA3_a_qualified_connector_is_still_not_operational(client, keypair, ses
     assert body["verdict"]["gap"] is None
     assert body["operational"] is False
     assert body["health_state"] == "UNKNOWN"
-    assert body["transport_available"] is False
+    # True since DH-CONNECT-AGENT-001: DHealth has a delivery runtime. Deliberately asserted
+    # alongside the two fields it must not be confused with -- transport existing is a fact about
+    # DHealth, while `operational` and `verdict.qualified` are facts about this facility.
+    assert body["transport_available"] is True
 
     readiness = client.get(
         f"/exchange/v1/organizations/{lab}/enrollment/readiness",

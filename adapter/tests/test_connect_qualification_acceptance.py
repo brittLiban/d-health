@@ -320,7 +320,12 @@ def test_AC_the_whole_connect_contract_journey(world):
     assert receipt.passed is True
     assert receipt.evidence_level is EvidenceLevel.DECLARED
     assert receipt.detail is not None and "déclaration seule" in receipt.detail
-    assert "déclaration seule" in run.evidence_summary
+    # The summary names the scenario that proved less than the others. It says "réserve(s)" rather
+    # than "déclaration seule" since DH-CONNECT-AGENT-001: the same field now also carries a
+    # scenario that genuinely delivered an order against a synthetic adapter, and calling that a
+    # declaration would understate it. The per-capability  above still says exactly what
+    # this run's limitation was.
+    assert "réserve(s)" in run.evidence_summary
     assert "LQ1-order-receipt-declared" in run.evidence_summary
 
     stored = world["connectors"].qualification_history(installation.id)[0]

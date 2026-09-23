@@ -18815,3 +18815,95 @@ backfill; `current == heads`. `PG9`–`PG11` cover the same ground as tests; 11/
   this correction does not touch that code.
 
 **The correction is complete. DH-CONNECT-CONTRACT-001 remains closed.**
+
+---
+
+## DH-CONNECT-AGENT-001 — Connector Runtime + Durable Correlation / Delivery Engine · 2026-09-23 · directly on `master`
+
+From `ddac950`. The ticket DH-CONNECT-CONTRACT-001's correction named as the one that had to earn
+`EXERCISED`. It builds the **generic** runtime and deliberately no vendor adapter.
+
+### What exists now that did not
+
+- **Durable delivery** — `connector_deliveries`, both directions, one idempotency key
+  `(installation, direction, replay_scope, source_event_id)`. Claim leases rather than locks, so an
+  agent that dies holding work blocks it for one lease rather than forever. Exponential retry to a
+  two-minute ceiling, five attempts, then a dead letter that is **unresolved, never deleted and
+  never a cancellation**.
+- **A service-identity boundary** — `ConnectorServicePrincipal`, its own principal class, on its own
+  OIDC audience. The installation comes from `token → azp → service_client_id → installation`, and
+  **no runtime endpoint has an `organization_id` or `connector_installation_id` parameter at all**.
+  The envelope's organization is compared, and a mismatch is refused, audited, and writes nothing.
+- **An on-premises agent** — `daher_adapter.connect_agent`: stdlib SQLite (no partner PostgreSQL),
+  an ordered append-only migration list rather than a second Alembic environment, and a cycle whose
+  ordering closes every crash window. `dhealth-connect-agent run|status`, and **no destructive
+  subcommand**, guarded by a test that inspects the parser.
+- **Derived health** — four states from observations, with no column, endpoint or control that could
+  set one. `DEGRADED` blocks routing exactly as `UNAVAILABLE` does. Staleness measured against
+  DHealth's receive time; the agent's clock recorded for skew and never consulted.
+- **Correlation** — exact bindings between DHealth ids and partner identifiers, recorded before any
+  clinical mutation. §43's "no fuzzy matching" is enforced by there being nothing to match on.
+- **The outbox hook** — assigning an order to a CONNECT laboratory queues the notification **in the
+  same transaction as the selection**, from both selection paths.
+
+### The headline result, and its limit
+
+`ORDER_RECEIPT` is proved by queueing a real notification, running a real agent cycle over the real
+runtime API, and checking three independent places — the adapter holds the order, the central row is
+`DELIVERED`, the agent's own inbox row is `ACKNOWLEDGED`. §41 named the invalid shortcut explicitly
+and it is not taken anywhere.
+
+**So the synthetic laboratory suite reaches `connector_qualified = true` for the first time in this
+codebase.** `QUALIFICATION_SUITE_VERSION` moved 2 → 3, so every suite-2 PASS reports
+`SUITE_VERSION_OUTDATED` rather than being re-credited with a claim it never made.
+
+**And a facility in that state is still not routable.** Routing additionally requires a qualified
+*vendor* adapter, which does not exist. The `READY_FOR_ROUTING` refusal stayed; only its reason
+changed, because the old one ("no connector exists") became false.
+
+### Negative controls — executed and reverted
+
+| Control | Injected | Red |
+|---|---|---|
+| NC-RUNTIME-1 | installation taken from the envelope, not the credential | **1** |
+| NC-RUNTIME-2 | claim ignores the lease | **2** |
+| NC-RUNTIME-3 | terminal failures retried instead of dead-lettered | **2** |
+| NC-RUNTIME-4 | agent skips its local receipt | **0 → then 1** |
+| NC-RUNTIME-5 | health ignores the staleness window | **3** |
+| NC-RUNTIME-6 | `ORDER_RECEIPT` credited without the delivery path | **2** |
+| NC-RUNTIME-7 | outbox hook queues for a suspended installation | **1** |
+
+**NC-RUNTIME-4 stayed green, and that was a real gap rather than a control bug.** `R3` asserted that
+a redelivered order produced one entry in `received_orders` — but `SyntheticLabAdapter.handle_order`
+is *itself* idempotent, so the test passed with the agent's replay check deleted. It now asserts the
+**call count**, so a non-idempotent partner adapter is protected too. Same shape as
+DH-CONNECT-CONTRACT-001's NC2 finding, and the same lesson: a control that stays green is a
+guarantee nothing was checking.
+
+### Real PostgreSQL
+
+`tests/integration/test_dhconnect002_postgres_runtime.py`, 10 tests against native PostgreSQL 18.6.
+The one that matters most is `PG12`: two concurrent transactions both claiming, asserting the claims
+are **disjoint**. `FOR UPDATE SKIP LOCKED` is ignored silently by SQLite, so every claim test in the
+fast suite would pass with that clause deleted — this is the only place the property is actually
+tested. Also covered: the replay unique index, the partial unique index on `service_client_id`
+(including that many installations may have none), lease expiry on real `timestamptz`, the audit
+vocabulary CHECK that 0029 drops and recreates (a branch SQLite never executes), and that a dead
+letter keeps its payload.
+
+### Two things removed or added late, and why
+
+- **`release_expired_claims` was written and deleted.** `claim` already treats an expired lease as
+  claimable, so the sweeper changed no outcome and nothing called it. An unexercised method that
+  looks like part of the recovery story is worse than its absence: the next reader would reasonably
+  assume recovery depends on scheduling it.
+- **`tests/test_connect_correlation.py` was added** because `resolve_order` and
+  `external_order_id_for` shipped with no caller. Rather than delete the read half of a table whose
+  write half is a §43 guarantee, they got a direct test — which also pins what the applier's tests
+  cannot say: the model has no demographic column a similarity match could use.
+
+Both were found by grepping the new symbols for references before closing, not by a test. Worth
+recording as a habit rather than an incident.
+
+**DH-CONNECT-AGENT-001 is closed.** No vendor adapter exists, no real EMR or LIS has been qualified,
+and no facility is live through Connect.

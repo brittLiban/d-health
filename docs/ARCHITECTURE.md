@@ -1908,12 +1908,14 @@ else.
 
 ## 22. The DHealth Connect contract and qualification model (DH-CONNECT-CONTRACT-001) — added 2026-09-22
 
-> **The transport is not built.** No FHIR client, no HL7 parser, no MLLP, no SFTP runtime, no file
-> watcher, no webhook receiver, no polling, no on-premise agent, no delivery worker. Nothing in this
-> repository has contacted an external EMR or LIS. This section describes a contract and an evidence
-> model, not a working integration.
+> **The runtime is built; no vendor adapter is.** DH-CONNECT-AGENT-001 added a durable delivery
+> engine, a service-identity boundary and an on-premises agent — and no FHIR client, no HL7 parser,
+> no MLLP, no SFTP runtime, no file watcher and no webhook receiver. The only adapter that exists is
+> synthetic. Nothing in this repository has contacted a real external EMR or LIS, and no facility is
+> production-routable through Connect.
 
-Full detail: `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-QUALIFICATION.md`, ADR-056.
+Full detail: `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-QUALIFICATION.md`, `docs/CONNECT-AGENT.md`,
+ADR-056, ADR-057.
 
 ### Where it sits
 
@@ -1998,3 +2000,63 @@ configuration. DHealth stores the digest and never the configuration — enough 
 which is what invalidates a qualification, without DHealth becoming a place worth attacking for a
 partner's LIS password. No endpoint in this section accepts a credential field, and `CX3` asserts
 that no response carries one either.
+
+---
+
+## 23. The DHealth Connect runtime (DH-CONNECT-AGENT-001) — added 2026-09-23
+
+> **The runtime exists; no vendor adapter does.** A durable delivery engine, a service-identity
+> boundary and an on-premises agent are built and exercised end to end. The only implementation of
+> the adapter protocol is synthetic and contacts nothing. No real EMR or LIS has been qualified and
+> no facility is production-routable through Connect.
+
+Full detail: `docs/CONNECT-AGENT.md`, ADR-057.
+
+### Where it sits
+
+§22 defined the contract and the qualification model and deliberately stopped at the boundary. This
+section is the boundary being crossed:
+
+```
+  Exchange ──► connector_deliveries ──► /exchange/v1/connect/runtime ──► agent ──► adapter
+     ▲              (durable, leased)        (OIDC, second audience)              (synthetic)
+     └───────────── connect/inbound.py ◄── submit ◄──────────────────────────────────┘
+                    (ConnectBridge, one transaction per message)
+```
+
+The runtime is **protocol-neutral by construction**. Everything vendor-specific sits behind
+`ConnectorAdapter` — three methods, `handle_order`, `poll_events`, `probe` — and the runtime never
+branches on `connector_key`. A future FHIR or HL7 adapter implements that protocol and nothing here
+changes.
+
+### The identity boundary
+
+A connector agent is its own principal class, never a user. The installation is derived from the
+credential:
+
+```
+token ─► azp ─► connector_installations.service_client_id ─► installation ─► organization
+```
+
+No runtime endpoint has an `organization_id` or `connector_installation_id` parameter. The envelope
+carries an organization and it is *compared*, never consumed — a mismatch is refused and audited with
+no mutation. Human and agent tokens share an issuer and signing keys and differ by audience, so
+neither works where the other belongs.
+
+DHealth stores the OIDC client *identifier*, which is a public name. The secret is the identity
+provider's and never enters DHealth; there is no column that could hold one.
+
+### Health, derived
+
+Four states — `UNKNOWN`, `HEALTHY`, `DEGRADED`, `UNAVAILABLE` — computed from observations. No
+column, no endpoint, no control. `DEGRADED` blocks routing exactly as `UNAVAILABLE` does: an agent
+that is alive and cannot reach its LIS accepts orders and strands them, which is worse than refusing
+them. Staleness is measured against DHealth's own receive time; the agent's clock is recorded for
+skew and never consulted.
+
+### What it does not change
+
+`READY_FOR_ROUTING` is still unreachable for a CONNECT facility. The refusal's *reason* changed —
+there is now a runtime, and there is still no qualified vendor adapter — and the rule did not. A
+fully qualified connector with a healthy agent is still refused, and a test pins that so the next
+ticket cannot lift the block by accident.

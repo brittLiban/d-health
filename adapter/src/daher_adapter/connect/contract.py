@@ -1,4 +1,4 @@
-"""DH-CONNECT-CONTRACT-001 — the DHealth Connect contract, version 1.0.
+"""DH-CONNECT-CONTRACT-001 — the DHealth Connect contract, version 1.1.
 
 Protocol-neutral by construction. Every type here describes *meaning*, never a wire format: a
 connector that speaks FHIR, one that speaks HL7 v2, and one that reads a nightly SFTP drop all
@@ -13,6 +13,7 @@ The distinctions this module exists to make structurally hard to confuse:
     released original     != later amendment
     qualified             != operational
     collection occurred   != collection recorded
+    inbound               != outbound          (contract 1.1)
 
 Each of those is a separate type or a separate field, not a boolean somebody remembers to set
 correctly. ``TechnicalAck`` and ``BusinessAcceptance`` are two classes rather than one class with
@@ -41,7 +42,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 #: backward-compatible evolution. **New major version: every connector must be requalified** --
 #: there is no automatic carry-forward, and nothing in this codebase infers compatibility. See
 #: ``docs/CONNECT-CONTRACT.md`` for what a major change is allowed to be.
-CONTRACT_VERSION = "1.0"
+#:
+#: **1.0 -> 1.1 (DH-CONNECT-AGENT-001).** Additive only: one new message type,
+#: ``ORDER_NOTIFICATION``, in the DHealth-to-connector direction, which 1.0 had no way to express
+#: at all. No existing message type changed a field, a name, a meaning or a validation rule, so a
+#: connector written against 1.0 remains correct -- it simply cannot receive orders, which is
+#: exactly what was true of it before. The major component is therefore unchanged, and no
+#: qualification is invalidated by the version bump itself. (The qualification *suite* version is a
+#: separate number and does move; see ``qualification.QUALIFICATION_SUITE_VERSION``.)
+CONTRACT_VERSION = "1.1"
 
 
 def contract_major(version: str) -> int:
@@ -352,9 +361,62 @@ class MessageType(StrEnum):
     COLLECTION_EVENT = "COLLECTION_EVENT"
     RELEASED_RESULT = "RELEASED_RESULT"
     RELEASED_AMENDMENT = "RELEASED_AMENDMENT"
+    #: Added in contract 1.1 (DH-CONNECT-AGENT-001). The first message that travels *outward*.
+    ORDER_NOTIFICATION = "ORDER_NOTIFICATION"
 
 
-def _require_aware(value: datetime) -> datetime:
+class Direction(StrEnum):
+    """Which way a message travels. Added in contract 1.1.
+
+    Contract 1.0 described seven message types and every one of them ran connector -> DHealth. That
+    was not an oversight about direction, it was the shape of a build with no runtime: DHealth could
+    receive what a connector chose to send and could send nothing at all. It also meant
+    ``ORDER_RECEIPT`` -- a *required* laboratory capability -- was unexercisable by construction,
+    which is the hole DH-CONNECT-CONTRACT-001's correction had to record as ``DECLARED``.
+
+    Direction is an explicit enum rather than a naming convention because the runtime enforces it at
+    two boundaries in opposite senses: a connector may only *submit* ``CONNECTOR_TO_DHEALTH``
+    messages, and DHealth may only *queue* ``DHEALTH_TO_CONNECTOR`` ones. A convention cannot be
+    checked; this can.
+    """
+
+    CONNECTOR_TO_DHEALTH = "CONNECTOR_TO_DHEALTH"
+    DHEALTH_TO_CONNECTOR = "DHEALTH_TO_CONNECTOR"
+
+
+_DIRECTIONS: Mapping[MessageType, Direction] = {
+    MessageType.ORDER_SUBMISSION: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.TECHNICAL_ACK: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.BUSINESS_ACCEPTANCE: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.BUSINESS_REJECTION: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.COLLECTION_EVENT: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.RELEASED_RESULT: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.RELEASED_AMENDMENT: Direction.CONNECTOR_TO_DHEALTH,
+    MessageType.ORDER_NOTIFICATION: Direction.DHEALTH_TO_CONNECTOR,
+}
+
+
+def message_direction(message_type: MessageType) -> Direction:
+    """The direction this message type travels.
+
+    Raises for a type absent from the table rather than guessing. A new message type whose direction
+    nobody stated is a message the runtime's two boundary checks would both let through, which is
+    the fail-open direction; ``test_every_message_type_declares_a_direction`` makes forgetting it a
+    test failure rather than a production surprise.
+    """
+    try:
+        return _DIRECTIONS[message_type]
+    except KeyError:  # pragma: no cover - the test above makes this unreachable
+        raise ValueError(f"no direction declared for message type {message_type!r}") from None
+
+
+def require_aware(value: datetime) -> datetime:
+    """Refuse a naive datetime. Public because more than one module needs exactly this rule.
+
+    DH-CONNECT-AGENT-001's heartbeat carries the agent's own clock reading, and §59 forbids naive
+    timestamps everywhere rather than only in the envelope. Two copies of this check would be two
+    places for it to be relaxed.
+    """
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise ValueError("timestamp must be offset-aware; a naive instant is not a fact about when")
     return value
@@ -493,8 +555,44 @@ class ReleasedAmendment(BaseModel):
     observations: tuple[ResultObservation, ...] = Field(min_length=1)
 
 
+class OrderNotification(BaseModel):
+    """DHealth telling a laboratory's connector that it has work. Contract 1.1.
+
+    The mirror image of ``OrderSubmission``, and deliberately not the same class. A submission asks
+    DHealth to *create* an order and therefore carries no DHealth order id; a notification is about
+    an order that already exists, and the id lives on the envelope where the correlation rules can
+    see it. Reusing one class for both would have meant a field that is required in one direction
+    and forbidden in the other -- the kind of conditional shape that reads fine and is impossible to
+    validate.
+
+    **What it does not carry is the point.** No date of birth, no sex, no address, no phone number,
+    no diagnosis, no clinical narrative, no free-text note. A LIS that needs demographics to
+    register a patient is describing a real requirement, and the honest place to raise it is
+    DH-CONNECT-ADAPTER-001 with a named partner and a stated purpose -- not here, pre-emptively, on
+    behalf of a hypothetical system, which is how minimization turns into a JSON blob. ADR-056
+    decision 5 stands.
+
+    ``catalog_codes`` are **DHealth catalog codes**, not the laboratory's own orderables. The
+    connector maps them through the same ``TestMapping`` revision its qualification pinned, and an
+    unmapped code fails the notification closed rather than delivering a partial order -- a
+    laboratory that runs four of five requested tests and reports four results has produced a
+    clinically misleading report, and nothing downstream would know a test was dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_type: Literal[MessageType.ORDER_NOTIFICATION] = MessageType.ORDER_NOTIFICATION
+    #: The patient as the *ordering provider's* system identifies them. DHealth holds no identity
+    #: the laboratory asserted -- if it did, this would still be the provider's, because that is the
+    #: identity the order was placed under.
+    patient: ScopedExternalId
+    practitioner: SourcePractitionerRef
+    catalog_codes: tuple[str, ...] = Field(min_length=1)
+
+
 ConnectMessage = Annotated[
     OrderSubmission
+    | OrderNotification
     | TechnicalAck
     | BusinessAcceptance
     | BusinessRejection
@@ -544,7 +642,7 @@ class Envelope(BaseModel):
     @field_validator("source_occurred_at", "sent_at")
     @classmethod
     def _offset_aware(cls, value: datetime) -> datetime:
-        return _require_aware(value)
+        return require_aware(value)
 
     @model_validator(mode="after")
     def _order_correlation_matches_message(self) -> Envelope:
@@ -558,6 +656,7 @@ class Envelope(BaseModel):
         else's, and forbidding it is cheaper than deciding which.
         """
         needs_order = {
+            MessageType.ORDER_NOTIFICATION,
             MessageType.TECHNICAL_ACK,
             MessageType.BUSINESS_ACCEPTANCE,
             MessageType.BUSINESS_REJECTION,

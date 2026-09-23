@@ -200,13 +200,18 @@ const READINESS_FINDING_BLOCKING: Record<string, string> = {
    * The blocking wording says what is missing and why nobody can fix it here.
    *
    * "Aucun connecteur DHealth en service" invites the reading that somebody
-   * forgot to switch one on. Nobody did: the runtime that would report a
-   * connector as operational does not exist yet, so this condition cannot be
-   * satisfied by any action on any screen in this release. An operator who
-   * spends an afternoon looking for the toggle has been misled by the interface.
+   * forgot to switch one on. Nobody did, and nobody can: this condition is
+   * satisfied by an agent reporting in from the facility's own hardware, never
+   * by an action on any screen. An operator who spends an afternoon looking for
+   * the toggle has been misled by the interface.
+   *
+   * DH-CONNECT-AGENT-001 changed the label because the old one had become false.
+   * It read "Transport DHealth Connect non construit", and the transport is now
+   * built -- what is still missing for a real facility is a qualified vendor
+   * adapter, which is a different sentence and a different piece of work.
    */
   connector_operational:
-    'Transport DHealth Connect non construit — aucun connecteur ne peut être en service',
+    "Aucun agent connecteur n'est en service pour cet établissement",
 }
 
 export function readinessFindingLabel(code: string, satisfied = true, blocking = false): string {
@@ -369,7 +374,7 @@ export function capabilityLabel(capability: string): string {
  * release, and it is the honest one: nothing reports in, so nothing is known.
  */
 const HEALTH_STATE: Record<string, string> = {
-  UNKNOWN: 'Inconnu — aucun runtime ne remonte d’état',
+  UNKNOWN: 'Inconnu — DHealth n’observe pas cet agent',
   HEALTHY: 'Sain',
   DEGRADED: 'Dégradé',
   UNAVAILABLE: 'Indisponible',

@@ -261,7 +261,7 @@ const CONNECT_READINESS: FacilityReadiness = {
       code: 'connector_operational',
       satisfied: false,
       blocking: true,
-      detail: "aucune exécution de connecteur ne remonte d'état ; le transport DHealth Connect n'est pas construit",
+      detail: "aucun agent ne s'est jamais annoncé pour ce connecteur",
     },
     { code: 'administrator_present', satisfied: true, blocking: false, detail: null },
   ],
@@ -281,6 +281,41 @@ function connectReadinessWithReason(detail: string): FacilityReadiness {
     findings: CONNECT_READINESS.findings.map((finding) =>
       finding.code === 'connector_qualified' ? { ...finding, detail } : finding,
     ),
+  }
+}
+
+/**
+ * The same thing for the *operational* finding, which DH-CONNECT-AGENT-001 made variable.
+ *
+ * A separate helper rather than a parameter, because putting a runtime reason on the
+ * `connector_qualified` finding is precisely the conflation these screens exist to prevent -- and a
+ * capture that did it would show "Connecteur DHealth non qualifié — L'agent ne joint pas le système
+ * source", which blames a qualification for an outage.
+ */
+function connectReadinessWithRuntime(
+  detail: string,
+  { operational = false }: { operational?: boolean } = {},
+): FacilityReadiness {
+  return {
+    ...CONNECT_READINESS,
+    // `production_routing_allowed` stays false in every one of these, including the fully healthy
+    // one, and that is the single most important thing about this fixture. A CONNECT facility
+    // cannot reach READY_FOR_ROUTING while no qualified vendor adapter exists (§6), so every
+    // connector finding being satisfied still does not make the facility routable. A capture that
+    // flipped this to true would be the falsehood this whole scene set exists to prevent.
+    findings: CONNECT_READINESS.findings.map((finding) => {
+      if (finding.code === 'connector_operational') {
+        return { ...finding, satisfied: operational, detail }
+      }
+      if (finding.code === 'connector_qualified') {
+        return {
+          ...finding,
+          satisfied: true,
+          detail: 'connecteur qualifié pour cette configuration',
+        }
+      }
+      return finding
+    }),
   }
 }
 
@@ -451,11 +486,16 @@ const PROVIDER_TEAM: OrganizationMembership[] = [
 
 // ── DH-CONNECT-CONTRACT-001 connector fixtures ────────────────────────────────
 //
-// Six states of one laboratory's connector, captured so somebody can look at
-// them rather than take a test's word. Every one of them has `operational:
-// false` and `transport_available: false`, including the qualified one -- if a
-// screenshot ever shows a CONNECT facility that looks routable, this is where
-// the falsehood would have been invented.
+// States of one laboratory's connector, captured so somebody can look at them
+// rather than take a test's word.
+//
+// DH-CONNECT-AGENT-001 changed what these must show. `transport_available` is
+// now true -- DHealth has a delivery runtime -- and `operational` is reachable,
+// so the scene set gains a healthy agent and a degraded one. What has *not*
+// changed is the rule these fixtures exist to protect: no capture may show a
+// CONNECT facility that looks production-routable, because no qualified vendor
+// adapter exists. If a screenshot ever suggests otherwise, this is where the
+// falsehood would have been invented.
 
 const CONNECTOR_FP_CONFIG = '9f2b7c41d8e05a36bb14ce9207d5f8a1c3e60b94d72af815e0c36d9b47a1f280'
 const CONNECTOR_FP_MAPPING = '3a51e0cd7b92486fa0d1c85e73b64902fd18ae57c0b39d462e8f10a7cb95d3e6'
@@ -472,6 +512,9 @@ const CONNECTOR_INSTALLATION = {
   configuration_fingerprint: CONNECTOR_FP_CONFIG,
   mapping_fingerprint: CONNECTOR_FP_MAPPING,
   status: 'REGISTERED',
+  // The OIDC client this installation's agent authenticates as. A public identifier, never a
+  // secret -- there is no field anywhere in this type that could hold one.
+  service_client_id: 'connect-agent-lab-central',
   created_at: '2026-09-01T08:00:00Z',
   updated_at: '2026-09-01T08:00:00Z',
 }
@@ -533,7 +576,17 @@ const CONNECTOR_NONE: FacilityConnector = {
   },
   health_state: 'UNKNOWN',
   operational: false,
-  transport_available: false,
+  transport_available: true,
+  runtime: {
+    runtime_instance_id: null,
+    agent_version: null,
+    last_seen_at: null,
+    adapter_reachable: null,
+    pending_deliveries: 0,
+    dead_letters: 0,
+    oldest_pending_seconds: null,
+    reasons: ["Aucun agent ne s'est jamais annoncé pour ce connecteur."],
+  },
   qualification_history: [],
 }
 
@@ -606,6 +659,70 @@ const CONNECTOR_QUALIFIED: FacilityConnector = {
       })),
     },
   ],
+}
+
+/**
+ * DH-CONNECT-AGENT-001: a connector whose agent is reporting in and whose source system answers.
+ *
+ * Built on CONNECTOR_QUALIFIED so the capture shows the strongest state this build can reach:
+ * qualified, healthy, in service -- **and still not production-routable**, because no qualified
+ * vendor adapter exists. That combination is the single most important thing in this scene set. If
+ * a future screenshot of it ever reads as "this laboratory is live", the falsehood was invented
+ * here.
+ */
+const CONNECTOR_RUNTIME_HEALTHY: FacilityConnector = {
+  ...CONNECTOR_QUALIFIED,
+  health_state: 'HEALTHY',
+  operational: true,
+  runtime: {
+    runtime_instance_id: 'agent-7f31c0a95b2d4e18',
+    agent_version: '0.1.0',
+    last_seen_at: '2026-09-23T08:00:00Z',
+    adapter_reachable: true,
+    pending_deliveries: 0,
+    dead_letters: 0,
+    oldest_pending_seconds: null,
+    reasons: [],
+  },
+}
+
+/**
+ * The agent answers; its laboratory system does not.
+ *
+ * Captured because it is the state most likely to be misread. The connector is qualified, the agent
+ * is alive, and the facility must still not take work -- §63. A screen that showed this as "en
+ * service" would send orders into a queue nothing is draining.
+ */
+const CONNECTOR_RUNTIME_DEGRADED: FacilityConnector = {
+  ...CONNECTOR_RUNTIME_HEALTHY,
+  health_state: 'DEGRADED',
+  operational: false,
+  runtime: {
+    ...CONNECTOR_RUNTIME_HEALTHY.runtime,
+    adapter_reachable: false,
+    pending_deliveries: 4,
+    dead_letters: 1,
+    oldest_pending_seconds: 900,
+    reasons: [
+      "L'agent ne joint pas le système source.",
+      '4 message(s) en attente, le plus ancien depuis 15 min.',
+      '1 message(s) non livrable(s) en attente de décision.',
+    ],
+  },
+}
+
+/** Heard from, then silence. Not the same conversation as "no agent was ever installed". */
+const CONNECTOR_RUNTIME_UNAVAILABLE: FacilityConnector = {
+  ...CONNECTOR_RUNTIME_HEALTHY,
+  health_state: 'UNAVAILABLE',
+  operational: false,
+  runtime: {
+    ...CONNECTOR_RUNTIME_HEALTHY.runtime,
+    last_seen_at: '2026-09-23T06:40:00Z',
+    pending_deliveries: 12,
+    oldest_pending_seconds: 4800,
+    reasons: ['Aucun signal depuis 4800 s (seuil 90 s).'],
+  },
 }
 
 const CONNECTOR_FAILED: FacilityConnector = {
@@ -692,7 +809,7 @@ const CONNECT_QUALIFIED_READINESS: FacilityReadiness = {
       satisfied: false,
       blocking: true,
       detail:
-        "aucune exécution de connecteur ne remonte d'état ; le transport DHealth Connect n'est pas construit",
+        "aucun agent ne s'est jamais annoncé pour ce connecteur",
     },
     { code: 'administrator_present', satisfied: true, blocking: false, detail: null },
   ],
@@ -1027,6 +1144,32 @@ const SCENES: Record<string, () => ReactElement> = {
       facilities={[facilityFixture()]}
       readiness={CONNECT_QUALIFIED_READINESS}
       connector={CONNECTOR_QUALIFIED}
+    />
+  ),
+  // DH-CONNECT-AGENT-001. The three runtime states, captured because health is now something
+  // DHealth can actually observe -- and because the healthy one is the capture a reader is most
+  // likely to over-read. Every one of them still shows production routing refused.
+  'connector-runtime-healthy': () => (
+    <PlatformScene
+      facilities={[facilityFixture()]}
+      readiness={connectReadinessWithRuntime('agent 0.1.0 actif et joignable', {
+        operational: true,
+      })}
+      connector={CONNECTOR_RUNTIME_HEALTHY}
+    />
+  ),
+  'connector-runtime-degraded': () => (
+    <PlatformScene
+      facilities={[facilityFixture()]}
+      readiness={connectReadinessWithRuntime("L'agent ne joint pas le système source.")}
+      connector={CONNECTOR_RUNTIME_DEGRADED}
+    />
+  ),
+  'connector-runtime-unavailable': () => (
+    <PlatformScene
+      facilities={[facilityFixture()]}
+      readiness={connectReadinessWithRuntime('Aucun signal depuis 4800 s (seuil 90 s).')}
+      connector={CONNECTOR_RUNTIME_UNAVAILABLE}
     />
   ),
   'connector-stale': () => (

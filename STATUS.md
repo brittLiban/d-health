@@ -6,6 +6,31 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-23, DH-CONNECT-AGENT-001, directly on `master`.** From `ddac950`. DHealth Connect has a
+**runtime**: a durable delivery engine on the server (`connector_deliveries`, claim leases,
+exponential retry, dead letters), a service-identity boundary, an on-premises agent with its own
+SQLite inbox/outbox/receipts, and health **derived** from what an agent reports rather than declared
+by anyone. The consequence that matters is the one DH-CONNECT-CONTRACT-001's correction was waiting
+for: `ORDER_RECEIPT` is now proved by *delivering an order through the real path* — queued centrally,
+claimed over HTTP under a lease, handed to an adapter, acknowledged back — and checked in three
+independent places before it counts. **The synthetic laboratory suite therefore reaches
+`connector_qualified = true` for the first time in this codebase**, and the suite version moved 2 → 3
+so every older PASS reports `SUITE_VERSION_OUTDATED` rather than being re-credited with a claim it
+never made. §8's rule is structural: the installation is derived from the credential
+(`token → azp → service_client_id → installation`) and **no runtime endpoint has an
+`organization_id` or `connector_installation_id` parameter at all**; the envelope's organization is
+compared and a mismatch is refused, audited and not written. Human and agent tokens differ by OIDC
+audience, so neither works where the other belongs, and DHealth stores the client *identifier* —
+never a secret, which it never receives. Health has no setter anywhere: no column, no endpoint, no
+UI control, and `DEGRADED` blocks routing exactly as `UNAVAILABLE` does. Seven negative controls
+executed and reverted; **one stayed green and found a real gap** — the agent's local replay check was
+protected only by the synthetic adapter's own idempotency, so the test now asserts the call count and
+a non-idempotent partner adapter would be safe too. Real PostgreSQL 18.6 covered the one property
+SQLite structurally cannot: two concurrent `claim`s under `FOR UPDATE SKIP LOCKED` never take the
+same message. **No vendor adapter exists, no real EMR or LIS has been qualified, and no facility is
+live through Connect** — a CONNECT facility still cannot reach `READY_FOR_ROUTING`, and the refusal
+now names the real reason instead of the one that became false. Next: DH-CONNECT-ADAPTER-001.
+
 **2026-09-22, DH-CONNECT-CONTRACT-001 correction, directly on `master`.** From `a7e4d5e`. A hole in
 the ticket above: `ORDER_RECEIPT` was recorded as a passing required capability with "declaration
 only" written in prose, and the verdict counted every `passed=True` row. Nothing was routable, so it
@@ -240,6 +265,25 @@ changes, weakens, or reinterprets any of the four.
 *Qualified at the specific evidence level stated per item below — CI/unit/integration and, where
 noted, real-PostgreSQL. This is not a claim of production deployment, and where a ticket's own
 formal closure is a separate reserved human decision, that is stated explicitly in its bullet.*
+
+- **DHealth Connect runtime, DH-CONNECT-AGENT-001** (2026-09-23): a durable delivery engine
+  (`connector_deliveries`, claim leases, exponential retry, dead letters that are unresolved rather
+  than deleted), a service-identity boundary on its own OIDC audience where the installation is
+  derived from the credential and **no runtime endpoint accepts an organization or installation
+  parameter at all**, an on-premises agent (`daher_adapter.connect_agent`, stdlib SQLite, no partner
+  PostgreSQL required) whose persist/act/acknowledge ordering closes every crash window, exact
+  correlation with no fuzzy matching, and **health derived** from observations with no column,
+  endpoint or control that could set it. `ORDER_RECEIPT` is exercised by delivering a real order
+  through the real path and checking three independent places, so **the synthetic laboratory suite
+  reaches `connector_qualified = true` for the first time in this codebase** and the suite version
+  moved 2 → 3. Seven negative controls executed and reverted; one stayed green and exposed a real
+  gap (the agent's replay check was protected only by the synthetic adapter's own idempotency — the
+  test now asserts the call count). Real PostgreSQL 18.6 covered `FOR UPDATE SKIP LOCKED` under two
+  concurrent claims, which SQLite structurally cannot test. Migration `0029_connect_runtime`, with
+  a new `tests/test_migration_hygiene.py` measuring every revision id against `VARCHAR(32)`.
+  **No vendor adapter exists, no real EMR or LIS has been qualified, and no facility is live through
+  Connect** — a CONNECT facility still cannot reach `READY_FOR_ROUTING`. See `docs/CONNECT-AGENT.md`,
+  ADR-057.
 
 - **DHealth Exchange backend, DH-EX-001 through DH-EX-014B**: organization onboarding; patient/order
   creation; provider- and patient-driven lab assignment; accept/reject/processing; sample
@@ -638,6 +682,26 @@ cleared yet:
 No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
+
+**NEXT: DH-CONNECT-ADAPTER-001 — First Real Partner / Vendor Adapter.**
+DH-CONNECT-AGENT-001 built the runtime and deliberately no adapter. Everything vendor-specific sits
+behind one three-method protocol — `handle_order`, `poll_events`, `probe` — and the only
+implementation that exists is synthetic and contacts nothing. That is why a Connect facility can now
+hold a genuinely qualified connector with a healthy, reporting agent and still be refused production
+routing: there is nothing real at the far end.
+
+The next ticket writes the first one against a named partner system, and it is the first work in this
+repository that would actually contact an external EMR or LIS. Everything it needs already exists and
+must not be rebuilt: the canonical message set, the durable queue, the identity boundary, the
+correlation model, the retry and dead-letter semantics, and the qualification suite that will judge
+it. What it adds is a translation layer and the operational questions that come with a real
+counterparty — credentials, mapping revisions, the partner's own release signal, and whether their
+identifiers round-trip at all. The `READY_FOR_ROUTING` refusal is what keeps an unqualified adapter
+out of production in the meantime, and
+`test_RQ8_qualified_is_still_not_production_routable` pins it.
+
+**[Superseded 2026-09-23, DH-CONNECT-AGENT-001 — the paragraph below was the next ticket before the
+runtime existed.]**
 
 **NEXT: DH-CONNECT-CONTRACT-001 — External EMR/LIS Integration Contract + Qualification Model.**
 DH-MVP-ONBOARD-001 made it possible to enrol a facility, record that it keeps its own EMR or LIS,

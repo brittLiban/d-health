@@ -225,6 +225,35 @@ STATUSES_REQUIRING_LAB_SELECTION = frozenset(
 )
 
 
+def _notify_connector(
+    session: Session, lab_order_id: uuid.UUID, lab_organization_id: uuid.UUID
+) -> None:
+    """DH-CONNECT-AGENT-001 §83: tell the laboratory's connector, in this same transaction.
+
+    Called from **both** paths that select a laboratory -- the patient's own price-consent selection
+    and the provider's clinical assignment -- because an order reaching a CONNECT laboratory has to
+    reach its connector however it got there. Wiring only one of the two would produce a facility
+    whose orders arrive when a clinician assigns them and silently never arrive when a patient
+    selects them, which is the kind of gap nobody notices until somebody is waiting for a result.
+
+    Enqueued here rather than after the commit: the selection and the notification are one fact. A
+    crash between two separate commits would leave an order assigned to a laboratory that never
+    heard about it, with nothing anywhere recording that DHealth meant to tell them.
+
+    Does nothing for a NATIVE laboratory, for one with no registered connector, or for a suspended
+    or retired installation -- and never raises for any of those. Imported inside the function so
+    this module keeps no import-time dependency on the connect package, matching how the Exchange
+    already treats Connect as a boundary it reaches into rather than a layer it sits on.
+    """
+    from daher_adapter.connect.outbox_hook import notify_connector_of_assignment
+
+    notify_connector_of_assignment(
+        session,
+        lab_order_id=lab_order_id,
+        lab_organization_id=lab_organization_id,
+    )
+
+
 class LabSelectionRepository:
     def __init__(
         self, session_factory: sessionmaker[Session], organizations: OrganizationRepository
@@ -396,6 +425,7 @@ class LabSelectionRepository:
             session.add(lab_selection)
             order.status = LabOrderStatus.SELECTED.value
             session.flush()
+            _notify_connector(session, lab_order_id, lab_organization_id)
             return _to_selection_record(lab_selection), True
 
     def assign_by_provider(
@@ -611,6 +641,7 @@ class LabSelectionRepository:
         session.add(lab_selection)
         order.status = LabOrderStatus.SELECTED.value
         session.flush()
+        _notify_connector(session, lab_order_id, lab_organization_id)
         return _to_selection_record(lab_selection), True
 
     def get_for_order(self, lab_order_id: uuid.UUID) -> LabSelectionRecord | None:

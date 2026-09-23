@@ -12,6 +12,7 @@ from sqlalchemy import Engine, text
 from daher_adapter import __version__
 from daher_adapter.audit import AuditWriter
 from daher_adapter.config import Settings
+from daher_adapter.connect.runtime_api import build_connect_runtime_router
 from daher_adapter.database import build_engine, build_session_factory
 from daher_adapter.exchange.api import build_exchange_router
 from daher_adapter.exchange.audit import ExchangeAuditWriter
@@ -61,6 +62,29 @@ def create_app(
         audit_writer=exchange_audit,
         platform_admin_role=active_settings.exchange_platform_admin_role,
         patient_access_ttl_hours=active_settings.exchange_patient_access_ttl_hours,
+    )
+    # DH-CONNECT-AGENT-001 §8/§10: a **second validator with a second audience**, for connector
+    # agents only. Same issuer, same signing keys, different `aud` -- so a clinician's token is not
+    # a valid agent credential and an agent's token is not a valid clinical one. One validator for
+    # both would put two principal classes behind one credential, which is what §7 forbids.  Mounted
+    # unconditionally and failing closed when unconfigured, exactly as the Exchange router does.
+    # `UnconfiguredKeySource` when the runtime audience is unset means every runtime request is a
+    # 401 -- correct rather than limiting: a deployment that has provisioned no agent credentials
+    # has no agents.
+    connect_runtime_validator = TokenValidator(
+        issuer=active_settings.exchange_oidc_issuer or "",
+        audience=active_settings.exchange_connect_runtime_audience or "",
+        key_source=(
+            exchange_key_source
+            if active_settings.connect_runtime_oidc_configured
+            else UnconfiguredKeySource()
+        ),
+        platform_admin_role=active_settings.exchange_platform_admin_role,
+    )
+    connect_runtime_router = build_connect_runtime_router(
+        session_factory=exchange_session_factory,
+        runtime_token_validator=connect_runtime_validator,
+        platform_admin_role=active_settings.exchange_platform_admin_role,
     )
 
     @asynccontextmanager
@@ -138,5 +162,6 @@ def create_app(
         return {"status": "up"}
 
     app.include_router(exchange_router)
+    app.include_router(connect_runtime_router)
 
     return app

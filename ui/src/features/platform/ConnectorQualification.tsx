@@ -9,12 +9,17 @@
  *   a connector build is registered here      (bookkeeping)
  *   a qualification run passed                (evidence, about a past moment)
  *   that run still applies to what is installed (a present-tense question)
- *   a runtime is reporting in                 (false everywhere, in this release)
+ *   a runtime is reporting in                 (an observation, about right now)
  *
- * The last one is why nothing on this screen can make a facility routable, and
- * why there is no [Marquer comme qualifié] button anywhere in this file. A
- * qualification is what running the suite produced; if an operator could assert
- * it, every downstream guarantee would quietly become a claim.
+ * DH-CONNECT-AGENT-001 made the fourth one reachable. It did not add a way to
+ * assert it: health is derived from what an agent reported, and there is no
+ * [Marquer comme sain] control anywhere in this file, exactly as there is no
+ * [Marquer comme qualifié]. A flag an operator can set is a flag somebody sets
+ * at 2 a.m. to make an alarm stop, and the facility it unblocks then takes
+ * clinical work through a connector nobody has heard from.
+ *
+ * What still cannot happen here: making a real facility production-routable.
+ * That needs a qualified *vendor* adapter, and none exists.
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -154,10 +159,11 @@ export function ConnectorQualification({
       {/* Stated before anything else, because it is true regardless of everything
           below it and an operator who reads only one sentence should read this one. */}
       <p className={styles.nextStep}>
-        <strong>Le transport DHealth Connect n'est pas construit.</strong> Aucun connecteur
-        n'échange de données avec un système externe dans cette version. La qualification
-        ci-dessous vérifie qu'un connecteur respecterait le contrat&nbsp;; elle ne met rien en
-        service.
+        <strong>Aucun adaptateur éditeur qualifié n'existe.</strong> DHealth dispose désormais
+        d'une exécution de livraison durable, mais le seul adaptateur disponible est synthétique
+        : il sert à vérifier le chemin de livraison, il ne se connecte à aucun système réel.
+        Aucun établissement ne peut donc être mis en service via DHealth Connect dans cette
+        version.
       </p>
 
       {installation === null ? (
@@ -350,17 +356,69 @@ export function ConnectorQualification({
         </>
       ) : null}
 
-      <p>
-        <strong>En service</strong> — Non.
-      </p>
-      <p>
-        <strong>État remonté par l'exécution</strong> — {healthStateLabel(connector.health_state)}.
-      </p>
+      <h3 className={styles.subTitle}>Exécution</h3>
+
+      {/* The derivation's own reasons, printed verbatim. Rewriting them here would give the same
+          fact two French spellings, and the one on this screen would be the one nobody updated. */}
+      {connector.runtime.reasons.length > 0 ? (
+        <ul className={styles.findingList}>
+          {connector.runtime.reasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      ) : null}
+      <dl className={styles.definitionList}>
+        {/* State and service first, and as their own rows rather than one sentence. Two facts an
+            operator reads separately deserve two lines -- and a value in its own element is a value
+            a screen reader announces with its label rather than as part of a paragraph. */}
+        <dt>État</dt>
+        <dd>{healthStateLabel(connector.health_state)}</dd>
+        <dt>En service</dt>
+        <dd>{connector.operational ? 'Oui' : 'Non'}</dd>
+        <dt>Dernier signal reçu</dt>
+        {/* DHealth's receive time, labelled as such. An agent with a skewed clock must not be able
+            to look recent, and an operator comparing two facilities needs one clock, not theirs. */}
+        <dd>
+          {connector.runtime.last_seen_at === null
+            ? 'Jamais'
+            : `${formatMoment(connector.runtime.last_seen_at)} (heure de réception DHealth)`}
+        </dd>
+        <dt>Agent</dt>
+        <dd>
+          {connector.runtime.agent_version === null
+            ? 'Aucun agent ne s\u2019est annoncé'
+            : `version ${connector.runtime.agent_version} — instance ${
+                connector.runtime.runtime_instance_id ?? 'inconnue'
+              }`}
+        </dd>
+        <dt>Système source joignable</dt>
+        <dd>
+          {connector.runtime.adapter_reachable === null
+            ? 'Inconnu'
+            : connector.runtime.adapter_reachable
+              ? 'Oui'
+              : 'Non'}
+        </dd>
+        <dt>Messages en attente de livraison</dt>
+        <dd>
+          {connector.runtime.pending_deliveries}
+          {connector.runtime.oldest_pending_seconds !== null
+            ? ` — le plus ancien depuis ${Math.floor(
+                connector.runtime.oldest_pending_seconds / 60,
+              )} min`
+            : ''}
+        </dd>
+        <dt>Messages non livrables</dt>
+        {/* Never "supprimés". A dead letter is an unresolved clinical message somebody has to look
+            at, and the word has to say that -- DHealth does not invent a cancellation. */}
+        <dd>{connector.runtime.dead_letters}</dd>
+      </dl>
       <p className={styles.sectionLede}>
-        Un connecteur qualifié n'est pas un connecteur en service. La qualification prouve qu'une
-        version du connecteur respecte le contrat&nbsp;; seule une exécution qui remonte son état
-        prouve qu'elle fonctionne aujourd'hui. Aucune exécution de ce type n'existe dans cette
-        version, donc le routage de production reste refusé.
+        Un connecteur qualifié n'est pas un connecteur en service, et un agent qui répond n'est pas
+        un connecteur qualifié. La qualification prouve qu'une version du connecteur respecte le
+        contrat&nbsp;; l'état ci-dessus dit seulement ce que DHealth observe aujourd'hui. Les deux
+        sont nécessaires, et ni l'un ni l'autre ne suffit&nbsp;: le routage de production exige en
+        plus un adaptateur éditeur qualifié, qui n'existe pas.
       </p>
 
       {latest !== null ? (
@@ -433,8 +491,14 @@ export function ConnectorQualification({
               ? 'Qualification de production — incomplète, capacité restant à démontrer'
               : `Qualification de production — ${qualificationGapLabel(verdict.gap).toLowerCase()}`}
         </li>
-        <li className={styles.owed}>
-          Exécution du connecteur — aucun runtime dans cette version
+        {/* Now a real step with two outcomes rather than a permanent "not in this version".
+            The state is derived; nothing on this page can advance it. */}
+        <li className={connector.operational ? styles.done : styles.owed}>
+          {connector.operational
+            ? `Exécution du connecteur — agent actif (${healthStateLabel(connector.health_state)})`
+            : `Exécution du connecteur — ${healthStateLabel(
+                connector.health_state,
+              ).toLowerCase()}`}
         </li>
         <li className={styles.stopped}>Routage de production — désactivé</li>
       </ol>

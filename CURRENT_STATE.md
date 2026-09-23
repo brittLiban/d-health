@@ -1,5 +1,24 @@
 # Current State — Daher Health
 
+> **DHealth Connect, 2026-09-23 (DH-CONNECT-AGENT-001):** the **runtime is built and exercised end
+> to end**. A durable delivery engine (`connector_deliveries`, claim leases, retry, dead letters), a
+> service-identity boundary (`token → azp → service_client_id → installation`, on its own OIDC
+> audience), an on-premises agent (`daher_adapter.connect_agent`, stdlib SQLite, no partner
+> PostgreSQL required), correlation, and health **derived** from observations with no column,
+> endpoint or control that could set it. `ORDER_RECEIPT` is now exercised by delivering a real order
+> through that path, so **the synthetic laboratory suite reaches `connector_qualified = true` for the
+> first time** and the suite version moved 2 → 3.
+>
+> **What is still not built:** any vendor adapter. No FHIR client, HL7 parser, MLLP listener, SFTP
+> runtime, file watcher or webhook receiver exists, the only implementation of the adapter protocol
+> is synthetic and contacts nothing, **nothing in this repository has ever contacted a real external
+> EMR or LIS**, and no real system has been qualified. A CONNECT facility still cannot reach
+> `READY_FOR_ROUTING` — the refusal's *reason* changed (a runtime now exists; a qualified vendor
+> adapter does not) and the rule did not, pinned by
+> `test_RQ8_qualified_is_still_not_production_routable`. See `docs/CONNECT-AGENT.md`, ADR-057.
+>
+> **Superseded by the entry above, kept for the history it records.**
+>
 > **DHealth Connect, 2026-09-22 (DH-CONNECT-CONTRACT-001):** the integration **contract** and the
 > **qualification evidence model** are implemented and qualified against SQLite and real PostgreSQL
 > 18.6. The **transport is not built and has never run** — no FHIR client, HL7 parser, MLLP, SFTP

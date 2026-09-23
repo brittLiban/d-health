@@ -18,8 +18,11 @@ from daher_adapter.connect.contract import (
     CONTRACT_VERSION,
     BusinessAcceptance,
     Capability,
+    Direction,
     Envelope,
     InMemoryReceiptStore,
+    MessageType,
+    OrderNotification,
     OrderSubmission,
     ReleasedResult,
     ResultObservation,
@@ -29,6 +32,7 @@ from daher_adapter.connect.contract import (
     contract_major,
     fingerprint,
     mapping_fingerprint,
+    message_direction,
     optional_capabilities,
     required_capabilities,
 )
@@ -53,6 +57,24 @@ def _envelope(**overrides):
     }
     payload.update(overrides)
     return Envelope(**payload)
+
+
+def _order_notification() -> OrderNotification:
+    return OrderNotification(
+        patient=ScopedExternalId(
+            source_organization_id=ORG_B,
+            source_system="emr",
+            source_identity_system="urn:emr:mrn",
+            source_identity_value="P-1",
+        ),
+        practitioner=SourcePractitionerRef(
+            source_organization_id=ORG_B,
+            source_system="emr",
+            source_identity_system="urn:emr:staff",
+            source_identity_value="D-1",
+        ),
+        catalog_codes=("GLU",),
+    )
 
 
 class TestContractVersion:
@@ -320,4 +342,103 @@ class TestResultSemantics:
                         text_value="normal",
                     ),
                 ),
+            )
+
+
+class TestDirectionAndOutboundNotification:
+    """DH-CONNECT-AGENT-001 §5 — contract 1.1's one addition, and what makes it additive."""
+
+    def test_DI1_every_message_type_declares_a_direction(self):
+        """A type with no declared direction would pass both of the runtime's boundary checks.
+
+        The runtime refuses a connector submitting an outbound type and refuses DHealth queueing an
+        inbound one. Both checks read this table, so a type missing from it is a type nothing
+        constrains -- fail-open, and invisible until somebody sends one.
+        """
+        for message_type in MessageType:
+            assert message_direction(message_type) in set(Direction)
+
+    def test_DI2_contract_1_1_is_a_minor_bump_so_nothing_requalifies(self):
+        """§49: a contract *major* mismatch fails closed. 1.0 -> 1.1 must not be one.
+
+        A connector built against 1.0 keeps working; it simply cannot receive orders, which was
+        already true. Had this been 2.0, every existing installation would have gone
+        ``CONTRACT_MAJOR_MISMATCH`` on the strength of an added field nobody had to implement.
+        """
+        assert CONTRACT_VERSION == "1.1"
+        assert contract_major("1.0") == contract_major(CONTRACT_VERSION)
+        _envelope(contract_version="1.0")
+
+    def test_DI3_the_seven_1_0_message_types_still_travel_inbound(self):
+        """The version bump added a direction; it did not re-point an existing one."""
+        inbound = {
+            MessageType.ORDER_SUBMISSION,
+            MessageType.TECHNICAL_ACK,
+            MessageType.BUSINESS_ACCEPTANCE,
+            MessageType.BUSINESS_REJECTION,
+            MessageType.COLLECTION_EVENT,
+            MessageType.RELEASED_RESULT,
+            MessageType.RELEASED_AMENDMENT,
+        }
+        for message_type in inbound:
+            assert message_direction(message_type) is Direction.CONNECTOR_TO_DHEALTH
+        assert message_direction(MessageType.ORDER_NOTIFICATION) is Direction.DHEALTH_TO_CONNECTOR
+
+    def test_DI4_an_order_notification_must_name_the_dhealth_order(self):
+        """It is about an order DHealth already created, so the correlation is not optional.
+
+        The same rule the six other order-bound types obey. A notification without it would leave
+        the connector's eventual acceptance with nothing to correlate back to but an external
+        identifier DHealth never issued.
+        """
+        with pytest.raises(ValidationError):
+            _envelope(payload=_order_notification(), lab_order_id=None)
+
+        envelope = _envelope(payload=_order_notification(), lab_order_id=uuid.uuid4())
+        assert envelope.payload.message_type is MessageType.ORDER_NOTIFICATION
+
+    def test_DI5_an_order_notification_carries_no_demographics_or_clinical_content(self):
+        """ADR-056 decision 5, restated as an assertion because 1.1 is where it was tempting.
+
+        An outbound order is the first message DHealth composes rather than receives, which makes it
+        the first place DHealth could volunteer patient data nobody asked for. The fields below are
+        the ones a LIS integration would plausibly request; each must be raised by a named partner
+        in DH-CONNECT-ADAPTER-001, not added here on spec.
+        """
+        for forbidden in (
+            "date_of_birth",
+            "birth_date",
+            "sex",
+            "gender",
+            "address",
+            "phone",
+            "contact_value",
+            "diagnosis",
+            "clinical_notes",
+            "notes",
+            "indication",
+        ):
+            assert forbidden not in OrderNotification.model_fields
+        assert set(OrderNotification.model_fields) == {
+            "message_type",
+            "patient",
+            "practitioner",
+            "catalog_codes",
+        }
+
+    def test_DI6_an_order_notification_needs_at_least_one_catalog_code(self):
+        """An order for nothing is not an order, and a connector cannot ask what was meant."""
+        with pytest.raises(ValidationError):
+            OrderNotification(
+                patient=ScopedExternalId(
+                    source_system="emr",
+                    source_identity_system="urn:emr:mrn",
+                    source_identity_value="P-1",
+                ),
+                practitioner=SourcePractitionerRef(
+                    source_system="emr",
+                    source_identity_system="urn:emr:staff",
+                    source_identity_value="D-1",
+                ),
+                catalog_codes=(),
             )
