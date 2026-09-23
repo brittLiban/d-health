@@ -90,6 +90,14 @@ A released report for an order that did not come through this connector is not s
 `docs/CONNECT-AGENT.md` on why that is better than sending a DHealth identifier the receiving system
 has never seen.
 
+The correlation is **not** scoped to the installation that created it. It is scoped to the
+organization and the source system, so the identifier survives a connector replacement and stays
+separate from an identically-spelled one in another partner system. The contract is unchanged by
+that — it is a statement about DHealth's storage, not about the wire — but a connector author should
+know that retiring an installation does not invalidate the identifiers it reported, and that
+registering one for a *different* `source_system` starts an empty namespace rather than adopting the
+old one. See `docs/CONNECT-AGENT.md`, "Correlation outlives the connector that reported it".
+
 ### The envelope
 
 Every message travels inside an `Envelope` carrying, among others:

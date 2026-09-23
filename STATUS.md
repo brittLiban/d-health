@@ -6,6 +6,20 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-23, DH-CONNECT-AGENT-001 (lifetime correction), directly on `master`.** From `45130f3`.
+The provider half of the runtime shipped with two defects of the same kind — it confused how long a
+fact is true with how long the thing that reported it exists. A correlation was keyed on the
+connector *installation*, so a connector upgrade erased the partner's identifier namespace; and a
+delivery that could not be made produced a log line rather than a state. Both are corrected:
+correlation is scoped to **organization + source system** with the installation kept as provenance,
+and every release that owes a provider a notification now leaves a durable
+`ConnectorDeliveryObligation` behind — queued, or recorded as owed and why. Suspension is a pause
+rather than an erasure, retirement without a successor leaves the work owed rather than dropped, and
+a successor's first heartbeat discharges what its predecessor left. Migration
+`0031_connect_namespace`, qualified on real PostgreSQL including a refused ambiguous backfill and a
+downgrade round trip. **No vendor adapter was started, and nothing about routing changed.** See
+ADR-057 decisions 32–41.
+
 **2026-09-23, DH-CONNECT-AGENT-001, directly on `master`.** From `ddac950`. DHealth Connect has a
 **runtime**: a durable delivery engine on the server (`connector_deliveries`, claim leases,
 exponential retry, dead letters), a service-identity boundary, an on-premises agent with its own
@@ -289,6 +303,16 @@ changes, weakens, or reinterprets any of the four.
 *Qualified at the specific evidence level stated per item below — CI/unit/integration and, where
 noted, real-PostgreSQL. This is not a claim of production deployment, and where a ticket's own
 formal closure is a separate reserved human decision, that is stated explicitly in its bullet.*
+
+- **DHealth Connect provider-delivery durability, DH-CONNECT-AGENT-001** (2026-09-23,
+  correction): correlation scoped to the organization and source system rather than to the connector
+  installation, so an external identifier survives a connector replacement and never crosses a
+  source-system boundary; and `connector_delivery_obligations`, which makes *"this release owes a
+  provider a notification"* a durable, queryable state instead of a log line. Evidence: CL1–CL13,
+  SD/SD8/SD9, RT1–RT6, BF1–BF6, PQ13–PQ16, and AC1–AC3 driving the full replacement-and-suspension
+  journey through the real agent; four negative controls run and reverted; migration
+  `0031_connect_namespace` qualified on real PostgreSQL 18.6 with a seeded backfill, a deliberately
+  refused ambiguous upgrade, and an upgrade → downgrade → upgrade round trip (PG24–PG27).
 
 - **DHealth Connect runtime, DH-CONNECT-AGENT-001** (2026-09-23): a durable delivery engine
   (`connector_deliveries`, claim leases, exponential retry, dead letters that are unresolved rather

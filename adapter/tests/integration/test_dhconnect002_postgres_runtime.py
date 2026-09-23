@@ -160,7 +160,10 @@ def installation(sessions):
             {"i": installation_id},
         )
         session.execute(
-            text("DELETE FROM connector_correlations WHERE connector_installation_id = :i"),
+            # 0031 renamed this column: the installation is provenance now, not the key.
+            text(
+                "DELETE FROM connector_correlations WHERE created_by_connector_installation_id = :i"
+            ),
             {"i": installation_id},
         )
         session.execute(
@@ -747,3 +750,147 @@ def test_PG23_a_message_type_outside_the_contract_is_refused_by_the_database(
                 content_fingerprint="pg23",
             )
         )
+
+
+def test_PG24_the_correlation_key_is_the_namespace_not_the_installation(sessions):
+    """0031's whole point, read back out of ``pg_constraint`` rather than out of the model.
+
+    The SQLite suite builds its schema from metadata, so it would agree with the model even if the
+    migration had done nothing at all. This reads the constraint PostgreSQL actually holds, in
+    order, which is the only place the rescoping is either true or false for a deployed database.
+    """
+    with sessions() as session:
+        definition = session.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'uq_connector_correlations_external'"
+            )
+        ).scalar_one()
+        reverse = session.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'uq_connector_correlations_one_order'"
+            )
+        ).scalar_one()
+
+    assert definition == (
+        "UNIQUE (organization_id, source_system, correlation_kind, external_id)"
+    ), "0031 has not been applied to this database, or was applied with the old key"
+    assert "connector_installation_id" not in definition, (
+        "an external identifier must not need the adapter build that reported it to be resolvable"
+    )
+    assert "organization_id, source_system, lab_order_id" in reverse
+    assert "ORDER" in reverse, "the reverse uniqueness is ORDER-only; a report may repeat"
+
+
+def test_PG25_one_identifier_in_two_source_systems_is_two_bindings(sessions, installation):
+    """§6 enforced by the database, not only by the repository's WHERE clause.
+
+    Two external systems at one facility both calling something ``ORDER-1`` is ordinary -- they are
+    different orders that share a string. The namespace is what keeps them apart, and a unique key
+    that had collapsed to (organization, external_id) would refuse the second one here.
+
+    The same insert *within* one namespace is refused, which is the other half: exactness is what
+    makes the absence of fuzzy matching safe.
+    """
+    organization_id = installation.organization_id
+    order_id = installation.lab_order_id
+    rows = [
+        (uuid.uuid4(), "medsys", "ORDER-1"),
+        (uuid.uuid4(), "openelis", "ORDER-1"),
+    ]
+    insert = text(
+        "INSERT INTO connector_correlations "
+        "(id, organization_id, source_system, created_by_connector_installation_id, "
+        " correlation_kind, external_id, lab_order_id, created_at) "
+        "VALUES (:id, :org, :sys, :inst, 'REPORT', :ext, :order_id, now())"
+    )
+    try:
+        with sessions.begin() as session:
+            for row_id, system, external in rows:
+                session.execute(
+                    insert,
+                    {
+                        "id": row_id,
+                        "org": organization_id,
+                        "sys": system,
+                        "inst": installation.installation_id,
+                        "ext": external,
+                        "order_id": order_id,
+                    },
+                )
+
+        with pytest.raises(IntegrityError), sessions.begin() as session:
+            session.execute(
+                insert,
+                {
+                    "id": uuid.uuid4(),
+                    "org": organization_id,
+                    "sys": "medsys",
+                    "inst": installation.installation_id,
+                    "ext": "ORDER-1",
+                    "order_id": order_id,
+                },
+            )
+    finally:
+        with sessions.begin() as session:
+            for row_id, _, _ in rows:
+                session.execute(
+                    text("DELETE FROM connector_correlations WHERE id = :i"), {"i": row_id}
+                )
+
+
+def test_PG26_an_obligation_is_not_bound_to_any_installation(sessions):
+    """The structural reason a retirement cannot orphan one.
+
+    ``connector_delivery_obligations`` names an organization, a source system and a release version
+    -- and deliberately has no foreign key to ``connector_installations``. A column pointing at the
+    installation would have been the natural design and would have carried the same lifetime bug
+    one level down: retire the connector, and either the row goes with it or it points at something
+    retired. What is owed belongs to the namespace, so that is what the table records.
+    """
+    with sessions() as session:
+        referenced = set(
+            session.execute(
+                text(
+                    "SELECT ccu.table_name FROM information_schema.table_constraints tc "
+                    "JOIN information_schema.constraint_column_usage ccu "
+                    "  ON ccu.constraint_name = tc.constraint_name "
+                    "WHERE tc.table_name = 'connector_delivery_obligations' "
+                    "  AND tc.constraint_type = 'FOREIGN KEY'"
+                )
+            ).scalars()
+        )
+    assert "connector_installations" not in referenced
+    assert {"exchange_organizations", "exchange_release_versions", "exchange_lab_orders"} <= (
+        referenced
+    ), "0031 has not been applied to this database"
+
+
+def test_PG27_the_obligation_states_the_database_admits_are_the_three_that_exist(sessions):
+    """A durable row carrying a state nothing resolves is an obligation nobody can discharge.
+
+    Checked against the migration rather than the model for the reason PG23 gives: the SQLite suite
+    would agree with the model even if the CHECK had never reached PostgreSQL. The unresolved index
+    is asserted beside it because the operator read -- "what is still owed" -- is the whole point of
+    the table, and an unindexed one gets quietly replaced by a log line again.
+    """
+    with sessions() as session:
+        state_check = session.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_connector_delivery_obligations_state'"
+            )
+        ).scalar_one()
+        unresolved_index = session.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'ix_connector_delivery_obligations_unresolved'"
+            )
+        ).scalar_one()
+    for state in ("PENDING", "QUEUED", "FAILED"):
+        assert state in state_check
+    assert "DELIVERED" not in state_check, (
+        "an obligation records what is owed; whether a partner received it is the delivery's fact"
+    )
+    assert "QUEUED" in unresolved_index, "the partial predicate did not survive into PostgreSQL"

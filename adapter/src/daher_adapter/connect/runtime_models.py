@@ -350,23 +350,52 @@ class ConnectorCorrelation(Base):
     acceptance naming its accession, a release naming its report -- and is then **immutable**. An
     external id that arrives bound to a different order is a contradiction, and a runtime that
     re-pointed it would silently move clinical results between patients.
+
+    **The scope is the external namespace, not the connector installation** (0031, corrected).
+    A connector installation is one DHealth adapter build and configuration; it is retired and
+    replaced when a fingerprint changes or a version moves. An external order id belongs to the
+    partner's *system* -- an organization, a source system, a numbering namespace -- and that
+    outlives any number of connector upgrades. ``MEDSYS-ORDER-123`` did not stop meaning the same
+    thing because DHealth replaced the adapter that first told us about it.
+
+    Keying the lookup on the installation made the two lifetimes one, with a consequence that only
+    appears later: retire v1, register v2 for the same facility and the same EMR, and a result
+    released afterwards can no longer be filed, because the correlation the provider's own system
+    depends on became unresolvable through no act of theirs.
+
+    So production lookup is ``(organization_id, source_system, correlation_kind, external_id)``.
+    The installation that first wrote the row is kept as ``created_by_connector_installation_id`` --
+    provenance, which is worth having and is **not** part of any key.
+
+    Two facts stay separate and must not be confused: an external identifier's *meaning* carries
+    across a connector replacement; a connector's *qualification* does not. v2 inherits the
+    namespace and earns its own qualification.
     """
 
     __tablename__ = "connector_correlations"
     __table_args__ = (
         UniqueConstraint(
-            "connector_installation_id",
+            "organization_id",
+            "source_system",
             "correlation_kind",
             "external_id",
             name="uq_connector_correlations_external",
         ),
-        # The reverse direction, and **only for orders**. One order has one accession at one
-        # laboratory, so a second would mean their system duplicated it. Reports are deliberately
-        # exempt: the original release and every amendment are separate reports about one order, and
-        # a unique constraint here would make publishing a correction impossible.
+        # The reverse direction, and **only for orders**. One order has one external order id within
+        # one source-system namespace, so a second would mean that system duplicated it. Reports are
+        # deliberately exempt: the original release and every amendment are separate reports about
+        # one order, and a unique constraint here would make publishing a correction impossible.
+        #
+        # ``source_system`` is in this key for a reason that is easy to miss: one DHealth order
+        # legitimately has **two** ORDER correlations -- the provider's EMR knows it by the id it
+        # submitted, and the laboratory's LIS knows it by the accession it assigned. Those are
+        # different namespaces at (usually) different organizations, and a key without the namespace
+        # would make the laboratory's accession look like a contradiction of the provider's
+        # order id.
         Index(
             "uq_connector_correlations_one_order",
-            "connector_installation_id",
+            "organization_id",
+            "source_system",
             "lab_order_id",
             unique=True,
             postgresql_where=text("correlation_kind = 'ORDER'"),
@@ -380,7 +409,17 @@ class ConnectorCorrelation(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    connector_installation_id: Mapped[uuid.UUID] = mapped_column(
+    #: The facility whose namespace this identifier lives in. Half of the durable scope, and
+    #: **never inferred from the identifier itself** -- it is taken from the installation the
+    #: credential resolved to, which is the only thing in this system with authority over a tenant.
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: Provenance, not identity. Which adapter build first told DHealth about this binding, kept
+    #: because "who asserted this, under which configuration" is worth being able to answer years
+    #: later. Nothing resolves through it, and a retired installation here does not make the
+    #: correlation unusable -- that was the bug 0031 exists to fix.
+    created_by_connector_installation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("connector_installations.id", ondelete="RESTRICT"), nullable=False
     )
     correlation_kind: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -388,10 +427,132 @@ class ConnectorCorrelation(Base):
     lab_order_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
     )
-    #: Which of the partner's systems asserted the identifier. Two systems at one facility may
-    #: number their orders identically, and the scope is what keeps those apart -- the same lesson
-    #: ``PatientReference`` learned about patient ids.
+    #: Which of the partner's systems asserted the identifier, and the other half of the durable
+    #: scope. Two systems at one facility may number their orders identically, and this is what
+    #: keeps those apart -- the same lesson ``PatientReference`` learned about patient ids.
+    #:
+    #: It is also the boundary a **system migration** must not cross. A clinic that replaces MedSys
+    #: with Epic gets a new namespace: Epic's ``ORDER-123`` is not MedSys's ``ORDER-123``, and there
+    #: is deliberately no path by which the old binding is handed to the new system.
     source_system: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+class ObligationState(StrEnum):
+    """What DHealth owes a provider's system for one released report, and where it got to.
+
+    Three states and no more. ``PENDING`` is work that is owed and not yet queued -- no connector
+    can carry it right now. ``QUEUED`` is work handed to the durable delivery queue, which has its
+    own states from there. ``FAILED`` is work DHealth could not turn into a message at all.
+
+    None of them is terminal-and-forgotten: ``resolved_at`` is stamped when an obligation reaches
+    ``QUEUED``, and a ``PENDING`` or ``FAILED`` row stays visible until reconciliation moves it.
+    Nothing deletes one.
+    """
+
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"
+    FAILED = "FAILED"
+
+
+class ConnectorDeliveryObligation(Base):
+    """What DHealth owes a provider's own system, recorded whether or not it could be delivered.
+
+    **The invariant this table exists to make true** (0031): for a professionally released report on
+    an order a CONNECT provider submitted, the release transaction leaves behind *either* a durable
+    delivery *or* a durable record that one is owed and why it could not be created. Never a release
+    that committed with nothing anywhere recording that a provider is waiting.
+
+    Before this table there was a third outcome, and it was the dangerous one: message construction
+    raised, a warning was logged, and the function returned. A log line is not a state. After a
+    restart nothing could answer "which released results were never queued, and can they be
+    recovered" -- and the only reason that was survivable is that no real partner data exists yet.
+
+    **No second copy of the report.** The row names the ``LabResultReleaseVersion`` whose manifest
+    is already immutable clinical truth, and the correlation that gives the provider's own order id.
+    Reconciliation rebuilds the notification from those, so the payload lives in exactly one place
+    and this table holds no observation values, no labels and no patient identifiers (§21, §54).
+
+    Scoped to the **namespace**, like the correlation it depends on: an obligation created while one
+    installation was live is discharged by whichever installation is eligible for that organization
+    and source system when the time comes.
+    """
+
+    __tablename__ = "connector_delivery_obligations"
+    __table_args__ = (
+        # One obligation per released version. A release version is created once and never again, so
+        # this is what makes the hook and the reconciler idempotent without either of them having to
+        # remember anything: a re-entered release converges on the row the first one wrote.
+        UniqueConstraint(
+            "release_version_id", name="uq_connector_delivery_obligations_release_version"
+        ),
+        CheckConstraint(
+            "state IN ('PENDING', 'QUEUED', 'FAILED')",
+            name="ck_connector_delivery_obligations_state",
+        ),
+        CheckConstraint(
+            "intended_message_type IN ('RESULT_NOTIFICATION', 'AMENDMENT_NOTIFICATION')",
+            name="ck_connector_delivery_obligations_message_type",
+        ),
+        # The reconciler's query: everything still owed, oldest first. Partial on PostgreSQL because
+        # the overwhelming majority of rows are QUEUED and never read again.
+        Index(
+            "ix_connector_delivery_obligations_unresolved",
+            "state",
+            "created_at",
+            postgresql_where=text("state <> 'QUEUED'"),
+        ),
+        Index("ix_connector_delivery_obligations_order", "lab_order_id"),
+        # The heartbeat's query: what this one facility still owes. Separate from the partial index
+        # above because that one cannot serve it -- the heartbeat also has to consider QUEUED rows
+        # whose delivery was orphaned by a retirement, so its predicate is not "state <> QUEUED".
+        # Unpartitioned and organization-first, because a heartbeat is frequent and this table grows
+        # by one row per released result forever.
+        Index("ix_connector_delivery_obligations_org", "organization_id", "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    #: The namespace the report has to reach. Not an installation: the installation that will
+    #: eventually carry it may not be the one that existed when the obligation was created, and may
+    #: not exist yet at all.
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_system: Mapped[str] = mapped_column(String(64), nullable=False)
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: The immutable release this is about. Everything needed to rebuild the message hangs off it.
+    release_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_release_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    intended_message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The delivery idempotency key this obligation will use, computed once at release time so a
+    #: reconciliation years later produces the same key rather than a second delivery.
+    source_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=ObligationState.PENDING.value
+    )
+    #: Set when the obligation reached the queue. Nullable because most unresolved rows never had a
+    #: delivery, and a row that did keeps pointing at it after resolution.
+    connector_delivery_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("connector_deliveries.id", ondelete="RESTRICT")
+    )
+    #: Why this is not queued, in the runtime's own vocabulary. ``None`` while QUEUED.
+    failure_category: Mapped[str | None] = mapped_column(String(32))
+    #: Operator-facing, and **deliberately narrow**. A validation error's own message quotes the
+    #: input that failed, which for an observation label or a text result is clinical content --
+    #: §57. What goes here is the shape of the fault: the field and the error type, never a value.
+    failure_detail: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    #: When the obligation stopped being owed -- that is, when it reached the delivery queue. A
+    #: dead-lettered *delivery* is a separate fact with its own row; this one records that DHealth
+    #: handed the work over, not that a partner accepted it.
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

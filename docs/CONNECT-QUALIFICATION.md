@@ -72,7 +72,23 @@ Three specific limits worth naming individually:
    (§6/§86 — the far end is synthetic). `REVIEW_REPORTING` remains `DECLARED`: it is optional,
    nothing in DHealth consumes a connector-reported review yet, and inventing a scenario for it
    would manufacture evidence for a capability no facility can use.
-3. **Nothing here was run against a real EMR or LIS.** The subject is
+3. **A qualification is a statement about a connector, never a guarantee about a message.**
+   Added by the lifetime correction (2026-09-23). `QUALIFIED` says this build was driven and
+   behaved; it does not say every released result reached the partner. A connector that has proved
+   it can receive released results can still owe a specific report that could not be built, or that
+   became due while it was suspended. The answer to *"is everything the laboratory released actually
+   on its way"* comes from `connector_delivery_obligations`, never from the verdict, and an operator
+   needs both reads. Pinned as `PQ15`.
+
+   Four further scenarios were added as tests rather than as recorded suite scenarios, so
+   `QUALIFICATION_SUITE_VERSION` stays `"3"` and no existing PASS is invalidated: connector
+   replacement (`PQ13`), suspension (`PQ14`), delivery-obligation durability (`PQ15`) and the
+   source-system namespace (`PQ16`). They are properties of *DHealth's runtime*, not conformance
+   claims about a partner's connector — recording them as suite scenarios would oblige every
+   connector to be suspended and retired during its own qualification run, and would credit a
+   partner's build with evidence about DHealth's correctness. See ADR-057 decision 41.
+
+4. **Nothing here was run against a real EMR or LIS.** The subject is
    `SyntheticConnectorSubject`, which talks to nothing. The Exchange effects are real — real rows,
    real repositories, real constraints — but the connector side is synthetic.
 

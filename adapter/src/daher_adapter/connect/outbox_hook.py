@@ -21,6 +21,15 @@ An *unhealthy* one is different: the agent is expected back, and the queue is ex
 that lets it catch up on return. Refusing to enqueue while a connector is briefly down would turn a
 five-minute outage into permanently lost orders -- the opposite of what a durable queue is for (§84:
 an offline runtime never causes assigned orders to be cancelled, or dropped).
+
+**Known asymmetry, recorded rather than quietly fixed.** ``result_hook`` no longer treats a
+*suspended* installation as a reason to produce nothing: 0031 queues the notification against the
+suspended installation, where it waits unclaimable until restoration, and records a durable
+obligation either way. This hook still returns silently for a suspended laboratory, so an order
+assigned during a suspension is not queued and nothing records that it was owed. That is the same
+class of defect in the other direction. It is out of scope for the provider-side correction and is
+tracked in ``PROJECT_STATE.md``; the sentence above describes what this module does today, not what
+it should do.
 """
 
 from __future__ import annotations

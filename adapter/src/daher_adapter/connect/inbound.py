@@ -43,6 +43,7 @@ from daher_adapter.connect.contract import (
 )
 from daher_adapter.connect.correlation import (
     CorrelationConflict,
+    CorrelationNamespace,
     CorrelationRepository,
     CorrelationUnknown,
 )
@@ -51,6 +52,7 @@ from daher_adapter.connect.delivery import (
     DeliveryRepository,
     DurableReceiptStore,
 )
+from daher_adapter.connect.models import ConnectorInstallation
 from daher_adapter.connect.runtime_models import ConnectorDelivery
 from daher_adapter.models import utc_now
 
@@ -273,7 +275,8 @@ def _apply_one(
             # partner identifier that contradicts one already bound must refuse before anything is
             # written -- binding afterwards would mean the result had already landed by the time
             # DHealth noticed it was claimed for a different order.
-            _bind_correlations(session, delivery.connector_installation_id, envelope)
+            namespace = _namespace_for(session, delivery, organization_id, envelope)
+            _bind_correlations(session, namespace, delivery, envelope)
             outcome = bridge.apply(session, envelope)
             # ORDER_SUBMISSION is the exception to "correlation first": the DHealth order does not
             # exist until the bridge creates it, so there is nothing to bind *to* beforehand. Bound
@@ -282,10 +285,10 @@ def _apply_one(
             if isinstance(envelope.payload, OrderSubmission) and outcome.lab_order_id is not None:
                 CorrelationRepository().bind_order(
                     session,
-                    installation_id=delivery.connector_installation_id,
+                    namespace=namespace,
                     external_order_id=envelope.payload.external_order_id,
                     lab_order_id=outcome.lab_order_id,
-                    source_system=envelope.source_system,
+                    created_by_installation_id=delivery.connector_installation_id,
                 )
         except CorrelationConflict as error:
             conflict = FailureCategory.CONFLICT
@@ -329,7 +332,48 @@ def _apply_one(
     return record
 
 
-def _bind_correlations(session: Session, installation_id: uuid.UUID, envelope: Envelope) -> None:
+def _namespace_for(
+    session: Session,
+    delivery: ConnectorDelivery,
+    organization_id: uuid.UUID,
+    envelope: Envelope,
+) -> CorrelationNamespace:
+    """Which external namespace this message's identifiers belong to. **Not the envelope's word.**
+
+    The organization comes from the credential (§8) and the source system from the *installation
+    row*, because the namespace is what keeps one facility's two systems apart -- and a namespace an
+    agent could choose per message would be a namespace an agent could choose to write into. An
+    envelope whose ``source_system`` disagrees with its installation is refused rather than accepted
+    under the registered value: a partner that believes it said MedSys and had DHealth record Epic
+    has been silently misunderstood, which is the failure mode the contract is built to avoid.
+
+    That refusal is also what makes a real system migration safe. Replacing MedSys with Epic means
+    registering an installation whose ``source_system`` is Epic; Epic's ``ORDER-123`` then lands in
+    its own namespace, and MedSys's binding is neither reused nor reachable.
+    """
+    installation = session.get(ConnectorInstallation, delivery.connector_installation_id)
+    if installation is None:  # pragma: no cover - the FK guarantees it
+        raise ConnectApplyError(
+            FailureCategory.VALIDATION, "this delivery's connector installation no longer exists"
+        )
+    if envelope.source_system != installation.source_system:
+        raise ConnectApplyError(
+            FailureCategory.VALIDATION,
+            f"this envelope declares source system {envelope.source_system!r} but the installation "
+            f"is registered for {installation.source_system!r}; identifiers are namespaced by the "
+            "registered system and DHealth will not record them under another",
+        )
+    return CorrelationNamespace(
+        organization_id=organization_id, source_system=installation.source_system
+    )
+
+
+def _bind_correlations(
+    session: Session,
+    namespace: CorrelationNamespace,
+    delivery: ConnectorDelivery,
+    envelope: Envelope,
+) -> None:
     """Record what the partner calls this work, exactly, before anything clinical happens.
 
     §43's "no fuzzy matching" is enforced by there being nothing to match: an identifier either has
@@ -352,17 +396,17 @@ def _bind_correlations(session: Session, installation_id: uuid.UUID, envelope: E
         # they sent is what lets a later result correlate.
         correlations.bind_order(
             session,
-            installation_id=installation_id,
+            namespace=namespace,
             external_order_id=payload.external_accession_id or payload.external_order_id,
             lab_order_id=lab_order_id,
-            source_system=envelope.source_system,
+            created_by_installation_id=delivery.connector_installation_id,
         )
     elif isinstance(payload, ReleasedAmendment):
         # Checked first: an amendment naming a predecessor bound to another order is a cross-order
         # correction, and no amount of retrying makes it correct.
         predecessor = correlations.resolve_report(
             session,
-            installation_id=installation_id,
+            namespace=namespace,
             external_report_id=payload.corrects_external_report_id,
         )
         if predecessor != lab_order_id:
@@ -371,18 +415,18 @@ def _bind_correlations(session: Session, installation_id: uuid.UUID, envelope: E
             )
         correlations.bind_report(
             session,
-            installation_id=installation_id,
+            namespace=namespace,
             external_report_id=payload.external_report_id,
             lab_order_id=lab_order_id,
-            source_system=envelope.source_system,
+            created_by_installation_id=delivery.connector_installation_id,
         )
     elif isinstance(payload, ReleasedResult):
         correlations.bind_report(
             session,
-            installation_id=installation_id,
+            namespace=namespace,
             external_report_id=payload.external_report_id,
             lab_order_id=lab_order_id,
-            source_system=envelope.source_system,
+            created_by_installation_id=delivery.connector_installation_id,
         )
 
 

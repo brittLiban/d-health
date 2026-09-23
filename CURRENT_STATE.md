@@ -1,5 +1,25 @@
 # Current State — Daher Health
 
+> **DHealth Connect lifetime correction, 2026-09-23 (DH-CONNECT-AGENT-001, third pass):** two
+> defects in the provider half, both found by review before any partner data existed, both fixed.
+>
+> A correlation was keyed on the **connector installation**, so upgrading a facility's connector
+> made the EMR's own order id unresolvable and a result released afterwards could never be filed
+> back. It is now keyed on **organization + source system**, with the originating installation kept
+> as provenance — so a replacement for the same source system carries the identifier's meaning
+> (never the predecessor's qualification), and one registered for a *different* source system
+> receives nothing.
+>
+> A delivery that could not be made produced a **log line**. It now produces a durable
+> `ConnectorDeliveryObligation` — so "which released results were never queued, why, and can they be
+> recovered" is a query rather than a grep. Suspension queues against the suspended installation and
+> waits; retirement without a successor leaves the obligation owed; a successor's first heartbeat
+> discharges it. The release always commits and is never rolled back for an integration reason.
+>
+> Migration `0031_connect_namespace`, qualified on real PostgreSQL 18.6 including a refused
+> ambiguous backfill and a downgrade round trip. **Still no vendor adapter, and nothing about
+> routing changed.** See ADR-057 decisions 32–41.
+>
 > **DHealth Connect, 2026-09-23 (DH-CONNECT-AGENT-001):** the **runtime is built and exercised end
 > to end**. A durable delivery engine (`connector_deliveries`, claim leases, retry, dead letters), a
 > service-identity boundary (`token → azp → service_client_id → installation`, on its own OIDC

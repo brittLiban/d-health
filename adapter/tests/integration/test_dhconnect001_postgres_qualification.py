@@ -238,6 +238,8 @@ def test_PG1_the_migration_produced_the_schema_the_model_expects(engine):
             "connector_deliveries",
             "connector_message_receipts",
             "connector_correlations",
+            # DH-CONNECT-AGENT-001 correction, 0031_connect_namespace.
+            "connector_delivery_obligations",
         }
 
         index_def = conn.execute(

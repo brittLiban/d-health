@@ -69,6 +69,7 @@ from daher_adapter.connect.inbound import (
     build_default_bridge_factory,
 )
 from daher_adapter.connect.models import ConnectorInstallation
+from daher_adapter.connect.reconciliation import reconcile_delivery_obligations
 from daher_adapter.connect.runtime_health import (
     DEFAULT_HEALTH_POLICY,
     RuntimeHealthPolicy,
@@ -92,6 +93,11 @@ from daher_adapter.models import utc_now
 #: independently -- adding a heartbeat field is not a change to what a released result is -- and one
 #: number covering both would force a requalification for an operational change.
 RUNTIME_PROTOCOL_VERSION = "1"
+
+#: How many owed result-delivery obligations one heartbeat tries to discharge. Deliberately smaller
+#: than the operator-facing default: a heartbeat is frequent and a facility with a real backlog
+#: drains it over several beats rather than making one of them slow.
+HEARTBEAT_RECONCILE_LIMIT = 5
 
 
 def _refuse_reserved_instance_id(value: str) -> str:
@@ -502,6 +508,20 @@ def build_connect_runtime_router(
             identity_id=principal.identity_id,
             bridge_factory=bridges,
             deliveries=deliveries,
+            now=now,
+        )
+
+        # **And it is the outbound recovery clock, for the same reason** (0031). A result that was
+        # released while this facility had no connector able to carry it left a durable obligation
+        # and nothing queued; the event that changes that is an eligible agent appearing, which is
+        # precisely this call. So a successor's very first heartbeat discharges what its predecessor
+        # left owed, with no scheduler, no worker and nothing that has to have been configured --
+        # §14. Scoped to the caller's own facility and bounded small, because this is a hot path and
+        # an agent reconnecting has no business walking another facility's backlog.
+        reconcile_delivery_obligations(
+            session_factory,
+            organization_id=principal.organization_id,
+            limit=HEARTBEAT_RECONCILE_LIMIT,
             now=now,
         )
 

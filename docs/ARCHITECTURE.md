@@ -2091,3 +2091,25 @@ snapshot. A design where DHealth translated would have nothing to translate with
 Nothing about routing changed. Both synthetic suites now reach `connector_qualified = true`, and
 `RQ8` and `PQ12` pin from both sides that a qualified facility is still refused
 `READY_FOR_ROUTING`.
+
+### The lifetime correction, same day
+
+The diagram above was right about the shape and wrong about the lifetimes, in two places that would
+both have lost clinical work once a real partner existed. Recorded rather than redrawn:
+
+**A correlation was keyed on the connector installation.** An installation is one DHealth adapter
+build; the identifier belongs to the partner's *source system*. Retiring v1 and registering v2 made
+`ORDER-123` unresolvable, so a result released afterwards could never be filed back into the EMR
+that ordered it. The key is now **organization + source system + kind + external id**, with the
+originating installation kept as provenance. A connector upgrade carries the namespace's meaning
+across; it never carries the predecessor's qualification, and it never crosses a source-system
+boundary — Epic's `ORDER-123` is not MedSys's.
+
+**A delivery that could not happen produced a log line.** A suspended installation, or a
+notification that would not validate, left the release committed with nothing durable saying a
+provider was waiting. `connector_delivery_obligations` is now that record: no clinical content, a
+pointer to the immutable release version the message is rebuilt from, and a state an operator can
+query. Suspension queues against the suspended installation and waits; retirement without a
+successor leaves the obligation owed rather than dropping it; a successor's first heartbeat
+discharges what its predecessor left. Migration `0031_connect_namespace`, qualified on real
+PostgreSQL including a downgrade round trip and a deliberately refused ambiguous backfill.

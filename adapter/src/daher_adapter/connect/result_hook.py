@@ -2,33 +2,56 @@
 
 The mirror of ``outbox_hook``. That one fires when an order reaches a CONNECT *laboratory*; this one
 fires when a laboratory releases, and carries the released report back to the CONNECT *provider*
-that asked for it. Same rules, for the same reasons:
+that asked for it.
 
-* **In the caller's transaction.** A release recorded and the ordering system not told are two facts
-  that must never be able to disagree. Committing the delivery with the release makes the window
-  where they could not exist.
-* **Silence is the default and never an error.** A NATIVE provider, a provider with no connector, a
-  suspended installation, a provider whose agent has never connected -- none of those produces a
-  delivery or an exception. Release is a clinical act by a named professional; it does not fail
-  because somebody's EMR integration is down.
+**The order of the questions is the design** (0031, corrected). The first version asked them
+backwards:
 
-**The correlation is required, and its absence is the ordinary "do not send" case.** A result
-notification carries the provider's own ``external_order_id``, resolved through the binding the
-submission created. An order placed *natively* in DHealth by a facility that also happens to run a
-connector has no such binding -- the EMR never asked for it and has nothing to file it against -- so
-no notification is queued. Sending one with a DHealth id the receiving system has never seen
-would be a message that cannot be filed, which is worse than no message: it looks delivered.
+    find the currently registered installation  →  ask it for a correlation
 
-**Payload is values and labels, exactly as released.** No demographics, no interpretation, no
-normal/abnormal flag DHealth was not given. The observations are the release version's own manifest,
-which is what makes this the released report rather than the current contents of the result table --
-a distinction that matters precisely when an amendment is in flight.
+which lets whichever connector happens to be registered *now* decide which external system
+originally asked for the order. It also loses the work entirely when that connector is suspended,
+and finds nothing at all when it has been replaced. The correct order is:
+
+    the released DHealth order
+      → the provider-side ORDER correlation
+          → which tells us the organization, the source system and their own order id
+      → the installation currently eligible for *that* namespace
+      → queue the notification
+
+The correlation is the durable fact; the installation is the transport that happens to be available.
+Asking the transport who the correspondent is was the mistake.
+
+**Silence has exactly one cause, and it is the honest one.** No provider-side correlation means this
+order was placed natively inside DHealth: the EMR never asked for it and has no identifier to file
+it against. Nothing is queued and nothing is recorded, because nothing is owed. Every *other* path
+through this module leaves a durable row behind.
+
+**The release always commits.** A professional released a result; refusing that clinical act because
+an integration could not be arranged inverts the priority. But §11's invariant now holds with it:
+
+    correlated CONNECT provider + professional release
+      = a durable delivery, or a durable record that one is owed and why
+
+never a release that committed with nothing anywhere recording that a provider is waiting. That is
+what ``ConnectorDeliveryObligation`` is for, and why every exit below writes one.
+
+**Suspension does not delete an obligation.** A suspended connector means "do not carry traffic
+now", not "forget the work that became due while you were away". The delivery is queued against the
+suspended installation and simply waits: ``resolve_service_principal`` refuses that installation
+until it is restored, so nothing can claim the message, and the moment it is restored the agent
+drains it. No clinical result disappears because an operator suspended a connector for an afternoon.
+
+**Health is not a prerequisite.** An installation whose agent has never connected still gets the
+delivery. Health decides whether *new* production work should be routed to a facility; it does not
+erase work already owed (§84, and §16 of this correction). The queue is precisely the mechanism that
+lets an agent catch up when it returns.
 """
 
 from __future__ import annotations
 
-import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
@@ -39,14 +62,25 @@ from daher_adapter.connect.contract import (
     AmendmentNotification,
     Direction,
     Envelope,
+    FailureCategory,
+    MessageType,
     ResultNotification,
     ResultObservation,
 )
-from daher_adapter.connect.correlation import CorrelationRepository
+from daher_adapter.connect.correlation import (
+    CorrelationConflict,
+    CorrelationNamespace,
+    CorrelationRepository,
+    OrderCorrelation,
+)
 from daher_adapter.connect.delivery import DeliveryConflict, DeliveryRepository
 from daher_adapter.connect.models import ConnectorInstallation, ConnectorInstallationStatus
 from daher_adapter.connect.outbox_hook import DHEALTH_SOURCE_SYSTEM
-from daher_adapter.connect.runtime_models import ConnectorDelivery
+from daher_adapter.connect.runtime_models import (
+    ConnectorDelivery,
+    ConnectorDeliveryObligation,
+    ObligationState,
+)
 from daher_adapter.exchange.models import (
     LabObservation,
     LabOrder,
@@ -55,7 +89,22 @@ from daher_adapter.exchange.models import (
 )
 from daher_adapter.models import utc_now
 
-logger = logging.getLogger("daher_adapter.connect.result_hook")
+#: Statuses an installation may hold and still be handed work for its namespace, in preference
+#: order. ``SUSPENDED`` is included deliberately: the delivery waits in the queue, unclaimable until
+#: the installation is restored, which is what makes suspension a pause rather than an erasure.
+#: ``RETIRED`` is absent and must stay absent -- a retired installation never authenticates again,
+#: so a delivery queued against it would wait forever while looking queued.
+_ELIGIBLE_STATUSES = (
+    ConnectorInstallationStatus.REGISTERED.value,
+    ConnectorInstallationStatus.SUSPENDED.value,
+)
+
+
+#: The source system recorded on an obligation whose namespace could not be resolved. A real system
+#: name would be a guess, and an empty string reads like a bug rather than a decision; this is a
+#: value an operator can search for, and the only path that writes it is the ambiguous-correlation
+#: refusal below -- which is exactly the state a human has to settle.
+UNRESOLVED_SOURCE_SYSTEM = "?unresolved"
 
 
 def result_notification_event_id(lab_order_id: uuid.UUID, release_version: int) -> str:
@@ -64,8 +113,19 @@ def result_notification_event_id(lab_order_id: uuid.UUID, release_version: int) 
     The version is what keeps an amendment from colliding with the release it corrects: both are
     about one order, and a key naming only the order would make the correction look like a replay of
     the original and quietly drop it -- the one failure this whole path exists to prevent.
+
+    Deterministic also across *time*, which is what lets an obligation recorded today be discharged
+    by a reconciliation next week and still converge on one delivery rather than a second.
     """
     return f"result-notification:{lab_order_id}:{release_version}"
+
+
+@dataclass(frozen=True, slots=True)
+class ObligationOutcome:
+    """What the hook concluded. Returned for the caller's tests, never for its control flow."""
+
+    obligation: ConnectorDeliveryObligation | None
+    delivery: ConnectorDelivery | None
 
 
 def notify_provider_of_release(
@@ -74,89 +134,138 @@ def notify_provider_of_release(
     lab_order_id: uuid.UUID,
     release_version_id: uuid.UUID,
     now: datetime | None = None,
-) -> ConnectorDelivery | None:
-    """Queue a result or amendment notification for the ordering provider, if it takes one.
+) -> ObligationOutcome:
+    """Record what is owed to the ordering provider, and queue it if anything can carry it.
 
-    Returns the delivery, or ``None`` when there is nothing to send -- see the module docstring for
-    the four ordinary reasons there might not be. Runs on the caller's session so the row commits
-    with the release.
-
-    Which of the two messages is sent is decided by the version number and nothing else: version 1
-    is the release, anything above it is a correction of the version before it. Reading the version
-    number rather than taking a flag from the caller means the two release paths cannot disagree
-    about what they just did.
+    Runs on the caller's session so everything it writes commits with the release. Never raises for
+    an ordinary integration problem -- the outcome is written down instead.
     """
+    moment = now or utc_now()
     order = session.get(LabOrder, lab_order_id)
     if order is None:  # pragma: no cover - the caller just wrote a release for this order
-        return None
-
-    installation = session.scalar(
-        select(ConnectorInstallation).where(
-            ConnectorInstallation.organization_id == order.provider_organization_id,
-            ConnectorInstallation.status == ConnectorInstallationStatus.REGISTERED.value,
-        )
-    )
-    if installation is None:
-        return None
-
-    external_order_id = CorrelationRepository().external_order_id_for(
-        session, installation_id=installation.id, lab_order_id=lab_order_id
-    )
-    if external_order_id is None:
-        return None
+        return ObligationOutcome(None, None)
 
     version = session.get(LabResultReleaseVersion, release_version_id)
     if version is None:  # pragma: no cover - the caller just flushed this row
-        return None
-    observations = _released_observations(session, release_version_id)
-    if not observations:  # pragma: no cover - a release always has at least one manifest entry
-        return None
+        return ObligationOutcome(None, None)
+    # Read before the correlation lookup, so that even the path where the namespace cannot be
+    # resolved records *which* message was owed. An obligation that said RESULT_NOTIFICATION for a
+    # correction would send an operator looking for the wrong thing.
+    message_type = (
+        MessageType.RESULT_NOTIFICATION
+        if version.version_number == 1
+        else MessageType.AMENDMENT_NOTIFICATION
+    )
+    event_id = result_notification_event_id(lab_order_id, version.version_number)
 
-    moment = now or utc_now()
     try:
-        payload: ResultNotification | AmendmentNotification
-        if version.version_number == 1:
-            payload = ResultNotification(
-                external_order_id=external_order_id,
-                release_version=version.version_number,
-                observations=observations,
-            )
-        else:
-            payload = AmendmentNotification(
-                external_order_id=external_order_id,
-                release_version=version.version_number,
-                corrects_release_version=_corrected_version_number(session, version),
-                observations=observations,
-            )
+        correlation = CorrelationRepository().order_correlation_for(
+            session, organization_id=order.provider_organization_id, lab_order_id=lab_order_id
+        )
+    except CorrelationConflict as error:
+        # Two source systems at one facility both claiming to have ordered this. Refusing to choose
+        # is the whole of §43: there is no rule that makes one of them more likely to be right, and
+        # picking either would file a clinical report into a system that did not ask for it.
+        # Recorded as owed-and-unresolved, with the namespace left to an operator to settle.
+        return ObligationOutcome(
+            _record(
+                session,
+                order=order,
+                namespace=CorrelationNamespace(
+                    order.provider_organization_id, UNRESOLVED_SOURCE_SYSTEM
+                ),
+                release_version_id=release_version_id,
+                message_type=message_type,
+                source_event_id=event_id,
+                state=ObligationState.PENDING,
+                category=FailureCategory.CONFLICT,
+                detail=str(error),
+                moment=moment,
+            ),
+            None,
+        )
 
-        envelope = Envelope(
-            contract_version=CONTRACT_VERSION,
-            message_id=uuid.uuid4(),
-            connector_installation_id=installation.id,
-            organization_id=order.provider_organization_id,
-            source_system=DHEALTH_SOURCE_SYSTEM,
-            source_event_id=result_notification_event_id(lab_order_id, version.version_number),
-            source_occurred_at=moment,
-            sent_at=moment,
-            lab_order_id=lab_order_id,
-            payload=payload,
+    if correlation is None:
+        # Placed natively in DHealth. The EMR never asked for it and has no identifier to file it
+        # against, so nothing is owed -- and sending a DHealth id the receiving system has never
+        # seen would be a message it cannot place, which is worse than none because it looks
+        # delivered.
+        return ObligationOutcome(None, None)
+
+    installation = eligible_installation(session, correlation.namespace)
+    if installation is None:
+        # No connector can carry this: retired with no successor, or replaced by one registered for
+        # a *different* source system. Both are states an operator has to resolve, and neither is a
+        # reason to lose the report -- §9. Deliberately not routed to whatever connector a
+        # facility does have: that would deliver MedSys's order to Epic.
+        return ObligationOutcome(
+            _record(
+                session,
+                order=order,
+                namespace=correlation.namespace,
+                release_version_id=release_version_id,
+                message_type=message_type,
+                source_event_id=event_id,
+                state=ObligationState.PENDING,
+                category=FailureCategory.REMOTE_UNAVAILABLE,
+                detail="no eligible connector installation for this source system",
+                moment=moment,
+            ),
+            None,
         )
-    except ValueError:
-        # A released report DHealth cannot express as a Connect message -- a value outside what the
-        # contract's validators allow, or a chain the amendment rules refuse to describe. **The
-        # release still commits.** A professional released a result; refusing that clinical act
-        # because a notification would not validate is the failure this module's whole design is
-        # arranged to prevent, and the laboratory has already done the work either way.
-        #
-        # Deliberately narrow: ``ValueError`` covers pydantic's own validation error and nothing
-        # else, so a genuine programming fault still surfaces rather than being swallowed here.
-        # Logged with no payload, no identifiers and no patient data (§54, §57); the operator-facing
-        # signal is that the provider's system has no notification for a release DHealth holds.
-        logger.warning(
-            "connect result notification could not be built for a released version; "
-            "the release is unaffected and no notification was queued"
+
+    return _queue(
+        session,
+        order=order,
+        correlation=correlation,
+        installation=installation,
+        version=version,
+        message_type=message_type,
+        event_id=event_id,
+        moment=moment,
+    )
+
+
+def _queue(
+    session: Session,
+    *,
+    order: LabOrder,
+    correlation: OrderCorrelation,
+    installation: ConnectorInstallation,
+    version: LabResultReleaseVersion,
+    message_type: MessageType,
+    event_id: str,
+    moment: datetime,
+) -> ObligationOutcome:
+    """Build the notification and hand it to the durable queue, recording whichever happened."""
+    try:
+        envelope = build_notification_envelope(
+            session,
+            correlation=correlation,
+            installation_id=installation.id,
+            version=version,
+            moment=moment,
         )
-        return None
+    except ValueError as error:
+        # A released report DHealth cannot express as a Connect message. **The release still
+        # commits**, and -- the whole point of 0031 -- the failure is now a row rather than a log
+        # line. A log line cannot be queried after a restart, so "which released results were never
+        # queued, and can they be recovered" had no answer at all.
+        return ObligationOutcome(
+            _record(
+                session,
+                order=order,
+                namespace=correlation.namespace,
+                release_version_id=version.id,
+                message_type=message_type,
+                source_event_id=event_id,
+                state=ObligationState.FAILED,
+                category=FailureCategory.VALIDATION,
+                detail=safe_failure_detail(error),
+                moment=moment,
+            ),
+            None,
+        )
 
     try:
         delivery, _ = DeliveryRepository().enqueue(
@@ -166,18 +275,190 @@ def notify_provider_of_release(
             expected_direction=Direction.DHEALTH_TO_CONNECTOR,
             now=moment,
         )
-    except DeliveryConflict:
-        # The same order and version already queued with different content. DHealth's release
-        # versions are immutable, so this is a genuine contradiction rather than a replay --
-        # swallowed for the same reason the assignment hook swallows its own: refusing the release
-        # over a notification conflict would block a clinical act on connector bookkeeping, and the
-        # already-queued delivery stays visible to an operator.
+    except DeliveryConflict as error:
+        # The same order and version already queued with *different* content. DHealth's release
+        # versions are immutable, so this is a genuine contradiction rather than a replay -- and it
+        # is now durably visible (§15) instead of being inferable only by noticing an old queue row.
+        return ObligationOutcome(
+            _record(
+                session,
+                order=order,
+                namespace=correlation.namespace,
+                release_version_id=version.id,
+                message_type=message_type,
+                source_event_id=event_id,
+                state=ObligationState.FAILED,
+                category=FailureCategory.CONFLICT,
+                detail=f"delivery conflict: {type(error).__name__}",
+                moment=moment,
+            ),
+            None,
+        )
+
+    obligation = _record(
+        session,
+        order=order,
+        namespace=correlation.namespace,
+        release_version_id=version.id,
+        message_type=message_type,
+        source_event_id=event_id,
+        state=ObligationState.QUEUED,
+        category=None,
+        detail=None,
+        moment=moment,
+        delivery_id=delivery.id,
+    )
+    return ObligationOutcome(obligation, delivery)
+
+
+def build_notification_envelope(
+    session: Session,
+    *,
+    correlation: OrderCorrelation,
+    installation_id: uuid.UUID,
+    version: LabResultReleaseVersion,
+    moment: datetime,
+) -> Envelope:
+    """Rebuild the notification for one released version, from immutable facts only.
+
+    Public because reconciliation calls it too, and calling the *same* function is the point: an
+    obligation recorded today and discharged next week must produce the message the hook would have
+    produced, not a second construction path that drifted. Everything it reads -- the release
+    version, its manifest, the correlation -- is immutable, so the message is a function of stored
+    clinical truth rather than of when it happened to be built.
+    """
+    observations = _released_observations(session, version.id)
+    if not observations:  # pragma: no cover - a release always has at least one manifest entry
+        raise ValueError("release version has no manifest entries")
+
+    payload: ResultNotification | AmendmentNotification
+    if version.version_number == 1:
+        payload = ResultNotification(
+            external_order_id=correlation.external_order_id,
+            release_version=version.version_number,
+            observations=observations,
+        )
+    else:
+        payload = AmendmentNotification(
+            external_order_id=correlation.external_order_id,
+            release_version=version.version_number,
+            corrects_release_version=_corrected_version_number(session, version),
+            observations=observations,
+        )
+
+    return Envelope(
+        contract_version=CONTRACT_VERSION,
+        message_id=uuid.uuid4(),
+        connector_installation_id=installation_id,
+        organization_id=correlation.namespace.organization_id,
+        source_system=DHEALTH_SOURCE_SYSTEM,
+        source_event_id=result_notification_event_id(
+            correlation.lab_order_id, version.version_number
+        ),
+        source_occurred_at=moment,
+        sent_at=moment,
+        lab_order_id=correlation.lab_order_id,
+        payload=payload,
+    )
+
+
+def eligible_installation(
+    session: Session, namespace: CorrelationNamespace
+) -> ConnectorInstallation | None:
+    """The installation that may carry work for this namespace right now, if there is one.
+
+    **Matched on the source system, not merely on the organization.** A facility that migrated from
+    MedSys to Epic has an installation registered for Epic, and Epic's connector must not be handed
+    a report for an order MedSys placed -- their ``ORDER-123`` values are different orders that
+    happen to share a string. No fuzzy handoff, no "the facility only has one connector so it must
+    be the right one".
+
+    Suspended installations are eligible on purpose; retired ones never are. At most one non-retired
+    installation exists per organization (``uq_connector_installations_one_live_per_org``), so this
+    cannot be ambiguous -- and it still refuses to choose if that ever stops being true, because a
+    silent pick is how a report reaches the wrong system.
+    """
+    rows = session.scalars(
+        select(ConnectorInstallation).where(
+            ConnectorInstallation.organization_id == namespace.organization_id,
+            ConnectorInstallation.source_system == namespace.source_system,
+            ConnectorInstallation.status.in_(_ELIGIBLE_STATUSES),
+        )
+    ).all()
+    if len(rows) != 1:
         return None
-    return delivery
+    return rows[0]
+
+
+def _record(
+    session: Session,
+    *,
+    order: LabOrder,
+    namespace: CorrelationNamespace,
+    release_version_id: uuid.UUID,
+    message_type: MessageType,
+    source_event_id: str,
+    state: ObligationState,
+    category: FailureCategory | None,
+    detail: str | None,
+    moment: datetime,
+    delivery_id: uuid.UUID | None = None,
+) -> ConnectorDeliveryObligation:
+    """Write or update the one obligation row for this release version.
+
+    Upsert rather than insert, because the release path can legitimately be re-entered -- and
+    because reconciliation moves the same row from PENDING or FAILED to QUEUED rather than writing a
+    second one. The unique key on ``release_version_id`` is what makes that safe without a lock.
+    """
+    existing = session.scalar(
+        select(ConnectorDeliveryObligation).where(
+            ConnectorDeliveryObligation.release_version_id == release_version_id
+        )
+    )
+    row = existing or ConnectorDeliveryObligation(
+        organization_id=namespace.organization_id,
+        source_system=namespace.source_system,
+        lab_order_id=order.id,
+        release_version_id=release_version_id,
+        intended_message_type=message_type.value,
+        source_event_id=source_event_id,
+        created_at=moment,
+    )
+    row.state = state.value
+    row.failure_category = None if category is None else category.value
+    row.failure_detail = detail
+    row.connector_delivery_id = delivery_id
+    row.updated_at = moment
+    row.resolved_at = moment if state is ObligationState.QUEUED else None
+    if existing is None:
+        session.add(row)
+    session.flush()
+    return row
+
+
+def safe_failure_detail(error: ValueError) -> str:
+    """An operator-readable reason that cannot carry clinical content.
+
+    ``str(ValidationError)`` quotes the value that failed -- ``input_value=...`` -- and for an
+    observation label or a text result that value *is* patient data. §57 forbids putting it in an
+    operational record, so what survives is the shape of the fault: which fields failed and what
+    kind of failure it was. That is what an operator needs to fix a configuration anyway.
+    """
+    errors = getattr(error, "errors", None)
+    if not callable(errors):
+        return type(error).__name__
+    try:
+        fields = sorted({".".join(str(part) for part in item.get("loc", ())) for item in errors()})
+        kinds = sorted({str(item.get("type", "unknown")) for item in errors()})
+    except Exception:  # noqa: BLE001 - a detail we cannot read is not worth failing a release over
+        return type(error).__name__
+    return f"{type(error).__name__}: fields={', '.join(fields)[:300]}; kinds={', '.join(kinds)}"[
+        :512
+    ]
 
 
 def _corrected_version_number(session: Session, version: LabResultReleaseVersion) -> int:
-    """Which version this amendment actually corrects, read rather than inferred.
+    """Which version this amendment corrects, read rather than inferred.
 
     ``version_number - 1`` would be right today: ``release_amendment`` raises
     ``AmendmentBaseVersionSuperseded`` unless the amendment's base is still the latest version, so
@@ -185,9 +466,6 @@ def _corrected_version_number(session: Session, version: LabResultReleaseVersion
     else, and §77 forbids DHealth rewriting clinical chronology -- an amendment notification naming
     the wrong predecessor tells the receiving system to supersede a report that was never corrected.
     Reading the base version is the fact; arithmetic is a bet on another module not changing.
-
-    Falls back to the arithmetic only if the chain cannot be read, which the amendment release path
-    does not permit -- and the fallback is still the correct answer under today's invariant.
     """
     from daher_adapter.exchange.models import LabResultAmendment
 
@@ -210,6 +488,9 @@ def _released_observations(
     corrected value -- so the original release notification would carry the correction, and the
     amendment notification that followed would carry the same thing again. The version's manifest is
     immutable and says what was actually released under that version number.
+
+    It is also what makes reconciliation honest: rebuilding from the manifest months later produces
+    the report as released, not as the record looks now.
 
     Values, units and ranges are relayed exactly as the laboratory recorded them. DHealth does not
     normalize a unit, convert a range or infer normal/abnormal on the way out any more than it did

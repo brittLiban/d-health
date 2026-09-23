@@ -49,6 +49,7 @@ from daher_adapter.connect.contract import (
     SourcePractitionerRef,
     fingerprint,
 )
+from daher_adapter.connect.correlation import CorrelationNamespace, CorrelationRepository
 from daher_adapter.connect.models import EvidenceLevel, QualificationResult
 from daher_adapter.connect.provider_qualification import (
     ProviderQualificationHarness,
@@ -57,11 +58,18 @@ from daher_adapter.connect.provider_qualification import (
 )
 from daher_adapter.connect.qualification import (
     QUALIFICATION_SUITE_VERSION,
+    QualificationGap,
     qualification_verdict_in_session,
 )
+from daher_adapter.connect.reconciliation import unresolved_obligations
 from daher_adapter.connect.repository import ConnectorInstallationRepository
 from daher_adapter.connect.runtime_api import build_connect_runtime_router
-from daher_adapter.connect.runtime_models import ConnectorDelivery, DeliveryState
+from daher_adapter.connect.runtime_models import (
+    ConnectorCorrelation,
+    ConnectorDelivery,
+    DeliveryState,
+    ObligationState,
+)
 from daher_adapter.connect_agent.adapter import AdapterEvent, SyntheticProviderAdapter
 from daher_adapter.connect_agent.client import ConnectRuntimeClient, TokenSource
 from daher_adapter.connect_agent.runner import AgentRunner
@@ -89,6 +97,7 @@ from daher_adapter.exchange.selection import LabSelectionRepository
 
 RUNTIME_AUDIENCE = "dhealth-connect-runtime"
 AGENT_CLIENT = "connect-agent-clinique"
+SOURCE_SYSTEM = "emr"
 EXTERNAL_ORDER_ID = "EMR-ORDER-77"
 SOURCE_EVENT_ID = "emr-order-77-created"
 PROVIDER_CAPABILITIES = frozenset(
@@ -297,8 +306,15 @@ def _run_native_laboratory_to_release(world, lab_order_id: uuid.UUID) -> None:
     )
 
 
-def _run_native_amendment(world, lab_order_id: uuid.UUID) -> None:
-    """A correction after release, again through the Exchange's own amendment machinery."""
+def _run_native_amendment(
+    world, lab_order_id: uuid.UUID, *, label: str = "Glycémie à jeun"
+) -> None:
+    """A correction after release, again through the Exchange's own amendment machinery.
+
+    ``label`` is a parameter because the amendment writes its **own** observation: blanking the
+    rows released earlier does not reach it, so a test that needs an inexpressible correction has to
+    say so here. (Learned by writing that test the other way first.)
+    """
     sessions = world["sessions"]
     amendments = LabResultAmendmentRepository(sessions)
     lab_id = world["lab_id"]
@@ -323,7 +339,7 @@ def _run_native_amendment(world, lab_order_id: uuid.UUID) -> None:
         observation_id=predecessor_id,
         result_type=LabResultType.NUMERIC,
         source_code="GLU",
-        display_label_snapshot="Glycémie à jeun",
+        display_label_snapshot=label,
         corrected_by_identity_id=actor,
         numeric_value=Decimal("7.1"),
         numeric_unit="mmol/L",
@@ -352,6 +368,9 @@ def driven(world, sessions, tmp_path):
         submission = drive_order_submission(
             sessions,
             installation_id=world["installation_id"],
+            namespace=CorrelationNamespace(
+                organization_id=world["provider_id"], source_system=SOURCE_SYSTEM
+            ),
             external_order_id=EXTERNAL_ORDER_ID,
             emit_submission=lambda: _queue_submission(adapter, world["provider_id"]),
             run_cycle=runner.run_once,
@@ -674,6 +693,228 @@ class TestWhatStillDoesNotHappen:
                 )
             ).all()
         assert deliveries == [], "an order the EMR never submitted must not produce a notification"
+
+    def test_PQ13_a_replacement_installation_starts_unqualified(
+        self, driven, world, sessions, tmp_path
+    ):
+        """§5, at the qualification layer. The namespace carries over; the qualification does not.
+
+        This is the half that would be dangerous in the other direction. v2 inherits what the source
+        system's identifiers *mean* -- a fact about the partner's world, unchanged by DHealth
+        upgrading its adapter. It inherits nothing about whether v2's own build can carry clinical
+        traffic, which is a fact about the connector and has to be earned again.
+
+        So immediately after a replacement the facility is not production-qualified, and the
+        correlation still resolves. Both at once is the point: a system that had to choose between
+        them would either lose the identifier or credit an untested build.
+        """
+        started = datetime.now(UTC)
+        run = ProviderQualificationHarness(declared_capabilities=PROVIDER_CAPABILITIES).run(
+            started_at=started,
+            completed_at=started,
+            submission=driven["submission"],
+            released_result=driven["released"],
+            amendment=driven["amended"],
+        )
+        installations = ConnectorInstallationRepository(sessions)
+        installations.record_qualification(
+            installation_id=world["installation_id"],
+            suite_version=QUALIFICATION_SUITE_VERSION,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            result=QualificationResult.PASSED,
+            capabilities=list(run.capability_outcomes),
+            actor_identity_id=world["identity_id"],
+            evidence_summary=run.evidence_summary,
+        )
+        with sessions() as session:
+            assert qualification_verdict_in_session(
+                session, world["provider_id"], OrganizationType.PROVIDER.value
+            ).qualified
+
+        installations.retire(
+            installation_id=world["installation_id"], actor_identity_id=world["identity_id"]
+        )
+        successor = installations.register(
+            organization_id=world["provider_id"],
+            connector_key="synthetic-emr",
+            connector_version="0.2",
+            source_system=SOURCE_SYSTEM,
+            interface_type="FHIR",
+            configuration_fingerprint=fingerprint({"endpoint": "https://emr.invalid/fhir/v2"}),
+            mapping_fingerprint=fingerprint(
+                {"mapping_revision": [["emr", "GLUC", "cat-1", "GLU"]]}
+            ),
+            actor_identity_id=world["identity_id"],
+        )
+
+        with sessions() as session:
+            verdict = qualification_verdict_in_session(
+                session, world["provider_id"], OrganizationType.PROVIDER.value
+            )
+            # ...and the identifier v1 reported still resolves, under the namespace rather than
+            # under either installation.
+            resolved = CorrelationRepository().resolve_order(
+                session,
+                namespace=CorrelationNamespace(
+                    organization_id=world["provider_id"], source_system=SOURCE_SYSTEM
+                ),
+                external_order_id=EXTERNAL_ORDER_ID,
+            )
+        assert not verdict.qualified, (
+            "a new installation has its own qualification to earn, whatever its predecessor proved"
+        )
+        assert resolved == driven["lab_order_id"]
+        assert successor.id != world["installation_id"]
+
+    def test_PQ14_suspension_withholds_qualification_without_erasing_it(
+        self, driven, world, sessions
+    ):
+        """Suspension is a pause, and the qualification record is not what is paused.
+
+        A suspended connector is not production-qualified -- that is the operator's instruction and
+        it must hold. But the run that proved this build could carry clinical traffic is still true
+        while it is suspended, so restoring must not require requalifying: an operator who suspends
+        a connector for an afternoon has not invalidated last week's evidence, and a system that
+        behaved as though they had would make suspension expensive enough to avoid using.
+        """
+        started = datetime.now(UTC)
+        run = ProviderQualificationHarness(declared_capabilities=PROVIDER_CAPABILITIES).run(
+            started_at=started,
+            completed_at=started,
+            submission=driven["submission"],
+            released_result=driven["released"],
+            amendment=driven["amended"],
+        )
+        installations = ConnectorInstallationRepository(sessions)
+        installations.record_qualification(
+            installation_id=world["installation_id"],
+            suite_version=QUALIFICATION_SUITE_VERSION,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            result=QualificationResult.PASSED,
+            capabilities=list(run.capability_outcomes),
+            actor_identity_id=world["identity_id"],
+            evidence_summary=run.evidence_summary,
+        )
+
+        installations.suspend(
+            installation_id=world["installation_id"], actor_identity_id=world["identity_id"]
+        )
+        with sessions() as session:
+            suspended = qualification_verdict_in_session(
+                session, world["provider_id"], OrganizationType.PROVIDER.value
+            )
+        assert not suspended.qualified
+        assert suspended.gap == QualificationGap.SUSPENDED
+
+        installations.restore(
+            installation_id=world["installation_id"], actor_identity_id=world["identity_id"]
+        )
+        with sessions() as session:
+            restored = qualification_verdict_in_session(
+                session, world["provider_id"], OrganizationType.PROVIDER.value
+            )
+        assert restored.qualified, "restoring must not require requalifying"
+
+    def test_PQ15_a_qualified_connector_can_still_owe_an_undelivered_result(
+        self, driven, world, sessions
+    ):
+        """QUALIFIED is a statement about a connector, not a guarantee about every message.
+
+        The two reads are independent and an operator needs both. A connector that has proved it can
+        receive released results can still have a specific report that could not be built and
+        therefore could not be queued -- and the honest answer to "is everything the laboratory
+        released actually on its way" comes from the obligation table, never from the verdict.
+
+        The failure is induced the way BF1 induces it: a label that the contract refuses, reaching
+        the boundary through a release that really happened. The release commits regardless.
+        """
+        started = datetime.now(UTC)
+        run = ProviderQualificationHarness(declared_capabilities=PROVIDER_CAPABILITIES).run(
+            started_at=started,
+            completed_at=started,
+            submission=driven["submission"],
+            released_result=driven["released"],
+            amendment=driven["amended"],
+        )
+        ConnectorInstallationRepository(sessions).record_qualification(
+            installation_id=world["installation_id"],
+            suite_version=QUALIFICATION_SUITE_VERSION,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            result=QualificationResult.PASSED,
+            capabilities=list(run.capability_outcomes),
+            actor_identity_id=world["identity_id"],
+            evidence_summary=run.evidence_summary,
+        )
+
+        # A second correction, whose own observation carries a label the contract refuses.
+        _run_native_amendment(world, driven["lab_order_id"], label="")
+
+        with sessions() as session:
+            verdict = qualification_verdict_in_session(
+                session, world["provider_id"], OrganizationType.PROVIDER.value
+            )
+            owed = unresolved_obligations(session)
+        assert verdict.qualified, "one undeliverable message does not un-qualify a connector"
+        assert len(owed) == 1
+        assert owed[0].state == ObligationState.FAILED.value
+        assert owed[0].failure_category == "VALIDATION"
+        assert owed[0].resolved_at is None
+
+    def test_PQ16_an_agent_may_not_submit_into_a_source_system_it_did_not_register(
+        self, world, tmp_path, sessions
+    ):
+        """§6, enforced at the boundary rather than trusted from the envelope.
+
+        The namespace an identifier lands in decides which external system's ``ORDER-77`` this is,
+        so an agent that could name it in the message would be choosing its own scope -- the same
+        class of mistake as accepting ``organization_id`` from a request body. The installation's
+        registered source system is the authority, and a disagreement is refused rather than
+        reconciled.
+
+        Driven through the real agent and the real API, because that is the path where it matters:
+        this is the check that would go unnoticed if it only existed in a unit test of the applier.
+        """
+        adapter = SyntheticProviderAdapter()
+        store = AgentStore(tmp_path / "wrong-namespace.sqlite")
+        client = ConnectRuntimeClient(
+            base_url="http://connect.invalid",
+            tokens=TokenSource(world["token"]),
+            http_client=TestClient(world["app"]),
+        )
+        runner = AgentRunner(
+            store=store,
+            client=client,
+            adapter=adapter,
+            organization_id=world["provider_id"],
+            installation_id=world["installation_id"],
+            # Registered as "emr". This agent claims to be speaking for a different system.
+            source_system="lis",
+        )
+        try:
+            _queue_submission(adapter, world["provider_id"])
+            for _ in range(3):
+                runner.run_once()
+        finally:
+            store.close()
+
+        with sessions() as session:
+            delivery = session.scalar(
+                select(ConnectorDelivery).where(
+                    ConnectorDelivery.message_type == "ORDER_SUBMISSION"
+                )
+            )
+            correlations = session.scalars(select(ConnectorCorrelation)).all()
+        assert delivery is not None, "the message reached DHealth -- it is the applier that refuses"
+        assert delivery.state == DeliveryState.DEAD_LETTER.value, (
+            "a namespace disagreement is not retryable: retrying changes nothing about it"
+        )
+        assert delivery.last_failure_category == "VALIDATION"
+        assert correlations == [], (
+            "no identifier may be written into a namespace the installation did not register"
+        )
 
 
 def _glucose_id(session: Session) -> uuid.UUID:

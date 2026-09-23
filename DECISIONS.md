@@ -7859,3 +7859,147 @@ could try it.
   provider half of what `test_RQ8` pins for laboratories: a qualified connector with a healthy agent
   is still refused `READY_FOR_ROUTING`, because the far end is synthetic and no vendor adapter
   exists.
+
+### Lifetime correction — added 2026-09-23, same ticket
+
+The provider side above shipped with two defects of the same kind: it confused *how long a fact is
+true* with *how long the thing that reported it exists*. Neither is rewritten away below. Both were
+found by review before any partner data existed, which is the only reason this is a correction and
+not an incident.
+
+**What was wrong, stated plainly.**
+
+*Problem A — correlation scoped to the wrong lifetime.* `connector_correlations` was keyed on
+`connector_installation_id + correlation_kind + external_id`. An installation is one DHealth adapter
+build and configuration; the external identifier belongs to an organization's *source system*.
+`ORDER-123` did not stop meaning the same thing because DHealth upgraded its connector, but under
+that key it did: retiring v1 and registering v2 made the identifier unresolvable, so a result
+released afterwards could never be filed back into the EMR that ordered it.
+
+*Problem B — a log line is not a delivery state.* If the notification could not be built, or the
+installation was suspended, the release committed and a warning was logged. After a restart DHealth
+had no queryable answer to "which released results were never queued, why, and can they be
+recovered" — the three questions an operator actually has.
+
+**The laws this establishes, stated so a later ticket has to disagree with them explicitly.**
+
+- **Connector installation identity ≠ external source-system identity.** Qualification and
+  configuration belong to an installation. Clinical correlation belongs to the organization and its
+  source system.
+- **Connector installation lifetime ≠ external correlation lifetime.** The installation that first
+  created a correlation is useful provenance. It must never be the only key needed to resolve it.
+- **A professional release may outlive connector availability.** A clinical act does not fail, and
+  is never rolled back, because an integration could not be arranged.
+- **A release commits, and a delivery failure becomes durable unresolved integration work.** Never a
+  release that committed with nothing anywhere recording that a provider is waiting.
+
+32. **Correlation is scoped to `organization_id + source_system + correlation_kind + external_id`,**
+    and the originating installation is preserved as `created_by_connector_installation_id` — a
+    provenance column that is part of no key. The organization is never inferred from an external
+    id; it is carried explicitly, so tenant scoping is strengthened rather than traded away.
+
+    The reverse uniqueness (one DHealth order ↔ one external order id) is scoped the same way and
+    stays `ORDER`-only. It has to include `source_system`: one DHealth order legitimately carries
+    *two* ORDER correlations when both ends of a route are connected — the provider's EMR order id
+    and the laboratory's accession — and a check on `lab_order_id` alone would refuse the second
+    message every time.
+
+33. **A replacement inherits the namespace's meaning and nothing else.** v2 registered for the same
+    organization and source system may deliver the result for `ORDER-123`, because what it inherits
+    is what that identifier *means* in the partner's world. It does not inherit v1's qualification,
+    which is a fact about a build and has to be earned again (PQ13). Those are separate facts and
+    the correction turns on keeping them separate.
+
+    The database enforces the second half by construction: `service_client_id` is globally unique
+    across retired rows, so a successor cannot reuse its predecessor's credential.
+
+34. **A source-system change is not a handoff.** Epic's `ORDER-123` is not MedSys's `ORDER-123`.
+    `eligible_installation` matches on organization **and** source system, so a facility that
+    migrated from MedSys to Epic has a live connector and still receives nothing for MedSys's
+    orders — the obligation stays owed instead (AC2, RT3). "The facility only has one connector, so
+    it must be the right one" is precisely the shortcut that would file a report into the wrong
+    system.
+
+35. **The result hook resolves the correlation first.** The original order of questions was
+    *find the currently registered installation → ask it for a correlation*, which lets whichever
+    connector happens to be registered now decide which external system originally asked for the
+    order. The corrected order is: released order → provider-side ORDER correlation → organization,
+    source system and their own order id → the installation currently eligible for *that* namespace
+    → queue. The correlation is the durable fact; the installation is the transport that happens to
+    be available.
+
+36. **Suspension queues against the suspended installation rather than withholding the message.**
+    This is the part worth being deliberate about. `resolve_service_principal` refuses a suspended
+    installation, so nothing can claim the delivery and it waits exactly as long as the suspension
+    lasts, draining the moment it is restored. Withholding it instead would mean the moment of
+    restoration had to be *noticed* by something, and anything that has to be noticed is something
+    that can be missed.
+
+37. **`ConnectorDeliveryObligation` is the durable record, and it stores no clinical content.** Id,
+    organization, source system, order, release version, intended message type, source event id,
+    state (`PENDING`/`QUEUED`/`FAILED`), failure category, a safe detail, timestamps. The message is
+    **reconstructed** from the immutable `LabResultReleaseVersion` and its manifest (§13), which is
+    also what makes a recovery months later produce the report *as released* rather than as the
+    record looks now.
+
+    `safe_failure_detail` records field names and error kinds only. `str(ValidationError)` quotes
+    `input_value=...`, and for an observation label or a text result that value is patient data
+    (§57). The shape of the fault is what an operator needs to fix a configuration anyway.
+
+    The table has **no foreign key to `connector_installations`** (PG26). A column pointing at the
+    installation would have been the natural design and would have carried the same lifetime bug one
+    level down.
+
+38. **Reconciliation rides on the heartbeat, and is a method rather than a project.** §14 is
+    explicit that this must not become a background-worker project, and it has not: there is no
+    Celery, no broker, no cron. The event that makes an owed obligation dischargeable is *an
+    eligible agent appearing*, which is an event DHealth already hears — so a successor's very first
+    heartbeat queues what its predecessor left owed (AC3), bounded to five and scoped to the
+    caller's own facility. The same reasoning already drives `apply_pending_inbound` from the
+    heartbeat, and for the same reason: no agent means no traffic, so there is nothing to recover.
+
+39. **An obligation can be QUEUED and still owed.** Queue a delivery against a suspended
+    installation — correct, and the point of decision 36 — then retire that installation and
+    register its successor. The delivery is attached to a principal that will never authenticate
+    again, so it waits forever *while the obligation reads as discharged*: the exact state this
+    correction forbids, reached by a legal sequence of operator actions. So `still_owed_condition`
+    also selects obligations whose delivery sits undelivered on a retired installation, demotes them
+    to `PENDING`, and re-targets them at the successor. The orphaned delivery row is left where it
+    is (§51); the successor gets a new one, because the idempotency key includes the installation.
+    Found by review, pinned by RT4–RT6.
+
+40. **Retirement with no successor leaves the obligation durably unresolved.** Not dead-lettered,
+    not dropped, and not routed to a different source system. §56: an unresolved row an operator has
+    to look at beats a cancellation DHealth invented on a partner's behalf.
+
+41. **`QUALIFICATION_SUITE_VERSION` still does not move, and the new scenarios are tests rather than
+    suite scenarios.** Replacement, suspension, build-failure durability and source-system
+    namespacing are properties of *DHealth's runtime*, not conformance claims about a partner's
+    connector. Recording them as qualification scenarios would mean every connector had to be
+    suspended and retired during its own qualification run, and would credit a partner's build with
+    evidence about DHealth's correctness. They are pinned as PQ13–PQ16 in the qualification suite's
+    test file instead, where they constrain the same code without changing what a recorded PASS
+    claims. Recorded here so the absence reads as a decision rather than an omission.
+
+### Consequences — lifetime correction
+
+- Migration `0031_connect_namespace` (22 characters). Adds `organization_id`, backfills it by
+  joining each correlation to its originating installation, renames
+  `connector_installation_id` → `created_by_connector_installation_id`, rescopes both unique keys,
+  and creates `connector_delivery_obligations`. It **fails closed** on any row it cannot backfill
+  and on any pair that would collide under the namespace key — refusing to choose which binding
+  survives, because choosing wrong moves a clinical result between patients.
+- Qualified on real PostgreSQL 18.6, not only on SQLite: seeded at 0030 with a retired v1, a live
+  v2 and three correlations, refused an upgrade with a deliberate collision present (leaving the
+  revision at 0030), then upgrade → downgrade → upgrade, with the constraint columns read back out
+  of `pg_constraint`. PG24–PG27 pin the resulting shape.
+- `docs/CONNECT-AGENT.md` §"Correlation" and the result-hook docstrings claiming a never-connected
+  or suspended agent produces no delivery are corrected in place, with the mistake recorded rather
+  than deleted.
+- **Still no vendor adapter, and nothing about routing changed.** The far end remains
+  `SyntheticProviderAdapter`; `READY_FOR_ROUTING` is still refused. No real EMR or LIS was
+  contacted at any point in this work.
+- Known follow-up, deliberately out of scope: `outbox_hook` has the same `REGISTERED`-only gap for
+  *order* notifications that this correction fixed for result notifications. Recorded in
+  `PROJECT_STATE.md` rather than fixed here, because it is the laboratory direction and this ticket
+  is explicitly the provider one.

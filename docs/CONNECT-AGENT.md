@@ -101,9 +101,71 @@ never asked for by that EMR and has no identifier there. A message carrying a DH
 receiving system has never seen is one it cannot file, which is worse than no message: it looks
 delivered.
 
-The release itself always commits. A notification that cannot be built is logged and dropped; a
-professional released a result, and refusing that clinical act because a Connect message would not
-validate inverts the priority.
+The release itself always commits. A professional released a result, and refusing that clinical act
+because a Connect message would not validate inverts the priority.
+
+> **Corrected 2026-09-23 (0031).** The sentence that stood here said a notification that cannot be
+> built "is logged and dropped". That was true and it was wrong: a log line is not a delivery state,
+> and after a restart DHealth had no queryable answer to *which released results were never queued*.
+> The behaviour is described below. The original wording is left recorded rather than edited away.
+
+### Correlation outlives the connector that reported it
+
+A correlation is scoped to **organization + source system + kind + external id**. The installation
+that created it is kept as `created_by_connector_installation_id` — provenance, and part of no key.
+
+This is the shape it should always have had. It was first keyed on the *installation*, which made
+`ORDER-123` unresolvable the moment a facility's connector was upgraded: an installation is one
+DHealth adapter build, while the identifier belongs to the partner's source system, and a connector
+upgrade must not erase an external system's identity namespace.
+
+What follows from the correct scoping:
+
+| Situation | What happens |
+| --- | --- |
+| v1 retired, v2 registered for the **same** source system | v2 delivers the result for `ORDER-123`. It inherits what the identifier *means* — never v1's qualification, which it has to earn. |
+| v2 registered for a **different** source system | Nothing is delivered. Epic's `ORDER-123` is not MedSys's `ORDER-123`; the obligation stays owed for a human to settle. No fuzzy handoff. |
+| Same identifier in two source systems at one facility | Two distinct bindings. The namespace keeps them apart. |
+| Same identifier at two organizations | Two distinct bindings. Tenant scoping is explicit and is never inferred from an external id. |
+
+The hook asks its questions in that order, and the order is the design: released order → the
+provider-side ORDER correlation → the organization, source system and their own order id → the
+installation currently eligible for *that* namespace → queue. Asking the currently registered
+connector who the correspondent is was the original mistake.
+
+### What is owed, when nothing can carry it
+
+Every path through the result hook except one leaves a durable row in
+`connector_delivery_obligations`. The exception is an order placed natively in DHealth, where
+nothing is owed at all.
+
+    correlated CONNECT provider + professional release
+      = a durable delivery, or a durable record that one is owed and why
+
+| State | Meaning |
+| --- | --- |
+| `QUEUED` | a delivery exists for it |
+| `PENDING` | nothing can carry it yet — suspended-then-retired, replaced for another source system, or none registered |
+| `FAILED` | the notification could not be built, or contradicted a message already queued |
+
+The row stores **no clinical content**. It names the `LabResultReleaseVersion` whose manifest is
+already the clinical truth, and the message is rebuilt from it — which is why a recovery months
+later produces the report *as released* rather than as the record looks now. Failure details carry
+field names and error kinds only, never the value that failed (§57).
+
+**Suspension is a pause, not an erasure.** The delivery is queued against the suspended
+installation and simply waits: a suspended installation cannot authenticate, so nothing can claim
+the message, and the moment it is restored the agent drains it. Withholding it instead would mean
+the restoration had to be *noticed* by something, and anything that has to be noticed can be missed.
+
+**Health is not a prerequisite.** A registered installation whose agent has never connected still
+gets the delivery. Health decides whether *new* work should be routed to a facility; it does not
+erase work already owed. The queue is what lets an agent catch up when it arrives.
+
+**Recovery is the agent's own heartbeat.** There is no worker, broker or scheduler. The event that
+makes an owed obligation dischargeable is an eligible agent appearing, and DHealth already hears
+that — so a successor's first heartbeat queues what its predecessor left owed, bounded and scoped to
+that facility. `reconcile_delivery_obligations` is also callable directly by an operator.
 
 ---
 

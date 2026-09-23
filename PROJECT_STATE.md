@@ -19009,3 +19009,102 @@ was checking — but it is worth knowing which one you have.
 No vendor adapter. No real EMR or LIS qualified. No facility live through Connect. Both synthetic
 suites now reach `connector_qualified = true`; neither facility can reach `READY_FOR_ROUTING`, and
 `PQ12` and `RQ8` pin that from both sides.
+
+---
+
+## DH-CONNECT-AGENT-001 — lifetime correction (2026-09-23, same ticket, third pass)
+
+From `45130f3`, directly on `master`. **No vendor adapter was started**, which was the explicit
+instruction: the generic runtime is accepted, and this pass fixes the lifetime and durability
+semantics of provider result delivery *before* any real partner data exists.
+
+### The two defects, recorded rather than edited away
+
+**A — correlation scoped to the wrong lifetime.** `connector_correlations` was keyed on
+`connector_installation_id + correlation_kind + external_id`. An installation is one DHealth adapter
+build and configuration; the external identifier belongs to an organization's *source system*.
+Retiring v1 and registering v2 made `ORDER-123` unresolvable, so a result released afterwards could
+never be filed back into the EMR that ordered it. A connector upgrade must not erase an external
+system's identity namespace.
+
+**B — a log line is not a delivery state.** A suspended installation, or a notification that would
+not validate, left the release committed with nothing durable recording that a provider was waiting.
+After a restart there was no queryable answer to *which released results were never queued, why, and
+can they be recovered*.
+
+Both were found by review before any partner data existed. That is the only reason this is a
+correction and not an incident.
+
+### What changed
+
+| | |
+|---|---|
+| Correlation scope | `organization_id + source_system + correlation_kind + external_id`; the installation survives as `created_by_connector_installation_id`, part of no key |
+| Reverse uniqueness | `organization_id + source_system + lab_order_id`, `ORDER`-only — **with** `source_system`, because one DHealth order legitimately has two ORDER correlations when both ends of a route are connected |
+| Result hook | resolves the correlation **first**, then finds the installation eligible for *that* namespace. The original order let whichever connector happened to be registered now decide who had asked |
+| Eligible carrier | `REGISTERED` **or** `SUSPENDED`, matched on organization **and** source system. `RETIRED` never |
+| Durable record | `ConnectorDeliveryObligation` — `PENDING`/`QUEUED`/`FAILED`, no clinical content, message rebuilt from the immutable release manifest |
+| Recovery | `reconcile_delivery_obligations`, driven by the agent's own heartbeat (bounded 5, org-scoped) and callable directly by an operator. No worker, no broker, no cron — §14 |
+| Namespace authority | `runtime_api.submit` previously never checked the envelope's `source_system` against the installation's registration, so the namespace was a *claim*. `_namespace_for` now refuses a disagreement (dead letter, `VALIDATION`) |
+| Migration | `0031_connect_namespace` (22 chars), head `0030_connect_provider` |
+
+### Tests
+
+| | |
+|---|---|
+| CL1–CL13 | correlation lifetime — the bug (CL2), replacement without inherited qualification (CL3), two source systems (CL4), two organizations (CL5), refusal not guessing (CL6), retired-is-provenance-not-carrier (CL7), suspended-is-a-carrier (CL8), wrong-system-is-not (CL9), both ends of one order (CL10), registered source system is authoritative (CL11), refuses to choose (CL12), the repository surface (CL13) |
+| SD, SD8, SD9 | suspension: the release commits, the obligation exists, the delivery waits against the suspended installation and drains on restoration |
+| RT1–RT6 | retirement: owed with no successor, discharged by a same-namespace successor, never by a different-namespace one, and the orphaned-delivery case found by review (RT4–RT6) |
+| BF1–BF6 | build failure: durable row not a log line, no patient value in the detail, reconciliation rebuilds from the release version, amendments recover identically, idempotent, never resolved when it could not be done |
+| NO1 | a natively placed order owes nothing |
+| AC1 | **the full acceptance journey through the real agent** — v1 submits `ORDER-ABC`, v1 retired, v2 registered, released while v2 suspended, obligation persists, nothing reaches any partner, v2 restored, result filed exactly once, then the amendment |
+| AC2 | the same journey with v2 registered for `epic` — the report goes nowhere, the obligation stays owed, and the correlation still resolves only under `medsys` |
+| AC3 | a successor's *first heartbeat* discharges what its predecessor left owed, with no reconciliation called anywhere |
+| PQ13–PQ16 | replacement starts unqualified; suspension withholds qualification without erasing it; a qualified connector can still owe an undelivered result; an agent may not submit into a source system it did not register |
+| PG24–PG27 | the constraint columns read out of `pg_constraint`, namespace separation enforced by the database, the obligation table's deliberate lack of any installation foreign key, and the state CHECK plus partial index |
+
+Connect subset: **246 passed, 27 skipped** (was 211/23 before this pass).
+
+### Negative controls
+
+Four run, each reverted. `-x` off, so the full failing set is recorded:
+
+| | Broken | Failures |
+|---|---|---|
+| NC-CORR-1 | hook picks whatever connector the facility has now (organization-only, `REGISTERED`-only) | AC1, **AC2**, SD, SD8, SD9, RT3, RT4, CL8, CL9 — 9 |
+| NC-CORR-2 | correlation lookup drops the source-system namespace | CL4 |
+| NC-DUR-1 | a suspended installation is not an eligible carrier | SD, SD8, SD9, RT4, CL8, AC1 — 6 |
+| NC-DUR-2 | a build failure returns quietly instead of writing a durable row | BF1 (and BF3, BF6, PQ15 downstream) |
+
+AC2 failing under NC-CORR-1 is the one that matters: with the source-system predicate gone, a
+released MedSys report is filed into Epic's connector. That is the failure mode a clinician
+discovers.
+
+### PostgreSQL qualification (18.6, native, `dhconnect002_qual`)
+
+Not a schema read: the database was seeded **at 0030** with a retired v1, a live v2 and three
+correlations, so the backfill had real rows to convert.
+
+1. With a deliberate namespace collision present, `alembic upgrade head` **refused** — `1 external
+   identifiers would bind to more than one DHealth order under the namespace key` — and left the
+   revision at `0030_connect_provider`. Fail closed on ambiguity, as required.
+2. Collision removed → upgrade. Every correlation carried `organization_id` from its originating
+   installation, both provenance installations preserved, both unique keys rescoped.
+3. `downgrade 0030_connect_provider` → the column rename reversed and the data intact.
+4. `upgrade head` again → identical shape. The `batch_alter_table` rename plus constraint
+   drop/recreate is the path SQLite never executes, and it is now exercised in both directions.
+
+### Follow-ups, not fixed here
+
+- **`outbox_hook` has the same `REGISTERED`-only gap for *order* notifications.** An order assigned
+  to a laboratory during a suspension is not queued and nothing records that it was owed — the same
+  class of defect as B, in the laboratory direction. Out of scope for a provider-side correction;
+  annotated in the module docstring so it is not read as endorsed design.
+- The ambiguous-correlation path writes `source_system = "?unresolved"` and stays `PENDING` until a
+  human settles which source system owns the identifier. Nothing deletes it and nothing guesses.
+
+### What is still not true
+
+No vendor adapter exists. No real EMR or LIS was contacted at any point in this work. No facility is
+live through Connect, and `READY_FOR_ROUTING` is still refused for a fully qualified connector with
+a healthy agent.

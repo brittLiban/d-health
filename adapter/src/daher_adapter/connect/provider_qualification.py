@@ -39,7 +39,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.connect.contract import Capability
-from daher_adapter.connect.correlation import CorrelationRepository, CorrelationUnknown
+from daher_adapter.connect.correlation import (
+    CorrelationNamespace,
+    CorrelationRepository,
+    CorrelationUnknown,
+)
 from daher_adapter.connect.models import EvidenceLevel
 from daher_adapter.connect.result_hook import result_notification_event_id
 from daher_adapter.connect.runtime_models import ConnectorDelivery, DeliveryState
@@ -115,6 +119,7 @@ def drive_order_submission(
     sessions: sessionmaker[Session],
     *,
     installation_id: uuid.UUID,
+    namespace: CorrelationNamespace,
     external_order_id: str,
     emit_submission: Callable[[], None],
     run_cycle: Callable[[], object],
@@ -145,7 +150,7 @@ def drive_order_submission(
         failure_detail = None if row is None else row.last_failure_detail
         try:
             lab_order_id = CorrelationRepository().resolve_order(
-                session, installation_id=installation_id, external_order_id=external_order_id
+                session, namespace=namespace, external_order_id=external_order_id
             )
         except CorrelationUnknown:
             # Not an error here. "The submission never bound a correlation" is one of the outcomes
