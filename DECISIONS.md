@@ -7954,8 +7954,10 @@ recovered" — the three questions an operator actually has.
     explicit that this must not become a background-worker project, and it has not: there is no
     Celery, no broker, no cron. The event that makes an owed obligation dischargeable is *an
     eligible agent appearing*, which is an event DHealth already hears — so a successor's very first
-    heartbeat queues what its predecessor left owed (AC3), bounded to five and scoped to the
-    caller's own facility. The same reasoning already drives `apply_pending_inbound` from the
+    heartbeat queues what its predecessor left owed (AC3), bounded to five, round-robin and scoped
+    to the caller's own facility. Round-robin because a bounded pass ordered by age would re-attempt
+    the same oldest unfixable rows forever and never reach a newer one that could be discharged; the
+    pass takes the least recently attempted instead. The same reasoning already drives `apply_pending_inbound` from the
     heartbeat, and for the same reason: no agent means no traffic, so there is nothing to recover.
 
 39. **An obligation can be QUEUED and still owed.** Queue a delivery against a suspended

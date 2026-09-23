@@ -120,6 +120,10 @@ def reconcile_delivery_obligations(
     an agent reconnecting should not make DHealth walk every other facility's backlog. Omitted, it
     considers all of them, which is what an operator command wants.
 
+    Bounded **and round-robin**: each pass takes the least recently attempted obligations, so a
+    small limit on a frequent caller still reaches every owed row rather than grinding on whichever
+    ones are oldest and unfixable.
+
     Per-obligation transactions for the reason ``apply_pending_inbound`` uses them: one obligation
     that cannot be discharged must not roll back the ones beside it, and the next pass must not hit
     the same poison row before reaching the rest.
@@ -129,8 +133,15 @@ def reconcile_delivery_obligations(
         query = select(ConnectorDeliveryObligation.id).where(still_owed_condition())
         if organization_id is not None:
             query = query.where(ConnectorDeliveryObligation.organization_id == organization_id)
+        # **Least recently attempted first, not oldest first.** A bounded pass ordered by
+        # ``created_at`` re-attempts the same oldest rows every time, so a facility holding five
+        # permanently stuck obligations -- a build failure nobody has fixed, a source system that
+        # will never get a connector -- would starve every newer, dischargeable one forever. Since
+        # ``_reconcile_one`` stamps ``updated_at`` on every attempt, ordering by it is round-robin
+        # for free. ``unresolved_obligations`` keeps the chronological order, because that is the
+        # operator's read and theirs should not rotate.
         pending_ids = list(
-            session.scalars(query.order_by(ConnectorDeliveryObligation.created_at).limit(limit))
+            session.scalars(query.order_by(ConnectorDeliveryObligation.updated_at).limit(limit))
         )
 
     queued: list[uuid.UUID] = []

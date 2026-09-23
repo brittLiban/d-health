@@ -19044,7 +19044,7 @@ correction and not an incident.
 | Result hook | resolves the correlation **first**, then finds the installation eligible for *that* namespace. The original order let whichever connector happened to be registered now decide who had asked |
 | Eligible carrier | `REGISTERED` **or** `SUSPENDED`, matched on organization **and** source system. `RETIRED` never |
 | Durable record | `ConnectorDeliveryObligation` — `PENDING`/`QUEUED`/`FAILED`, no clinical content, message rebuilt from the immutable release manifest |
-| Recovery | `reconcile_delivery_obligations`, driven by the agent's own heartbeat (bounded 5, org-scoped) and callable directly by an operator. No worker, no broker, no cron — §14 |
+| Recovery | `reconcile_delivery_obligations`, driven by the agent's own heartbeat (bounded 5, org-scoped, **round-robin by last attempt** so a stuck backlog cannot starve a dischargeable row) and callable directly by an operator. No worker, no broker, no cron — §14 |
 | Namespace authority | `runtime_api.submit` previously never checked the envelope's `source_system` against the installation's registration, so the namespace was a *claim*. `_namespace_for` now refuses a disagreement (dead letter, `VALIDATION`) |
 | Migration | `0031_connect_namespace` (22 chars), head `0030_connect_provider` |
 
@@ -19055,7 +19055,8 @@ correction and not an incident.
 | CL1–CL13 | correlation lifetime — the bug (CL2), replacement without inherited qualification (CL3), two source systems (CL4), two organizations (CL5), refusal not guessing (CL6), retired-is-provenance-not-carrier (CL7), suspended-is-a-carrier (CL8), wrong-system-is-not (CL9), both ends of one order (CL10), registered source system is authoritative (CL11), refuses to choose (CL12), the repository surface (CL13) |
 | SD, SD8, SD9 | suspension: the release commits, the obligation exists, the delivery waits against the suspended installation and drains on restoration |
 | RT1–RT6 | retirement: owed with no successor, discharged by a same-namespace successor, never by a different-namespace one, and the orphaned-delivery case found by review (RT4–RT6) |
-| BF1–BF6 | build failure: durable row not a log line, no patient value in the detail, reconciliation rebuilds from the release version, amendments recover identically, idempotent, never resolved when it could not be done |
+| BF1–BF7 | build failure: durable row not a log line, no patient value in the detail, reconciliation rebuilds from the release version, amendments recover identically, idempotent, never resolved when it could not be done, and a bounded pass rotates rather than grinding on the oldest unfixable rows (BF7) |
+| CF1–CF3 | two source systems both claiming one order: the release commits, the obligation is owed with `CONFLICT` and `source_system = "?unresolved"`, the intended message type is still correct for an amendment, and reconciliation refuses to settle it |
 | NO1 | a natively placed order owes nothing |
 | AC1 | **the full acceptance journey through the real agent** — v1 submits `ORDER-ABC`, v1 retired, v2 registered, released while v2 suspended, obligation persists, nothing reaches any partner, v2 restored, result filed exactly once, then the amendment |
 | AC2 | the same journey with v2 registered for `epic` — the report goes nowhere, the obligation stays owed, and the correlation still resolves only under `medsys` |
@@ -19063,11 +19064,12 @@ correction and not an incident.
 | PQ13–PQ16 | replacement starts unqualified; suspension withholds qualification without erasing it; a qualified connector can still owe an undelivered result; an agent may not submit into a source system it did not register |
 | PG24–PG27 | the constraint columns read out of `pg_constraint`, namespace separation enforced by the database, the obligation table's deliberate lack of any installation foreign key, and the state CHECK plus partial index |
 
-Connect subset: **246 passed, 27 skipped** (was 211/23 before this pass).
+Connect subset: **251 passed, 27 skipped** (was 211/23 before this pass). Full adapter suite:
+**1467 passed, 145 skipped** (was 1426/139 before it).
 
 ### Negative controls
 
-Four run, each reverted. `-x` off, so the full failing set is recorded:
+Six run, each reverted. `-x` off, so the full failing set is recorded:
 
 | | Broken | Failures |
 |---|---|---|
@@ -19075,6 +19077,8 @@ Four run, each reverted. `-x` off, so the full failing set is recorded:
 | NC-CORR-2 | correlation lookup drops the source-system namespace | CL4 |
 | NC-DUR-1 | a suspended installation is not an eligible carrier | SD, SD8, SD9, RT4, CL8, AC1 — 6 |
 | NC-DUR-2 | a build failure returns quietly instead of writing a durable row | BF1 (and BF3, BF6, PQ15 downstream) |
+| NC-DUR-3 | the reconcile pass ordered by age instead of by last attempt | BF7 |
+| NC-DUR-4 | the ambiguous-correlation path hardcodes `RESULT_NOTIFICATION` again | CF2 |
 
 AC2 failing under NC-CORR-1 is the one that matters: with the source-system predicate gone, a
 released MedSys report is filed into Epic's connector. That is the failure mode a clinician

@@ -43,6 +43,7 @@ from daher_adapter.connect.reconciliation import (
     unresolved_obligations,
 )
 from daher_adapter.connect.repository import ConnectorInstallationRepository
+from daher_adapter.connect.result_hook import UNRESOLVED_SOURCE_SYSTEM
 from daher_adapter.connect.runtime_models import (
     ConnectorDelivery,
     ConnectorDeliveryObligation,
@@ -734,6 +735,142 @@ class TestBuildFailureIsDurable:
         assert len(obligations) == 1
         assert obligations[0].state == ObligationState.FAILED.value
         assert obligations[0].resolved_at is None
+
+    def test_BF7_a_bounded_pass_rotates_instead_of_grinding_on_the_oldest(self, world, sessions):
+        """Fairness, which a bounded pass has to have on purpose or it does not have at all.
+
+        The heartbeat reconciles five at a time. Ordered by age, a facility holding five
+        permanently stuck obligations -- a build failure nobody has fixed, a source system that will
+        never get a connector -- would re-attempt those same five forever and never reach a newer
+        one that could be discharged. The claim "a successor's first heartbeat queues what its
+        predecessor left owed" would then be false for precisely the facility that needed it.
+
+        So the pass takes the **least recently attempted**. Driven here with ``limit=1``, which is
+        the smallest bound that can express the difference: pass one must fail on the older
+        obligation, and pass two must reach the newer one rather than returning to it.
+        """
+        # An original release whose notification cannot be built, and stays unbuildable.
+        _prepare_and_enter(world)
+        _empty_every_observation_label(sessions)
+        _release_only(world)
+        # ...and an amendment that can be: the correction writes its own observation, so blanking
+        # the released rows above never reached it.
+        _amend(world)
+
+        obligations = _obligations(sessions)
+        assert len(obligations) == 2
+        older, newer = obligations
+        assert older.state == ObligationState.FAILED.value
+        assert newer.state == ObligationState.QUEUED.value
+
+        # Put the amendment back in the owed set the way a real fault would: its delivery is
+        # orphaned by retiring the installation it was queued against, and no successor exists yet.
+        world["installations"].retire(
+            installation_id=world["installation_id"], actor_identity_id=world["actor_id"]
+        )
+        successor = world["installations"].register(
+            organization_id=world["provider_id"],
+            connector_key="synthetic-emr",
+            connector_version="2.0",
+            source_system=SOURCE_SYSTEM,
+            interface_type="FHIR",
+            configuration_fingerprint=fingerprint({"endpoint": "https://medsys.invalid/v2"}),
+            mapping_fingerprint=fingerprint({"mapping_revision": [[SOURCE_SYSTEM, "GLU"]]}),
+            actor_identity_id=world["actor_id"],
+        )
+
+        first = reconcile_delivery_obligations(sessions, limit=1)
+        assert first.attempted == 1
+        second = reconcile_delivery_obligations(sessions, limit=1)
+        assert second.attempted == 1
+        assert second.queued != first.queued or second.still_unresolved != first.still_unresolved, (
+            "two passes that attempted the same row are the starvation this ordering prevents"
+        )
+
+        by_id = {row.id: row for row in _obligations(sessions)}
+        assert by_id[older.id].state == ObligationState.FAILED.value, "still unbuildable"
+        assert by_id[newer.id].state == ObligationState.QUEUED.value
+        assert by_id[newer.id].connector_delivery_id is not None
+        installations = {d.connector_installation_id for d in _deliveries(sessions)}
+        assert successor.id in installations
+
+
+class TestAnAmbiguousCorrelationIsOwedAndNotGuessed:
+    """§43 at the delivery layer: the refusal to choose has to leave something behind.
+
+    Two source systems at one facility both claiming to have ordered this. There is no rule that
+    makes one of them more likely to be right, and picking either files a clinical report into a
+    system that did not ask for it. The honest outcome is an obligation an operator has to settle --
+    and it has to be an obligation, because the alternative is that the most dangerous case is the
+    one that leaves no trace.
+    """
+
+    def _claim_the_order_from_a_second_system(self, world, sessions) -> None:
+        with sessions.begin() as session:
+            CorrelationRepository().bind_order(
+                session,
+                namespace=CorrelationNamespace(
+                    organization_id=world["provider_id"], source_system="epic"
+                ),
+                external_order_id="EPIC-ORDER-9",
+                lab_order_id=world["order_id"],
+                created_by_installation_id=world["installation_id"],
+            )
+
+    def test_CF1_the_release_commits_and_the_obligation_says_it_cannot_be_placed(
+        self, world, sessions
+    ):
+        """Owed, unresolved, and carrying no guess about which namespace it belongs to."""
+        self._claim_the_order_from_a_second_system(world, sessions)
+        _release(world)
+
+        obligations = _obligations(sessions)
+        assert len(obligations) == 1
+        assert obligations[0].state == ObligationState.PENDING.value
+        assert obligations[0].failure_category == "CONFLICT"
+        assert obligations[0].source_system == UNRESOLVED_SOURCE_SYSTEM, (
+            "a real system name here would be the guess this path exists to refuse"
+        )
+        assert obligations[0].intended_message_type == "RESULT_NOTIFICATION"
+        assert obligations[0].resolved_at is None
+        assert _deliveries(sessions) == [], "no report may be filed while it is unclear who asked"
+
+    def test_CF2_an_amendment_records_that_it_was_an_amendment_that_could_not_be_placed(
+        self, world, sessions
+    ):
+        """The message type is read before the namespace, because the operator needs both.
+
+        An obligation saying ``RESULT_NOTIFICATION`` for a correction sends whoever picks it up
+        looking for the wrong thing -- and a correction is the message whose loss matters most.
+        """
+        _release(world)
+        self._claim_the_order_from_a_second_system(world, sessions)
+        _amend(world)
+
+        amendment = _obligations(sessions)[1]
+        assert amendment.intended_message_type == "AMENDMENT_NOTIFICATION"
+        assert amendment.state == ObligationState.PENDING.value
+        assert amendment.failure_category == "CONFLICT"
+
+    def test_CF3_reconciliation_does_not_resolve_it_and_does_not_delete_it(self, world, sessions):
+        """Nothing in the runtime deletes a correlation, so this stays owed until a human acts.
+
+        Which is the point: the recovery path must not quietly "fix" an ambiguity by picking one.
+        """
+        self._claim_the_order_from_a_second_system(world, sessions)
+        _release(world)
+
+        report = reconcile_delivery_obligations(sessions)
+        assert report.queued == ()
+        assert len(report.still_unresolved) == 1
+
+        with sessions() as session:
+            owed = unresolved_obligations(session)
+        assert len(owed) == 1
+        assert owed[0].state == ObligationState.PENDING.value
+        assert owed[0].failure_category == "CONFLICT"
+        assert owed[0].source_system == UNRESOLVED_SOURCE_SYSTEM
+        assert _deliveries(sessions) == []
 
 
 # ── what is deliberately not owed ────────────────────────────────────────────────────────────

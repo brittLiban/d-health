@@ -549,6 +549,9 @@ class ConnectorDeliveryObligation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    #: **When this obligation was last attempted**, not merely when the row last changed. Every
+    #: reconciliation pass stamps it, discharged or not, which is what lets a bounded pass rotate
+    #: through a backlog instead of grinding on whichever rows are oldest and unfixable.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
