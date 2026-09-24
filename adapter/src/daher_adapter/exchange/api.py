@@ -226,6 +226,22 @@ from daher_adapter.exchange.selection import (
     StalePriceSelection,
 )
 
+# DH-NOTIFY-001. A top-level import, unlike the connect boundary's deliberately lazy one: the
+# Exchange API *owns* the enrollment surface (it is where a clinician records consent), whereas the
+# connect hooks in `results.py` are called from clinical mutation paths that must keep no
+# import-time dependency on an integration package. Nothing here reaches back into the Exchange.
+from daher_adapter.notify.dispatcher import send_access_link_inline
+from daher_adapter.notify.links import build_patient_access_url
+from daher_adapter.notify.models import (
+    DISPATCHABLE_EVENT_TYPES,
+    NotificationChannel,
+    NotificationEventType,
+)
+from daher_adapter.notify.phone import InvalidDestination
+from daher_adapter.notify.phone import normalize as normalize_destination
+from daher_adapter.notify.repository import PatientNotificationRepository, access_link_key
+from daher_adapter.notify.transport import NotificationTransport
+
 # DH-EX-004R: the fixed, server-derived source-identity namespace for a DHealth-native ordering
 # clinician's `PractitionerReference` -- never a caller-supplied practitioner_reference_id (see
 # `create_lab_order` below). `source_identity_value` is always the authenticated
@@ -1036,6 +1052,105 @@ class PatientAccessMetadataResponse(BaseModel):
     active: bool
     expires_at: datetime | None
     access_mode: Literal["LAB_SELECTION", "ORDER_READ"] | None
+
+
+class PatientNotificationEnrollmentRequest(BaseModel):
+    """DH-NOTIFY-001 §5: destination, channel and consent, all three explicit.
+
+    Consent is ``Literal[True]``, not ``bool``. A ``bool`` would accept ``false`` and leave the
+    server deciding what to do with a request that says "do not send" while asking to send;
+    ``Literal[True]`` makes the only way to reach the enrollment path a caller that affirmed it, and
+    ``false`` is a 422 at the schema boundary before any handler runs.
+
+    There is no note field, no consent-text field and no jurisdiction field. §5 says to persist the
+    minimum operational fact and to invent no legal language, and a free-text box is exactly where
+    invented legal language would accumulate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Literal["SMS", "WHATSAPP"]
+    #: As typed by the clinician. The server normalizes to E.164 (`notify/phone.py`) and refuses
+    #: anything it cannot parse, before any provider is contacted (§6).
+    destination: str = Field(min_length=3, max_length=32)
+    patient_consent_confirmed: Literal[True]
+
+
+class PatientAccessIssueRequest(BaseModel):
+    """Optional body on patient-access issuance.
+
+    Notification is **opt-in on an endpoint that already worked without it** -- the whole body is
+    optional, and an absent one behaves exactly as issuance did before DH-NOTIFY-001. That is Law 4
+    (§19) expressed in the API shape: the QR and the printed sheet are the baseline path, and
+    messaging is an addition a clinician may choose, never a step the workflow now requires.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    notify: PatientNotificationEnrollmentRequest | None = None
+
+
+class PatientNotificationResponse(BaseModel):
+    """One notification's operational state, for the clinician who sent it.
+
+    Carries no message body, no secure URL, no provider error text and no provider message id. A
+    clinician needs to know whether the message got out and what to do if it did not; the vendor's
+    identifier answers neither question and belongs only in the operator-facing read.
+
+    ``destination`` **is** returned, deliberately: the clinician typed it moments ago and needs to
+    see which number a failure refers to when an order has been re-enrolled with a corrected one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    event_type: Literal["ACCESS_LINK_ISSUED", "RESULT_RELEASED", "AMENDMENT_RELEASED"]
+    channel: Literal["SMS", "WHATSAPP"]
+    destination: str
+    state: Literal["PENDING", "SENDING", "SENT", "DELIVERED", "FAILED"]
+    failure_category: str | None
+    attempt_count: int
+    #: True when an operator may ask for another attempt. False for every access-link row, whose
+    #: secure link is not reconstructable -- the replacement path is revoke-and-reissue, and the UI
+    #: says so rather than offering a retry that would send a message with no link in it.
+    retryable: bool
+    created_at: datetime
+    sent_at: datetime | None
+    delivered_at: datetime | None
+
+
+class PatientNotificationStatusResponse(BaseModel):
+    """Whether this order is enrolled, and what has been sent about it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enrolled: bool
+    channel: Literal["SMS", "WHATSAPP"] | None
+    destination: str | None
+    notifications: list[PatientNotificationResponse]
+
+
+class NotificationOperationsResponse(BaseModel):
+    """DH-NOTIFY-001 §22: the operator's view. Counts and one age, nothing identifying.
+
+    No phone number, no order id, no grant id, no patient identifier, no provider message id, no
+    message body. This answers "are messages backing up, is the provider rejecting them, did
+    credentials stop working, how old is the oldest pending one" -- which is what §22 actually
+    requires -- without making an operational read into a privacy surface.
+
+    ``enabled`` distinguishes §10's two operationally different states: a deployment that is not
+    sending (nothing is wrong) from one that is sending and failing (somebody must look).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    provider: str | None
+    receipts_configured: bool
+    by_state: dict[str, int]
+    by_failure_category: dict[str, int]
+    by_channel: dict[str, int]
+    oldest_pending_age_seconds: int | None
 
 
 class PatientOrderItemResponse(BaseModel):
@@ -2499,6 +2614,16 @@ def build_exchange_router(
     audit_writer: ExchangeAuditWriter,
     platform_admin_role: str,
     patient_access_ttl_hours: int = 168,
+    # DH-NOTIFY-001. All three default to "notifications are off", which is what every existing
+    # test and every development stack gets without changing a line: no transport means nothing is
+    # ever sent, and no base URL means no link is ever composed. §10's *disabled* state.
+    notification_transport: NotificationTransport | None = None,
+    patient_public_base_url: str | None = None,
+    notification_default_region: str | None = None,
+    #: Whether an authenticated provider delivery receipt can be accepted at all. Surfaced in the
+    #: operator read so "everything stops at SENT" reads as a known configuration state rather than
+    #: as messages mysteriously never reaching DELIVERED.
+    notification_receipts_configured: bool = False,
 ) -> APIRouter:
     identities = ExchangeIdentityRepository(session_factory)
     organizations = OrganizationRepository(session_factory)
@@ -2530,6 +2655,7 @@ def build_exchange_router(
         enrollments=facility_enrollments,
     )
     connectors = ConnectorInstallationRepository(session_factory, security_audit=security_audit)
+    patient_notifications = PatientNotificationRepository()
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -4592,13 +4718,48 @@ def build_exchange_router(
         order_id: uuid.UUID,
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        body: PatientAccessIssueRequest | None = None,
     ) -> PatientAccessIssueResponse:
         # Patient access is clinical order access -- the exact same CLINICIAN boundary as
-        # creating/reading the order itself, never platform-admin-or-ORG_ADMIN-alone.
+        # creating/reading the order itself, never platform-admin-or-ORG_ADMIN-alone. DH-NOTIFY-001
+        # §20 inherits that unchanged: sending a patient a message is a clinical act by the
+        # clinician who owns the order, so it is gated here and not behind a weaker or broader role.
         response.headers["Cache-Control"] = "no-store"
         _require_clinician(principal, provider_id)
         _existing_order_for_provider_or_404(order_id, provider_id)
 
+        # DH-NOTIFY-001 §6: normalized and validated **before** the grant is issued, so an
+        # unparseable number costs the clinician a corrected digit rather than a live grant they
+        # must now revoke. Fails at the API boundary, never at the provider.
+        notify_request = body.notify if body is not None else None
+        normalized_destination: str | None = None
+        if notify_request is not None:
+            if notification_transport is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="patient notifications are not enabled on this deployment",
+                )
+            if patient_public_base_url is None:  # pragma: no cover - config refuses this pairing
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="patient notifications are not enabled on this deployment",
+                )
+            channel = NotificationChannel(notify_request.channel)
+            if not notification_transport.supports(channel):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"this deployment cannot send on the {channel.value} channel",
+                )
+            try:
+                normalized_destination = normalize_destination(
+                    notify_request.destination, default_region=notification_default_region
+                )
+            except InvalidDestination as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                ) from error
+
+        notification_id: uuid.UUID | None = None
         try:
             with session_factory.begin() as session:
                 issued = patient_access.issue(lab_order_id=order_id, session=session)
@@ -4611,6 +4772,41 @@ def build_exchange_router(
                     resource_type="patient_access_grant",
                     resource_id=issued.id,
                 )
+                if notify_request is not None and normalized_destination is not None:
+                    # Enrollment and obligation commit **with the grant**. If this transaction rolls
+                    # back there is no grant, no enrollment and no owed message; if it commits, all
+                    # three exist. The provider call is deliberately outside it -- see below.
+                    enrollment = patient_notifications.enroll(
+                        session,
+                        lab_order_id=order_id,
+                        patient_access_grant_id=issued.id,
+                        channel=NotificationChannel(notify_request.channel),
+                        destination=normalized_destination,
+                        consent_recorded_by_identity_id=principal.identity_id,
+                    )
+                    notification, _ = patient_notifications.enqueue(
+                        session,
+                        idempotency_key=access_link_key(
+                            issued.id,
+                            NotificationChannel(notify_request.channel),
+                            normalized_destination,
+                        ),
+                        lab_order_id=order_id,
+                        release_version_id=None,
+                        enrollment=enrollment,
+                        event_type=NotificationEventType.ACCESS_LINK_ISSUED,
+                        requested_by_identity_id=principal.identity_id,
+                    )
+                    notification_id = notification.id
+                    security_audit.record(
+                        session,
+                        event_type="patient_notification_requested",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=provider_id,
+                        outcome="created",
+                        resource_type="patient_notification",
+                        resource_id=notification.id,
+                    )
         except GrantOrderNotFound as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
@@ -4619,6 +4815,34 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ActiveGrantAlreadyExists as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+        if notification_id is not None:
+            # DH-NOTIFY-001 §4/§12 (Liban's A′ decision): the **only** moment DHealth can compose a
+            # patient link. `issued.raw_token` exists here, in this frame, and nowhere else ever --
+            # `exchange/patient_access.py` persists only its SHA-256 digest and there is no
+            # recovery endpoint by design (`docs/ARCHITECTURE.md` §19). So the link message is sent
+            # from the request that created it, after the clinical transaction has already
+            # committed.
+            #
+            # Two consequences, both deliberate. A provider outage cannot roll back the clinician's
+            # act of issuing access -- the grant is durable before a byte goes to Twilio. And a
+            # failure here is terminal rather than retryable: no background worker can ever
+            # reconstruct this URL, so the row goes straight to FAILED and the UI offers
+            # revoke-and-reissue, which is §4's own stated recovery path.
+            #
+            # The URL is built from configured deployment state, never from a request Host header
+            # (§17), and is passed as an argument -- never stored, never logged, never in an
+            # exception. `send_access_link_inline` swallows every failure precisely so that a
+            # messaging problem cannot turn into a failed issuance response whose raw token the
+            # clinician's browser would then never receive.
+            send_access_link_inline(
+                session_factory,
+                transport=notification_transport,
+                notification_id=notification_id,
+                patient_access_url=build_patient_access_url(
+                    patient_public_base_url or "", issued.raw_token
+                ),
+            )
 
         return PatientAccessIssueResponse(
             access_token=issued.raw_token,
@@ -4641,6 +4865,15 @@ def build_exchange_router(
         try:
             with session_factory.begin() as session:
                 outcome, grant_id = patient_access.revoke(lab_order_id=order_id, session=session)
+                # DH-NOTIFY-001: revoking access kills the link, so it also stops the messages that
+                # would tell the patient to open it. Same transaction as the revoke -- "access is
+                # gone" and "we will stop telling them to use it" must not be able to disagree.
+                #
+                # Deliberately does **not** cancel notifications already queued: a message that was
+                # owed when a result was released stays owed. The patient is still entitled to learn
+                # there is an update, and the message names their facility as the fallback, which is
+                # the path Law 4 requires to work anyway.
+                patient_notifications.withdraw(session, lab_order_id=order_id)
                 # Idempotent: revoking an order with no active grant is a safe no-op -- never a
                 # second `patient_access_revoked` audit row for the same underlying fact.
                 if outcome == "revoked":
@@ -4687,6 +4920,137 @@ def build_exchange_router(
             active=True,
             expires_at=grant.expires_at,
             access_mode=grant.access_mode.value,
+        )
+
+    # -- DH-NOTIFY-001: patient notification status, retry, and the operator read ------------------
+
+    def _to_notification_response(row) -> PatientNotificationResponse:  # noqa: ANN001 - ORM row
+        return PatientNotificationResponse(
+            id=row.id,
+            event_type=row.event_type,
+            channel=row.channel,
+            destination=row.destination,
+            state=row.state,
+            failure_category=row.failure_category,
+            attempt_count=row.attempt_count,
+            retryable=(
+                row.state == "FAILED"
+                and NotificationEventType(row.event_type) in DISPATCHABLE_EVENT_TYPES
+            ),
+            created_at=row.created_at,
+            sent_at=row.sent_at,
+            delivered_at=row.delivered_at,
+        )
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/notifications",
+        response_model=PatientNotificationStatusResponse,
+    )
+    def get_patient_notifications(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientNotificationStatusResponse:
+        """The same ``CLINICIAN``-for-the-owning-provider boundary as issuance, revocation and the
+        metadata read -- deliberately not a weaker one because this route only reads.
+        ``_existing_order_for_provider_or_404`` is what anti-enumerates: another provider's real
+        order id is indistinguishable here from one that does not exist (§20)."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_clinician(principal, provider_id)
+        _existing_order_for_provider_or_404(order_id, provider_id)
+
+        with session_factory() as session:
+            enrollment = patient_notifications.active_enrollment(session, lab_order_id=order_id)
+            rows = patient_notifications.list_for_order(session, lab_order_id=order_id)
+            return PatientNotificationStatusResponse(
+                enrolled=enrollment is not None,
+                channel=None if enrollment is None else enrollment.channel,
+                destination=None if enrollment is None else enrollment.destination,
+                notifications=[_to_notification_response(row) for row in rows],
+            )
+
+    @router.post(
+        "/organizations/{provider_id}/orders/{order_id}/notifications/{notification_id}/retry",
+        response_model=PatientNotificationResponse,
+    )
+    def retry_patient_notification(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        notification_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> PatientNotificationResponse:
+        """Make a ``FAILED`` message due again. A retry of one obligation, never a second message.
+
+        §20: gated on the owning provider's ``CLINICIAN``, and the notification must belong to the
+        order in the path. Possession of a notification id is not authority -- the id is checked
+        against the order, and the order against the provider, so a clinician in organization A
+        cannot retry organization B's message even holding both UUIDs.
+        """
+        response.headers["Cache-Control"] = "no-store"
+        _require_clinician(principal, provider_id)
+        _existing_order_for_provider_or_404(order_id, provider_id)
+
+        with session_factory.begin() as session:
+            row = patient_notifications.get(session, notification_id)
+            # The tenant check and the existence check collapse to one 404 on purpose: a
+            # notification belonging to another organization must be indistinguishable from one
+            # that does not exist.
+            if row is None or row.lab_order_id != order_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="notification not found"
+                )
+            try:
+                patient_notifications.retry(session, notification=row)
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail=str(error)
+                ) from error
+            security_audit.record(
+                session,
+                event_type="patient_notification_retry_requested",
+                actor_identity_id=principal.identity_id,
+                organization_id=provider_id,
+                outcome="updated",
+                resource_type="patient_notification",
+                resource_id=row.id,
+            )
+            return _to_notification_response(row)
+
+    @router.get("/notifications/operations", response_model=NotificationOperationsResponse)
+    def get_notification_operations(
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> NotificationOperationsResponse:
+        """§22: platform-admin only, and safe by construction.
+
+        Platform admin is correct **here** and wrong for sending (§20): this is cross-tenant
+        operational health, which is exactly a platform administrator's job, and it carries no
+        clinical authority -- no destination, no order, no patient, no message id, no body. A
+        platform admin still cannot send a patient a message, because ``issue_patient_access`` goes
+        through ``_require_clinician``, which they do not bypass.
+        """
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            authz.require_platform_admin(principal)
+        except NotAuthorized as error:
+            _audit_refused(principal, None)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="platform admin required"
+            ) from error
+        with session_factory() as session:
+            summary = patient_notifications.operational_summary(session)
+        return NotificationOperationsResponse(
+            enabled=notification_transport is not None,
+            provider=(
+                None if notification_transport is None else notification_transport.provider_name
+            ),
+            receipts_configured=notification_receipts_configured,
+            by_state=summary["by_state"],
+            by_failure_category=summary["by_failure_category"],
+            by_channel=summary["by_channel"],
+            oldest_pending_age_seconds=summary["oldest_pending_age_seconds"],
         )
 
     # -- DH-EX-005: patient API -- order-scoped by the bearer grant alone, never a path/body id ----

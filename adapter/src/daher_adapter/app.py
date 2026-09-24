@@ -22,6 +22,7 @@ from daher_adapter.exchange.identity_auth import (
     UnconfiguredKeySource,
 )
 from daher_adapter.logging import configure_logging
+from daher_adapter.notify.webhook import build_notification_webhook_router
 from daher_adapter.recovery import ManagedRecoveryFence, PostgresRecoveryFence
 
 logger = logging.getLogger("daher_adapter.health")
@@ -56,12 +57,24 @@ def create_app(
         key_source=exchange_key_source,
         platform_admin_role=active_settings.exchange_platform_admin_role,
     )
+    # Constructed once and shared by the enrollment surface (which sends the access-link message
+    # inline) and by any in-process dispatcher. `None` is the disabled state, not a failure.
+    notification_transport = active_settings.build_notification_transport()
     exchange_router = build_exchange_router(
         session_factory=exchange_session_factory,
         token_validator=exchange_token_validator,
         audit_writer=exchange_audit,
         platform_admin_role=active_settings.exchange_platform_admin_role,
         patient_access_ttl_hours=active_settings.exchange_patient_access_ttl_hours,
+        # DH-NOTIFY-001. `None` when notifications are disabled, which is the default and the state
+        # every development stack runs in: the enrollment surface then refuses with a 503 saying so,
+        # rather than accepting a consent record it can never act on. `Settings.from_env` has
+        # already refused to start if sending is enabled with anything missing, so a non-`None`
+        # transport here is always fully configured.
+        notification_transport=notification_transport,
+        patient_public_base_url=active_settings.patient_public_base_url,
+        notification_default_region=active_settings.notification_default_region,
+        notification_receipts_configured=active_settings.notification_receipts_configured,
     )
     # DH-CONNECT-AGENT-001 §8/§10: a **second validator with a second audience**, for connector
     # agents only. Same issuer, same signing keys, different `aud` -- so a clinician's token is not
@@ -85,6 +98,20 @@ def create_app(
         session_factory=exchange_session_factory,
         runtime_token_validator=connect_runtime_validator,
         platform_admin_role=active_settings.exchange_platform_admin_role,
+    )
+    # DH-NOTIFY-001 §15: the provider status callback. A third authentication regime, and it is a
+    # third one on purpose -- a messaging vendor cannot hold a Keycloak token, so this route's
+    # authority is an HMAC signature over the exact URL Twilio was configured to call. Mounted on
+    # its own router rather than on the Exchange's, because a clinical route whose auth dependency
+    # differs from every other clinical route's is the kind of exception somebody later copies.
+    #
+    # Mounted unconditionally and failing closed when unconfigured, exactly as the two routers
+    # above do: with no auth token or no configured callback URL, every request is a 403. A
+    # deployment that has provisioned no provider receives no receipts.
+    notification_webhook_router = build_notification_webhook_router(
+        session_factory=exchange_session_factory,
+        auth_token=active_settings.twilio_auth_token,
+        callback_url=active_settings.notification_status_callback_url,
     )
 
     @asynccontextmanager
@@ -163,5 +190,6 @@ def create_app(
 
     app.include_router(exchange_router)
     app.include_router(connect_runtime_router)
+    app.include_router(notification_webhook_router)
 
     return app

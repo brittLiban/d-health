@@ -1700,7 +1700,13 @@ class ExchangeSecurityAuditEvent(Base):
             # `provider_lab_route_activation_refused` above: a refusal recorded because "who tried
             # to send us this, for which facility, and when" is the question an operator asks.
             "'connector_service_identity_set', 'connector_runtime_connected', "
-            "'connector_message_refused'"
+            "'connector_message_refused', "
+            # DH-NOTIFY-001: the two operator acts worth auditing. Every automatic transition --
+            # the release-triggered obligation, the dispatcher hand-over, the provider acceptance,
+            # the delivery receipt -- is deliberately absent, for the same reason `connector_
+            # heartbeat` is: telemetry in a security table buries the rows that matter. That
+            # history lives in `patient_notifications`/`patient_notification_attempts`.
+            "'patient_notification_requested', 'patient_notification_retry_requested'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1723,7 +1729,9 @@ class ExchangeSecurityAuditEvent(Base):
             # DH-CONNECT-AGENT-001 keeps that convention -- a refused message names the
             # installation it claimed to be, not the delivery row, because a refused message has no
             # delivery row: refusing it is precisely the decision not to create one.
-            "'connector_installation')",
+            # DH-NOTIFY-001: attempts hang off a notification, so audit stays notification-centric
+            # rather than per-attempt -- the same convention as the connector line above.
+            "'connector_installation', 'patient_notification')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )

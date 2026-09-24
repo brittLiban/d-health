@@ -2097,6 +2097,40 @@ def _notify_provider_connector(
     )
 
 
+def _notify_patient(
+    session: Session,
+    lab_order_id: uuid.UUID,
+    release_version_id: uuid.UUID,
+    *,
+    amendment: bool,
+) -> None:
+    """DH-NOTIFY-001 §11/§12: owe the patient a content-free "there is an update" message.
+
+    In **this** session, so the obligation commits with the release -- a result released and the
+    patient not owed a message are two facts that must never be able to disagree. The provider call
+    happens later, in the dispatcher's own transaction: §12 forbids holding a clinical release open
+    across vendor network I/O, and forbids an SMS vendor being able to roll back a legitimate
+    release.
+
+    Does nothing -- and never raises -- when the order has no live notification enrollment, which is
+    the ordinary case. Notification is optional (§19): a patient who never agreed to be messaged, or
+    who has no phone, still has the QR, the printed sheet and their clinic.
+
+    Distinct from ``_notify_provider_connector`` above in every way that matters. That one carries
+    the released report to the ordering EMR. This one carries no clinical content whatsoever, and
+    touches neither ``ResultDelivery`` (which means the ordering *organization* received the result)
+    nor ``DoctorReview``. Imported inside the function so this module keeps no import-time
+    dependency on the notify package, matching the connect boundary's treatment directly above.
+    """
+    from daher_adapter.notify.hooks import (
+        notify_patient_of_amendment,
+        notify_patient_of_release,
+    )
+
+    hook = notify_patient_of_amendment if amendment else notify_patient_of_release
+    hook(session, lab_order_id=lab_order_id, release_version_id=release_version_id)
+
+
 class LabResultReleaseRepository:
     """DH-EX-012/ADR-044, extended by DH-EX-012C, extended by DH-EX-014A/ADR-048: the sole
     supported production way to move a ``LabOrder`` from ``IN_PROGRESS`` to ``COMPLETED`` -- see
@@ -2271,6 +2305,7 @@ class LabResultReleaseRepository:
         order.status = LabOrderStatus.COMPLETED.value
         session.flush()
         _notify_provider_connector(session, order_id, version.id)
+        _notify_patient(session, order_id, version.id, amendment=False)
         return _to_release_record(release), True
 
     def list_release_candidates(
@@ -3278,6 +3313,7 @@ class LabResultAmendmentRepository:
         session.flush()
 
         _notify_provider_connector(session, order_id, version.id)
+        _notify_patient(session, order_id, version.id, amendment=True)
         return _to_release_version_record(version), True
 
     # -- release queue ----------------------------------------------------------------------------

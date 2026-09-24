@@ -152,6 +152,27 @@ SecurityEventType = Literal[
     "connector_service_identity_set",
     "connector_runtime_connected",
     "connector_message_refused",
+    # DH-NOTIFY-001 §21: the two operator acts worth auditing, and deliberately only those.
+    #
+    # `patient_notification_requested` records that a named clinician enrolled this order for
+    # patient messaging and affirmed the patient's agreement -- the consent fact, bound to a real
+    # `ExchangeIdentity` actor. `patient_notification_retry_requested` records a deliberate
+    # re-attempt of a failed message.
+    #
+    # **Absent on purpose:** every automatic transition. A release-triggered obligation, a
+    # dispatcher hand-over, a provider acceptance and a delivery receipt are all operational
+    # telemetry, not security mutations, and one audit row per attempt would bury the two rows above
+    # under their own noise -- the same reasoning §64 applied to connector heartbeats. That history
+    # lives in `patient_notifications`/`patient_notification_attempts`, which are queryable and hold
+    # no clinical content.
+    #
+    # **Also absent on purpose:** the destination number, the rendered message and the secure URL.
+    # These events carry only the notification's own id as `resource_id`; the transport tables are
+    # where an operator looks for a destination, and the raw link is never persisted anywhere at
+    # all. Putting a phone number into a generic audit detail would spread a patient identifier
+    # across a table whose retention and access are designed for security events, not contact data.
+    "patient_notification_requested",
+    "patient_notification_retry_requested",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
@@ -171,6 +192,9 @@ SecurityResourceType = Literal[
     # DH-CONNECT-CONTRACT-001. Qualification rows hang off an installation, so every connector
     # event names the installation -- audit stays installation-centric, never per-capability.
     "connector_installation",
+    # DH-NOTIFY-001. Attempt rows hang off a notification, so audit stays notification-centric,
+    # never per-attempt -- matching the connector convention directly above.
+    "patient_notification",
 ]
 
 

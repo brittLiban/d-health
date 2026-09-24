@@ -92,6 +92,101 @@ def _positive_float(environment: Mapping[str, str], name: str, default: float) -
     return value
 
 
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+#: Providers this build can actually construct. An unknown name is a startup refusal rather than a
+#: silent fallback to the default: "I set DHEALTH_NOTIFICATION_PROVIDER=meta and nothing happened"
+#: must not be a thing that can occur.
+_KNOWN_NOTIFICATION_PROVIDERS = frozenset({"twilio", "fake"})
+
+
+def _boolean(environment: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = environment.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise ConfigurationError(f"{name} must be a boolean (true/false)")
+
+
+def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
+    """DH-NOTIFY-001 §10 — fail closed when sending is switched on but cannot work.
+
+    The asymmetry is the point. With notifications **off**, every value below is optional and the
+    adapter starts normally -- that is the state every test, every development stack and the native
+    demo run in, and it must stay frictionless. With notifications **on**, a missing credential is a
+    refusal to start, naming the variable, rather than a process that looks deployed and quietly
+    sends nothing. §10 requires those two to be different states, and a half-configured service that
+    boots green is precisely the shape that makes them look the same.
+
+    The one that is easy to miss and is checked anyway: `DHEALTH_PATIENT_PUBLIC_BASE_URL`. Without
+    it there is no way to compose a patient link at all, so enabling notifications without it would
+    produce an access-link message that cannot be rendered -- discovered at the first patient
+    handoff rather than at boot.
+    """
+    enabled = _boolean(environment, "DHEALTH_NOTIFICATIONS_ENABLED", False)
+    provider = environment.get("DHEALTH_NOTIFICATION_PROVIDER", "").strip().lower() or "twilio"
+    if provider not in _KNOWN_NOTIFICATION_PROVIDERS:
+        raise ConfigurationError(
+            f"DHEALTH_NOTIFICATION_PROVIDER must be one of "
+            f"{', '.join(sorted(_KNOWN_NOTIFICATION_PROVIDERS))}"
+        )
+
+    base_url = environment.get("DHEALTH_PATIENT_PUBLIC_BASE_URL", "").strip() or None
+    callback_url = environment.get("DHEALTH_NOTIFICATION_STATUS_CALLBACK_URL", "").strip() or None
+    account_sid = environment.get("TWILIO_ACCOUNT_SID", "").strip() or None
+    auth_token = environment.get("TWILIO_AUTH_TOKEN", "").strip() or None
+    sms_from = environment.get("DHEALTH_SMS_FROM", "").strip() or None
+    whatsapp_from = environment.get("DHEALTH_WHATSAPP_FROM", "").strip() or None
+    region = environment.get("DHEALTH_NOTIFICATION_DEFAULT_REGION", "").strip().upper() or None
+
+    if region is not None and (len(region) != 2 or not region.isalpha()):
+        raise ConfigurationError(
+            "DHEALTH_NOTIFICATION_DEFAULT_REGION must be an ISO 3166-1 alpha-2 code (e.g. DJ)"
+        )
+
+    if enabled:
+        if base_url is None:
+            raise ConfigurationError(
+                "DHEALTH_PATIENT_PUBLIC_BASE_URL is required when "
+                "DHEALTH_NOTIFICATIONS_ENABLED is true -- a patient link cannot be composed "
+                "without it, and it must never be derived from a request Host header"
+            )
+        if not base_url.startswith("https://"):
+            # A patient-access URL carries a live bearer credential in its fragment. Over http://
+            # that fragment is exposed to anyone on the path before TLS would have protected it.
+            raise ConfigurationError("DHEALTH_PATIENT_PUBLIC_BASE_URL must be an https:// URL")
+        if provider == "twilio":
+            if account_sid is None:
+                raise ConfigurationError(
+                    "TWILIO_ACCOUNT_SID is required when notifications are enabled"
+                )
+            if auth_token is None:
+                raise ConfigurationError(
+                    "TWILIO_AUTH_TOKEN is required when notifications are enabled"
+                )
+            if sms_from is None and whatsapp_from is None:
+                raise ConfigurationError(
+                    "at least one of DHEALTH_SMS_FROM or DHEALTH_WHATSAPP_FROM is required "
+                    "when notifications are enabled"
+                )
+
+    return {
+        "notifications_enabled": enabled,
+        "notification_provider": provider,
+        "patient_public_base_url": base_url,
+        "notification_status_callback_url": callback_url,
+        "twilio_account_sid": account_sid,
+        "twilio_auth_token": auth_token,
+        "sms_from": sms_from,
+        "whatsapp_from": whatsapp_from,
+        "notification_default_region": region,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     timezone: str
@@ -143,6 +238,34 @@ class Settings:
     # [1, 720] hours (1 hour .. 30 days) so a misconfigured value cannot silently produce an
     # unbounded-lifetime or effectively-instant-expiry grant.
     exchange_patient_access_ttl_hours: int = 168
+    # DH-NOTIFY-001 §10: patient SMS/WhatsApp notification. **Off by default**, and the default is
+    # the decision -- a deployment that has not deliberately switched this on must never send a
+    # message to a real phone number, and every development stack and test run inherits that.
+    #
+    # Three operationally distinct states, which §10 requires be distinguishable (see the
+    # `notifications_*` properties below): *disabled* (nothing is owed, nothing is wrong),
+    # *enabled and configured* (messages flow), and *enabled but incomplete* (a startup refusal,
+    # never a service that looks deployed and silently sends nothing).
+    notifications_enabled: bool = False
+    notification_provider: str = "twilio"
+    #: The public origin patient links are built from. **Explicit deployment configuration, never
+    #: derived from an incoming `Host` header** (§17): a server-composed link built from an
+    #: attacker-controlled header is a link that carries a live patient credential to an
+    #: attacker-chosen origin. The browser-side QR/print path keeps using its own `window.origin`
+    #: (`ui/src/features/patient/patientAccessUrl.ts`) and is unaffected.
+    patient_public_base_url: str | None = None
+    #: The exact URL Twilio is configured to call back, signed by them and validated against this
+    #: value. `None` disables receipt handling entirely -- notifications then stop at `SENT`, which
+    #: is honest rather than limiting.
+    notification_status_callback_url: str | None = None
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    sms_from: str | None = None
+    whatsapp_from: str | None = None
+    #: ISO 3166-1 alpha-2 default region for parsing a destination typed without a country code.
+    #: Unset by default, so a number with no country code is refused rather than guessed (§6).
+    #: This is the configuration seam §6 asks for; Djibouti is deliberately not hard-coded.
+    notification_default_region: str | None = None
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -188,6 +311,7 @@ class Settings:
             exchange_patient_access_ttl_hours=_bounded_int(
                 env, "EXCHANGE_PATIENT_ACCESS_TTL_HOURS", 168, minimum=1, maximum=720
             ),
+            **_notification_settings(env),
         )
 
     @property
@@ -231,6 +355,47 @@ class Settings:
             self.exchange_oidc_configured
             and self.exchange_connect_runtime_audience
             and self.exchange_connect_runtime_audience != self.exchange_oidc_audience
+        )
+
+    @property
+    def notification_receipts_configured(self) -> bool:
+        """Whether an authenticated provider receipt can be accepted at all.
+
+        Needs both the shared secret that signs it and the exact URL that was signed. Either one
+        missing means the webhook refuses every request, and notifications truthfully stop at
+        ``SENT`` -- a weaker claim, correctly made, rather than ``DELIVERED`` asserted on nothing.
+        """
+        return bool(self.twilio_auth_token and self.notification_status_callback_url)
+
+    def build_notification_transport(self):  # noqa: ANN201 -- NotificationTransport | None
+        """The configured provider, or ``None`` when sending is off.
+
+        ``None`` is the *disabled* state, not a failure: callers treat it as "nothing to send" and
+        report nothing wrong (§10). A misconfigured-but-enabled deployment never reaches here --
+        ``from_env`` already refused to start.
+
+        Imported lazily so that ``config`` keeps no import-time dependency on the notify package,
+        matching how ``exchange/results.py`` and ``exchange/selection.py`` treat the connect
+        boundary.
+        """
+        if not self.notifications_enabled:
+            return None
+        if self.notification_provider == "fake":
+            # Reachable only by explicit configuration, and never in production: a deployment that
+            # sets this has deliberately asked for a provider that contacts nothing. It exists so
+            # the native demo stack can run the whole golden journey offline.
+            from daher_adapter.notify.fake import FakeNotificationTransport
+
+            return FakeNotificationTransport()
+
+        from daher_adapter.notify.twilio import TwilioNotificationTransport
+
+        return TwilioNotificationTransport(
+            account_sid=self.twilio_account_sid or "",
+            auth_token=self.twilio_auth_token or "",
+            sms_from=self.sms_from,
+            whatsapp_from=self.whatsapp_from,
+            status_callback_url=self.notification_status_callback_url,
         )
 
     @property
