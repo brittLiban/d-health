@@ -43,7 +43,7 @@ for the design rules the fixes had to stay inside.
 | Widths | 1280×860 (desktop), 768×1024 (tablet), 390×844 (phone), `deviceScaleFactor: 2`, locale `fr-FR`. |
 | Captures | 44 scenes × 3 widths = **132 screenshots**, of which **42 are new** (14 new clinic/laboratory scenes). |
 | Mechanical checks per scene | page-level horizontal overflow; controls outside the viewport; controls reachable only by scrolling their container; navigation clipping and height; unlabelled inputs; console errors; page errors; failed requests. |
-| Looked at | 6 captures read as images, named in A.3. The rest are evidence on disk; the harness's own checks cover all 132. |
+| Looked at | 5 distinct captures read as images, two of them before and after a fix — 7 reads in all. The rest are evidence on disk; the harness's own mechanical checks cover all 132. |
 
 **Why a harness rather than the full stack.** §42 prefers native demo + Keycloak + Caddy + a real
 browser. The Docker daemon is permission-denied in this environment, so Keycloak and Caddy cannot
@@ -163,6 +163,12 @@ by breaking the name. `break-word` breaks only when a word genuinely cannot fit 
 min-content alone. A technical identifier keeps `anywhere` — a UUID has no break opportunity and
 loses nothing.
 
+This one is in a **shared** component: `PatientIdentity` and `LabPatientIdentity` render a patient's
+name on every staff screen, not only the two this ticket reviewed. The evidence that it broke
+nothing elsewhere is mechanical rather than visual — all 132 captures were re-taken afterwards, at
+all three widths, with no new overflow, no newly off-screen control and no console or page error on
+any scene, including the platform and shell scenes not re-inspected by eye.
+
 #### P1-4 — the orders table dragged the whole page sideways *(fixed)*
 
 `ClinicOrdersPage`'s six-column table already sat in an `overflow-x: auto` box, and the box did
@@ -222,6 +228,7 @@ now uses the design system's own warning pair.
 | O-3 | **P3** | 20px of page overflow at 390px on the result detail, from the four-column observations table. | `table-layout: fixed` was tested and removes it, at the cost of changing how every clinical values table lays out at every width. Not worth that trade for 20px; recorded with the tested fix so the next person does not have to find it again. |
 | O-4 | **P3** | On the laboratory history rows, `Voir le contenu exact` wraps to three lines beside its row. | Cosmetic. §24: do not let P3 consume the ticket. |
 | O-5 | **P3** | Every queue card and table row shows the internal order id (`order-entry`, `order-completed`). | §26 (automatic-data audit) says the system should not make people read what it already knows. Whether staff actually use that string to talk to a laboratory on the telephone is a question for a human session — removing it on a guess would be the wrong direction. |
+| O-6 | **P3** | Which version tab is *selected* is shown by a background tint only. | Pre-existing, and not what P0-1 was about: the current/superseded fact is now in the tab's own text and in a banner, so nothing safety-bearing rests on the tint. `aria-selected` is set, so the selection reaches a screen reader. Recorded because "the fact is in the text, not in a colour" is a claim about the standing, not about the whole tab strip, and a reader should not have to work that out. |
 
 ### A.5 Required-field audit (§25)
 
@@ -269,10 +276,13 @@ accented `enregistrée` as the error. `FR1-NC` asserts both directions in the te
 ### A.8 Numbers
 
 ```text
-UI test suite         882 tests across 58 files, run in 10 batches
-                      881 pass
-                        1 fails: src/features/auth/logout.test.ts — pre-existing,
-                          environment-bound, untouched by this ticket
+UI test suite         882 tests across 58 files, measured in 10 batches
+                      That run had 2 failures: the pre-existing, environment-bound
+                      src/features/auth/logout.test.ts, and the design-token test,
+                      which had caught the three undefined custom properties below.
+                      After that fix the affected files were re-run and pass, so the
+                      standing count is 881 passing and 1 pre-existing failure —
+                      reconciled from two runs, not measured in one.
 new tests               14
 tsc -b --noEmit       clean
 oxlint                48 → 49 warnings, 0 errors. The new one is
