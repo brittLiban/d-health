@@ -359,6 +359,188 @@ describe('ClinicResultsPage', () => {
     expect(screen.queryByText('0.9')).not.toBeInTheDocument()
   })
 
+  /*
+   * DH-USABILITY-001 §13 (P0) -- which result is the one that counts.
+   *
+   * §13 names the outcome these pin exactly: "if the user cannot confidently identify which result
+   * is current: P0 usability defect". Before this ticket the tabs read "Version 1" and
+   * "Rectificatif (version 2)" and said only which was *later*; a clinician opening version 1 after
+   * a correction saw a complete, plausible result with nothing on screen contradicting it.
+   *
+   * The standing is asserted in the accessible *name* and in text, never in a colour, because a
+   * badge that a stylesheet can hide or a greyscale print can flatten is not a safety control.
+   *
+   * ADR-048 deliberately gives every released version its own review obligation, so reaching an
+   * older version is legitimate and is not disabled here. What these tests pin is that it is
+   * unmistakably labelled and demoted.
+   */
+  function twoVersionClient(): ExchangeClient {
+    return makeClient({
+      listResultReviews: vi.fn().mockResolvedValue(
+        makeQueueResponse([
+          makeQueueEntry({
+            release_version_id: 'rel-v2',
+            release_version_number: 2,
+            is_amendment: true,
+          }),
+        ]),
+      ),
+      getReleaseVersions: vi.fn().mockResolvedValue(
+        makeHistory('order-a', {
+          versions: [
+            {
+              release_version_id: 'rel-v1',
+              release_version_number: 1,
+              is_amendment: false,
+              released_at: '2026-09-17T09:00:00Z',
+              review_status: 'NO_FOLLOW_UP_REQUIRED',
+              reviewed_at: '2026-09-17T09:15:00Z',
+              reviewed_by_practitioner_reference_id: 'prac-1',
+            },
+            {
+              release_version_id: 'rel-v2',
+              release_version_number: 2,
+              is_amendment: true,
+              released_at: '2026-09-17T09:30:00Z',
+              review_status: 'PENDING',
+              reviewed_at: null,
+              reviewed_by_practitioner_reference_id: null,
+            },
+          ],
+        }),
+      ),
+      getReleaseVersion: vi.fn((_providerId: string, _orderId: string, versionId: string) =>
+        Promise.resolve(
+          versionId === 'rel-v1'
+            ? makeVersionContent({
+                release_version_id: 'rel-v1',
+                review_status: 'NO_FOLLOW_UP_REQUIRED',
+                results: [],
+              })
+            : makeVersionContent({ release_version_id: 'rel-v2', is_amendment: true }),
+        ),
+      ),
+    })
+  }
+
+  /**
+   * The replacement banner is not the page's only `role="status"` -- the two loading lines share
+   * that role -- so it is located by its own sentence and read through the element that owns it.
+   */
+  async function findSupersededBanner(): Promise<HTMLElement> {
+    const sentence = await screen.findByText('Ce résultat a été remplacé.')
+    const banner = sentence.closest('[role="status"]')
+    expect(banner).not.toBeNull()
+    return banner as HTMLElement
+  }
+
+  it('UI-CUR1: exactly one version tab is named current, and it is the latest one', async () => {
+    const user = userEvent.setup()
+    render(<StaffApp client={twoVersionClient()} initialSection="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9')
+
+    const tabs = screen.getAllByRole('tab')
+    const current = tabs.filter((tab) => /Résultat actuel/.test(tab.textContent ?? ''))
+    const replaced = tabs.filter((tab) => /Remplacé/.test(tab.textContent ?? ''))
+
+    expect(current).toHaveLength(1)
+    expect(replaced).toHaveLength(1)
+    // Which one carries which standing -- "one of each" would also be satisfied by a reversed
+    // derivation, and a reversed derivation is the dangerous half of this defect.
+    expect(current[0].textContent).toMatch(/Rectificatif \(version 2\)/)
+    expect(replaced[0].textContent).toMatch(/^Version 1/)
+  })
+
+  it('UI-CUR2: opening a replaced version says so above the values, naming the one that counts', async () => {
+    const user = userEvent.setup()
+    render(<StaffApp client={twoVersionClient()} initialSection="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9')
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+
+    const banner = await findSupersededBanner()
+    expect(banner).toHaveTextContent(/rectificatif \(version 2\)/i)
+    expect(
+      within(banner).getByRole('button', { name: 'Voir le résultat actuel' }),
+    ).toBeInTheDocument()
+  })
+
+  it('UI-CUR3: the banner takes the clinician to the current version, and then withdraws', async () => {
+    const client = twoVersionClient()
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="results" />)
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9')
+    await user.click(screen.getByRole('tab', { name: /^Version 1/ }))
+    const banner = await findSupersededBanner()
+
+    await user.click(within(banner).getByRole('button', { name: 'Voir le résultat actuel' }))
+
+    await waitFor(() =>
+      expect(client.getReleaseVersion).toHaveBeenLastCalledWith('provider-a', 'order-a', 'rel-v2'),
+    )
+    await waitFor(() =>
+      expect(screen.queryByText('Ce résultat a été remplacé.')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('UI-CUR4: a single released version is named current and carries no replacement warning', async () => {
+    const user = userEvent.setup()
+    render(
+      <StaffApp
+        client={makeClient({
+          listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
+          getReleaseVersions: vi.fn().mockResolvedValue(makeHistory('order-a')),
+          getReleaseVersion: vi.fn().mockResolvedValue(makeVersionContent()),
+        })}
+        initialSection="results"
+      />,
+    )
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('0.9')
+
+    expect(screen.getByRole('tab', { name: /^Version 1 — Résultat actuel/ })).toBeInTheDocument()
+    expect(screen.queryByText('Ce résultat a été remplacé.')).not.toBeInTheDocument()
+  })
+
+  it('UI-CUR5: a legacy unversioned result claims neither standing, because nothing superseded it', async () => {
+    const user = userEvent.setup()
+    render(
+      <StaffApp
+        client={makeClient({
+          listResultReviews: vi.fn().mockResolvedValue(
+            makeQueueResponse([
+              makeQueueEntry({
+                order_id: 'order-legacy',
+                release_version_id: null,
+                release_version_number: null,
+                legacy_unversioned: true,
+                released_at: null,
+              }),
+            ]),
+          ),
+          getReleaseVersions: vi
+            .fn()
+            .mockResolvedValue(makeHistory('order-legacy', { versions: [] })),
+          getOrderResults: vi.fn().mockResolvedValue(makeLegacyResults()),
+        })}
+        initialSection="results"
+      />,
+    )
+
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText('Résultat historique — aucune version de libération enregistrée.')
+
+    // Either claim would be an invented fact: there is no version record to compare against.
+    expect(screen.queryByText('Ce résultat a été remplacé.')).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/Résultat actuel/)
+  })
+
   it('UI-V3: a mismatched release_version_id in the content response fails closed', async () => {
     const client = makeClient({
       listResultReviews: vi.fn().mockResolvedValue(makeQueueResponse([makeQueueEntry()])),
@@ -573,7 +755,14 @@ describe('ClinicResultsPage', () => {
     expect(screen.getByText(/Revue enregistrée/)).toBeInTheDocument()
     // The recheck re-derives the version history fresh (never the stale switch-time snapshot), so
     // the tab's own status label reflects what the mutation actually recorded.
-    expect(screen.getByRole('tab', { name: /Version 1 — Revu — aucun suivi requis/ })).toBeInTheDocument()
+    // DH-USABILITY-001 §13: the tab now also carries which release is current. This assertion's
+    // subject is unchanged -- that the label refreshes once the review is recorded -- and the
+    // expected name is tightened rather than relaxed.
+    expect(
+      screen.getByRole('tab', {
+        name: /Version 1 — Résultat actuel — Revu — aucun suivi requis/,
+      }),
+    ).toBeInTheDocument()
   })
 
   it('UI-R6: a 409 conflict from a concurrent reviewer never overwrites -- shows the authoritative outcome', async () => {

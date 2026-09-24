@@ -55,6 +55,28 @@ interface ClinicPatientsPageProps {
   onPendingOrderChange?: (scopeKey: string, pending: PendingOrderMutation | null) => void
 }
 
+/*
+ * DH-USABILITY-001 §27/§32 — the two messages a front-desk user meets when this browser cannot
+ * keep the record that makes patient creation safe to retry.
+ *
+ * Both previously read "Impossible de verifier la recuperation sure d'une creation precedente." --
+ * unaccented, in a product where French is first class, and written from the inside: "récupération
+ * sûre" is the idempotency mechanism, not anything the person at the desk can act on. §32 asks
+ * every error to answer three questions, and neither answered the third.
+ *
+ * What is stated is only what is actually known. The first message cannot claim the patient does
+ * or does not exist -- that is precisely what could not be checked -- so it says what to do to
+ * find out. The second can claim it, because nothing was sent, and saying so plainly is what
+ * stops somebody creating the same patient twice.
+ */
+const PENDING_PATIENT_UNVERIFIABLE =
+  'Impossible de vérifier si une création de patient faite ici auparavant a bien abouti. ' +
+  'Par précaution, la création est bloquée sur cet appareil afin d’éviter un doublon. ' +
+  'Recherchez le patient par son nom ci-dessous : s’il apparaît, il est déjà enregistré.'
+const PENDING_PATIENT_NOT_SENT =
+  'Cet appareil n’a pas pu préparer l’enregistrement. Rien n’a été envoyé : aucun patient n’a ' +
+  'été créé. Réessayez ; si le message revient, utilisez un autre appareil.'
+
 // DH-CLINIC-005 §16: a plain-text name for inline sentence use (e.g. "Sélectionnez... pour X.")
 // -- the full identity banner is `<PatientIdentity>` itself, used everywhere else. Never falls
 // back to a technical identifier (that fallback belongs to `<PatientIdentity>`'s own display).
@@ -236,7 +258,7 @@ export function ClinicPatientsPage({
     if (user && providerId) {
       if (!canReadPendingPatientStorage()) {
         setStorageUnreadable(true)
-        setDefinitiveError("Impossible de verifier la recuperation sure d'une creation precedente.")
+        setDefinitiveError(PENDING_PATIENT_UNVERIFIABLE)
       }
       let stored: OpaquePendingPatientIdentity | null = null
       try {
@@ -244,7 +266,7 @@ export function ClinicPatientsPage({
       } catch (error) {
         if (error instanceof PendingPatientStorageReadError) {
           setStorageUnreadable(true)
-          setDefinitiveError("Impossible de verifier la recuperation sure d'une creation precedente.")
+          setDefinitiveError(PENDING_PATIENT_UNVERIFIABLE)
           setShowCreate(false)
         } else throw error
       }
@@ -899,7 +921,7 @@ export function ClinicPatientsPage({
     // Durability is a precondition of issuing a mutation whose response may be lost.
     if (!setStoredPendingPatient(user.identity_id, targetProviderId, { idempotency_key: idempotencyKey })) {
       setCreateErrorCode('SERVER_ERROR')
-      setDefinitiveError("Impossible de preparer la recuperation sure de cette creation. Aucun envoi n'a ete effectue.")
+      setDefinitiveError(PENDING_PATIENT_NOT_SENT)
       return
     }
     onPendingCreationChange(scopeKey, { body, idempotencyKey })
@@ -1069,10 +1091,18 @@ export function ClinicPatientsPage({
                   {orderStorageUnreadable ? (
                     <div className={styles.alertBanner} role="alert" style={{ marginTop: 'var(--space-3)' }}>
                       <ErrorState code="SERVER_ERROR" />
+                      {/*
+                        DH-USABILITY-001 §27/§32: "Stockage local de réconciliation d'ordre" named
+                        the mechanism rather than the situation, and left the reader with nothing
+                        to do. The fact and the consequence are unchanged; what is added is the
+                        third answer -- what happens now.
+                      */}
                       <p>
-                        <strong>Stockage local corrompu :</strong> Le stockage local de réconciliation d’ordre
-                        est corrompu ou illisible. Pour prévenir la création d’ordres en doublon, la création
-                        de nouveaux ordres est temporairement bloquée.
+                        <strong>Création d’ordres bloquée sur cet appareil :</strong> DHealth ne peut
+                        plus vérifier ici si un ordre envoyé précédemment est bien arrivé. Pour éviter
+                        un doublon, la création de nouveaux ordres est suspendue sur cet appareil. Les
+                        ordres déjà envoyés ne sont pas affectés ; utilisez un autre appareil pour en
+                        créer de nouveaux.
                       </p>
                     </div>
                   ) : null}
@@ -1496,7 +1526,7 @@ export function ClinicPatientsPage({
       </header>
 
       {storageUnreadable ? (
-        <Card><div className={styles.createError}><ErrorState code="SERVER_ERROR" /><p className={styles.errorText}>Impossible de verifier la recuperation sure d'une creation precedente.</p></div></Card>
+        <Card><div className={styles.createError}><ErrorState code="SERVER_ERROR" /><p className={styles.errorText}>{PENDING_PATIENT_UNVERIFIABLE}</p></div></Card>
       ) : null}
 
       {confirmedReadAttempt ? (
@@ -1539,7 +1569,7 @@ export function ClinicPatientsPage({
             <h2>Nouveau patient</h2>
             <div>
               <TextInput
-                label="Nom affiché (obligatoire)"
+                label="Nom du patient (obligatoire)"
                 value={displayName}
                 maxLength={256}
                 disabled={createState !== 'idle'}

@@ -1,3 +1,16 @@
+/*
+ * DH-USABILITY-001 §29 — how a patient's name is allowed to break.
+ *
+ * `overflow-wrap: anywhere` broke names mid-word wherever the column was narrow: a phone-width
+ * order table rendered "Fatou / ma / Robleh" and "Ismail / Warsa / ma", and a telephone number
+ * across five lines. It also collapsed the column that caused it, because `anywhere` lets a word
+ * count as one character wide when the browser measures min-content -- so the cell agreed to be
+ * unreadably narrow, and then filled that width by breaking the name.
+ *
+ * `break-word` breaks a word only when it genuinely cannot fit, and does not shrink min-content.
+ * Identity stays legible and the column stops collapsing. A technical identifier keeps `anywhere`
+ * below: a UUID has no break opportunity at all, and breaking one mid-string loses nothing.
+ */
 .compact,
 .full {
   display: grid;
@@ -13,7 +26,7 @@
   margin: 0;
   font-weight: 600;
   color: var(--color-text, inherit);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .full .name {
@@ -24,7 +37,7 @@
   margin: 0;
   font-size: 0.85rem;
   color: var(--color-text-muted);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .warning {

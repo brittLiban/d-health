@@ -10,6 +10,7 @@ import { Button, Card, EmptyState, ErrorState, LoadingSkeleton, StatusBadge } fr
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { ReleaseVersionHistory } from '../components/ReleaseVersionHistory'
 import { useLab } from '../LabContext'
+import { PANEL_COLUMNS } from '../panelLayout'
 
 const INSPECTION_LOAD_ERROR = 'Impossible de charger les résultats de cet ordre.'
 const ORDER_MISMATCH_ERROR = 'Impossible de vérifier de manière sûre cet ordre.'
@@ -505,7 +506,7 @@ export function LabReleasePage() {
       </div>
 
       {tab === 'results' ? (
-      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: panel ? '1fr 1fr' : '1fr' }}>
+      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: panel ? PANEL_COLUMNS : '1fr' }}>
         <Card>
           <div style={{ padding: 'var(--space-4)' }}>
             {queueState.loading && queueState.entries.length === 0 ? (
@@ -668,7 +669,7 @@ export function LabReleasePage() {
         ) : null}
       </div>
       ) : (
-      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: amendmentPanel ? '1fr 1fr' : '1fr' }}>
+      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: amendmentPanel ? PANEL_COLUMNS : '1fr' }}>
         <Card>
           <div style={{ padding: 'var(--space-4)' }}>
             {amendmentQueueState.loading && amendmentQueueState.entries.length === 0 ? (

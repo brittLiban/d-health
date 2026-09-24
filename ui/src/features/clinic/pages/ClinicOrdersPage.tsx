@@ -241,8 +241,16 @@ export function ClinicOrdersPage() {
         </EmptyState>
       ) : (
         <div style={{ display: 'grid', gap: 'var(--space-5)' }}>
-          <Card>
-            <div style={{ overflowX: 'auto' }}>
+          {/*
+            DH-USABILITY-001 §29: `minWidth: 0`. The scroll container below was already here and
+            did nothing, because a grid item defaults to `min-width: auto` and therefore refuses
+            to shrink below its content -- so this six-column table pushed the *page* 235px wide
+            at tablet and 385px at phone, carrying "Suivi patient" and "Parcours" off the right
+            edge and, at phone width, the navigation with them. With the item allowed to shrink,
+            the table scrolls inside its own box and the page does not move.
+          */}
+          <Card style={{ minWidth: 0 }}>
+            <div style={{ overflowX: 'auto', position: 'relative' }}>
               <table
                 style={{
                   width: '100%',

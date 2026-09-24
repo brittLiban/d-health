@@ -23,21 +23,29 @@ import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ExchangeClient } from '../src/api/exchangeClient'
 import type {
+  CatalogEntry,
   FacilityConnector,
   ExchangeMembershipSummary,
   ExchangeMeResponse,
   FacilityEnrollment,
   FacilityReadiness,
+  LabOrder,
+  LabResultInspection,
+  LabWorkflowOrder,
   OrganizationMembership,
+  PatientDirectoryEntry,
+  PatientIdentitySummary,
   ProviderLabRoute,
   PatientOrder,
+  ResultEntryPlanTemplate,
 } from '../src/api/exchangeTypes'
 import { PatientStatusPage } from '../src/features/patient/PatientStatusPage'
+import { StaffApp } from '../src/features/staff/StaffApp'
 import { StaffWorkspace } from '../src/features/staff/StaffWorkspace'
 import { StaffShell } from '../src/features/staff/StaffShell'
 import { WorkflowRelay } from '../src/features/staff/WorkflowRelay'
 import { providerRelayNodes } from '../src/features/staff/relayNodes'
-import { availableSections } from '../src/features/staff/staffSections'
+import { availableSections, type StaffSectionId } from '../src/features/staff/staffSections'
 import { WorkspaceProvider } from '../src/features/workspace/WorkspaceProvider'
 import { capabilitiesFor } from '../src/features/workspace/workspaceCapabilities'
 import '../src/fonts.ts'
@@ -901,6 +909,433 @@ function PlatformScene({
   )
 }
 
+/*
+ * DH-USABILITY-001 §29/§42 — the clinic and laboratory workflows, in a real browser.
+ *
+ * Every scene above this line is platform, shell or patient work. The two workflows this product
+ * is actually for — a clinician ordering and reading results, a laboratory entering and releasing
+ * them — had never been photographed at any width, so every claim about their density, their
+ * touch targets and their behaviour on a tablet came from reading source. §42 is explicit that
+ * component tested is not browser tested; this is the browser half.
+ *
+ * Synthetic throughout (§5): invented names, invented values, one laboratory, one clinic. The
+ * numbers below are plausible-looking and clinically meaningless, and nothing here is or has ever
+ * been a real patient.
+ */
+
+const WORKFLOW_PATIENT: PatientIdentitySummary = {
+  patient_id: 'pat-1',
+  display_name: 'Fatouma Robleh',
+  date_of_birth: '1988-06-02',
+  contact_channel_type: 'PHONE',
+  contact_value: '+25377100001',
+}
+
+const WORKFLOW_ITEMS = [
+  { catalog_entry_id: 'cat-1', catalog_code_snapshot: 'GLU', catalog_display_name_snapshot: 'Glycémie à jeun' },
+  { catalog_entry_id: 'cat-2', catalog_code_snapshot: 'NFS', catalog_display_name_snapshot: 'Numération formule sanguine' },
+]
+
+const CLINIC_ORDERS: LabOrder[] = [
+  {
+    id: 'order-completed',
+    provider_organization_id: 'prov-1',
+    patient_reference_id: 'ref-1',
+    practitioner_reference_id: 'prac-1',
+    patient: WORKFLOW_PATIENT,
+    status: 'COMPLETED',
+    created_at: '2026-09-23T07:10:00Z',
+    items: WORKFLOW_ITEMS,
+    lab_assignment: {
+      lab_organization_id: 'lab-1',
+      lab_organization_name: 'Laboratoire Central',
+      selected_at: '2026-09-23T07:20:00Z',
+    },
+  },
+  {
+    id: 'order-in-progress',
+    provider_organization_id: 'prov-1',
+    patient_reference_id: 'ref-2',
+    practitioner_reference_id: 'prac-1',
+    patient: {
+      patient_id: 'pat-2',
+      display_name: 'Ismail Warsama',
+      date_of_birth: '1979-11-14',
+      contact_channel_type: 'PHONE',
+      contact_value: '+25377100002',
+    },
+    status: 'IN_PROGRESS',
+    created_at: '2026-09-23T08:40:00Z',
+    items: [WORKFLOW_ITEMS[0]],
+    lab_assignment: {
+      lab_organization_id: 'lab-1',
+      lab_organization_name: 'Laboratoire Central',
+      selected_at: '2026-09-23T08:45:00Z',
+    },
+  },
+  {
+    id: 'order-awaiting',
+    provider_organization_id: 'prov-1',
+    patient_reference_id: 'ref-3',
+    practitioner_reference_id: 'prac-1',
+    patient: {
+      patient_id: 'pat-3',
+      display_name: 'Nasra Guelleh',
+      date_of_birth: '1994-02-27',
+      contact_channel_type: 'PHONE',
+      contact_value: '+25377100003',
+    },
+    status: 'AWAITING_LAB_SELECTION',
+    created_at: '2026-09-23T09:05:00Z',
+    items: [WORKFLOW_ITEMS[1]],
+    lab_assignment: null,
+  },
+]
+
+const CLINIC_DIRECTORY: PatientDirectoryEntry[] = [
+  {
+    patient_id: 'pat-1',
+    provider_organization_id: 'prov-1',
+    display_name: 'Fatouma Robleh',
+    date_of_birth: '1988-06-02',
+    contact_channel_type: 'PHONE',
+    contact_value: '+25377100001',
+    primary_patient_reference_id: 'ref-1',
+    created_at: '2026-09-01T06:00:00Z',
+  },
+  {
+    patient_id: 'pat-2',
+    provider_organization_id: 'prov-1',
+    display_name: 'Ismail Warsama',
+    date_of_birth: '1979-11-14',
+    contact_channel_type: 'PHONE',
+    contact_value: '+25377100002',
+    primary_patient_reference_id: 'ref-2',
+    created_at: '2026-09-04T06:00:00Z',
+  },
+  {
+    patient_id: 'pat-3',
+    provider_organization_id: 'prov-1',
+    display_name: 'Nasra Guelleh',
+    date_of_birth: null,
+    contact_channel_type: null,
+    contact_value: null,
+    primary_patient_reference_id: 'ref-3',
+    created_at: '2026-09-22T06:00:00Z',
+  },
+]
+
+const CLINIC_CATALOG: CatalogEntry[] = [
+  { id: 'cat-1', code: 'GLU', display_name: 'Glycémie à jeun', version: 1, active: true, is_synthetic: true },
+  { id: 'cat-2', code: 'NFS', display_name: 'Numération formule sanguine', version: 1, active: true, is_synthetic: true },
+  { id: 'cat-3', code: 'CRP', display_name: 'Protéine C-réactive', version: 1, active: true, is_synthetic: true },
+]
+
+const RESULT_OBSERVATIONS = [
+  {
+    observation_id: 'obs-1',
+    source_code: 'GLU',
+    source_system: 'dhealth-exchange',
+    display_label_snapshot: 'Glycémie',
+    result_type: 'NUMERIC' as const,
+    numeric_value: '5.4000',
+    numeric_unit: 'mmol/L',
+    reference_range_low: '3.9000',
+    reference_range_high: '5.5000',
+    text_value: null,
+    recorded_at: '2026-09-23T10:40:00Z',
+  },
+]
+
+const AMENDED_OBSERVATIONS = [
+  { ...RESULT_OBSERVATIONS[0], observation_id: 'obs-2', numeric_value: '6.2000', recorded_at: '2026-09-23T12:05:00Z' },
+]
+
+/** The two-version history that DH-USABILITY-001 §13's P0 fix is about. */
+const CLINIC_VERSIONS = [
+  {
+    release_version_id: 'rel-v1',
+    release_version_number: 1,
+    is_amendment: false,
+    released_at: '2026-09-23T11:00:00Z',
+    review_status: 'NO_FOLLOW_UP_REQUIRED' as const,
+    reviewed_at: '2026-09-23T11:20:00Z',
+    reviewed_by_practitioner_reference_id: 'prac-1',
+  },
+  {
+    release_version_id: 'rel-v2',
+    release_version_number: 2,
+    is_amendment: true,
+    released_at: '2026-09-23T12:10:00Z',
+    review_status: 'PENDING' as const,
+    reviewed_at: null,
+    reviewed_by_practitioner_reference_id: null,
+  },
+]
+
+const LAB_TEMPLATE: ResultEntryPlanTemplate = {
+  template_id: 'tpl-1',
+  version: 1,
+  is_synthetic: true,
+  observations: [
+    {
+      definition_id: 'def-1',
+      source_code: 'GLU',
+      display_label: 'Glycémie',
+      result_type: 'NUMERIC',
+      numeric_unit: 'mmol/L',
+      required: true,
+      sort_order: 1,
+    },
+    {
+      definition_id: 'def-2',
+      source_code: 'GLU-NOTE',
+      display_label: 'Observation du technicien',
+      result_type: 'TEXT',
+      numeric_unit: null,
+      required: false,
+      sort_order: 2,
+    },
+  ],
+}
+
+const LAB_WORKFLOW_ORDERS: LabWorkflowOrder[] = [
+  {
+    order_id: 'order-new',
+    status: 'SELECTED',
+    selected_at: '2026-09-23T09:05:00Z',
+    updated_at: '2026-09-23T09:05:00Z',
+    patient_display_name: 'Nasra Guelleh',
+    patient: { patient_id: 'pat-3', display_name: 'Nasra Guelleh', date_of_birth: null },
+    ordering_provider_name: 'Clinique de la Paix',
+    requested_tests: [
+      {
+        catalog_code_snapshot: 'NFS',
+        catalog_display_name_snapshot: 'Numération formule sanguine',
+        selected_price_amount: null,
+        selected_price_currency: null,
+      },
+    ],
+    collection_recorded_at: null,
+  },
+  {
+    order_id: 'order-entry',
+    status: 'IN_PROGRESS',
+    selected_at: '2026-09-23T08:45:00Z',
+    updated_at: '2026-09-23T10:30:00Z',
+    patient_display_name: 'Ismail Warsama',
+    patient: { patient_id: 'pat-2', display_name: 'Ismail Warsama', date_of_birth: '1979-11-14' },
+    ordering_provider_name: 'Clinique de la Paix',
+    requested_tests: [
+      {
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        selected_price_amount: null,
+        selected_price_currency: null,
+      },
+    ],
+    collection_recorded_at: '2026-09-23T09:15:00Z',
+  },
+]
+
+const LAB_INSPECTION: LabResultInspection = {
+  order_id: 'order-entry',
+  order_status: 'IN_PROGRESS',
+  all_items_entry_complete: true,
+  released: false,
+  released_at: null,
+  patient: { patient_id: 'pat-2', display_name: 'Ismail Warsama', date_of_birth: '1979-11-14' },
+  ordering_provider_name: 'Clinique de la Paix',
+  result_fingerprint: 'fingerprint-1',
+  results: [
+    {
+      item_id: 'item-1',
+      catalog_code_snapshot: 'GLU',
+      catalog_display_name_snapshot: 'Glycémie à jeun',
+      entry_completed: true,
+      entry_completed_at: '2026-09-23T10:40:00Z',
+      has_correction_history: false,
+      observations: RESULT_OBSERVATIONS,
+    },
+  ],
+}
+
+/**
+ * One stub covering both workflows, because a clinician and a technician in this product are the
+ * same application under two memberships -- and a scene that stubbed only one side would hide the
+ * navigation the other one sees.
+ *
+ * `released` turns the laboratory's release queue entry into an order that already has a version
+ * history, which is what the lab-side "which version counts" capture needs.
+ */
+function workflowClient(options: { released?: boolean } = {}): ExchangeClient {
+  const versions = options.released ? CLINIC_VERSIONS : [CLINIC_VERSIONS[0]]
+  const versionContent = (versionId: string) => ({
+    order_id: 'order-completed',
+    release_version_id: versionId,
+    release_version_number: versionId === 'rel-v2' ? 2 : 1,
+    is_amendment: versionId === 'rel-v2',
+    patient: WORKFLOW_PATIENT,
+    review_status: versionId === 'rel-v2' ? 'PENDING' : 'NO_FOLLOW_UP_REQUIRED',
+    reviewed_at: versionId === 'rel-v2' ? null : '2026-09-23T11:20:00Z',
+    reviewed_by_practitioner_reference_id: versionId === 'rel-v2' ? null : 'prac-1',
+    results: [
+      {
+        item_id: 'item-1',
+        catalog_code_snapshot: 'GLU',
+        catalog_display_name_snapshot: 'Glycémie à jeun',
+        entry_completed_at: '2026-09-23T10:40:00Z',
+        observations: versionId === 'rel-v2' ? AMENDED_OBSERVATIONS : RESULT_OBSERVATIONS,
+      },
+    ],
+  })
+
+  return {
+    // Clinic
+    listOrders: () => Promise.resolve(CLINIC_ORDERS),
+    listPatients: () => Promise.resolve(CLINIC_DIRECTORY),
+    searchPatients: () => Promise.resolve(CLINIC_DIRECTORY.slice(0, 1)),
+    listCatalogTests: () => Promise.resolve(CLINIC_CATALOG),
+    listPatientOrders: () => Promise.resolve(CLINIC_ORDERS.slice(0, 1)),
+    getOrder: () => Promise.resolve(CLINIC_ORDERS[0]),
+    listResultReviews: (_providerId: string, params: { status?: string } = {}) =>
+      Promise.resolve({
+        provider_organization_id: 'prov-1',
+        entries: [
+          {
+            review_id: 'review-1',
+            order_id: 'order-completed',
+            release_version_id: options.released ? 'rel-v2' : 'rel-v1',
+            release_version_number: options.released ? 2 : 1,
+            is_amendment: Boolean(options.released),
+            released_at: options.released ? '2026-09-23T12:10:00Z' : '2026-09-23T11:00:00Z',
+            legacy_unversioned: false,
+            review_status: 'PENDING',
+            reviewed_at: null,
+            patient: WORKFLOW_PATIENT,
+            order_created_at: '2026-09-23T07:10:00Z',
+          },
+        ].filter((entry) => (params.status ?? 'PENDING') === 'ALL' || entry.review_status === (params.status ?? 'PENDING')),
+      }),
+    getReleaseVersions: () => Promise.resolve({ order_id: 'order-completed', versions }),
+    getReleaseVersion: (_providerId: string, _orderId: string, versionId: string) =>
+      Promise.resolve(versionContent(versionId)),
+    getPatientAccessMetadata: () =>
+      Promise.resolve({ active: false, expires_at: null, access_mode: null }),
+    getPatientNotifications: () =>
+      Promise.resolve({
+        enrolled: false,
+        channel: null,
+        destination: null,
+        notifications: [],
+        available_channels: ['WHATSAPP'],
+      }),
+
+    // Laboratory
+    listLabOrders: () => Promise.resolve(LAB_WORKFLOW_ORDERS),
+    getLabOrder: (_labId: string, orderId: string) =>
+      Promise.resolve(LAB_WORKFLOW_ORDERS.find((order) => order.order_id === orderId) ?? LAB_WORKFLOW_ORDERS[1]),
+    getResultEntryWorkspace: (_labId: string, orderId: string) =>
+      Promise.resolve({
+        order_id: orderId,
+        order_status: 'IN_PROGRESS',
+        items: [
+          {
+            item_id: 'item-1',
+            catalog_code_snapshot: 'GLU',
+            catalog_display_name_snapshot: 'Glycémie à jeun',
+            template: LAB_TEMPLATE,
+            template_pinned: true,
+            entry_mode: 'NATIVE_TEMPLATE',
+            entry_completed: false,
+            entry_completed_at: null,
+            entered_values: [],
+          },
+        ],
+      }),
+    getReleaseQueue: () =>
+      Promise.resolve({
+        lab_organization_id: 'lab-1',
+        orders: [
+          {
+            order_id: 'order-entry',
+            patient: { patient_id: 'pat-2', display_name: 'Ismail Warsama', date_of_birth: '1979-11-14' },
+            ordering_provider_name: 'Clinique de la Paix',
+            requested_tests: [
+              {
+                catalog_code_snapshot: 'GLU',
+                catalog_display_name_snapshot: 'Glycémie à jeun',
+                selected_price_amount: null,
+                selected_price_currency: null,
+              },
+            ],
+            updated_at: '2026-09-23T10:40:00Z',
+          },
+        ],
+      }),
+    getAmendmentReleaseQueue: () => Promise.resolve({ lab_organization_id: 'lab-1', orders: [] }),
+    getLabOrderResults: () =>
+      Promise.resolve(
+        options.released
+          ? { ...LAB_INSPECTION, order_status: 'COMPLETED', released: true, released_at: '2026-09-23T11:00:00Z' }
+          : LAB_INSPECTION,
+      ),
+    getLabOrderReleaseVersions: () =>
+      Promise.resolve({
+        order_id: 'order-entry',
+        versions: versions.map((version) => ({
+          release_version_id: version.release_version_id,
+          version_number: version.release_version_number,
+          lab_result_release_id: version.is_amendment ? null : 'release-1',
+          amendment_id: version.is_amendment ? 'amendment-1' : null,
+          created_at: version.released_at,
+          is_amendment: version.is_amendment,
+        })),
+      }),
+    getLabOrderReleaseVersionContent: (_labId: string, _orderId: string, versionId: string) =>
+      Promise.resolve({
+        order_id: 'order-entry',
+        release_version_id: versionId,
+        release_version_number: versionId === 'rel-v2' ? 2 : 1,
+        is_amendment: versionId === 'rel-v2',
+        patient: { patient_id: 'pat-2', display_name: 'Ismail Warsama', date_of_birth: '1979-11-14' },
+        ordering_provider_name: 'Clinique de la Paix',
+        results: [
+          {
+            item_id: 'item-1',
+            catalog_code_snapshot: 'GLU',
+            catalog_display_name_snapshot: 'Glycémie à jeun',
+            entry_completed_at: '2026-09-23T10:40:00Z',
+            observations: versionId === 'rel-v2' ? AMENDED_OBSERVATIONS : RESULT_OBSERVATIONS,
+          },
+        ],
+      }),
+  } as unknown as ExchangeClient
+}
+
+function WorkflowScene({
+  organization,
+  section,
+  released = false,
+}: {
+  organization: 'PROVIDER' | 'LAB'
+  section: StaffSectionId
+  released?: boolean
+}) {
+  const response =
+    organization === 'PROVIDER'
+      ? me([membership('PROVIDER', 'Clinique de la Paix', ['CLINICIAN'])], 'Dr. Halima Farah')
+      : me(
+          [membership('LAB', 'Laboratoire Central', ['LAB_TECH', 'LAB_RESULT_RELEASER'])],
+          'Ahmed Osman',
+        )
+  const client = {
+    ...workflowClient({ released }),
+    getMe: () => Promise.resolve(response),
+  } as unknown as ExchangeClient
+  return <StaffApp client={client} initialSection={section} />
+}
+
 const SCENES: Record<string, () => ReactElement> = {
   'shell-provider': () => (
     <ShellScene
@@ -929,6 +1364,27 @@ const SCENES: Record<string, () => ReactElement> = {
   relay: () => <RelayScene amended={false} />,
   'relay-amended': () => <RelayScene amended />,
   patient: () => <PatientStatusPage order={PATIENT_ORDER} />,
+
+  // DH-USABILITY-001 §29: the clinic and laboratory workflows, which no screenshot had ever
+  // covered. `clinic-results-superseded` and `lab-version-history` are this ticket's own P0/P1
+  // fixes -- the point of photographing them is that a reader can check the claim rather than
+  // take the assertion's word for it.
+  'clinic-today': () => <WorkflowScene organization="PROVIDER" section="today" />,
+  'clinic-patients': () => <WorkflowScene organization="PROVIDER" section="patients" />,
+  'clinic-patient-new': () => <WorkflowScene organization="PROVIDER" section="patients" />,
+  'clinic-orders': () => <WorkflowScene organization="PROVIDER" section="orders" />,
+  'clinic-order-handoff': () => <WorkflowScene organization="PROVIDER" section="orders" />,
+  'clinic-results-queue': () => <WorkflowScene organization="PROVIDER" section="results" />,
+  'clinic-results-detail': () => <WorkflowScene organization="PROVIDER" section="results" />,
+  'clinic-results-superseded': () => (
+    <WorkflowScene organization="PROVIDER" section="results" released />
+  ),
+  'lab-today': () => <WorkflowScene organization="LAB" section="today" />,
+  'lab-orders': () => <WorkflowScene organization="LAB" section="orders" />,
+  'lab-entry': () => <WorkflowScene organization="LAB" section="orders" />,
+  'lab-release-queue': () => <WorkflowScene organization="LAB" section="results" />,
+  'lab-release-inspect': () => <WorkflowScene organization="LAB" section="results" />,
+  'lab-version-history': () => <WorkflowScene organization="LAB" section="results" released />,
 
   // DH-MVP-ONBOARD-001 platform scenes. Network administration is desktop and
   // tablet work, captured at 1280 and 768 rather than at phone width.

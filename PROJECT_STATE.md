@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DH-MVP-ONBOARD-001,
-> 2026-09-21 — this parenthetical has now gone stale twice, first reading "DH-MVP-001 and
-> DH-DOC-001" and then "DH-PATIENT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DH-USABILITY-001,
+> 2026-09-24 — this parenthetical has now gone stale three times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -19386,3 +19386,127 @@ Deliberately left open and not decided here: the SMS provider; email and voice (
 `ResultDelivery` semantics (`docs/MVP-1.0.md` §10 item 6); the per-channel sensitive-content policy
 beyond the content-free rule (§10 item 8); proxy/family authorization; inbound messaging, WhatsApp
 Flows, patient accounts and OTP.
+
+---
+
+## DH-USABILITY-001 — native clinic + laboratory workflow review · 2026-09-24 · `INTERNAL WORKFLOW REVIEW`
+
+**Start `2395da2` → this commit. No adapter change, no migration: the browser only.**
+
+**The label is the finding.** §40 of the ticket: *"If no real humans participate: the ticket is NOT
+usability-qualified."* No clinician, no front-desk user and no laboratory technician took part. This
+is `INTERNAL WORKFLOW REVIEW`, not `USER-QUALIFIED`, and the distinction it turns on —
+`component tested ≠ browser tested ≠ human tested` — is the reason the document exists.
+Full record: `docs/USABILITY-QUALIFICATION-001.md`. Its Part B is the human-session instrument,
+written out in full and deliberately empty; Part C is what this environment could not do.
+
+### What was looked at, and how
+
+14 new harness scenes for the clinic and laboratory workflows — the two screens this product exists
+for, which had never been photographed at any width. 44 scenes × 3 widths = **132 captures** at
+1280×860, 768×1024 and 390×844 in headless Chromium with the real components, stylesheets and
+self-hosted fonts. Per scene: page overflow, controls outside the viewport, controls reachable only
+by scrolling a container, navigation clipping and height, unlabelled inputs, console errors, page
+errors, failed requests. Six captures were read as images; the mechanical checks cover all 132.
+
+### P0 — fixed
+
+Version tabs said which release was **later** and never which is **current**
+(`Version 1 — Revu — aucun suivi requis` beside `Rectificatif (version 2) — À examiner`). §13 names
+this outcome as a P0 by itself. A clinician opening version 1 after an amendment saw a complete,
+plausible result with nothing on screen contradicting it.
+
+Now: `Version 1 — Remplacé`, `Rectificatif (version 2) — Résultat actuel`, and above the values a
+`role="status"` banner — *"Ce résultat a été remplacé. Le résultat actuel est le rectificatif
+(version 2)…"* — leading with a control that goes to the current result. The fact is in the **text**
+(a badge CSS can hide or greyscale can flatten is not a safety control) and is derived from the
+highest `release_version_number`, never array order. Reviewing a superseded version stays permitted:
+ADR-048 Model 3 gives every released version its own immutable obligation, so the fix is labelling
+and demotion, not disabling something an ADR allows.
+
+### P1 — five, all fixed
+
+| | Defect | Evidence |
+|---|---|---|
+| P1-1 | The laboratory's own version history had the identical gap | `Version 1 — Version initiale — Remplacé`, plus *"Version remplacée — ce n'est plus le résultat de référence"* above the exact content. Same words as the clinician's screen, deliberately |
+| P1-2 | A fixed `1fr 1fr` panel held two columns on a tablet | `lab-entry` 101px overflow at 768 → **0**; 251px at 390 → **0**; `Enregistrer les valeurs` and `Terminer la saisie` were off the right edge. `lab-release-inspect` 154px → 0 (`Libérer les résultats` off-screen); `lab-version-history` 174px → 0 (the navigation itself). Fixed with `repeat(auto-fit, minmax(min(100%, 22rem), 1fr))` — a rule, not a breakpoint |
+| P1-3 | `overflow-wrap: anywhere` broke patient names mid-word | `Fatou / ma / Robleh`, `Ismail / Warsa / ma`, a phone number over five lines. `anywhere` also *caused* the narrow column: it lets a word count as one character when the browser measures min-content. `break-word` fixes both; a UUID keeps `anywhere` |
+| P1-4 | The clinic orders table dragged the page sideways | 235px at tablet, 385px at phone, carrying `Suivi patient`, `Choisir un laboratoire` and the navigation out of view. The `overflow-x: auto` box was already there and did nothing: a grid item defaults to `min-width: auto`. `minWidth: 0` + `position: relative` → **0** |
+| P1-5 | Three error messages, unaccented and written from the inside | `Impossible de verifier la recuperation sure d'une creation precedente.` — five missing accents, and vocabulary belonging to the idempotency mechanism. §32's third question (*what should I do now*) went unanswered. Rewritten to state only what is known: the first cannot claim the patient exists, because that is what could not be checked, so it says how to find out; the second says plainly that nothing was sent |
+
+### P2 — two fixed, two open
+
+Fixed: `Enter` in a result-entry field now does what `Enregistrer les valeurs` does, behind the same
+guard (§18: *"a lab technician doing 100 samples per day cannot tolerate a mouse-heavy workflow"*),
+and never completes entry — ending entry keeps its own two gestures. The panel was deliberately not
+wrapped in one `<form>`: it holds entry fields, an independent correction editor and a two-step
+completion, and a single implicit submit would make `Enter` mean different things depending on
+cursor position. Also fixed: two date formats on the same laboratory card
+(`23/09/2026 14:00:00` above `23 sept. 2026, 14:00`).
+
+Open, with reasons in `docs/USABILITY-QUALIFICATION-001.md` §A.4: order actions reachable only by
+scrolling the table sideways at tablet and phone (the honest fix is a card layout, and whether staff
+phones are a target at all is a product question); and the result detail rendering below the queue
+with no scroll-into-view or focus move (belongs to one deliberate focus pass across all four detail
+panels, and interacts with accessibility work §30 says not to damage).
+
+### Negative controls — five executed, each reverted, tree green afterwards
+
+| Control | Broken | Red |
+|---|---|---|
+| NC-U1 | `currentVersionIdOf` comparison reversed (clinic) | `UI-CUR1`, `UI-CUR2`, `UI-CUR3` — and nothing else. `UI-CUR4`/`UI-R5` stay green correctly: a reduce over one version is identity |
+| NC-U2 | tab label reverted to identity-only and the banner suppressed | `UI-CUR1`…`UI-CUR4` **and** `UI-R5`, which asserts the tab's own text — the pre-existing test was tightened by this ticket, not relaxed |
+| NC-U3 | `currentVersionIdOf` comparison reversed (laboratory) | `VH-UI2`, `VH-UI3` — and nothing else |
+| NC-U4 | `handleSave()` removed from the entry field's key handler | `UI-KB1` only; `UI-KB2`/`UI-KB3` stay green because they assert absence |
+| NC-U5 | the original unaccented message reintroduced | `FR1` and `FR2` |
+
+**A control found that a new test was worthless and passing.** The first `frenchCopy.test.ts`
+matched quoted spans with a regular expression. That desynchronises on every short literal and on
+apostrophes in JSX text (`l'état`), then tests the garbage between stray quotes, and it never
+inspected JSX text at all — where most user-visible copy lives. It passed while a live match sat in
+`ClinicResultsPage.tsx`. It now parses the file with the TypeScript compiler and walks string,
+template and JSX-text nodes, with Unicode-aware word boundaries because JavaScript's `\b` is
+ASCII-only and would report the correctly accented `enregistrée` as an error. `FR1-NC` asserts both
+directions inside the test file.
+
+### Also fixed, found by a test rather than by looking
+
+The design-token test named three custom properties referenced and never defined:
+`--color-warning-400` and `--color-warning-50` (introduced by this ticket's P0 banner, now the
+design system's own warning pair) and **`--radius-2`**, pre-existing from DH-NOTIFY-001's handoff
+stylesheet — a silent fallback to a 0 radius that shipped unnoticed.
+
+### Counts
+
+UI **882 tests across 58 files, run in 10 batches, 881 passing**; the one failure is the
+pre-existing un-runnable `src/features/auth/logout.test.ts` (`vi.stubGlobal('location', …)` under
+`vmForks`), untouched by this ticket. **14 new tests.** `tsc -b --noEmit` clean. oxlint 48 → 49
+warnings, 0 errors — the new one is `react(only-export-components)` on the new harness scene
+function, the same rule, file and shape as three that already exist there. 132 screenshots with no
+console error, page error or failed request at any width.
+
+### What is NOT true
+
+* **Nobody has used this.** No clinician, no front-desk user, no laboratory technician. Every
+  scenario in §7–§22 of the ticket is unrun; §B.4's timing table is empty because there is no
+  honest way to time a task nobody performed.
+* **§42's preferred stack never ran.** The Docker daemon is permission-denied here, so there was no
+  Keycloak, no Caddy and no authenticated session. Nothing here is evidence about login, session
+  expiry, routing or latency.
+* **§31 (performance perception) is entirely unassessed.** Stub promises resolve instantly; a slow
+  search and a loading flash are both invisible to this method.
+* **Most of §32's error states were not seen in a browser** — `network temporarily unavailable`,
+  `session expires`, `stale release state`, `notification unavailable`. Only the
+  duplicate-patient/order family was reviewed as text and rewritten.
+* **No missing-product list exists** (§34) and **the role hypothesis is untested** (§36). Both may
+  only be filled from what participants actually say; inventing either would be the failure this
+  ticket was written against.
+
+### Human Decision Required: Yes — two
+
+1. **Are staff phones (390px) a supported surface, or is the staff floor desktop and tablet only?**
+   The answer decides whether the open clinic-orders finding is a P2 to schedule or a non-issue. It
+   is a product decision, not an implementation one, and nothing here should guess it.
+2. **Who are the three participants, and when?** One clinician, one front-desk user, one laboratory
+   technician with release authority, a day between them. Until that happens no amount of further
+   automated work changes the label on this ticket.

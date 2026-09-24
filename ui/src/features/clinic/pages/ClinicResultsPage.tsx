@@ -63,6 +63,45 @@ function formatVersionLabel(versionNumber: number, isAmendment: boolean): string
 }
 
 /**
+ * DH-USABILITY-001 §13 (P0) — which of these is the result that counts.
+ *
+ * The version labels above say which release is *later*. They never said which is **current**, and
+ * a clinician who opens "Version 1" after a correction exists sees a complete, plausible result
+ * with nothing on the screen contradicting it. §13 names that outcome exactly: if the user cannot
+ * confidently identify which result is current, it is a P0.
+ *
+ * Ordering is not an answer. A tab strip is scanned, arrived at from a link, and re-read hours
+ * later; "it was the one on the right" is not something anybody reconstructs under time pressure.
+ *
+ * So the fact travels **in the label text**, not in a colour or a position: a badge that CSS could
+ * hide, a screen reader could skip, or a greyscale print could flatten is not a safety control.
+ * ``currentVersionId`` is derived once, from the highest ``release_version_number`` rather than
+ * from array order, so a differently-sorted response cannot silently invert the meaning.
+ *
+ * The review action is deliberately **not** removed from a superseded version. ADR-048 Model 3
+ * gives every released version its own immutable review obligation, and a clinician who genuinely
+ * read version 1 may legitimately record a disposition against it. What changes is which action is
+ * offered first: going to the current result leads, reviewing what is on screen follows.
+ */
+function currentVersionIdOf(versions: ProviderReleaseVersionSummary[] | null): string | null {
+  if (!versions || versions.length === 0) return null
+  return versions.reduce((latest, candidate) =>
+    candidate.release_version_number > latest.release_version_number ? candidate : latest,
+  ).release_version_id
+}
+
+/** The tab's own text: version identity, then whether this is the result that counts. */
+function formatVersionTabLabel(
+  version: ProviderReleaseVersionSummary,
+  currentVersionId: string | null,
+): string {
+  const identity = formatVersionLabel(version.release_version_number, version.is_amendment)
+  const standing =
+    version.release_version_id === currentVersionId ? 'Résultat actuel' : 'Remplacé'
+  return `${identity} — ${standing}`
+}
+
+/**
  * The queue form of the same label: the word alone, no ordinal.
  *
  * A queue row is scanned, not studied. What it has to carry is that this result
@@ -603,6 +642,23 @@ export function ClinicResultsPage() {
     )?.reviewed_at ??
     null
 
+  /*
+   * DH-USABILITY-001 §13 (P0). Derived once, here, and used by the tabs and by the banner below,
+   * so the two can never disagree about which release is current.
+   *
+   * `null` for a legacy unversioned order, which is correct rather than a gap: there is no version
+   * history, nothing has superseded anything, and the banner must not appear.
+   */
+  const currentVersionId = currentVersionIdOf(panel?.versions ?? null)
+  const currentVersion = panel?.versions?.find(
+    (version) => version.release_version_id === currentVersionId,
+  )
+  const viewingSupersededVersion = Boolean(
+    displayedContent?.release_version_id &&
+      currentVersionId &&
+      displayedContent.release_version_id !== currentVersionId,
+  )
+
   return (
     <div style={{ padding: 'var(--space-5)', maxWidth: '1000px', margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)' }}>
@@ -808,7 +864,7 @@ export function ClinicResultsPage() {
                               cursor: 'pointer',
                             }}
                           >
-                            {formatVersionLabel(version.release_version_number, version.is_amendment)}
+                            {formatVersionTabLabel(version, currentVersionId)}
                             {' — '}
                             {formatReviewStatusLabel(version.review_status)}
                           </button>
@@ -819,6 +875,53 @@ export function ClinicResultsPage() {
                         Résultat historique — aucune version de libération enregistrée.
                       </p>
                     )}
+
+                    {/*
+                      DH-USABILITY-001 §13 (P0). Above the content, not beside it: a clinician
+                      reading a superseded result must meet this before the values, not after.
+
+                      `role="status"` rather than `role="alert"` — it is announced without
+                      interrupting, because arriving on an older version is a legitimate thing to
+                      do (ADR-048 gives every version its own review obligation) and not an error.
+
+                      The control that leads is the one that takes them to the result that counts.
+                      Reviewing what is on screen stays available below, because a clinician who
+                      genuinely read version 1 may record a disposition against it — what changes
+                      is which action the screen offers first.
+                    */}
+                    {viewingSupersededVersion && currentVersion ? (
+                      <div
+                        role="status"
+                        style={{
+                          marginBottom: 'var(--space-3)',
+                          padding: 'var(--space-3)',
+                          borderRadius: 'var(--radius-md, 6px)',
+                          // The design system's own warning pair, not a hand-picked amber: the
+                          // token test found the invented ones, which would have fallen back to
+                          // a hue belonging to no palette here.
+                          border: '1px solid var(--color-waiting-border)',
+                          background: 'var(--color-warning-bg)',
+                        }}
+                      >
+                        <p style={{ margin: 0, fontWeight: 600 }}>
+                          Ce résultat a été remplacé.
+                        </p>
+                        <p style={{ margin: 'var(--space-1) 0 var(--space-2)' }}>
+                          Le résultat actuel est le{' '}
+                          {formatVersionLabel(
+                            currentVersion.release_version_number,
+                            currentVersion.is_amendment,
+                          ).toLowerCase()}
+                          . Ce que vous consultez ici n’est plus le résultat de référence.
+                        </p>
+                        <Button
+                          type="button"
+                          onClick={() => handleSwitchVersion(currentVersion.release_version_id)}
+                        >
+                          Voir le résultat actuel
+                        </Button>
+                      </div>
+                    ) : null}
 
                     {panel.contentLoading ? (
                       panel.checking ? (
@@ -859,6 +962,14 @@ export function ClinicResultsPage() {
                                 {item.catalog_display_name_snapshot} ({item.catalog_code_snapshot})
                               </h3>
 
+                              {/*
+                                DH-USABILITY-001 §29: four columns of observation, value, unit and
+                                reference range do not fit 390px, and without this the overflow
+                                was the page's rather than the table's. Scrolling the values
+                                sideways is acceptable; a result screen whose whole layout shifts
+                                under the reader is not.
+                              */}
+                              <div style={{ overflowX: 'auto', minWidth: 0, position: 'relative' }}>
                               <table
                                 style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-sm)' }}
                               >
@@ -889,6 +1000,7 @@ export function ClinicResultsPage() {
                                   ))}
                                 </tbody>
                               </table>
+                              </div>
                             </div>
                           ))
                         )}

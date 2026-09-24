@@ -359,7 +359,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.type(screen.getByLabelText('Téléphone (facultatif)'), '+25377000000')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
@@ -394,7 +394,7 @@ describe('Clinic native patient workflow', () => {
     expect(await screen.findByText('Aucun patient trouvé')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Avec Naissance')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Avec Naissance')
     await user.type(screen.getByLabelText('Date de naissance (facultatif)'), '1990-05-14')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
@@ -438,7 +438,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.type(screen.getByLabelText('Téléphone (facultatif)'), '+25377000000')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     expect(await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')).toBeInTheDocument()
@@ -448,7 +448,7 @@ describe('Clinic native patient workflow', () => {
     await screen.findByRole('heading', { name: 'Accueil Clinique' })
     await user.click(screen.getByRole('button', { name: 'Patients' }))
     await screen.findByRole('heading', { name: 'Nouveau patient' })
-    expect(screen.getByLabelText('Nom affiché (obligatoire)')).toBeDisabled()
+    expect(screen.getByLabelText('Nom du patient (obligatoire)')).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(await screen.findByRole('heading', { name: 'Nom stocké autoritatif' })).toBeInTheDocument()
@@ -472,7 +472,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Nom saisi')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Nom saisi')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     expect(await screen.findByRole('button', { name: 'Réessayer l’ouverture' })).toBeInTheDocument()
     expect(screen.queryByText('raw detail failure')).not.toBeInTheDocument()
@@ -521,7 +521,7 @@ describe('Clinic native patient workflow', () => {
       render(<StaffApp client={client} initialSection="patients" />)
       await screen.findByText('Aucun patient trouvé')
       await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-      await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+      await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
       await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
       // Confirmed recovery state
@@ -553,9 +553,9 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
-    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Rien n’a été envoyé : aucun patient n’a été créé/)).toBeInTheDocument()
     expect(bind).not.toHaveBeenCalled()
     expect(getStoredPendingPatient('identity-1', 'provider-a')).toBeNull()
   })
@@ -578,9 +578,9 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
-    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Rien n’a été envoyé : aucun patient n’a été créé/)).toBeInTheDocument()
     expect(bind).not.toHaveBeenCalled()
   })
 
@@ -601,9 +601,9 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
-    expect(await screen.findByText(/Impossible de preparer la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Rien n’a été envoyé : aucun patient n’a été créé/)).toBeInTheDocument()
     expect(bind).not.toHaveBeenCalled()
   })
 
@@ -613,7 +613,7 @@ describe('Clinic native patient workflow', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
-    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Impossible de vérifier si une création de patient faite ici auparavant a bien abouti/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     expect(bind).not.toHaveBeenCalled()
   })
@@ -630,7 +630,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
 
-    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Impossible de vérifier si une création de patient faite ici auparavant a bien abouti/)).toBeInTheDocument()
     expect(screen.queryByText(/corrupted_payload/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     expect(bind).not.toHaveBeenCalled()
@@ -646,7 +646,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
 
-    expect(await screen.findByText(/Impossible de verifier la recuperation sure/)).toBeInTheDocument()
+    expect(await screen.findByText(/Impossible de vérifier si une création de patient faite ici auparavant a bien abouti/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     expect(bind).not.toHaveBeenCalled()
     expect(localStorage.getItem('dhealth_clinic_pending_patient_v2:identity-1:provider-a')).toBe(rawInvalidJson)
@@ -745,7 +745,7 @@ describe('Clinic native patient workflow', () => {
 
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Tentative A')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Tentative A')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')
 
@@ -753,13 +753,13 @@ describe('Clinic native patient workflow', () => {
     await user.selectOptions(providerSelect, 'provider-b')
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Tentative B')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Tentative B')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     await screen.findByText('Réessayez pour vérifier la même référence sans créer un doublon.')
 
     await user.selectOptions(providerSelect, 'provider-a')
     await screen.findByRole('heading', { name: 'Nouveau patient' })
-    expect(screen.getByLabelText('Nom affiché (obligatoire)')).toHaveValue('Tentative A')
+    expect(screen.getByLabelText('Nom du patient (obligatoire)')).toHaveValue('Tentative A')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     expect(await screen.findByRole('heading', { name: 'Nom stocké autoritatif' })).toBeInTheDocument()
 
@@ -789,7 +789,7 @@ describe('Clinic native patient workflow', () => {
 
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Synthétique')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Synthétique')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     const providerSelect = screen.getByLabelText("Établissement actif")
     await user.selectOptions(providerSelect, 'provider-b')
@@ -829,7 +829,7 @@ describe('Clinic native patient workflow', () => {
     expect(bind).not.toHaveBeenCalled()
 
     // Whitespace display name
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), '   ')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), '   ')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
     expect(await screen.findByText('Le nom affiché est obligatoire.')).toBeInTheDocument()
     expect(bind).not.toHaveBeenCalled()
@@ -849,7 +849,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Tentative Definitive')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Tentative Definitive')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     // Shows validation error without ambiguous duplicate warning
@@ -859,7 +859,7 @@ describe('Clinic native patient workflow', () => {
     ).not.toBeInTheDocument()
 
     // Form remains enabled
-    const input = screen.getByLabelText('Nom affiché (obligatoire)')
+    const input = screen.getByLabelText('Nom du patient (obligatoire)')
     expect(input).not.toBeDisabled()
 
     // No pending state in storage
@@ -885,7 +885,7 @@ describe('Clinic native patient workflow', () => {
     render(<StaffApp client={client} initialSection="patients" />)
     await screen.findByText('Aucun patient trouvé')
     await user.click(screen.getByRole('button', { name: 'Nouveau patient' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Secret PHI')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Secret PHI')
     await user.type(screen.getByLabelText('Téléphone (facultatif)'), '+25377999888')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
@@ -932,7 +932,7 @@ describe('Clinic native patient workflow', () => {
     expect(screen.queryByRole('button', { name: 'Abandonner la tentative' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Nouveau patient' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Reprendre' }))
-    await user.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Nouveau Patient Après Abandon')
+    await user.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Nouveau Patient Après Abandon')
     await user.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(1)
@@ -1080,7 +1080,7 @@ describe('Clinic native patient workflow', () => {
     )
     expect(await screen.findByText(/Tentative non confirmée/)).toBeInTheDocument()
     await userEventObj.click(screen.getByRole('button', { name: 'Reprendre' }))
-    await userEventObj.type(screen.getByLabelText('Nom affiché (obligatoire)'), 'Patient Repris')
+    await userEventObj.type(screen.getByLabelText('Nom du patient (obligatoire)'), 'Patient Repris')
     await userEventObj.click(screen.getByRole('button', { name: 'Créer et ouvrir' }))
 
     expect(bind).toHaveBeenCalledTimes(1)
@@ -1786,7 +1786,7 @@ describe('Clinic native patient workflow', () => {
 
     // Must surface storage unreadable error
     expect(
-      await screen.findByText(/Le stockage local de réconciliation d’ordre est corrompu ou illisible/),
+      await screen.findByText(/DHealth ne peut plus vérifier ici si un ordre envoyé précédemment est bien arrivé/),
     ).toBeInTheDocument()
 
     // "Nouvel ordre de laboratoire" must be disabled to prevent duplicate creation
@@ -2032,7 +2032,7 @@ describe('Clinic native patient workflow', () => {
 
     // Storage unreadable alert is displayed
     expect(
-      await screen.findByText(/Le stockage local de réconciliation d’ordre est corrompu ou illisible/),
+      await screen.findByText(/DHealth ne peut plus vérifier ici si un ordre envoyé précédemment est bien arrivé/),
     ).toBeInTheDocument()
 
     setItemSpy.mockRestore()
@@ -2079,7 +2079,7 @@ describe('Clinic native patient workflow', () => {
 
     // Storage unreadable alert is displayed
     expect(
-      await screen.findByText(/Le stockage local de réconciliation d’ordre est corrompu ou illisible/),
+      await screen.findByText(/DHealth ne peut plus vérifier ici si un ordre envoyé précédemment est bien arrivé/),
     ).toBeInTheDocument()
 
     vi.restoreAllMocks()
@@ -2355,7 +2355,7 @@ describe('Clinic native patient workflow', () => {
       key: string,
     ) {
       // Fail closed: corrupted-storage banner shown, new-order creation blocked.
-      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
 
       // Recovered services never attached/rendered -- catalog wizard never opens.
@@ -2935,7 +2935,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
       await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
-      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
 
       // Switch to Patient B, who has no recovery problem of her own.
@@ -2948,7 +2948,7 @@ describe('Clinic native patient workflow', () => {
 
       // B is not poisoned by A's fail-closed state.
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
-      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Création d’ordres bloquée sur cet appareil/)).not.toBeInTheDocument()
       expect(screen.queryByText('BACKEND-SNAP-CODE')).not.toBeInTheDocument()
       expect(commitOrderIntentWithOutcome).not.toHaveBeenCalled()
     })
@@ -2972,7 +2972,7 @@ describe('Clinic native patient workflow', () => {
 
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
-      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
 
       await userEventObj.click(screen.getByRole('button', { name: 'Retour aux patients' }))
@@ -2983,7 +2983,7 @@ describe('Clinic native patient workflow', () => {
       ).toBeInTheDocument()
 
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
-      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Création d’ordres bloquée sur cet appareil/)).not.toBeInTheDocument()
     })
 
     it('NC26-C: a genuinely global storage failure re-arms fail-closed on every scope, not just the first', async () => {
@@ -3006,7 +3006,7 @@ describe('Clinic native patient workflow', () => {
 
         const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
         await userEventObj.click(openButtons[0])
-        expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+        expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
 
         // Switch to Patient B -- storage is STILL globally broken, so the synchronous scope reset
@@ -3019,7 +3019,7 @@ describe('Clinic native patient workflow', () => {
           await screen.findByRole('heading', { name: 'Nom non renseigné' }),
         ).toBeInTheDocument()
 
-        expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+        expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeDisabled()
       } finally {
         getItemSpy.mockRestore()
@@ -3061,7 +3061,7 @@ describe('Clinic native patient workflow', () => {
       const openButtons = await screen.findAllByRole('button', { name: 'Ouvrir' })
       await userEventObj.click(openButtons[0])
       await waitFor(() => expect(getOrderIntentByIdempotencyKey).toHaveBeenCalled())
-      expect(await screen.findByText(/Stockage local corrompu/)).toBeInTheDocument()
+      expect(await screen.findByText(/Création d’ordres bloquée sur cet appareil/)).toBeInTheDocument()
 
       const providerSelect = screen.getByLabelText("Établissement actif")
       await userEventObj.selectOptions(providerSelect, 'provider-b')
@@ -3072,7 +3072,7 @@ describe('Clinic native patient workflow', () => {
       ).toBeInTheDocument()
 
       expect(screen.getByRole('button', { name: 'Nouvel ordre de laboratoire' })).toBeEnabled()
-      expect(screen.queryByText(/Stockage local corrompu/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Création d’ordres bloquée sur cet appareil/)).not.toBeInTheDocument()
     })
   })
 })

@@ -6,8 +6,39 @@ import { Button, LoadingSkeleton } from '../../../design-system'
 const HISTORY_LOAD_ERROR = "Impossible de charger l'historique des versions."
 const CONTENT_LOAD_ERROR = 'Impossible de charger le contenu de cette version.'
 
+/**
+ * DH-USABILITY-001 §27: the same shape as every other date on this screen.
+ *
+ * `toLocaleString('fr-FR')` rendered "23/09/2026 14:00:00" directly above the release line's
+ * "23 sept. 2026, 14:00" -- two formats, one of them carrying seconds nobody reads, in the same
+ * card. Consistent wording is not decoration here: a reader comparing two timestamps should be
+ * comparing the times, not first working out that the formats differ.
+ */
 function formatDateTime(value: string): string {
-  return new Date(value).toLocaleString('fr-FR')
+  return new Date(value).toLocaleDateString('fr-FR', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/**
+ * DH-USABILITY-001 §13/§21. The lab's record of what it sent needs the same fact the clinician's
+ * screen needs: which of these versions is the one that counts now. "Version 1 — Version initiale"
+ * says only which came first, and a technician checking what was reported reads real values with
+ * nothing on screen saying an amendment has since replaced them.
+ *
+ * Derived from the highest version number, not from list position, so a history returned in any
+ * order still names the right one. The wording matches the clinician's screen deliberately --
+ * "résultat actuel" must mean the same thing in both rooms.
+ */
+function currentVersionIdOf(versions: LabReleaseVersionSummary[]): string | null {
+  if (versions.length === 0) return null
+  return versions.reduce((latest, candidate) =>
+    candidate.version_number > latest.version_number ? candidate : latest,
+  ).release_version_id
 }
 
 export interface ReleaseVersionHistoryProps {
@@ -87,6 +118,8 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
       })
   }
 
+  const currentVersionId = state.versions ? currentVersionIdOf(state.versions) : null
+
   return (
     <div>
       <Button type="button" variant="secondary" onClick={handleToggle}>
@@ -110,6 +143,8 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
                       {' — '}
                       {version.is_amendment ? 'Amendement' : 'Version initiale'}
                       {' — '}
+                      {version.release_version_id === currentVersionId ? 'Résultat actuel' : 'Remplacé'}
+                      {' — '}
                       {formatDateTime(version.created_at)}
                     </p>
                     <Button
@@ -130,19 +165,39 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
                         {contentState.error}
                       </p>
                     ) : contentState.content ? (
-                      <ul style={{ margin: '4px 0 0', paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
-                        {contentState.content.results.flatMap((item) =>
-                          item.observations.map((observation) => (
-                            <li key={observation.observation_id} style={{ fontSize: 'var(--font-size-sm)' }}>
-                              {item.catalog_display_name_snapshot} — {observation.display_label_snapshot} :{' '}
-                              {observation.numeric_value ?? observation.text_value}
-                              {observation.numeric_value && observation.numeric_unit
-                                ? ` ${observation.numeric_unit}`
-                                : ''}
-                            </li>
-                          )),
-                        )}
-                      </ul>
+                      <>
+                        {/*
+                          DH-USABILITY-001 §13/§21: before the values, not after them. Opening an
+                          older version's exact content is a legitimate act -- it is how the lab
+                          answers "what did we actually report?" -- so this states a fact rather
+                          than raising an error.
+                        */}
+                        {version.release_version_id !== currentVersionId ? (
+                          <p
+                            role="status"
+                            style={{
+                              margin: '4px 0 0',
+                              fontSize: 'var(--font-size-sm)',
+                              fontWeight: 600,
+                            }}
+                          >
+                            Version remplacée — ce n’est plus le résultat de référence.
+                          </p>
+                        ) : null}
+                        <ul style={{ margin: '4px 0 0', paddingLeft: 'var(--space-4)', display: 'grid', gap: 'var(--space-1)' }}>
+                          {contentState.content.results.flatMap((item) =>
+                            item.observations.map((observation) => (
+                              <li key={observation.observation_id} style={{ fontSize: 'var(--font-size-sm)' }}>
+                                {item.catalog_display_name_snapshot} — {observation.display_label_snapshot} :{' '}
+                                {observation.numeric_value ?? observation.text_value}
+                                {observation.numeric_value && observation.numeric_unit
+                                  ? ` ${observation.numeric_unit}`
+                                  : ''}
+                              </li>
+                            )),
+                          )}
+                        </ul>
+                      </>
                     ) : null
                   ) : null}
                 </li>

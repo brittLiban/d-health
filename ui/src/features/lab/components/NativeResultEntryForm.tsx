@@ -12,8 +12,19 @@ const CORRECTION_STALE_ERROR =
   'Cette valeur a déjà été modifiée depuis votre dernière consultation. La valeur actuelle est affichée ci-dessous.'
 const HISTORY_LOAD_ERROR = "Impossible de charger l'historique de cette analyse."
 
+/**
+ * DH-USABILITY-001 §27: the same shape as every other date a technician reads on this screen. The
+ * default `toLocaleString` form ("18/09/2026 10:40:00") carried seconds nobody uses and did not
+ * match the page it sits in.
+ */
 function formatDateTime(value: string): string {
-  return new Date(value).toLocaleString('fr-FR')
+  return new Date(value).toLocaleDateString('fr-FR', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 export interface NativeResultEntryFormProps {
@@ -288,6 +299,14 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
                       onChange={(e) =>
                         setCorrectionState((prev) => ({ ...prev, draft: e.target.value }))
                       }
+                      onKeyDown={(event) => {
+                        // DH-USABILITY-001 §18: Enter does what the primary button beside it
+                        // does, under exactly the same guard. See the note on the entry field.
+                        if (event.key !== 'Enter') return
+                        event.preventDefault()
+                        if (correctionState.submitting || correctionState.draft.trim() === '') return
+                        void handleSubmitCorrection(definition.definition_id)
+                      }}
                     />
                     <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
                       Cette correction conservera l'ancienne valeur dans l'historique.
@@ -343,6 +362,24 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
                 onChange={(e) =>
                   setDrafts((prev) => ({ ...prev, [definition.definition_id]: e.target.value }))
                 }
+                onKeyDown={(event) => {
+                  /*
+                    DH-USABILITY-001 §18: Enter records the typed values.
+                    This panel is not a <form> -- it holds the entry fields, an independent
+                    correction editor and a two-step completion, and one implicit submit across
+                    all three would mean Enter doing something different depending on where the
+                    cursor happens to be. So the key is bound where its meaning is unambiguous:
+                    in an entry field, Enter is "Enregistrer les valeurs".
+                    It is the same call, behind the same guard, as that button -- never
+                    "Terminer la saisie", which stays deliberately two deliberate gestures
+                    because it is the step that ends entry.
+                  */
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  if (saveState.submitting || item.entry_completed || pendingDrafts.length === 0)
+                    return
+                  void handleSave()
+                }}
               />
               {/* DH-MVP-POLISH-001 — a typed value is not a recorded value.
                   There is no autosave here, deliberately: a half-typed
@@ -470,7 +507,7 @@ export function NativeResultEntryForm({ client, labId, orderId, item, onChanged 
 
       {item.entry_completed ? (
         <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-success, #15803d)' }}>
-          Saisie terminée{item.entry_completed_at ? ` — ${new Date(item.entry_completed_at).toLocaleString('fr-FR')}` : ''}.
+          Saisie terminée{item.entry_completed_at ? ` — ${formatDateTime(item.entry_completed_at)}` : ''}.
         </p>
       ) : confirmingComplete ? (
         <div style={{ display: 'grid', gap: 'var(--space-2)' }}>

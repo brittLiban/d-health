@@ -649,6 +649,97 @@ describe('LabReleasePage', () => {
     expect(await screen.findByText(/Glycémie à jeun — Glycémie : 5.4000 mmol\/L/)).toBeInTheDocument()
   })
 
+  /*
+   * DH-USABILITY-001 §13/§21 -- the lab's own answer to "which one counts now".
+   *
+   * The history rows said which version came first and when. They did not say which one is the
+   * result in force, so a technician checking what was reported could read superseded values with
+   * nothing on screen contradicting them. Same fact, same words as the clinician's screen.
+   */
+  function historyRow(pattern: RegExp) {
+    return screen.findByText(
+      (_content, node) => node?.tagName === 'P' && pattern.test(node.textContent ?? ''),
+    )
+  }
+
+  function amendedHistoryClient(): ExchangeClient {
+    return makeClient({
+      getLabOrderResults: vi
+        .fn()
+        .mockResolvedValue(makeInspection({ released: true, released_at: '2026-09-18T11:00:00Z' })),
+      getLabOrderReleaseVersions: vi.fn().mockResolvedValue({
+        order_id: 'order-a',
+        versions: [
+          {
+            release_version_id: 'version-1',
+            version_number: 1,
+            lab_result_release_id: 'release-1',
+            amendment_id: null,
+            created_at: '2026-09-18T11:00:00Z',
+            is_amendment: false,
+          },
+          {
+            release_version_id: 'version-2',
+            version_number: 2,
+            lab_result_release_id: null,
+            amendment_id: 'amendment-a',
+            created_at: '2026-09-18T12:05:00Z',
+            is_amendment: true,
+          },
+        ],
+      }),
+    })
+  }
+
+  it('VH-UI2: with an amendment released, exactly one version row is named current -- the amendment', async () => {
+    const user = userEvent.setup()
+    render(<StaffApp client={amendedHistoryClient()} initialSection="results" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Voir l'historique des versions" }))
+
+    await historyRow(/Version 1 — Version initiale — Remplacé/)
+    await historyRow(/Version 2 — Amendement — Résultat actuel/)
+    // Not merely "one of each": a reversed derivation would satisfy that and mislabel both.
+    expect(screen.queryByText((_c, n) => n?.tagName === 'P' && /Version 1 — Version initiale — Résultat actuel/.test(n.textContent ?? ''))).toBeNull()
+  })
+
+  it('VH-UI3: opening a replaced version\'s exact content says so before the values', async () => {
+    const user = userEvent.setup()
+    render(<StaffApp client={amendedHistoryClient()} initialSection="results" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Voir l'historique des versions" }))
+    await historyRow(/Version 1 — Version initiale — Remplacé/)
+
+    // The first row is version 1 -- the one that was replaced.
+    await user.click(screen.getAllByRole('button', { name: 'Voir le contenu exact' })[0])
+
+    expect(
+      await screen.findByText('Version remplacée — ce n’est plus le résultat de référence.'),
+    ).toBeInTheDocument()
+    // And the exact content is still shown: this labels the values, it does not withhold them.
+    expect(await screen.findByText(/Glycémie à jeun — Glycémie : 5.4000 mmol\/L/)).toBeInTheDocument()
+  })
+
+  it('VH-UI4: a single released version is named current and carries no replacement line', async () => {
+    const client = makeClient({
+      getLabOrderResults: vi
+        .fn()
+        .mockResolvedValue(makeInspection({ released: true, released_at: '2026-09-18T11:00:00Z' })),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="results" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Voir l'historique des versions" }))
+
+    await historyRow(/Version 1 — Version initiale — Résultat actuel/)
+    await user.click(await screen.findByRole('button', { name: 'Voir le contenu exact' }))
+
+    await screen.findByText(/Glycémie à jeun — Glycémie : 5.4000 mmol\/L/)
+    expect(
+      screen.queryByText('Version remplacée — ce n’est plus le résultat de référence.'),
+    ).not.toBeInTheDocument()
+  })
+
   it('switching to Amendements never calls the original release queue/inspection endpoints, and vice versa', async () => {
     const getReleaseQueue = vi.fn().mockResolvedValue(makeQueue())
     const getAmendmentReleaseQueue = vi.fn().mockResolvedValue(makeAmendmentQueue())

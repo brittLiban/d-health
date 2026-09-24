@@ -14,6 +14,7 @@ import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { NativeResultEntryForm } from '../components/NativeResultEntryForm'
 import { ReleaseVersionHistory } from '../components/ReleaseVersionHistory'
 import { useLab } from '../LabContext'
+import { PANEL_COLUMNS } from '../panelLayout'
 
 // DH-LAB-001 §29: SELECTED does NOT mean accepted -- preserve that distinction textually, never
 // by color/icon alone.
@@ -677,7 +678,7 @@ export function LabOrdersPage() {
         ))}
       </div>
 
-      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: panel ? '1fr 1fr' : '1fr' }}>
+      <div style={{ display: 'grid', gap: 'var(--space-4)', gridTemplateColumns: panel ? PANEL_COLUMNS : '1fr' }}>
         <Card>
           <div style={{ padding: 'var(--space-4)' }}>
             {queueState.loading && queueState.entries.length === 0 ? (

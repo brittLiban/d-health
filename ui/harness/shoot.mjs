@@ -48,6 +48,24 @@ const SCENES = [
   'relay',
   'relay-amended',
   'patient',
+  // DH-USABILITY-001 §29: the clinic and laboratory workflows. Everything above this line is
+  // platform, shell or patient work -- the two screens a clinician and a technician spend their
+  // day in had never been photographed at any width, and the mechanical checks below (overflow,
+  // off-screen controls, unlabelled inputs, nav height) had therefore never run against them.
+  'clinic-today',
+  'clinic-patients',
+  'clinic-patient-new',
+  'clinic-orders',
+  'clinic-order-handoff',
+  'clinic-results-queue',
+  'clinic-results-detail',
+  'clinic-results-superseded',
+  'lab-today',
+  'lab-orders',
+  'lab-entry',
+  'lab-release-queue',
+  'lab-release-inspect',
+  'lab-version-history',
 ]
 
 // Scenes whose subject is a screen reached by an action, and the control that
@@ -102,6 +120,27 @@ const SCENE_ACTIONS = {
     { click: /^Rechercher$/ },
     { click: /Ahmed Osman/ },
   ],
+
+  // DH-USABILITY-001 §29. Each of these is a screen reached by doing something, and the gesture
+  // is part of what is being reviewed: if the control that opens the panel is hard to find, the
+  // capture is of a screen nobody reaches.
+  'clinic-patient-new': [/^Nouveau patient$/],
+  'clinic-order-handoff': [/^Suivi patient pour Fatouma Robleh$/],
+  'clinic-results-detail': [/^Examiner/],
+  // The P0 this ticket fixed: open the review, then step back to the version that was replaced.
+  // The capture is the answer to "would a clinician know this is not the result that counts?"
+  'clinic-results-superseded': [{ click: /^Examiner/ }, { click: /^Version 1/, role: 'tab' }],
+  // Not the first "Examiner" on the page: the first order is new and unaccepted, and the screen
+  // worth photographing is the one with the entry form on it.
+  'lab-entry': [/^Examiner l'ordre de Ismail Warsama$/],
+  'lab-release-inspect': [/^Examiner les résultats de Ismail Warsama$/],
+  // The lab-side sibling of the same fact, two gestures in: the history, then the exact content
+  // of the version that was superseded.
+  'lab-version-history': [
+    { click: /^Examiner les résultats de Ismail Warsama$/ },
+    { click: /^Voir l'historique des versions$/ },
+    { click: /^Voir le contenu exact$/ },
+  ],
 }
 
 // Phone width is the patient surface's case. Platform work is desktop and tablet,
@@ -145,19 +184,30 @@ for (const viewport of WIDTHS) {
     deviceScaleFactor: 2,
     locale: 'fr-FR',
   })
-  const page = await context.newPage()
-
-  // Anything the page logs or fails to load is a finding, not noise: a font that
-  // 404s or a thrown render error is exactly what this exercise is looking for.
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') problems.push(`console ${viewport.name}: ${msg.text()}`)
-  })
-  page.on('pageerror', (err) => problems.push(`pageerror ${viewport.name}: ${err.message}`))
-  page.on('requestfailed', (req) =>
-    problems.push(`requestfailed ${viewport.name}: ${req.url()} ${req.failure()?.errorText ?? ''}`),
-  )
+  // DH-USABILITY-001 §29: a page per scene. With the workflow scenes added, one long-lived page
+  // taking full-page shots at deviceScaleFactor 2 exhausted the renderer partway through the
+  // desktop pass ("Page crashed") -- a harness limit, not a finding about the application, and
+  // one that would otherwise silently truncate the evidence.
+  let page = null
 
   for (const scene of SCENES) {
+    if (page) await page.close()
+    page = await context.newPage()
+
+    // Anything the page logs or fails to load is a finding, not noise: a font that
+    // 404s or a thrown render error is exactly what this exercise is looking for.
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') problems.push(`console ${viewport.name}/${scene}: ${msg.text()}`)
+    })
+    page.on('pageerror', (err) =>
+      problems.push(`pageerror ${viewport.name}/${scene}: ${err.message}`),
+    )
+    page.on('requestfailed', (req) =>
+      problems.push(
+        `requestfailed ${viewport.name}/${scene}: ${req.url()} ${req.failure()?.errorText ?? ''}`,
+      ),
+    )
+
     await page.goto(`${base}/harness/index.html?scene=${scene}`, { waitUntil: 'load' })
     await page.evaluate(() => document.fonts.ready.then(() => true))
     await page.waitForTimeout(250)
@@ -215,15 +265,36 @@ for (const viewport of WIDTHS) {
     // the step advances and the button that advances it is off the right edge.
     const offscreen = await page.evaluate(() => {
       const width = document.documentElement.clientWidth
-      return [...document.querySelectorAll('button')]
-        .filter((el) => {
-          const r = el.getBoundingClientRect()
-          return r.width > 0 && (r.right > width + 1 || r.left < -1)
-        })
-        .map((el) => el.textContent?.trim() ?? '(sans texte)')
+      // DH-USABILITY-001 §29: a control sitting outside a *scrollable* box is a different fact
+      // from one sitting outside the window. The first is reachable -- a wide table of orders
+      // scrolls sideways inside its own card -- and the second is not reachable at all. Reporting
+      // them as one thing made the honest case and the broken case look identical, which is how a
+      // check stops being read.
+      const scrollable = (el) => {
+        for (let a = el.parentElement; a; a = a.parentElement) {
+          const overflow = getComputedStyle(a).overflowX
+          if (overflow === 'auto' || overflow === 'scroll') return true
+        }
+        return false
+      }
+      const out = { offscreen: [], needsScrolling: [] }
+      for (const el of document.querySelectorAll('button')) {
+        const r = el.getBoundingClientRect()
+        if (!(r.width > 0 && (r.right > width + 1 || r.left < -1))) continue
+        const label = el.textContent?.trim() ?? '(sans texte)'
+        if (scrollable(el)) out.needsScrolling.push(label)
+        else out.offscreen.push(label)
+      }
+      return out
     })
-    if (offscreen.length)
-      problems.push(`control off-screen ${viewport.name}/${scene}: ${offscreen.join(', ')}`)
+    if (offscreen.offscreen.length)
+      problems.push(
+        `control off-screen ${viewport.name}/${scene}: ${offscreen.offscreen.join(', ')}`,
+      )
+    if (offscreen.needsScrolling.length)
+      problems.push(
+        `control reachable only by scrolling its container ${viewport.name}/${scene}: ${offscreen.needsScrolling.join(', ')}`,
+      )
 
     // Every interactive control needs an accessible name. A select whose only
     // label is a neighbouring table header reads as nothing to a screen reader.

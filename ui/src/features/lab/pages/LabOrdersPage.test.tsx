@@ -1660,6 +1660,92 @@ describe('LabOrdersPage', () => {
     })
   })
 
+
+  /*
+   * DH-USABILITY-001 §18 — result entry without reaching for the mouse.
+   *
+   * A technician types a value and then has to find and click a button. §18 asks whether the
+   * whole entry can be done from the keyboard; it could not. Enter now does exactly what the
+   * primary button beside the field does, which is the only version of this worth having: a key
+   * that does something the visible control does not would be worse than no key at all.
+   */
+  it('UI-KB1: pressing Enter in an entry field records the values, exactly as the button does', async () => {
+    const recordNativeResultValues = vi.fn().mockResolvedValue({
+      order_id: 'order-a',
+      item_id: 'item-a',
+      result_id: 'result-1',
+      template_id: 'template-a',
+      values: [
+        {
+          definition_id: 'def-a',
+          observation_id: 'obs-1',
+          numeric_value: '7.2000',
+          text_value: null,
+          recorded_at: '2026-09-18T10:50:00Z',
+          created: true,
+        },
+      ],
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      recordNativeResultValues,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2{Enter}')
+
+    await waitFor(() => expect(recordNativeResultValues).toHaveBeenCalledTimes(1))
+    expect(recordNativeResultValues).toHaveBeenCalledWith('lab-a', 'order-a', 'item-a', {
+      template_id: 'template-a',
+      values: [{ definition_id: 'def-a', numeric_value: '7.2' }],
+    })
+  })
+
+  it('UI-KB2: Enter in an empty entry field records nothing', async () => {
+    const recordNativeResultValues = vi.fn()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      recordNativeResultValues,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    const field = await screen.findByLabelText(/Demo Measure A/)
+    field.focus()
+    await user.keyboard('{Enter}')
+
+    // The same guard as the disabled button: nothing typed, nothing sent.
+    expect(recordNativeResultValues).not.toHaveBeenCalled()
+  })
+
+  it('UI-KB3: Enter never completes entry -- that step keeps its own two gestures', async () => {
+    const completeResultEntry = vi.fn()
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([inProgressOrder()]),
+      getLabOrder: vi.fn().mockResolvedValue(inProgressOrder()),
+      completeResultEntry,
+      recordNativeResultValues: vi.fn().mockResolvedValue({
+        order_id: 'order-a',
+        item_id: 'item-a',
+        result_id: 'result-1',
+        template_id: 'template-a',
+        values: [],
+      }),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.type(await screen.findByLabelText(/Demo Measure A/), '7.2{Enter}')
+
+    // Ending entry is the step that closes this item to further plain entry. A key press that
+    // happened to land on it would be a gesture nobody chose to make.
+    expect(completeResultEntry).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Terminer la saisie' })).toBeInTheDocument()
+  })
+
   it('UI15: completion is blocked until every required definition has a value, with its own confirmation', async () => {
     const completeResultEntry = vi.fn()
     const client = makeClient({

@@ -6,6 +6,64 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-24, DH-USABILITY-001, directly on `master`.** From `2395da2`. The native clinic and
+laboratory workflows were reviewed screen by screen in a real browser at three widths, and the
+defects that review found were fixed. **It is an `INTERNAL WORKFLOW REVIEW`, not a usability
+qualification.** No clinician, no front-desk user and no laboratory technician took part in
+anything; §40 of the ticket decides the label and it is not negotiable —
+`component tested ≠ browser tested ≠ human tested`, and the third was not done.
+Full record: [`docs/USABILITY-QUALIFICATION-001.md`](docs/USABILITY-QUALIFICATION-001.md), whose
+Part B is the human-session instrument, written out and deliberately empty.
+
+**One P0 and five P1s, all fixed.** The P0 is the one that could have changed a clinical decision:
+a corrected result's version tabs said which release was *later* and never which is **current**, so
+a clinician opening version 1 after an amendment saw a complete, plausible result with nothing
+contradicting it. The tab now reads `Version 1 — Remplacé`, the current one reads `— Résultat
+actuel`, and a superseded version leads with *"Ce résultat a été remplacé"* and a control that goes
+to the one that counts. The standing is in the **text**, never a colour, and is derived from the
+highest `release_version_number` rather than array order. The laboratory's own version history had
+the identical gap and got the identical words. Reviewing an older version stays permitted — ADR-048
+Model 3 gives every version its own obligation; what changed is which action leads.
+
+**The other four P1s were invisible to 844 passing tests because jsdom has no layout.** At 768px
+the laboratory's fixed `1fr 1fr` panel pushed `Enregistrer les valeurs` and `Terminer la saisie`
+off the screen (101px of overflow; 251px at 390px). `overflow-wrap: anywhere` broke patient names
+mid-word — `Fatou / ma / Robleh` — and *caused* the narrow column it was breaking to fit. The clinic
+orders table dragged the whole page 235px sideways at tablet and 385px at phone, carrying the
+navigation itself out of view. Three error messages shipped in unaccented French written from
+inside the idempotency mechanism (`Impossible de verifier la recuperation sure…`) and never
+answered §32's third question, *what should I do now*.
+
+**Found by looking at the screens, which had never been photographed.** The existing harness covered
+platform, shell and patient surfaces only; 14 clinic/laboratory scenes were added, giving 132
+captures at 1280/768/390 with per-scene checks for overflow, off-screen controls, navigation
+clipping and unlabelled inputs. Page-level overflow on every affected scene is now **0**.
+
+**Two P2s are open and say why** (`§A.4` of the document): at tablet and phone the clinic order
+actions are reachable only by scrolling the table sideways — the honest fix is a card layout, and
+somebody should first decide whether staff phones are a target at all — and the result detail opens
+below the queue with no scroll or focus move, which belongs to a deliberate focus-management pass
+across all four detail panels rather than to one screen.
+
+14 regression tests with **5 negative controls executed and reverted**, each naming exactly which
+tests reddened. One of them found that the first version of the French-copy guard was worthless and
+passing: it matched quoted spans with a regular expression, desynchronised on apostrophes in JSX
+text, and never saw JSX text at all — it now reads the copy through the TypeScript parser with
+Unicode-aware word boundaries, because `\b` is ASCII-only and reports `enregistrée` as an error.
+
+Counts, re-measured: UI **882 tests across 58 files in 10 batches, 881 passing**, plus the one
+pre-existing un-runnable test (`src/features/auth/logout.test.ts`, untouched). `tsc` clean; oxlint
+48 → 49 warnings, 0 errors — the new one is the same rule, file and shape as three that already
+exist in the harness. The design-token test also caught `--radius-2`, referenced by
+DH-NOTIFY-001's handoff stylesheet and never defined; fixed here. No adapter change, no migration:
+this ticket touched the browser only.
+
+**§42's preferred stack could not run.** The Docker daemon is permission-denied in this
+environment, so there was no Keycloak, no Caddy and no authenticated session. Nothing here is
+evidence about login, session expiry, routing or latency, which leaves §31 (performance perception)
+**entirely unassessed** — stub promises resolve instantly and can show neither a slow search nor a
+loading flash.
+
 **2026-09-24, DH-NOTIFY-META-001, directly on `master`.** From `f9339e9`. WhatsApp now goes
 **directly to Meta's WhatsApp Cloud API** — `DHealth → Meta → WhatsApp → patient`, no intermediary
 (ADR-059). **It still has not sent a message.** No real Meta endpoint has been contacted, no
@@ -785,6 +843,17 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## E. BLOCKED / OPEN
 
+- **Human usability qualification of the native clinic and laboratory workflows**: **not done, and
+  it is the only thing that would make the claim.** DH-USABILITY-001 (2026-09-24) reviewed both
+  workflows in a real browser, fixed one P0 and five P1s, and is labelled `INTERNAL WORKFLOW
+  REVIEW` exactly because no clinician, front-desk user or laboratory technician has used it. §40:
+  automated browser tests are not a substitute. The instrument for the sessions is written out and
+  empty in [`docs/USABILITY-QUALIFICATION-001.md`](docs/USABILITY-QUALIFICATION-001.md) Part B;
+  what is needed is one clinician, one front-desk participant and one laboratory participant for a
+  day. Two P2s stay open with stated reasons (order actions reachable only by scrolling a table at
+  tablet/phone; a result detail that opens below the queue with no scroll or focus move), and one
+  question belongs to a human rather than to a developer's guess: whether staff phones are a
+  supported surface at all.
 - **WhatsApp patient notification against real credentials**: **still `BLOCKED`, and the pinned P0
   rule is unchanged** — a mock is never done. **2026-09-24 dated update (DH-NOTIFY-001, transport
   replaced same day by DH-NOTIFY-META-001/ADR-059):** the transport, the content policy, the durable
