@@ -19112,3 +19112,135 @@ correlations, so the backfill had real rows to convert.
 No vendor adapter exists. No real EMR or LIS was contacted at any point in this work. No facility is
 live through Connect, and `READY_FOR_ROUTING` is still refused for a fully qualified connector with
 a healthy agent.
+
+---
+
+## DH-NOTIFY-001 — Real Patient Notification Transport · 2026-09-24 · directly on `master`
+
+Starting point: `master` at `f861008`. Decision record: **ADR-058**. Long-form:
+`docs/PATIENT-NOTIFICATION.md`, `docs/ARCHITECTURE.md` §24.
+
+### The blocker, and how it was resolved
+
+The ticket's own §4 and §16/§30 cannot both hold. §4 forbids storing or recovering the raw
+`PatientAccessGrant` secret; §16/§30 require the release/amendment message to contain a working
+`{patient_access_url}`. A release happens hours or days after issuance, by which time the secret
+exists nowhere — it is returned once, into the clinician's browser
+(`exchange/patient_access.py`; `docs/ARCHITECTURE.md` §19: "No raw-token recovery, ever").
+
+This is `AGENTS.md`'s "anything changing what patient data leaves the system" **and** its "a gap
+that obviously should be filled a particular way". **Human Decision Required: Yes** — escalated
+before any implementation, with three options and their costs stated in Liban's own quoted words
+from §4 and §16.
+
+**Liban chose A′ in session:** the link is sent at issuance only; release and amendment messages
+carry no link. Options B (encrypted token at rest) and C (re-issue the grant at send time) were
+presented and rejected — B because a database dump plus an environment dump would recover every
+live patient token, C because it kills the printed QR already in a patient's hands. Full reasoning
+in ADR-058.
+
+**Provider choice was not escalated.** ADR-002 already permits "the WhatsApp Cloud API (or Twilio)
+directly"; §9/§10 name Twilio first, and it is the only provider covering both Launch-1 channels
+behind one credential. Stated as the working assumption in the same question, not separately asked.
+
+### What was built
+
+| Area | Files |
+|---|---|
+| Domain | `notify/models.py` (3 tables, 4 enums), migration `0032_patient_notifications` |
+| Content policy | `notify/templates.py` — every string that can ever be sent |
+| Destinations | `notify/phone.py` (libphonenumber), `phonenumbers==9.0.39` pinned |
+| Transport boundary | `notify/transport.py` (Protocol), `notify/twilio.py`, `notify/fake.py` |
+| Durability | `notify/repository.py`, `notify/hooks.py`, `notify/dispatcher.py`, `notify/cli.py` |
+| Receipts | `notify/webhook.py` |
+| Links | `notify/links.py` (server-side; the browser keeps its own builder) |
+| Wiring | `exchange/api.py`, `exchange/results.py`, `exchange/models.py`, `exchange/security_audit.py`, `config.py`, `app.py` |
+| UI | `api/exchangeTypes.ts`, `api/exchangeClient.ts`, `clinic/components/PatientAccessHandoff.tsx` + `.module.css`, `clinic/components/patientNotificationWording.ts` |
+| Ops | `docker-compose.yml` `patient-notifier` (profile `notify`), `.github/workflows/ci.yml`, `.env.example` (9 vars) |
+
+**Nothing existing was reinterpreted.** `ResultDelivery`, `DoctorReview`, `PatientAccessGrant`,
+`LabResultReleaseVersion` and every clinical table are untouched; no column was added to any of
+them and nothing was backfilled. `0032` adds three tables and widens the two audit-vocabulary CHECK
+constraints (the `0029` pattern).
+
+### Evidence actually executed
+
+**Adapter suite: 1565 passed, 160 skipped** (baseline measured before any change: **1467 passed,
+145 skipped**; re-measured at the end rather than carried forward -- an earlier run read 1564,
+before the `enqueue` race regression test was added). The 97 new SQLite tests are `test_patient_notification_domain.py` (34),
+`test_patient_notification_api.py` (20), `test_patient_notification_transport.py` (43).
+
+**Real PostgreSQL 18.6** (`dhnotify001_qual`, native instance, migrated `alembic upgrade head` from
+empty through `0032`): **15 passed** in
+`tests/integration/test_dhnotify001_postgres_qualification.py` — two-thread claim disjointness
+under `FOR UPDATE SKIP LOCKED` (PG3), concurrent hooks converging on one row (PG2), the unique
+constraint biting on a raw insert (PG2b), lease expiry and reclaim (PG4), restart survival (PG4b),
+poison isolation (PG5), release/obligation atomicity in both directions (PG1, PG6), the
+PostgreSQL-only E.164 regex CHECK (PG7), the partial provider-message-id index (PG8), the audit
+CHECK definitions read back out of `pg_constraint` (PG9), the release-version presence CHECK
+(PG10), and one-live-enrollment-per-order (PG11).
+
+**UI: 841 passed** across three vitest batches (clinic+api 321, lab/patient/patients/platform 264,
+staff/workspace/auth/admission/maternity/design-system/App 256 passed + 1 failed -- the pre-existing
+`logout.test.ts` described below, not a regression). `tsc -b --noEmit` clean, `oxlint` 0 errors.
+
+**A real bug that SQLite structurally could not find.** `enqueue` called `session.add()` *before*
+opening its savepoint. Entering `begin_nested()` calls `_take_snapshot()`, which flushes pending
+objects — so the INSERT was emitted by the **outer** transaction, before the savepoint existed. A
+unique-key collision would therefore have aborted the caller's transaction, and the caller is a
+clinical result release: a patient owed a duplicate message would have rolled back a released
+result. Found by PG2's two concurrent threads; fixed by moving `session.add` inside the savepoint
+(the shape `exchange/patient_access.py` already had right); now pinned by a **deterministic SQLite
+regression test** as well as the concurrency one.
+
+### Negative controls — eight executed, each reverted, tree green afterwards
+
+| Control | Broken | Red |
+|---|---|---|
+| NC-0 (extra) | the bug above, restored | SQLite `test_enqueue_losing_the_insert_race…`; PG `test_pg2_concurrent_hooks…` |
+| NC-NOTIFY-1 | `uq_patient_notifications_idempotency_key` dropped (ORM + live `ALTER TABLE`) | SQLite `test_enqueue_losing_the_insert_race…`; PG `test_pg2…`, `test_pg2b…` |
+| NC-NOTIFY-2 | result value/unit/range added to both release templates | `test_a9_a10_a11_release_messages_carry_no_clinical_content[False]`, `[True]` |
+| NC-NOTIFY-3 | `ResultDeliveryRepository.mark_delivered()` called on a successful patient send | `test_a7_and_a8_notification_never_mutates_result_delivery_or_doctor_review` |
+| NC-NOTIFY-4 | `links.py` `#access=` → `&access=` | `test_link_message_is_sent_inline_with_the_fragment_form` |
+| NC-NOTIFY-5 | both webhook guards removed (missing-signature and `compare_digest`) | `test_c2…`, `test_c3_missing_signature…`, `test_c3_a_signature_computed_over_a_different_url…` |
+| NC-NOTIFY-6 | vendor `send()` moved **inside** the issuance transaction | `test_a_failed_link_send_is_terminal_and_never_fails_the_issuance` — `TransportFailure` escapes the handler, so the issuance fails and the grant rolls back; plus `test_link_message_is_sent_inline_with_the_fragment_form` and `test_enrollment_and_retry_are_audited_without_the_destination`, both red because the send now happens before the audit row and before the response, which is itself why the ordering matters |
+| NC-NOTIFY-7 | `_require_clinician` removed from `issue_patient_access` | `test_a17_a_clinician_cannot_enrol_another_organizations_order`, `test_a_non_clinician_member_cannot_enrol`, `test_a_platform_admin_gains_no_clinical_messaging_authority` |
+
+**Two stayed green where a reader might expect red, and both are correct.** Under NC-NOTIFY-1,
+SQLite's `test_a3_same_release_version_cannot_owe_two_messages` stays green because it exercises
+`enqueue`'s read-first fast path, which needs no constraint — that control is the evidence that the
+SQLite test is the weaker of the pair and the PostgreSQL one is the real proof. Under NC-NOTIFY-3,
+`test_c7_webhook_cannot_alter_clinical_state` stays green because the leak was placed on the
+dispatcher path, which its snapshot window does not cover; `test_a7_and_a8` is the test that covers
+it.
+
+### What is NOT true
+
+* **No real provider has ever been contacted.** No credential exists, no message has reached any
+  handset, and every test runs against `FakeNotificationTransport`, which has no network code at
+  all. **ADR-003's gate is unchanged: WhatsApp/SMS stays `BLOCKED`, not `DONE`.**
+* **Pilot gate 5 is not cleared**, and §25's `REAL-PROVIDER-QUALIFIED` / `PRODUCTION-READY` labels
+  are explicitly **not** claimed. §30's acceptance journey has **not** been performed: it requires a
+  real provider, a real test destination and a browser, and none of the three happened.
+* **No browser demonstration of the send flow.** The UI is component-tested only, the same evidence
+  level as the rest of DHealth Clinic (`STATUS.md` §D).
+* **The real-provider qualification *path* does not exist either.** §26 asks for an explicitly
+  invoked manual qualification using repository secrets, in the shape of `qualify-native-auth.yml`.
+  None was written: there are no credentials to run it against, and a workflow that has never been
+  executed is exactly the "the script exists" trap this repository's pinned P0 rules name. When
+  credentials arrive, the first step is writing that path, not running it.
+* **The compose `patient-notifier` service has never been started.** It parses under
+  `docker compose config` (now wired into CI's `compose` job alongside the `backup` profile); it has
+  not been booted, here or anywhere.
+* **One pre-existing UI test cannot be run in this environment**, unrelated to this ticket:
+  `src/features/auth/logout.test.ts` uses `vi.stubGlobal('location', …)`, which the `vmForks` pool
+  breaks, and the default pool cannot start a worker on this box at all (an untouched file fails
+  identically). Not a regression from this ticket; `git status` shows the file untouched.
+
+### Human Decision Required: No outstanding items from this ticket
+
+The one blocker was resolved in session (ADR-058). Items deliberately left open and **not** decided
+here: `ResultDelivery` semantics (`docs/MVP-1.0.md` §10 item 6); the per-channel sensitive-content
+policy *beyond* the content-free rule (§10 item 8 — ADR-058 sidesteps this by making every channel
+carry the same nothing, which is not the same as answering it); proxy/family authorization (§10
+item 9); email, voice, patient accounts, OTP and bidirectional messaging (`§28` non-goals).

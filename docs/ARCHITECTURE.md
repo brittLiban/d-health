@@ -2113,3 +2113,82 @@ query. Suspension queues against the suspended installation and waits; retiremen
 successor leaves the obligation owed rather than dropping it; a successor's first heartbeat
 discharges what its predecessor left. Migration `0031_connect_namespace`, qualified on real
 PostgreSQL including a downgrade round trip and a deliberately refused ambiguous backfill.
+
+---
+
+## 24. Patient notification (DH-NOTIFY-001) — added 2026-09-24
+
+The transport §19 deliberately left unwired. DHealth Patient gave a patient a safe way to *look*;
+this gives DHealth a way to tell them there is something to look at — and nothing more than that.
+
+Full detail: [`PATIENT-NOTIFICATION.md`](PATIENT-NOTIFICATION.md). Decision record: ADR-058.
+
+```
+  ISSUANCE (raw secret in memory)                RELEASE / AMENDMENT (secret gone)
+  ───────────────────────────────                ─────────────────────────────────
+  PatientAccessHandoff                           LabResultReleaseRepository.release
+    │ destination + channel + consent              │ (or release_amendment)
+    ▼                                              ▼
+  POST .../patient-access {notify}               _notify_patient()  ── same session ──┐
+    │                                              │                                   │
+    │  grant + enrollment + obligation             │  obligation                       │
+    ▼  COMMIT                                      ▼  COMMIT (with the release)        │
+  compose URL from DHEALTH_PATIENT_PUBLIC_BASE_URL                                     │
+    │  send inline, after commit                 patient_notifications  ◄──────────────┘
+    ▼                                              │
+  "Voici votre lien sécurisé : <link>"             ▼  claim (lease, FOR UPDATE SKIP LOCKED)
+                                                 patient-notifier  ──► Twilio
+                                                   │                     │
+                                                   ▼                     ▼ status callback
+                                                 SENT            POST /notifications/v1/twilio/status
+                                                                   │  HMAC over the CONFIGURED url
+                                                                   ▼
+                                                                 DELIVERED
+```
+
+**Why the link exists only on the left-hand path.** The raw `PatientAccessGrant` secret is returned
+exactly once and is unrecoverable afterwards (§19). A release-time message therefore cannot contain
+a working link without persisting the secret or re-issuing the grant — the first forbidden by the
+ticket, the second would kill the printed QR already in a patient's hands. So the release message
+carries no link at all and points at the one the patient already has, or at their facility.
+`DISPATCHABLE_EVENT_TYPES` excludes `ACCESS_LINK_ISSUED` structurally, so no background worker can
+claim the one message that needs a URL it cannot rebuild. ADR-058 records the two rejected
+alternatives.
+
+**Four different things now mean "it went somewhere", and none implies another.**
+`ResultDelivery` (the ordering *provider organization* received the result — semantics still an
+open product decision, and untouched here), `ConnectorDelivery` (a partner EMR/LIS was handed a
+message), `DoctorReview` (a clinician recorded a disposition), `PatientNotification` (a patient was
+sent a content-free nudge). The notification domain has its own tables and imports none of the
+others; the webhook module in particular cannot reach a clinical model at all.
+
+**The message is not the result.** `notify/templates.py` holds every string that can be sent, and
+the release/amendment templates have **no substitution slot**, so no value, unit, reference range,
+interpretation, disposition, test name or identifier can reach a handset. Release and amendment
+wording is identical on purpose: "your result has been corrected" is itself a clinical fact about a
+named person, read on a lock screen.
+
+**Durability mirrors §23's Connect engine rather than inventing a second queue.** The obligation
+commits in the release's own transaction; the vendor call happens outside it, so a messaging outage
+never rolls back a clinically valid release. Idempotency is a UNIQUE index keyed on the immutable
+`LabResultReleaseVersion` — keyed on the order, an amendment would look like a replay of the
+release it corrects and be dropped. Claim leases, bounded exponential retry, one transaction per
+message, `FAILED` as a row an operator sees rather than a deletion.
+
+**`SENT` is not `DELIVERED` and neither is "read".** `SENT` means a vendor's API accepted the
+request. `DELIVERED` is written in one place, only after an HMAC signature check against the
+*configured* callback URL — never one derived from the request's `Host` header.
+
+**Authorization is unchanged, not extended.** Sending rides on the same `CLINICIAN`-for-the-owning-
+provider boundary as issuing patient access, which a platform administrator does not bypass. A
+platform admin may read cross-tenant queue health, which carries no destination, order, patient or
+message id.
+
+**Law 4 is intact.** Notification is optional. The QR-only path is one gesture and does not route
+through a form asking for a phone number, the printed sheet is unchanged, and nothing in ordering,
+laboratory work, release, review or follow-up requires a message to have been sent.
+
+**What this does not make true.** No real provider has been contacted, no credential exists, and no
+message has ever reached a handset. ADR-003's gate is unchanged: WhatsApp/SMS stays **BLOCKED**
+until real credentials run the flow, pilot gate 5 is not cleared, and a passing test against the
+in-process fake proves the code above the transport boundary and nothing about delivery.

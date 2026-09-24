@@ -8005,3 +8005,122 @@ recovered" — the three questions an operator actually has.
   *order* notifications that this correction fixed for result notifications. Recorded in
   `PROJECT_STATE.md` rather than fixed here, because it is the laboratory direction and this ticket
   is explicitly the provider one.
+
+---
+
+## ADR-058 — ACCEPTED / IMPLEMENTED (2026-09-24, DH-NOTIFY-001): a patient notification is a
+## content-free nudge, and the secure link can only be sent at issuance
+
+**Date:** 2026-09-24 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED, TESTED,
+REAL-POSTGRESQL-QUALIFIED · **NOT REAL-PROVIDER-QUALIFIED** — ADR-003's gate is unchanged and
+remains **BLOCKED** · **Decided by:** Liban (DH-NOTIFY-001 ticket; option A′ chosen in session)
+
+**Relationship to prior decisions.** ADR-002 permitted "a notifier module inside the adapter calls
+the WhatsApp Cloud API (or Twilio) directly"; this entry exercises that permission and names
+Twilio. ADR-003's real-credential gate is **not** weakened, relaxed or reinterpreted — see
+Decision 9. ADR-042's central data boundary and patient result-release policy are unchanged:
+nothing here sends a patient a result. DH-PATIENT-001's `PatientAccessGrant` model is unchanged in
+every particular, which is the whole point of Decision 1.
+
+### The conflict this ADR exists to resolve
+
+DH-NOTIFY-001 asked for a push notification that carries the patient's secure DHealth link, fired
+when a laboratory releases a result. Two of its own requirements cannot both hold:
+
+* §4: *"DHealth cannot reconstruct the raw token after the original PatientAccessGrant issuance.
+  Do not weaken that invariant. Do not store the raw token so notifications become convenient."*
+  This is `exchange/patient_access.py`'s existing design and `docs/ARCHITECTURE.md` §19's
+  "No raw-token recovery, ever."
+* §16 and §30: the release/amendment message contains `{patient_access_url}`, and acceptance
+  requires that the link in that message opens DHealth Patient.
+
+A release happens hours or days after issuance. By then the raw secret exists nowhere — it was
+returned once, into the clinician's browser. So a message composed at release time cannot contain
+a working link **unless** DHealth either persists the secret or re-issues the grant.
+
+This is `AGENTS.md`'s "anything changing what patient data leaves the system" and its "a gap that
+obviously should be filled a particular way", so it was escalated rather than resolved by
+inference. Three options were put to Liban.
+
+### The options, as presented
+
+**A′ — the link is sent only at issuance (CHOSEN).** The issuance request optionally carries
+destination, channel and consent; the server composes the URL while the secret is still in that
+request's memory, commits the grant and the obligation together, and sends the link message
+immediately afterwards. Release and amendment messages carry **no link** — they say there is an
+update and point at the link the patient already holds, or at their facility. Changes no existing
+invariant. Costs: §16's update template loses `{patient_access_url}`; §30's acceptance step becomes
+"the patient opens the link already in hand"; one event type §11 did not list.
+
+**B — encrypted raw token at rest**, key in the environment, decrypted only in the dispatcher.
+Satisfies §16 and §30 exactly as written. Rejected because of what it costs in
+`patient_access.py`'s own words: the digest exists "so a database read (or a backup, or a careless
+log) cannot recover the bearer secret itself". Under B, a database dump plus an environment dump
+recovers every live patient token.
+
+**C — re-issue the grant at send time.** Stores nothing and satisfies §16/§30. Rejected because the
+printed sheet or QR already in the patient's hands dies the instant the first message goes out, and
+every amendment kills the previous link — a direct Law 4 harm — unless the one-live-grant-per-order
+constraint is also relaxed, which §29 says to preserve.
+
+### The decisions
+
+1. **A′ is accepted.** The `PatientAccessGrant` model, its partial unique index, its digest-only
+   storage and the absence of any recovery endpoint are unchanged. No column added by this ticket
+   holds a token, a rendered message or a patient-access URL.
+
+2. **The notification is not the result.** Every string DHealth can send lives in
+   `notify/templates.py`, and the release/amendment templates contain **no substitution slot at
+   all**. The content policy is structural rather than editorial: there is no field through which a
+   value, unit, reference range, interpretation, follow-up disposition, test name, identifier or
+   clinician name could reach a handset. Lock screens and shared phones are the assumed reading
+   environment.
+
+3. **Release and amendment messages are textually identical.** "Your earlier result has been
+   corrected" would tell whoever is holding the phone that a correction happened to a named person,
+   which is a clinical fact. The patient learns what changed from the authoritative status page.
+
+4. **A separate domain, never `ResultDelivery`.** `ResultDelivery` means the ordering *provider
+   organization* received the result, and its exact semantics remain an open product decision
+   (`docs/MVP-1.0.md` §10 item 6). This ticket does not touch, read as authority or reinterpret it.
+   Four distinct facts now exist and none implies another: `ResultDelivery`, `ConnectorDelivery`,
+   `DoctorReview`, `PatientNotification`.
+
+5. **Obligations commit with the release; the vendor call happens outside it.** The hook runs on the
+   release's own session, so "a result was released" and "the patient is owed a message" cannot
+   disagree. No provider I/O occurs inside a clinical transaction, and a messaging vendor can never
+   roll back a release.
+
+6. **Idempotency is a database constraint.** `idempotency_key` is UNIQUE and minted deterministically
+   from the immutable `LabResultReleaseVersion`. Keyed on the order instead, an amendment would look
+   like a replay of the release it corrects and be silently dropped — the failure this domain most
+   needs not to have.
+
+7. **`SENT` is not `DELIVERED`, and neither is "read".** `SENT` means the provider's API accepted
+   the request. `DELIVERED` is written in exactly one place, only after an HMAC signature check on a
+   provider receipt. Neither means the patient read, opened or understood anything, and the French
+   wording module exists to keep that true after translation.
+
+8. **Consent is a recorded act with a named actor, never an inference.** Two columns — when, and
+   which `ExchangeIdentity` affirmed it. No free-text field, because that is where invented
+   jurisdiction-specific legal language accumulates. Sending is gated on the owning provider's
+   `CLINICIAN`, which a platform administrator does not bypass.
+
+9. **ADR-003's gate is unchanged and still BLOCKED.** The transport, the retry budget, the webhook
+   and the content policy are all qualified against a deterministic in-process fake and against real
+   PostgreSQL. **No real provider has been contacted, no credential exists, and no message has ever
+   been sent to any handset.** A passing fake is not a completion. This build is
+   `WRITTEN, TESTED, REAL-POSTGRESQL-QUALIFIED` and explicitly **not**
+   `REAL-PROVIDER-QUALIFIED`, not production-ready, and does not clear pilot gate 5.
+
+10. **Twilio, behind a vendor-independent interface.** Launch 1 needs both SMS and WhatsApp (§5) and
+    Twilio is the one provider covering both behind a single credential. `NotificationTransport` is
+    three methods; Meta's WhatsApp Cloud API would be a second implementation with no change to any
+    clinical or workflow file. Twilio's Messages API has **no request idempotency key**, so this
+    system claims durable at-least-once with idempotent local processing — never exactly-once.
+
+11. **Not decided here, and deliberately still open:** `ResultDelivery`'s semantics
+    (`docs/MVP-1.0.md` §10 item 6); the per-channel sensitive-content policy *beyond* the
+    content-free rule this ADR sets (§10 item 8 — this ADR makes every channel carry the same
+    nothing, which sidesteps rather than resolves the question); proxy/family authorization (§10
+    item 9); email, voice, patient accounts, OTP and bidirectional messaging, all §28 non-goals.

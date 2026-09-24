@@ -6,6 +6,58 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-24, DH-NOTIFY-001, directly on `master`.** From `f861008`. DHealth can now compose and
+hand a patient message to a transport. **It still has not sent one.** No real provider has been
+contacted, no credential exists, and ADR-003's pinned gate is unchanged: WhatsApp/SMS stays
+`BLOCKED`, not `DONE`, and **pilot gate 5 is not cleared**. What exists is the domain, the content
+policy, the durability and the transport boundary — all qualified against a deterministic in-process
+fake and real PostgreSQL 18.6, which is a claim about code, not about delivery.
+
+The ticket's own §4 and §16/§30 could not both hold, and the conflict was escalated rather than
+guessed: the raw `PatientAccessGrant` secret is returned exactly once and is unrecoverable
+(`docs/ARCHITECTURE.md` §19), so a message composed at *release* time cannot carry a working link
+without either persisting the secret or re-issuing the grant — the first forbidden by §4, the second
+fatal to the printed QR already in a patient's hands. Liban chose **A′** (ADR-058): the link is sent
+at issuance, while the secret is still in the request's memory; release and amendment messages carry
+**no link at all** and point at the one the patient already holds, or at their facility.
+`PatientAccessGrant` is unchanged in every particular, and `DISPATCHABLE_EVENT_TYPES` excludes
+`ACCESS_LINK_ISSUED` structurally so no worker can claim the one message needing a URL it cannot
+rebuild.
+
+**The message is not the result.** `notify/templates.py` holds every string that can ever be sent,
+and the release/amendment templates contain **no substitution slot**, so no value, unit, reference
+range, interpretation, follow-up disposition, test name or identifier can reach a handset. Release
+and amendment wording is identical on purpose — "your result has been corrected" is itself a
+clinical fact about a named person, read on a lock screen. **`ResultDelivery` is untouched**: it
+means the ordering *provider organization* received the result, its semantics remain an open product
+decision (`docs/MVP-1.0.md` §10 item 6), and nothing in this ticket reads or writes it — asserted by
+a before/after snapshot diff across the whole release → dispatch → receipt path, which `NC-NOTIFY-3`
+turns red.
+
+Obligations commit **inside the release transaction** and the vendor call happens outside it, so a
+messaging outage can never roll back a clinically valid release. Idempotency is a UNIQUE index keyed
+on the immutable `LabResultReleaseVersion`; keyed on the order, an amendment would look like a
+replay of the release it corrects and be silently dropped. `SENT` means a vendor's API accepted the
+request and nothing about a handset; `DELIVERED` is written in one place only, after an HMAC check
+against the **configured** callback URL, never one derived from a request `Host` header.
+
+**Real PostgreSQL 18.6 found a real bug that SQLite structurally could not**: `enqueue` called
+`session.add()` before opening its savepoint, so entering `begin_nested()` flushed the INSERT into
+the *outer* transaction — a unique-key collision would have aborted the caller's transaction, which
+is a clinical result release. Fixed, and now pinned by a deterministic SQLite regression test as
+well as the concurrency one. Eight negative controls executed and reverted, each red exactly where
+predicted; two stayed green where a reader might expect red and both are recorded with the reason.
+
+Counts, re-measured at the end rather than carried forward: **1565 passed, 160 skipped** in the
+adapter suite (baseline measured before any change: 1467/145), of which 97 are new SQLite tests and
+15 are the real-PostgreSQL qualification file. UI: **841 passed**, plus one pre-existing test that
+cannot be run in this environment at all and is untouched by this ticket
+(`src/features/auth/logout.test.ts` — see `PROJECT_STATE.md`). **Not done:** no real provider, no
+credential, no handset, no browser demonstration of the send flow, no facility using it, and **no
+real-provider qualification path exists yet either** — when credentials arrive the first step is
+writing one, not running it.
+
+
 **2026-09-23, DH-CONNECT-AGENT-001 (lifetime correction), directly on `master`.** From `45130f3`.
 The provider half of the runtime shipped with two defects of the same kind — it confused how long a
 fact is true with how long the thing that reported it exists. A correlation was keyed on the
@@ -303,6 +355,27 @@ changes, weakens, or reinterprets any of the four.
 *Qualified at the specific evidence level stated per item below — CI/unit/integration and, where
 noted, real-PostgreSQL. This is not a claim of production deployment, and where a ticket's own
 formal closure is a separate reserved human decision, that is stated explicitly in its bullet.*
+
+- **Patient notification domain, transport and dispatcher, DH-NOTIFY-001** (2026-09-24,
+  ADR-058): a durable patient-notification domain separate from `ResultDelivery` in every respect
+  (`patient_notifications`, `patient_notification_enrollments`, `patient_notification_attempts`,
+  migration `0032_patient_notifications`); a content policy enforced structurally rather than
+  editorially — the release/amendment templates have **no substitution slot**, so no value, unit,
+  reference range, interpretation, disposition or identifier can reach a handset; obligations that
+  commit inside the release transaction while the vendor call happens outside it; idempotency as a
+  UNIQUE index keyed on the immutable `LabResultReleaseVersion`; a vendor-independent transport
+  with one Twilio implementation; a dispatcher using `FOR UPDATE SKIP LOCKED` with claim leases,
+  bounded retry and one transaction per message; and a delivery-receipt webhook whose authority is
+  an HMAC signature over the **configured** callback URL. Evidence: 97 SQLite tests
+  (`test_patient_notification_domain/api/transport.py`) and 15 real-PostgreSQL 18.6 tests
+  (`tests/integration/test_dhnotify001_postgres_qualification.py`), including two-thread claim
+  disjointness, concurrent-hook convergence on one row, lease expiry, the PostgreSQL-only E.164
+  CHECK and the audit-vocabulary constraints read back out of `pg_constraint`. Eight negative
+  controls executed and reverted. Real PostgreSQL found a genuine bug SQLite structurally could not
+  — `enqueue` flushed its INSERT outside the savepoint, so a unique-key collision would have
+  aborted the caller's clinical release transaction — now fixed and pinned by a deterministic
+  SQLite regression test as well. **This is a claim about code. No real provider was contacted and
+  no message was sent** (§E).
 
 - **DHealth Connect provider-delivery durability, DH-CONNECT-AGENT-001** (2026-09-23,
   correction): correlation scoped to the organization and source system rather than to the connector
@@ -649,9 +722,18 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## E. BLOCKED / OPEN
 
-- **WhatsApp/SMS/email result delivery**: `ResultDelivery` is created `PENDING` at order creation
-  and no code path advances it past `PENDING`. Stays `BLOCKED`, not `DONE`, until a real transport
-  runs the flow against real credentials — a mock is never done, per this repo's pinned P0 rule.
+- **WhatsApp/SMS patient notification against real credentials**: **still `BLOCKED`, and the
+  pinned P0 rule is unchanged** — a mock is never done. **2026-09-24 dated update (DH-NOTIFY-001):**
+  the transport, the content policy, the durable queue, the dispatcher and the signed delivery-
+  receipt webhook now exist and are CI- and real-PostgreSQL-qualified (§C). **No real provider has
+  been contacted, no credential exists, and no message has ever reached a handset**, so this stays
+  `BLOCKED` and pilot gate 5 is not cleared. What changed is that clearing it is now a matter of
+  credentials rather than of code.
+- **`ResultDelivery` semantics**: created `PENDING` at order creation and no code path advances it
+  past `PENDING`. Unchanged by DH-NOTIFY-001, deliberately: a patient's handset accepting an SMS is
+  not the ordering provider organization receiving a result, and what `DELIVERED` should mean there
+  remains an open product decision (`docs/MVP-1.0.md` §10 item 6).
+- **Email and voice patient notification**: not built, and `§28` non-goals rather than gaps.
 - **Real Keycloak qualification of authorization boundaries**: still not run for token
   validation/audience/authorization decisions — every such boundary is proven only against a locally
   generated RSA keypair (`StaticKeySource`), never a live identity provider. (Narrower than before:
@@ -688,10 +770,12 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   itself): no code of its own exists yet. **[Updated 2026-09-20, DH-PATIENT-001 — this bullet
   previously also named "DHealth Patient (assisted-digital patient layer)" as having no code of its
   own; a first DHealth Patient surface now exists, see §D.]** What remains not built on the patient
-  side specifically: **push notification of any kind** (WhatsApp, SMS, email, voice — DH-PATIENT-001
-  deliberately built a safe access path first and wired no transport to it), detailed result
-  delivery to patients (excluded by policy, not pending — patients see status only), patient
-  accounts, family/proxy authorization, and offline/PWA capability.
+  side specifically **[updated 2026-09-24, DH-NOTIFY-001 — this bullet previously named push
+  notification of any kind as having no code; SMS and WhatsApp now have a full implementation that
+  has never been run against a real provider, see §C and §E]**: **email and voice** notification
+  (`§28` non-goals rather than gaps), detailed result delivery to patients (excluded by policy, not
+  pending — patients see status only), patient accounts, family/proxy authorization, and
+  offline/PWA capability.
 - **Any patient-facing marketplace or pricing surface.** Not built, not scheduled for Launch 1 —
   preserved as a product-law boundary (§B), not merely an unstarted feature.
 - **Any decision-support, alerting, or clinical-interpretation logic anywhere in the repository.**
@@ -722,7 +806,10 @@ cleared yet:
 3. Manual live/browser demonstration of the golden path (currently: not run).
 4. A performed backup **restore drill**, not merely a script that exists (pinned P0; see
    `PROJECT_STATE.md` for current backup status).
-5. WhatsApp/SMS result delivery running against real credentials, not a mock (pinned P0, §E).
+5. WhatsApp/SMS patient notification running against real credentials, not a mock (pinned
+   P0, §E). **Not cleared.** DH-NOTIFY-001 built the transport, the dispatcher and the
+   receipt webhook (§C); no real provider has been contacted and no message has reached a
+   handset, so clearing this is now a matter of credentials rather than of code.
 6. Clinical lead sign-off on the order set and partograph fields (`docs/CLINICAL-SIGNOFF.md`) —
    unrelated to the Exchange track's own gates above, but binding wherever the maternity track is
    touched. Pilot-ready is never clinically live without it.
@@ -730,6 +817,10 @@ cleared yet:
 No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
+
+**DH-NOTIFY-001 landed 2026-09-24 (§A) and did not change what comes next.** It closed the
+push-notification transport gap on the Exchange track, which is orthogonal to Connect; the
+next ticket is unchanged.
 
 **NEXT: DH-CONNECT-ADAPTER-001 — First Real Partner / Vendor Adapter.**
 DH-CONNECT-AGENT-001 built the runtime and deliberately no adapter. Everything vendor-specific sits
