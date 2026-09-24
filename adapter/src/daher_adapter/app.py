@@ -99,19 +99,21 @@ def create_app(
         runtime_token_validator=connect_runtime_validator,
         platform_admin_role=active_settings.exchange_platform_admin_role,
     )
-    # DH-NOTIFY-001 §15: the provider status callback. A third authentication regime, and it is a
-    # third one on purpose -- a messaging vendor cannot hold a Keycloak token, so this route's
-    # authority is an HMAC signature over the exact URL Twilio was configured to call. Mounted on
-    # its own router rather than on the Exchange's, because a clinical route whose auth dependency
-    # differs from every other clinical route's is the kind of exception somebody later copies.
+    # DH-NOTIFY-001 §15 / DH-NOTIFY-META-001 §11: Meta's webhook. A third authentication regime, and
+    # it is a third one on purpose -- a messaging vendor cannot hold a Keycloak token, so these
+    # routes' authority is a verify token for the subscription handshake and an HMAC-SHA256
+    # signature over the raw body for every event. Mounted on its own router rather than on the
+    # Exchange's, because a clinical route whose auth dependency differs from every other clinical
+    # route's is the kind of exception somebody later copies.
     #
-    # Mounted unconditionally and failing closed when unconfigured, exactly as the two routers
-    # above do: with no auth token or no configured callback URL, every request is a 403. A
-    # deployment that has provisioned no provider receives no receipts.
+    # Mounted unconditionally and failing closed when unconfigured, exactly as the two routers above
+    # do: with no app secret or no verify token, every request is a 403. A deployment that has
+    # provisioned no WhatsApp Business Account receives no callbacks.
     notification_webhook_router = build_notification_webhook_router(
         session_factory=exchange_session_factory,
-        auth_token=active_settings.twilio_auth_token,
-        callback_url=active_settings.notification_status_callback_url,
+        app_secret=active_settings.meta_app_secret,
+        verify_token=active_settings.meta_webhook_verify_token,
+        phone_number_id=active_settings.meta_phone_number_id,
     )
 
     @asynccontextmanager

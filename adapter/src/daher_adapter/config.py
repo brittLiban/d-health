@@ -3,12 +3,17 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import URL
 
 _DB_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# DH-NOTIFY-META-001 §3: `vNN.N`. Validated rather than trusted -- the Graph API version is the
+# value most likely to be pasted from a stale example, and a malformed or unversioned path
+# silently changes which API a deployment talks to.
+_GRAPH_VERSION = re.compile(r"^v\d+\.\d+$")
 
 # DH-011/BLOCKER-6 (Option F): OpenELIS's SITEYEARNUM accession format needs a real numeric
 # facility site code before any ServiceRequest can be created (DH-011B, live-reconfirmed this
@@ -96,9 +101,15 @@ _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 #: Providers this build can actually construct. An unknown name is a startup refusal rather than a
-#: silent fallback to the default: "I set DHEALTH_NOTIFICATION_PROVIDER=meta and nothing happened"
-#: must not be a thing that can occur.
-_KNOWN_NOTIFICATION_PROVIDERS = frozenset({"twilio", "fake"})
+#: silent fallback to a default: "I set DHEALTH_NOTIFICATION_PROVIDER=twilio and nothing happened"
+#: must not be a thing that can occur. Twilio was removed by DH-NOTIFY-META-001/ADR-059 -- WhatsApp
+#: goes directly to Meta, and no SMS provider has been selected.
+_KNOWN_NOTIFICATION_PROVIDERS = frozenset({"meta", "fake"})
+
+#: The two approved-template names a deployment must register in its WhatsApp Business Account.
+#: Keys match `notify/templates.py`'s `MetaTemplateBinding.config_key`; DHealth never invents a
+#: template name, because Meta approves them per WABA.
+_META_TEMPLATE_KEYS = ("META_TEMPLATE_PATIENT_ACCESS_FR", "META_TEMPLATE_PATIENT_UPDATE_FR")
 
 
 def _boolean(environment: Mapping[str, str], name: str, default: bool) -> bool:
@@ -113,7 +124,7 @@ def _boolean(environment: Mapping[str, str], name: str, default: bool) -> bool:
 
 
 def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
-    """DH-NOTIFY-001 §10 — fail closed when sending is switched on but cannot work.
+    """DH-NOTIFY-001 §10 / DH-NOTIFY-META-001 §4 — fail closed when sending is on but cannot work.
 
     The asymmetry is the point. With notifications **off**, every value below is optional and the
     adapter starts normally -- that is the state every test, every development stack and the native
@@ -122,13 +133,20 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
     sends nothing. §10 requires those two to be different states, and a half-configured service that
     boots green is precisely the shape that makes them look the same.
 
-    The one that is easy to miss and is checked anyway: `DHEALTH_PATIENT_PUBLIC_BASE_URL`. Without
-    it there is no way to compose a patient link at all, so enabling notifications without it would
-    produce an access-link message that cannot be rendered -- discovered at the first patient
-    handoff rather than at boot.
+    Two that are easy to miss and are checked anyway:
+
+    ``DHEALTH_PATIENT_PUBLIC_BASE_URL`` -- without it there is no way to compose a patient link at
+    all, so enabling notifications without it produces an access-link message that cannot be built,
+    discovered at the first patient handoff rather than at boot.
+
+    ``META_GRAPH_API_VERSION`` -- **required, with no default**, and shape-validated.
+    DH-NOTIFY-META-001
+    §3 says to pin and document the version DHealth has actually qualified against; a default would
+    be a guess, and this repository could not reach Meta's changelog to make an informed one. The
+    deployment states which version it uses, and the operations read shows it back.
     """
     enabled = _boolean(environment, "DHEALTH_NOTIFICATIONS_ENABLED", False)
-    provider = environment.get("DHEALTH_NOTIFICATION_PROVIDER", "").strip().lower() or "twilio"
+    provider = environment.get("DHEALTH_NOTIFICATION_PROVIDER", "").strip().lower() or "meta"
     if provider not in _KNOWN_NOTIFICATION_PROVIDERS:
         raise ConfigurationError(
             f"DHEALTH_NOTIFICATION_PROVIDER must be one of "
@@ -136,17 +154,25 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
         )
 
     base_url = environment.get("DHEALTH_PATIENT_PUBLIC_BASE_URL", "").strip() or None
-    callback_url = environment.get("DHEALTH_NOTIFICATION_STATUS_CALLBACK_URL", "").strip() or None
-    account_sid = environment.get("TWILIO_ACCOUNT_SID", "").strip() or None
-    auth_token = environment.get("TWILIO_AUTH_TOKEN", "").strip() or None
-    sms_from = environment.get("DHEALTH_SMS_FROM", "").strip() or None
-    whatsapp_from = environment.get("DHEALTH_WHATSAPP_FROM", "").strip() or None
     region = environment.get("DHEALTH_NOTIFICATION_DEFAULT_REGION", "").strip().upper() or None
+
+    access_token = environment.get("META_WHATSAPP_ACCESS_TOKEN", "").strip() or None
+    phone_number_id = environment.get("META_WHATSAPP_PHONE_NUMBER_ID", "").strip() or None
+    business_account_id = environment.get("META_WHATSAPP_BUSINESS_ACCOUNT_ID", "").strip() or None
+    app_secret = environment.get("META_APP_SECRET", "").strip() or None
+    verify_token = environment.get("META_WEBHOOK_VERIFY_TOKEN", "").strip() or None
+    graph_version = environment.get("META_GRAPH_API_VERSION", "").strip() or None
+    template_language = environment.get("META_TEMPLATE_LANGUAGE", "").strip() or None
+    template_names = {
+        key: value for key in _META_TEMPLATE_KEYS if (value := environment.get(key, "").strip())
+    }
 
     if region is not None and (len(region) != 2 or not region.isalpha()):
         raise ConfigurationError(
             "DHEALTH_NOTIFICATION_DEFAULT_REGION must be an ISO 3166-1 alpha-2 code (e.g. DJ)"
         )
+    if graph_version is not None and not _GRAPH_VERSION.fullmatch(graph_version):
+        raise ConfigurationError("META_GRAPH_API_VERSION must look like 'v23.0'")
 
     if enabled:
         if base_url is None:
@@ -159,31 +185,45 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
             # A patient-access URL carries a live bearer credential in its fragment. Over http://
             # that fragment is exposed to anyone on the path before TLS would have protected it.
             raise ConfigurationError("DHEALTH_PATIENT_PUBLIC_BASE_URL must be an https:// URL")
-        if provider == "twilio":
-            if account_sid is None:
+        if provider == "meta":
+            if access_token is None:
                 raise ConfigurationError(
-                    "TWILIO_ACCOUNT_SID is required when notifications are enabled"
+                    "META_WHATSAPP_ACCESS_TOKEN is required when notifications are enabled"
                 )
-            if auth_token is None:
+            if phone_number_id is None:
                 raise ConfigurationError(
-                    "TWILIO_AUTH_TOKEN is required when notifications are enabled"
+                    "META_WHATSAPP_PHONE_NUMBER_ID is required when notifications are enabled"
                 )
-            if sms_from is None and whatsapp_from is None:
+            if graph_version is None:
                 raise ConfigurationError(
-                    "at least one of DHEALTH_SMS_FROM or DHEALTH_WHATSAPP_FROM is required "
-                    "when notifications are enabled"
+                    "META_GRAPH_API_VERSION is required when notifications are enabled -- there "
+                    "is deliberately no default; pin the version this deployment has qualified"
+                )
+            if template_language is None:
+                raise ConfigurationError(
+                    "META_TEMPLATE_LANGUAGE is required when notifications are enabled -- it must "
+                    "match the language code of the templates approved in the WABA"
+                )
+            missing_templates = [key for key in _META_TEMPLATE_KEYS if key not in template_names]
+            if missing_templates:
+                raise ConfigurationError(
+                    f"{', '.join(missing_templates)} is required when notifications are enabled -- "
+                    "DHealth never invents an approved template name"
                 )
 
     return {
         "notifications_enabled": enabled,
         "notification_provider": provider,
         "patient_public_base_url": base_url,
-        "notification_status_callback_url": callback_url,
-        "twilio_account_sid": account_sid,
-        "twilio_auth_token": auth_token,
-        "sms_from": sms_from,
-        "whatsapp_from": whatsapp_from,
         "notification_default_region": region,
+        "meta_access_token": access_token,
+        "meta_phone_number_id": phone_number_id,
+        "meta_business_account_id": business_account_id,
+        "meta_app_secret": app_secret,
+        "meta_webhook_verify_token": verify_token,
+        "meta_graph_api_version": graph_version,
+        "meta_template_language": template_language,
+        "meta_template_names": template_names,
     }
 
 
@@ -247,21 +287,36 @@ class Settings:
     # *enabled and configured* (messages flow), and *enabled but incomplete* (a startup refusal,
     # never a service that looks deployed and silently sends nothing).
     notifications_enabled: bool = False
-    notification_provider: str = "twilio"
+    #: `meta` (the real WhatsApp Cloud API) or `fake` (contacts nothing). Twilio was removed by
+    #: DH-NOTIFY-META-001/ADR-059: WhatsApp goes directly to Meta, and no SMS provider is selected.
+    notification_provider: str = "meta"
     #: The public origin patient links are built from. **Explicit deployment configuration, never
     #: derived from an incoming `Host` header** (§17): a server-composed link built from an
     #: attacker-controlled header is a link that carries a live patient credential to an
     #: attacker-chosen origin. The browser-side QR/print path keeps using its own `window.origin`
     #: (`ui/src/features/patient/patientAccessUrl.ts`) and is unaffected.
     patient_public_base_url: str | None = None
-    #: The exact URL Twilio is configured to call back, signed by them and validated against this
-    #: value. `None` disables receipt handling entirely -- notifications then stop at `SENT`, which
-    #: is honest rather than limiting.
-    notification_status_callback_url: str | None = None
-    twilio_account_sid: str | None = None
-    twilio_auth_token: str | None = None
-    sms_from: str | None = None
-    whatsapp_from: str | None = None
+    #: Meta WhatsApp Cloud API credentials. The access token is a bearer credential for the whole
+    #: WhatsApp Business Account: it lives in the environment and in the transport's memory, and
+    #: never in a log, an exception, a database row, a metric or an audit detail.
+    meta_access_token: str | None = None
+    meta_phone_number_id: str | None = None
+    #: Provenance for the runbook, not used on the send path. Recorded so an operator can tell which
+    #: WABA a deployment belongs to without opening Meta's console.
+    meta_business_account_id: str | None = None
+    #: Signs every inbound webhook (`X-Hub-Signature-256`). Without it the webhook refuses every
+    #: request and notifications truthfully stop at `SENT` -- a weaker claim, correctly made.
+    meta_app_secret: str | None = None
+    #: Echoed back during Meta's subscription handshake. Required alongside the app secret.
+    meta_webhook_verify_token: str | None = None
+    #: **Required when sending is enabled, with no default** (§3). DHealth has qualified no Graph
+    #: API version; the deployment states which one it uses and the operations read shows it back.
+    meta_graph_api_version: str | None = None
+    #: The language code of the templates approved in the WABA (e.g. `fr`). Must match exactly.
+    meta_template_language: str | None = None
+    #: Approved template names, keyed by the config variable that supplied them. DHealth never
+    #: invents one -- Meta approves templates per WABA.
+    meta_template_names: dict[str, str] = field(default_factory=dict)
     #: ISO 3166-1 alpha-2 default region for parsing a destination typed without a country code.
     #: Unset by default, so a number with no country code is refused rather than guessed (§6).
     #: This is the configuration seam §6 asks for; Djibouti is deliberately not hard-coded.
@@ -361,11 +416,12 @@ class Settings:
     def notification_receipts_configured(self) -> bool:
         """Whether an authenticated provider receipt can be accepted at all.
 
-        Needs both the shared secret that signs it and the exact URL that was signed. Either one
-        missing means the webhook refuses every request, and notifications truthfully stop at
-        ``SENT`` -- a weaker claim, correctly made, rather than ``DELIVERED`` asserted on nothing.
+        Needs both the app secret that signs an event and the verify token that registers the
+        subscription. Either one missing means the webhook refuses every request, and notifications
+        truthfully stop at ``SENT`` -- a weaker claim, correctly made, rather than ``DELIVERED``
+        asserted on nothing.
         """
-        return bool(self.twilio_auth_token and self.notification_status_callback_url)
+        return bool(self.meta_app_secret and self.meta_webhook_verify_token)
 
     def build_notification_transport(self):  # noqa: ANN201 -- NotificationTransport | None
         """The configured provider, or ``None`` when sending is off.
@@ -388,14 +444,15 @@ class Settings:
 
             return FakeNotificationTransport()
 
-        from daher_adapter.notify.twilio import TwilioNotificationTransport
+        from daher_adapter.notify.meta import MetaWhatsAppTransport
 
-        return TwilioNotificationTransport(
-            account_sid=self.twilio_account_sid or "",
-            auth_token=self.twilio_auth_token or "",
-            sms_from=self.sms_from,
-            whatsapp_from=self.whatsapp_from,
-            status_callback_url=self.notification_status_callback_url,
+        return MetaWhatsAppTransport(
+            access_token=self.meta_access_token or "",
+            phone_number_id=self.meta_phone_number_id or "",
+            graph_api_version=self.meta_graph_api_version or "",
+            template_names=self.meta_template_names,
+            template_language=self.meta_template_language or "",
+            business_account_id=self.meta_business_account_id,
         )
 
     @property

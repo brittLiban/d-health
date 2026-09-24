@@ -20,7 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from daher_adapter.notify.models import NotificationChannel, NotificationFailureCategory
+from daher_adapter.notify.models import (
+    NotificationChannel,
+    NotificationEventType,
+    NotificationFailureCategory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +74,24 @@ class TransportFailure(RuntimeError):
 class NotificationTransport(Protocol):
     """Three methods, no clinical vocabulary.
 
-    ``send`` takes a channel, an E.164 destination and a finished body. It does not take an order,
-    a patient, a result, a template id or a locale -- a transport that could see any of those would
-    eventually be asked to make a decision using one.
+    ``send`` takes a channel, an E.164 destination, **which notification event this is**, and a
+    locale. It does not take an order, a patient, a result, a disposition or a template *name* -- a
+    transport that could see any of those would eventually be asked to make a decision using one.
+
+    **Why the event type rather than a finished body** (changed by DH-NOTIFY-META-001). A
+    WhatsApp Business message is not free text: Meta renders an approved template, and DHealth
+    supplies the template's *name* and its parameters. A transport handed only a rendered string
+    would have nothing to send. So the intent crosses the boundary and each transport decides how
+    it becomes a wire payload -- Meta binds it to an approved template, a future SMS transport
+    renders ``templates.render()`` verbatim. Rendering in the dispatcher instead would put
+    provider-shaped knowledge on the wrong side of this line.
+
+    **The template name is never a parameter here, and that is load-bearing.** The server owns the
+    event → approved-template mapping (``templates.meta_binding``). A ``send(template_name=...)``
+    signature would let any caller name any approved template, which is how a message intended as
+    "there is an update" becomes one that says something else.
+    ``tests/test_patient_notification_meta.py`` asserts the absence of such a parameter rather than
+    trusting this paragraph.
     """
 
     @property
@@ -86,14 +105,26 @@ class NotificationTransport(Protocol):
         Separate from ``send`` raising, because an unsupported channel is a *configuration* fact
         knowable before an obligation is created -- so the enrollment endpoint can refuse at the
         point a clinician is still looking at the screen, rather than producing an obligation that
-        can only ever fail.
+        can only ever fail. It is also what the staff UI reads to avoid offering a channel this
+        deployment cannot send on (DH-NOTIFY-META-001 §6/§20).
         """
         ...
 
     def send(
-        self, *, channel: NotificationChannel, destination: str, body: str
+        self,
+        *,
+        channel: NotificationChannel,
+        destination: str,
+        event_type: NotificationEventType,
+        locale: str,
+        patient_access_url: str | None = None,
     ) -> TransportAccepted:
-        """Hand one message to the provider. Raises ``TransportFailure`` if it was not accepted."""
+        """Hand one message to the provider. Raises ``TransportFailure`` if it was not accepted.
+
+        ``patient_access_url`` is supplied **only** for ``ACCESS_LINK_ISSUED`` and is rejected by
+        every other event's binding -- ADR-058's A′ in the one place a provider payload is built.
+        It is never stored, never logged, and never part of a release or amendment message.
+        """
         ...
 
 

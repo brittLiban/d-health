@@ -17,9 +17,10 @@ processed rolls back its own transaction and nothing else; every other message i
 already committed its outcome. A batch-wide transaction would let one bad destination hold up every
 other patient's notification, which is the failure §14 names explicitly.
 
-**The dispatcher never touches clinical state.** It reads a notification row, renders a controlled
-template, calls a transport, and writes back to its own two tables. It cannot reach ``LabOrder``,
-``ResultDelivery``, ``DoctorReview`` or a release version, and that is enforced by what it imports.
+**The dispatcher never touches clinical state.** It reads a notification row, hands the event to a
+transport -- which owns how it becomes a wire payload -- and writes back to its own two tables. It
+cannot reach ``LabOrder``, ``ResultDelivery``, ``DoctorReview`` or a release version, and that is
+enforced by what it imports.
 
 **Where the tenant boundary is, and where it deliberately is not.** ``claim`` is not scoped to an
 organization: one dispatcher drains the whole deployment's queue, across every facility. That is a
@@ -59,7 +60,6 @@ from daher_adapter.notify.repository import (
     NotificationRetryPolicy,
     PatientNotificationRepository,
 )
-from daher_adapter.notify.templates import render
 from daher_adapter.notify.transport import (
     NotificationsDisabled,
     NotificationTransport,
@@ -195,16 +195,20 @@ class PatientNotificationDispatcher:
                 )
                 return False
 
-            # Rendered inside the transaction but *sent* outside it would require holding the
-            # session open across network I/O. Instead the body is built here, the session commits
-            # nothing yet, and the send happens below -- the transaction this opens is short and
-            # contains no vendor call. `render` for a dispatchable event never touches a URL or a
-            # token: `DISPATCHABLE_EVENT_TYPES` excludes the only template that has a link slot.
-            message = render(event_type, locale=locale)
-
+        # Everything the send needs was read above and the transaction is closed. **No vendor call
+        # happens inside a database transaction**, which is §16's invariant and the reason a
+        # provider outage can never roll back a clinically valid release.
+        #
+        # No `patient_access_url` is passed, and none exists to pass: `DISPATCHABLE_EVENT_TYPES`
+        # excludes the one event whose template carries a link, so the binding for anything reaching
+        # here takes zero parameters (DH-NOTIFY-META-001 §8). Rendering now happens inside the
+        # transport -- Meta binds this event to an approved template rather than sending a body.
         try:
             accepted = self._transport.send(
-                channel=channel, destination=destination, body=message.body
+                channel=channel,
+                destination=destination,
+                event_type=event_type,
+                locale=locale,
             )
         except NotificationsDisabled:
             # Switched off underneath a running worker. Leave the row exactly as it is: it is still
@@ -316,8 +320,16 @@ def send_access_link_inline(
                 NotificationFailureCategory.CONFIGURATION,
                 f"no sender configured for the {channel.value} channel",
             )
-        message = render(event_type, locale=locale, patient_access_url=patient_access_url)
-        accepted = transport.send(channel=channel, destination=destination, body=message.body)
+        # The one send that carries a link. The URL is passed as an argument, never stored, and the
+        # transport's binding is the only thing that decides it may be carried at all -- for every
+        # other event the binding refuses it outright.
+        accepted = transport.send(
+            channel=channel,
+            destination=destination,
+            event_type=event_type,
+            locale=locale,
+            patient_access_url=patient_access_url,
+        )
     except TransportFailure as failure:
         with session_factory.begin() as session:
             notification = repository.get(session, notification_id)

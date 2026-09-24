@@ -1128,6 +1128,15 @@ class PatientNotificationStatusResponse(BaseModel):
     channel: Literal["SMS", "WHATSAPP"] | None
     destination: str | None
     notifications: list[PatientNotificationResponse]
+    #: DH-NOTIFY-META-001 §6/§20: the channels this deployment can **actually** send on, derived
+    #: server-side from the configured transport. Empty when notifications are off.
+    #:
+    #: The domain understands SMS and WhatsApp; the *availability* of each is a fact about what is
+    #: configured, and only the server knows it. Sent here rather than inferred in React because a
+    #: frontend that hard-codes the channel list is a frontend that offers SMS forever after the
+    #: provider stops supporting it -- which is exactly the false advertisement §6 forbids. Today,
+    #: with the Meta WhatsApp transport and no SMS provider selected, this is ``["WHATSAPP"]``.
+    available_channels: list[Literal["SMS", "WHATSAPP"]]
 
 
 class NotificationOperationsResponse(BaseModel):
@@ -1147,6 +1156,16 @@ class NotificationOperationsResponse(BaseModel):
     enabled: bool
     provider: str | None
     receipts_configured: bool
+    #: DH-NOTIFY-META-001 §3: "configuration must make the selected version visible to operators
+    #: without exposing secrets". The pinned Graph API version, or ``None`` for a provider that has
+    #: none. Configured *and* invisible would leave an operator unable to answer "which API is this
+    #: deployment talking to?" without shell access to the container's environment -- which is also
+    #: where the access token lives, so the safe way to ask has to be this one.
+    graph_api_version: str | None
+    #: The channels this deployment can actually send on, same derivation as the per-order read.
+    #: Here so an operator can see at a glance that SMS is unavailable network-wide rather than
+    #: broken for one facility.
+    available_channels: list[Literal["SMS", "WHATSAPP"]]
     by_state: dict[str, int]
     by_failure_category: dict[str, int]
     by_channel: dict[str, int]
@@ -4825,7 +4844,7 @@ def build_exchange_router(
             # committed.
             #
             # Two consequences, both deliberate. A provider outage cannot roll back the clinician's
-            # act of issuing access -- the grant is durable before a byte goes to Twilio. And a
+            # act of issuing access -- the grant is durable before a byte goes to Meta. And a
             # failure here is terminal rather than retryable: no background worker can ever
             # reconstruct this URL, so the row goes straight to FAILED and the UI offers
             # revoke-and-reissue, which is §4's own stated recovery path.
@@ -4924,6 +4943,25 @@ def build_exchange_router(
 
     # -- DH-NOTIFY-001: patient notification status, retry, and the operator read ------------------
 
+    def _available_channels() -> list[str]:
+        """DH-NOTIFY-META-001 §6: which channels this deployment can actually send on.
+
+        Asked of the configured transport rather than derived from the enum, so "the domain knows
+        about SMS" and "this deployment can send an SMS" stay separate facts. With no transport
+        configured the list is empty and the UI offers nothing -- which is correct: a notification
+        enrolment would be refused with a 503 anyway.
+
+        Ordered by the enum rather than by the transport, so the answer is stable across restarts
+        and a test can assert on it without sorting.
+        """
+        if notification_transport is None:
+            return []
+        return [
+            channel.value
+            for channel in NotificationChannel
+            if notification_transport.supports(channel)
+        ]
+
     def _to_notification_response(row) -> PatientNotificationResponse:  # noqa: ANN001 - ORM row
         return PatientNotificationResponse(
             id=row.id,
@@ -4968,6 +5006,7 @@ def build_exchange_router(
                 channel=None if enrollment is None else enrollment.channel,
                 destination=None if enrollment is None else enrollment.destination,
                 notifications=[_to_notification_response(row) for row in rows],
+                available_channels=_available_channels(),
             )
 
     @router.post(
@@ -5047,6 +5086,11 @@ def build_exchange_router(
                 None if notification_transport is None else notification_transport.provider_name
             ),
             receipts_configured=notification_receipts_configured,
+            # `getattr` rather than an attribute, because "has a pinned API version" is a
+            # Meta-specific fact and the operations read must not require every future transport to
+            # invent one. A provider without the concept reports `None`, which is the truth.
+            graph_api_version=getattr(notification_transport, "graph_api_version", None),
+            available_channels=_available_channels(),
             by_state=summary["by_state"],
             by_failure_category=summary["by_failure_category"],
             by_channel=summary["by_channel"],

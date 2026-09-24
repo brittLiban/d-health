@@ -76,6 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings.notification_provider if settings.notifications_enabled else None
         )
         summary["receipts_configured"] = settings.notification_receipts_configured
+        # DH-NOTIFY-META-001 §3: the pinned Graph API version, visible without shell access
+        # to the container environment -- which is where the access token also lives, so the
+        # safe way to ask which API this deployment talks to has to be this one.
+        summary["graph_api_version"] = (
+            settings.meta_graph_api_version if settings.notifications_enabled else None
+        )
         # stdout, as data. No destination, no message id, no body -- the same safe projection the
         # operator HTTP read uses, for the same reason.
         print(json.dumps(summary, indent=2, sort_keys=True))

@@ -1,192 +1,281 @@
-"""DH-NOTIFY-001 §15 — the provider status callback, and everything it is forbidden to do.
+"""DH-NOTIFY-META-001 §11 — Meta's webhook, and everything it is forbidden to do.
 
-A delivery receipt is the only way ``DELIVERED`` is ever written, and this endpoint is the only
-place a receipt is accepted. Everything about it is built around one sentence: **a spoofed callback
-must be unable to mark anything delivered.**
+A delivery receipt is the only way ``DELIVERED`` is ever written, and these two routes are the only
+place one is accepted. Everything about them is built around one sentence: **a spoofed callback must
+be unable to mark anything delivered.**
 
-What it may change: ``PatientNotification.state``, and the attempt history that explains it.
+Two routes, because Meta's registration handshake and its event delivery are different things:
 
-What it may not change, and structurally cannot -- this module imports none of them:
-``LabOrder``, ``LabResult``, ``LabObservation``, a release version, ``DoctorReview``, and
-``ResultDelivery``. A messaging vendor is not an authority on clinical state. §15 says it and the
-import list enforces it.
+* ``GET`` -- the subscription handshake. Meta sends ``hub.mode=subscribe``, ``hub.verify_token`` and
+  ``hub.challenge``; a correct verify token means echoing the raw challenge back as ``text/plain``.
+* ``POST`` -- the events. Authenticity is ``X-Hub-Signature-256``, an HMAC-SHA256 of the **raw
+  request body** keyed with the Meta app secret.
 
-**Resolution is by provider message id and nothing else.** The payload's own account identifier,
-any organization or patient field a provider might add, and anything else in the body are never
-read as authority. DHealth minted the message id when *it* accepted the provider's response, so it
-is the one field in the callback that is a fact DHealth already knows.
+What they may change: ``PatientNotification.state``, and nothing else.
 
-**Mounted outside the Exchange router.** It carries no OIDC, because a vendor cannot hold a Keycloak
-token; its authentication is the signature, and putting it on the clinical router would mean a route
-there whose auth dependency is different from every other route's.
+What they may not change, and structurally cannot -- this module imports none of them:
+``LabOrder``, ``LabResult``, ``LabObservation``, ``LabResultReleaseVersion``,
+``LabResultAmendment``, ``DoctorReview``, ``ResultDelivery``, ``ConnectorDeliveryObligation``,
+``PatientAccessGrant``. §11 says it and the import list enforces it.
+
+**Resolution is by ``wamid`` and nothing else.** The payload's WABA id (``entry[].id``), its
+``metadata.phone_number_id``, its ``recipient_id`` and anything else in the body are never read as
+authority over which row is touched. DHealth minted nothing here -- it *recorded* the message id
+when it accepted Meta's send response, so that id is the one field in the callback that is a fact
+DHealth already knows. A forged payload naming a real organization, order or notification id changes
+nothing, because none of those fields is consulted.
+
+**Inbound messages are ignored entirely.** ``value.messages[]`` carries patient replies; §29 makes
+inbound chat a non-goal, and a handler that parsed them would be the first half of an inbox nobody
+decided to build.
+
+**``read`` is ignored** (§13). It is not a clinical fact: it means a chat thread was open on a
+device, not that a person read, understood or acted on anything, and mapping it into the state
+machine would create a value somebody would eventually read as acknowledgement.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
+import json
 import logging
-from urllib.parse import parse_qsl
+from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.notify.meta import META_DELIVERED_STATUSES, META_FAILED_STATUSES
 from daher_adapter.notify.models import NotificationFailureCategory
 from daher_adapter.notify.repository import PatientNotificationRepository
-from daher_adapter.notify.twilio import TWILIO_DELIVERED_STATUSES, TWILIO_FAILED_STATUSES
 
 logger = logging.getLogger("daher_adapter.notify.webhook")
 
-#: A real Twilio status callback is a few hundred bytes. Generous, and still a bound.
-_MAX_CALLBACK_BODY_BYTES = 64 * 1024
+#: Meta batches status events, so this is more generous than a single-message provider needs while
+#: still being a bound: an unauthenticated caller must not be able to make the server allocate
+#: arbitrary memory before the signature has even been checked.
+_MAX_CALLBACK_BODY_BYTES = 256 * 1024
+
+#: The only ``object`` value this endpoint will process. A payload for some other Meta product
+#: reaching this URL is a misconfiguration, not an event.
+_EXPECTED_OBJECT = "whatsapp_business_account"
 
 
-def twilio_signature(auth_token: str, url: str, params: dict[str, str]) -> str:
-    """Twilio's documented scheme: HMAC-SHA1 over the full URL with sorted params appended.
+def meta_signature(app_secret: str, raw_body: bytes) -> str:
+    """Meta's scheme: ``sha256=`` + HMAC-SHA256 of the **raw** body, keyed with the app secret.
 
-    Implemented here rather than pulled from the vendor SDK so the repository has no runtime
-    dependency on it, and so the *validation* -- the part that matters for security -- is readable
-    in one place.
+    Implemented here rather than pulled from a vendor SDK so the repository has no runtime
+    dependency on one, and so the validation -- the part that matters for security -- is readable in
+    one place.
+
+    The raw bytes matter and are why ``webhook`` reads ``request.body()`` before parsing anything:
+    JSON that is decoded and re-encoded is not byte-identical to what Meta signed, so a validator
+    working from a parsed object rejects every genuine callback and would be "fixed" by removing it.
     """
-    payload = url
-    for key in sorted(params):
-        payload += key + params[key]
-    digest = hmac.new(
-        auth_token.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha1,  # noqa: S324
-    ).digest()
-    return base64.b64encode(digest).decode("ascii")
+    digest = hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
 
 
 def build_notification_webhook_router(
     *,
     session_factory: sessionmaker[Session],
-    auth_token: str | None,
-    callback_url: str | None,
+    app_secret: str | None,
+    verify_token: str | None,
+    phone_number_id: str | None = None,
     prefix: str = "/notifications/v1",
 ) -> APIRouter:
-    """The one webhook route.
+    """The two webhook routes.
 
-    ``auth_token`` and ``callback_url`` are both required for the endpoint to accept anything.
+    ``app_secret`` and ``verify_token`` are both required for the endpoint to accept anything.
     Unset -- the ordinary state for a deployment with notifications off, and for every test that is
     not about this endpoint -- means **every** request is refused. Fails closed, exactly as the
     Exchange router does when its OIDC is unconfigured: a deployment that has provisioned no
-    provider has no receipts to accept.
+    WhatsApp Business Account receives no callbacks.
 
-    ``callback_url`` is the **configured** public URL, never derived from the incoming ``Host``
-    header. That is the whole reason it is a parameter: Twilio signs the URL it was told to call,
-    and validating against an attacker-controlled ``Host`` would let anyone who can set a header
-    produce a signature that verifies.
+    ``phone_number_id`` is optional defence in depth. When set, a status event whose
+    ``metadata.phone_number_id`` names a different number is ignored -- not because the payload is
+    authority (it is not, and the ``wamid`` lookup would fail for a foreign message anyway), but
+    because a correctly-signed callback for the wrong business number means two deployments share an
+    app secret, which an operator needs to find out about.
     """
     router = APIRouter(prefix=prefix, tags=["notifications"])
     repository = PatientNotificationRepository()
 
-    @router.post("/twilio/status", status_code=status.HTTP_204_NO_CONTENT)
-    async def twilio_status_callback(
-        request: Request,
-        x_twilio_signature: str | None = Header(default=None, alias="X-Twilio-Signature"),
-    ) -> None:
-        """The form is parsed **once**, by hand, and that is deliberate on two counts.
+    @router.get("/meta/webhook")
+    async def verify_subscription(
+        hub_mode: str | None = Query(default=None, alias="hub.mode"),
+        hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+        hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
+    ) -> Response:
+        """Meta's subscription handshake.
 
-        First, correctness: the signature is computed over the exact parameter set, so reading the
-        fields from a second, independently-parsed source would let a payload verify under one
-        parse and act under another. One dict, one truth.
+        Echoes the raw ``hub.challenge`` as ``text/plain`` -- not JSON, not quoted. Meta compares
+        the body verbatim, and a JSON-serialised challenge is the single most common reason a
+        webhook fails to register.
 
-        Second, dependencies: both ``Form(...)`` parameters and ``request.form()`` require
-        ``python-multipart``, and the former requires it at *route-definition* time -- which would
-        make the whole adapter refuse to construct on every deployment, notifications or not, for a
-        route almost none of them use. Twilio status callbacks are always
-        ``application/x-www-form-urlencoded``, which the standard library decodes.
-
-        A body that is *not* urlencoded decodes to a parameter set that does not match what the
-        provider signed, so it is refused by the signature check below -- fail-closed, which is the
-        right outcome for a payload shape this endpoint does not expect.
+        The verify token comparison is constant-time. It is a shared secret like any other, and the
+        fact that this route is otherwise unauthenticated is exactly why it must not leak its value
+        one byte at a time.
         """
-        if not auth_token or not callback_url:
-            # Not 404: an operator whose callbacks are being refused needs to see that the
-            # deployment is not configured for them, and a provider's retry dashboard showing 403
-            # is the fastest route to that. It reveals nothing -- the endpoint's existence is
-            # already implied by the URL they were configured with.
+        if not app_secret or not verify_token:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="provider callbacks are not configured on this deployment",
             )
-        if not x_twilio_signature:
-            # A missing signature is refused exactly like a wrong one. Treating "absent" as a
-            # softer case than "invalid" is how signature checks get bypassed.
+        if hub_mode != "subscribe" or not hub_verify_token or not hub_challenge:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="invalid subscription request"
+            )
+        if not hmac.compare_digest(hub_verify_token, verify_token):
+            logger.warning("patient_notification_webhook_verify_token_rejected")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="invalid verify token"
+            )
+        return Response(content=hub_challenge, media_type="text/plain")
+
+    @router.post("/meta/webhook", status_code=status.HTTP_200_OK)
+    async def receive_events(request: Request) -> dict[str, str]:
+        """Status events.
+
+        Returns 200 for everything it has authenticated, including payloads it chooses to ignore.
+        That is deliberate: a 4xx makes Meta retry, and retrying a callback DHealth will never act
+        on is a loop that ends in the endpoint being disabled for flapping.
+        """
+        if not app_secret or not verify_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="provider callbacks are not configured on this deployment",
+            )
+
+        signature = request.headers.get("X-Hub-Signature-256")
+        if not signature:
+            # A missing signature is refused exactly like a wrong one. Treating "absent" as a softer
+            # case than "invalid" is how signature checks get bypassed.
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="missing provider signature"
             )
 
         raw = await request.body()
         if len(raw) > _MAX_CALLBACK_BODY_BYTES:
-            # Bounded before decoding. An unauthenticated caller must not be able to make the
-            # server allocate an arbitrary amount of memory, and a real Twilio callback is a few
-            # hundred bytes.
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload too large"
             )
-        # `keep_blank_values=True` matters and is not a default worth taking implicitly: Twilio
-        # sends empty `ErrorCode`/`ErrorMessage` fields on success, and they are part of what it
-        # signed. Dropping them would compute the digest over a different parameter set than the
-        # provider did, and every genuine callback would be refused.
-        params = {
-            key: value
-            for key, value in parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True)
-        }
-        message_sid = params.get("MessageSid", "")
-        message_status = params.get("MessageStatus", "")
 
-        # Signature first, always -- before any field is trusted, before any lookup, and before a
-        # missing-field complaint. Validating shape before authenticity would turn this endpoint
-        # into an oracle that tells an unauthenticated caller which fields DHealth expects.
-        expected = twilio_signature(auth_token, callback_url, params)
-        # Constant-time, so a wrong signature cannot be refined byte by byte from timing.
-        if not hmac.compare_digest(expected, x_twilio_signature):
-            # Logged without the payload, the signature, or the message id: a forged callback's
-            # body is attacker-controlled and would otherwise be written verbatim into the log.
+        # Signature over the raw bytes, **before** anything is parsed or trusted. Validating shape
+        # first would turn this route into an oracle telling an unauthenticated caller which fields
+        # DHealth expects.
+        if not hmac.compare_digest(meta_signature(app_secret, raw), signature):
+            # Logged without the payload, the signature or any id: a forged callback's body is
+            # attacker-controlled and would otherwise be written verbatim into the log.
             logger.warning("patient_notification_webhook_signature_rejected")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="invalid provider signature"
             )
 
-        if not message_sid or not message_status:
-            # An authenticated but malformed callback. 400 rather than 403: the caller proved they
-            # hold the shared secret, so this is their bug to fix, and a provider's retry dashboard
-            # distinguishing "rejected" from "malformed" is what makes it findable.
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Authenticated but unparseable. 400, because the caller proved they hold the app secret
+            # and this is their bug to see on their own delivery dashboard.
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="MessageSid and MessageStatus are required",
+                status_code=status.HTTP_400_BAD_REQUEST, detail="malformed payload"
+            ) from None
+        if not isinstance(payload, dict) or payload.get("object") != _EXPECTED_OBJECT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="unexpected payload object"
             )
 
-        normalized = message_status.strip().lower()
-        if normalized in TWILIO_DELIVERED_STATUSES:
-            delivered, category = True, None
-        elif normalized in TWILIO_FAILED_STATUSES:
-            delivered, category = False, NotificationFailureCategory.PROVIDER_REJECTED
-        else:
-            # `queued`, `sending`, `sent`, `accepted` and anything a future provider version adds.
-            # Acknowledged and ignored: they carry no information DHealth does not already have,
-            # and a 2xx stops the provider retrying a callback that would never change anything.
-            # Critically, this is also what prevents a late `sent` from walking a `DELIVERED` row
-            # backwards -- though `apply_delivery_receipt` refuses that independently.
-            return None
-
-        with session_factory.begin() as session:
-            updated = repository.apply_delivery_receipt(
-                session,
-                provider_message_id=message_sid,
-                delivered=delivered,
-                category=category,
-            )
-        if updated is None:
-            # An authenticated callback for a message id this deployment does not know. Not an
-            # error to the provider -- a 4xx would make them retry forever -- and deliberately not
-            # a row created here: a receipt is never allowed to bring a notification into
-            # existence, only to update one DHealth already owed and sent.
-            logger.info("patient_notification_webhook_unknown_message")
-        return None
+        for event in _status_events(payload, expected_phone_number_id=phone_number_id):
+            _apply(repository, session_factory, event)
+        return {"status": "ok"}
 
     return router
+
+
+def _status_events(
+    payload: dict[str, Any], *, expected_phone_number_id: str | None
+) -> list[tuple[str, str]]:
+    """Every ``(wamid, status)`` pair in the payload, defensively.
+
+    Meta batches: one callback carries ``entry[]``, each with ``changes[]``, each with a ``value``
+    that may hold ``statuses[]``. Every level is type-checked rather than indexed, because this
+    parses attacker-shaped input in the sense that matters -- it is authenticated, but a bug in
+    Meta's fan-out or a replayed body from another deployment must produce nothing rather than an
+    unhandled exception that a retry loop then hammers.
+
+    ``value.messages[]`` is never read: inbound patient replies are a §29 non-goal.
+    """
+    events: list[tuple[str, str]] = []
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return events
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            if expected_phone_number_id is not None:
+                metadata = value.get("metadata")
+                actual = metadata.get("phone_number_id") if isinstance(metadata, dict) else None
+                if actual is not None and str(actual) != expected_phone_number_id:
+                    # Correctly signed, wrong business number: two deployments sharing an app
+                    # secret. Ignored rather than applied, and worth an operator's attention.
+                    logger.warning("patient_notification_webhook_foreign_phone_number")
+                    continue
+            statuses = value.get("statuses")
+            if not isinstance(statuses, list):
+                continue
+            for item in statuses:
+                if not isinstance(item, dict):
+                    continue
+                message_id = item.get("id")
+                state = item.get("status")
+                if isinstance(message_id, str) and isinstance(state, str) and message_id:
+                    events.append((message_id, state.strip().lower()))
+    return events
+
+
+def _apply(
+    repository: PatientNotificationRepository,
+    session_factory: sessionmaker[Session],
+    event: tuple[str, str],
+) -> None:
+    """One status event, in its own transaction.
+
+    ``sent`` is a no-op: DHealth already recorded ``SENT`` when Meta accepted the send, and applying
+    it again would be the path by which a late ``sent`` arriving after a ``delivered`` walks a row
+    backwards. ``read`` is a no-op for §13's reason. Everything unrecognised is a no-op too --
+    Meta adding a status value must not make DHealth invent a meaning for it.
+
+    Out-of-order safety does not rest on this function alone: ``apply_delivery_receipt`` refuses to
+    move a row that is already ``DELIVERED`` or ``FAILED`` independently, so the two guards would
+    both have to be removed for a regression to occur.
+    """
+    message_id, state = event
+    if state in META_DELIVERED_STATUSES:
+        delivered, category = True, None
+    elif state in META_FAILED_STATUSES:
+        delivered, category = False, NotificationFailureCategory.PROVIDER_REJECTED
+    else:
+        return
+
+    with session_factory.begin() as session:
+        updated = repository.apply_delivery_receipt(
+            session,
+            provider_message_id=message_id,
+            delivered=delivered,
+            category=category,
+        )
+    if updated is None:
+        # An authenticated callback for a message id this deployment does not know -- another
+        # environment sharing the WABA, or a message from before a database restore. Logged without
+        # the id, and deliberately not created: a receipt may update an obligation DHealth already
+        # owed and sent, never bring one into existence.
+        logger.info("patient_notification_webhook_unknown_message")

@@ -135,6 +135,59 @@ class UnsupportedTemplate(LookupError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class MetaTemplateBinding:
+    """DH-NOTIFY-META-001 §8 — which approved Meta template an event maps to, and what it carries.
+
+    **The server owns this mapping, and that is the whole point.** A caller-supplied template name
+    would let any code path name any approved template, which is how a message intended as "there
+    is an update" becomes one that says something else. ``NotificationTransport.send`` therefore has
+    no ``template_name`` parameter at all, and a test asserts its absence.
+
+    ``config_key`` names the environment variable holding the *approved* template's name as
+    registered in the WhatsApp Business Account. DHealth does not invent template names: Meta
+    approves them per WABA, so the name is deployment configuration and there is no default.
+
+    ``carries_access_url`` is ADR-058's A′ expressed as data. Exactly one binding has it true, and
+    it is the one sent while the raw grant secret is still in the issuing request's memory. Every
+    other binding takes **zero parameters** — not "no clinical parameters", none at all — so the
+    update message has no substitution slot a value could ever be threaded through. §9 asks for
+    "preferably no dynamic clinical substitution fields"; zero is the strongest form of that, and it
+    is what makes ``NC-META-4`` a one-line change that a payload-level test catches.
+    """
+
+    config_key: str
+    carries_access_url: bool
+
+
+#: Event → approved-template binding. Closed, server-owned, and deliberately tiny.
+_META_BINDINGS: dict[NotificationEventType, MetaTemplateBinding] = {
+    NotificationEventType.ACCESS_LINK_ISSUED: MetaTemplateBinding(
+        config_key="META_TEMPLATE_PATIENT_ACCESS_FR", carries_access_url=True
+    ),
+    NotificationEventType.RESULT_RELEASED: MetaTemplateBinding(
+        config_key="META_TEMPLATE_PATIENT_UPDATE_FR", carries_access_url=False
+    ),
+    # The same template as a release, for the reason the wording is identical: telling somebody
+    # holding another person's phone that a *correction* happened is itself a clinical fact.
+    NotificationEventType.AMENDMENT_RELEASED: MetaTemplateBinding(
+        config_key="META_TEMPLATE_PATIENT_UPDATE_FR", carries_access_url=False
+    ),
+}
+
+
+def meta_binding(event_type: NotificationEventType) -> MetaTemplateBinding:
+    """The approved-template binding for this event. Raises rather than guessing.
+
+    A new event type with no binding must fail loudly here rather than fall back to some nearby
+    template — a fallback is how an unreviewed message reaches a patient under an approved name.
+    """
+    binding = _META_BINDINGS.get(event_type)
+    if binding is None:
+        raise UnsupportedTemplate(f"no approved Meta template binding for {event_type.value}")
+    return binding
+
+
 def template_identity(
     event_type: NotificationEventType, locale: str = DEFAULT_LOCALE
 ) -> tuple[str, int]:

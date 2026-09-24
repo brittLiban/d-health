@@ -21,7 +21,12 @@ import itertools
 import uuid
 from dataclasses import dataclass, field
 
-from daher_adapter.notify.models import NotificationChannel, NotificationFailureCategory
+from daher_adapter.notify.models import (
+    NotificationChannel,
+    NotificationEventType,
+    NotificationFailureCategory,
+)
+from daher_adapter.notify.templates import DEFAULT_LOCALE, render
 from daher_adapter.notify.transport import TransportAccepted, TransportFailure
 
 
@@ -58,8 +63,25 @@ class FakeNotificationTransport:
         return channel in self.supported_channels
 
     def send(
-        self, *, channel: NotificationChannel, destination: str, body: str
+        self,
+        *,
+        channel: NotificationChannel,
+        destination: str,
+        event_type: NotificationEventType,
+        locale: str = DEFAULT_LOCALE,
+        patient_access_url: str | None = None,
     ) -> TransportAccepted:
+        """Render the controlled template and record what would have gone out.
+
+        **The rendering happens here, inside the transport**, which is where DH-NOTIFY-META-001
+        moved it: Meta binds an event to an approved template rather than sending a body, so the
+        intent is what crosses the boundary. This fake stands in for a transport that *does* send
+        free text -- a future SMS provider -- so it renders ``templates.render()`` verbatim, which
+        is also what keeps every DH-NOTIFY-001 content test asserting on ``sent[].body`` valid and
+        meaningful rather than merely still compiling.
+        """
+        message = render(event_type, locale=locale, patient_access_url=patient_access_url)
+        body = message.body
         outcome = self.failures.pop(0) if self.failures else None
         if isinstance(outcome, TransportFailure):
             # Recorded before raising: a test asserting "the body never contained a result value"

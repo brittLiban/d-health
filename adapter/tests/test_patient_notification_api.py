@@ -592,6 +592,47 @@ def test_the_operations_read_refuses_a_clinician_and_carries_nothing_identifying
     assert payload["enabled"] is True
     assert payload["provider"] == "fake"
     assert payload["by_state"][NotificationState.SENT.value] == 1
+    # DH-NOTIFY-META-001 §6: channel availability is server-derived, not a frontend constant.
+    assert payload["available_channels"] == ["SMS", "WHATSAPP"], (
+        "the fake transport supports both; a real Meta deployment reports WHATSAPP only"
+    )
+
+
+def test_the_operations_read_shows_the_graph_version_and_never_a_credential(
+    sessions, keypair, tmp_path, organizations
+) -> None:
+    """DH-NOTIFY-META-001 §3: the pinned version is visible to operators; the token is not.
+
+    Both halves matter. An operator who cannot see which Graph API version a deployment talks to
+    has to read the container's environment -- which is also where the access token lives, so the
+    safe way to ask must be this read. And this read must never become the unsafe way.
+    """
+    from daher_adapter.notify.meta import MetaWhatsAppTransport
+
+    private_key, _ = keypair
+    secret_token = "meta-access-token-must-not-appear"  # noqa: S105 - fixture value
+    meta = MetaWhatsAppTransport(
+        access_token=secret_token,
+        phone_number_id="111222333444555",
+        graph_api_version="v23.0",
+        template_names={
+            "META_TEMPLATE_PATIENT_ACCESS_FR": "dh_access_fr",
+            "META_TEMPLATE_PATIENT_UPDATE_FR": "dh_update_fr",
+        },
+        template_language="fr",
+        client=object(),
+    )
+    meta_client = _make_client(sessions, keypair, tmp_path, transport=meta)
+    admin = make_token(private_key, subject="ops-admin-meta", roles=[PLATFORM_ADMIN_ROLE])
+
+    payload = meta_client.get("/exchange/v1/notifications/operations", headers=_auth(admin)).json()
+
+    assert payload["provider"] == "meta_whatsapp"
+    assert payload["graph_api_version"] == "v23.0"
+    # §6: Meta is not an SMS provider, and the read must not imply a capability that does not exist.
+    assert payload["available_channels"] == ["WHATSAPP"]
+    assert secret_token not in repr(payload)
+    assert "META_WHATSAPP_ACCESS_TOKEN" not in repr(payload)
 
 
 # -- §21: audit ------------------------------------------------------------------------------------
