@@ -8241,3 +8241,68 @@ The SMS provider; email and voice (§29 non-goals); `ResultDelivery`'s semantics
 rule ADR-058 set (§10 item 8 — making every channel carry the same nothing sidesteps the question
 rather than answering it); proxy/family authorization; inbound messaging, WhatsApp Flows, patient
 accounts and OTP.
+
+---
+
+## ADR-060 — ACCEPTED (2026-09-24, DH-USABILITY-001): staff workspaces are a desktop and tablet
+## product; the patient surface stays mobile-first
+
+**Date:** 2026-09-24 · **Status:** ACCEPTED (product scope) · **Decided by:** Liban, closing
+DH-USABILITY-001's open viewport question · **Scope:** DHealth Native MVP 1.0
+
+### The decision
+
+```text
+DHealth Patient      mobile-first                        unchanged
+Front Desk           desktop + tablet     supported
+Clinician            desktop + tablet     supported
+Lab Staff            desktop + tablet     supported
+Admin                desktop + tablet     supported
+~390px handset       NOT a supported primary staff-work surface for MVP 1.0
+```
+
+Concretely, for MVP 1.0:
+
+1. **Tablet is a supported staff surface and must not be weakened.** A workflow that works at 1280
+   and breaks at 768 is a defect, not a deferral.
+2. **Staff pages must not catastrophically break on a handset** — the page should still render and
+   remain navigable — but **full handset optimisation and card-layout conversion are not required**.
+3. **Dense workflows need no dedicated 390px layout before pilot**: clinical documentation, result
+   entry, result release, billing and administration.
+4. **The patient surface is untouched by this.** It is mobile-first, and MVP-1.0 §6's law — no
+   digital-literacy requirement for care, assisted-digital and non-smartphone paths always exist —
+   is a statement about patients and is unaffected.
+5. **Future tickets may selectively add handset-friendly staff workflows** where real usage
+   justifies them. "Real usage" means observed usage, not an assumption in either direction.
+
+### Why this is a product decision and not an implementation one
+
+DH-USABILITY-001 photographed both staff workflows at 1280, 768 and 390 and found the handset
+findings were not layout bugs but a question nobody had answered: is a clinician standing in a
+corridor with a phone a user of DHealth's *staff* product, or is the staff product something that
+happens at a desk and on a tablet? Answering "yes" implicitly, by making every table into cards,
+would have committed the design to a surface nobody had asked for; answering "no" implicitly, by
+leaving the findings open forever, would have let a supported-surface defect hide among
+unsupported-surface ones. The boundary above separates the two so each finding can be judged
+against a stated target.
+
+### What this closes, and what it deliberately does not
+
+**Closes** the handset half of DH-USABILITY-001's finding O-1: clinic order actions requiring
+horizontal scrolling *at 390px* are outside the supported staff viewport.
+
+**Does not close**, and this is recorded rather than folded into the closure: the same screen at
+**768** — a supported width — still clips the two primary action labels at the card's right edge
+(`Suivi patien…`, `Choisir un laboratoir…`) and leaves the `Parcours` control beyond it, reachable
+only by scrolling the table sideways. The page itself does not break: page-level horizontal overflow
+at 768 is **0**, measured after DH-USABILITY-001's fix. The closing condition attached to this
+decision was *"provided the same actions are fully usable … at supported tablet widths"*, and
+"clipped mid-word, with one of them off the visible area" does not meet it. It is carried as **O-1b,
+P2, on a supported surface**, for `DHEALTH-NATIVE-MVP-1.0` — which is where the six-column orders
+table is being reconsidered anyway, and where fixing it once is cheaper than patching it twice.
+
+### Not decided here
+
+Whether staff ever *read* DHealth on a handset (as opposed to working in it); whether a future
+handset-specific staff view is a responsive layout or a different product surface; and anything
+about the patient surface, which this decision does not touch.

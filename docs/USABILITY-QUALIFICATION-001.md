@@ -223,7 +223,8 @@ now uses the design system's own warning pair.
 
 | | Severity | Finding | Why it is still open |
 | --- | --- | --- | --- |
-| O-1 | **P2** | At 768 and 390 the clinic orders table's action controls (`Suivi patient`, `Choisir un laboratoire`, `Parcours`) are reachable only by scrolling the table sideways. The clipped status badge is the only affordance. | The honest fix is a card layout below a breakpoint, which is a redesign of the screen rather than a defect fix. §29 names desktop, tablet and *the mobile patient view* — a clinician's handset is not a stated target, which is what keeps this at P2 rather than P1. **Still open, and waiting on one question**: does a member of staff ever do clinic or laboratory work on a 390px screen, or is the staff floor desktop and tablet only? If handsets are out of scope this closes as a non-issue and the tablet behaviour is already correct; if they are in scope it belongs to `DHEALTH-NATIVE-MVP-1.0`, not to a retro-fit here. (The 2026-09-24 decision about staff **phone numbers** is a different matter and is recorded in `PROJECT_STATE.md`.) |
+| O-1 | ~~P2~~ | ~~At 390px the clinic orders table's action controls are reachable only by scrolling the table sideways.~~ | **CLOSED 2026-09-24 by ADR-060 — outside the supported MVP staff viewport.** A ~390px handset is not a supported primary staff-work surface: staff workspaces are a desktop and tablet product, the patient surface stays mobile-first, and full handset optimisation is explicitly not required for MVP 1.0. The page renders and stays navigable there, which is the bar that decision sets. No code was changed for this, deliberately. |
+| O-1b | **P2** | **At 768 — a *supported* width — the same table clips the two primary action labels at the card's right edge (`Suivi patien…`, `Choisir un laboratoir…`) and leaves `Parcours` beyond it, reachable only by scrolling the table sideways.** The three trailing columns (creation date, order reference, `Parcours`) are off the visible area. | Carried forward rather than folded into O-1's closure. ADR-060's closing condition was *"provided the same actions are fully usable … at supported tablet widths"*, and clipped mid-word with one control off the visible area does not meet it. What **is** met: page-level horizontal overflow at 768 is **0**, measured after this ticket's fix, so nothing breaks — the layout holds and the actions remain clickable. The remedy is the same six-column-table question `DHEALTH-NATIVE-MVP-1.0` is reconsidering anyway, and fixing it once there is cheaper than patching it twice here. |
 | O-2 | **P2** | Pressing `Examiner` on the results queue renders the detail *below* the queue and the history cards, with no scroll-into-view and no focus move. With a long queue the panel opens off-screen. | Focus management is worth doing deliberately across all four detail panels at once, not one screen at a time, and it interacts with the accessibility work §30 says not to damage. |
 | O-3 | **P3** | 20px of page overflow at 390px on the result detail, from the four-column observations table. | `table-layout: fixed` was tested and removes it, at the cost of changing how every clinical values table lays out at every width. Not worth that trade for 20px; recorded with the tested fix so the next person does not have to find it again. |
 | O-4 | **P3** | On the laboratory history rows, `Voir le contenu exact` wraps to three lines beside its row. | Cosmetic. §24: do not let P3 consume the ticket. |
@@ -403,11 +404,14 @@ payments" is evidence about a *task*, not a licence to create a role.
    history (P1-1); ③ the laboratory's save/complete controls off a tablet screen (P1-2); ④ patient
    names broken mid-word (P1-3); ⑤ the orders table dragging the page sideways (P1-4); ⑥ error
    messages written from inside the implementation, unaccented (P1-5); ⑦ entry requiring the mouse
-   (P2-1); ⑧ order actions reachable only by scrolling a table (O-1); ⑨ a detail panel that opens
-   below the fold (O-2); ⑩ two date formats on one card (P2-2)
+   (P2-1); ⑧ order actions clipped at a tablet's right edge, one of them reachable only by scrolling
+   the table (O-1b; the same thing at handset width is O-1, closed by ADR-060 as outside the
+   supported staff viewport); ⑨ a detail panel that opens below the fold (O-2); ⑩ two date formats
+   on one card (P2-2)
 8. **P0 findings** — one (P0-1). Fixed
 9. **P1 findings** — five (P1-1…P1-5). All fixed
-10. **P2 findings** — P2-1 and P2-2 fixed; O-1 and O-2 open with stated reasons
+10. **P2 findings** — P2-1 and P2-2 fixed; O-1 **closed by ADR-060** (handset is not a supported
+    staff surface); O-1b and O-2 open with stated reasons
 11. **Fixes made** — §A.3; eight code fixes and one pre-existing token defect
 12. **Required fields removed / retained** — none removed, none added. §A.5 records why each one
     that remains is justified
@@ -450,13 +454,15 @@ prior review, and was found by looking at the screen. What else is invisible is
 unknown, and the only instrument that finds it is a person doing their own job
 in front of it.
 
-Concretely, and separately from that: on a tablet a clinician's order actions
-are reachable only by scrolling a table sideways with no affordance saying so
-(O-1); opening a result renders the detail below the queue with no scroll or
-focus move, so on a busy day it opens off-screen (O-2); and nothing here has
-been through a login, a session expiry or a real network, so no claim about how
-this behaves when something is slow or has just failed is supported by anything
-in this document (Part C).
+Concretely, and separately from that: on a tablet -- a SUPPORTED surface, per
+ADR-060 -- a clinician's order actions are clipped at the card's right edge and
+one of them sits beyond it, reachable only by scrolling the table sideways with
+no affordance saying so (O-1b; the handset version of the same thing is out of
+scope and closed). Opening a result renders the detail below the queue with no
+scroll or focus move, so on a busy day it opens off-screen (O-2). And nothing
+here has been through a login, a session expiry or a real network, so no claim
+about how this behaves when something is slow or has just failed is supported by
+anything in this document (Part C).
 ```
 
 ---

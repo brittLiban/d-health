@@ -19444,11 +19444,13 @@ completion, and a single implicit submit would make `Enter` mean different thing
 cursor position. Also fixed: two date formats on the same laboratory card
 (`23/09/2026 14:00:00` above `23 sept. 2026, 14:00`).
 
-Open, with reasons in `docs/USABILITY-QUALIFICATION-001.md` §A.4: order actions reachable only by
-scrolling the table sideways at tablet and phone (the honest fix is a card layout, and whether staff
-phones are a target at all is a product question); and the result detail rendering below the queue
-with no scroll-into-view or focus move (belongs to one deliberate focus pass across all four detail
-panels, and interacts with accessibility work §30 says not to damage).
+Open, with reasons in `docs/USABILITY-QUALIFICATION-001.md` §A.4: the clinic order actions clipped
+at the card's right edge at 768 with `Parcours` beyond it (O-1b — the page itself does not break,
+and **tablet is a supported surface** per ADR-060, so this is carried to the specification rather
+than closed; the 390px version of the same thing, O-1, **is** closed as out of scope); and the
+result detail rendering below the queue with no scroll-into-view or focus move (belongs to one
+deliberate focus pass across all four detail panels, and interacts with accessibility work §30 says
+not to damage).
 
 ### Negative controls — five executed, each reverted, tree green afterwards
 
@@ -19545,24 +19547,40 @@ tidied out of the record.
 **No further automated work may be done to try to upgrade the label** (Liban, explicitly). The
 findings and fixes in this ticket stand as they are.
 
-### Still open — the question decision 1 did not answer
+### The viewport question — answered 2026-09-24, recorded as ADR-060
 
-Decision 1 is about staff phone **numbers**. This ticket's open question was about the staff
-**viewport**: whether a 390px-wide screen is a surface DHealth supports for staff, or whether the
-staff floor is desktop and tablet only. The two were conflated in the phrasing of the original
-question ("are staff phones a supported surface"), which was this file's fault, so the question is
-restated here rather than treated as answered:
+**Staff workspaces are a desktop and tablet product. A ~390px handset is not a supported primary
+staff-work surface for MVP 1.0.** DHealth Patient stays mobile-first; Front Desk, Clinician, Lab
+Staff and Admin must work well at 1280 and 768; staff pages must not catastrophically break on a
+handset, but full handset optimisation and card-layout conversion are not required, and the dense
+workflows — clinical documentation, result entry, result release, billing, administration — need no
+dedicated 390px layout before pilot. **Tablet must not be weakened.** Later tickets may add
+handset-friendly staff workflows where *observed* usage justifies them.
 
-> **Does a member of staff ever do clinic or laboratory work on a handset (390px), or is the staff
-> floor desktop (1280) and tablet (768) only?**
+Canonical record: `DECISIONS.md` **ADR-060**, with the same boundary in `docs/MVP-1.0.md` §3.
 
-It matters for exactly one open finding: at 390px the clinic orders table's actions (`Suivi
-patient`, `Choisir un laboratoire`) are reachable only by scrolling the table sideways. If handsets
-are out of scope, that finding closes as a non-issue and the tablet behaviour is already correct. If
-they are in scope, it needs a card layout below a breakpoint — a redesign, and one that belongs in
-`DHEALTH-NATIVE-MVP-1.0` rather than being retro-fitted here.
+**O-1 is closed** as outside the supported MVP staff viewport. **No code was changed for it**, per
+the instruction not to make changes solely for 390px staff support.
 
----
+**One thing did not close with it, and is not being folded into the closure.** The decision came
+with a condition: *"provided the same actions are fully usable without horizontal-page breakage at
+supported tablet widths."* Measured at 768:
+
+```text
+page-level horizontal overflow          0px   ✓ (nothing breaks; this was 235px before the fix)
+"Suivi patient"                         visible and clickable, label clipped mid-word
+"Choisir un laboratoire"                visible and clickable, label clipped mid-word
+"Parcours"                              beyond the card's right edge -- table scroll required
+creation date / order reference         beyond the card's right edge
+```
+
+So the first half of the condition holds and the second does not: clipped mid-word, with one control
+off the visible area, is not "fully usable". That residue is carried as **O-1b, P2, on a supported
+surface**, for `DHEALTH-NATIVE-MVP-1.0` — the six-column orders table is being reconsidered there
+anyway, and fixing it once in a considered layout is cheaper and better than patching it twice. It
+is recorded rather than fixed here because the ticket is closed and the remedy is a layout decision,
+not a defect fix.
+
 
 ## ▶ NEXT — DHEALTH-NATIVE-MVP-1.0 — Clinic + Lab Operating Product Specification · queued 2026-09-24
 
@@ -19613,8 +19631,11 @@ fragmentation; internal architecture exposed to users.
 
 * A P0 and five P1s already fixed, so the first human session is not spent on defects a reviewer
   could have found (`docs/USABILITY-QUALIFICATION-001.md` §A.3).
-* Two open findings with their reasons, one of which — the clinic orders table at handset width —
-  is a layout question this specification should settle rather than patch (§A.4, O-1).
+* Two open findings with their reasons, one of which — the six-column clinic orders table, whose
+  trailing columns and `Parcours` control fall outside the card at **768, a supported width** — is a
+  layout question this specification should settle rather than patch (§A.4, O-1b). ADR-060 already
+  removed the handset half of it from scope; what remains is a tablet question, and tablet is not
+  allowed to regress.
 * The required-field audit (§A.5): the native patient form already asks for a name and nothing else,
   which is the standard the new screens have to match rather than regress from.
 * **An empty product-gap list** (§B.5). It stays empty until participants fill it. Calendar,

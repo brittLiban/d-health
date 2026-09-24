@@ -852,11 +852,19 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   what is needed is one clinician, one front-desk participant and one laboratory participant for a
   day — **defined 2026-09-24**: they must be people who genuinely do those jobs (not developers or
   executives), and they are **not** to be trained on DHealth before the session; hesitation, a wrong
-  click and any moderator help are the evidence. Two P2s stay open with stated reasons (order
-  actions reachable only by scrolling a table at tablet/handset width; a result detail that opens
-  below the queue with no scroll or focus move), and one question is still unanswered: **does a
-  member of staff ever work on a 390px screen, or is the staff floor desktop and tablet only?** It
-  decides whether the first of those two closes as a non-issue.
+  click and any moderator help are the evidence. Two P2s stay open with stated reasons: the clinic
+  order actions are clipped at a tablet's right edge with one of them reachable only by scrolling
+  the table (O-1b — **tablet is a supported surface**, so this is carried, not closed), and a result
+  detail opens below the queue with no scroll or focus move. The handset version of the first is
+  **closed by ADR-060**.
+- **Staff workspaces are a desktop and tablet product — ADR-060, decided 2026-09-24.** DHealth
+  Patient stays mobile-first; Front Desk, Clinician, Lab Staff and Admin must work well at 1280 and
+  768; a **~390px handset is not a supported primary staff-work surface** for MVP 1.0. Staff pages
+  must not catastrophically break there, but card-layout conversion is not required, and the dense
+  workflows (documentation, result entry, release, billing, administration) need no 390px layout
+  before pilot. **Tablet must not be weakened**: a workflow that works at 1280 and breaks at 768 is
+  a defect. Later tickets may add handset-friendly staff workflows where *observed* usage justifies
+  them. `docs/MVP-1.0.md` §3 carries the same boundary.
 - **Staff identity stays minimal — decided 2026-09-24, and it is a constraint on future work rather
   than a change to present code.** Name, role(s) and login identity are required; **phone is
   optional**; email is optional unless authentication technically needs it. Staff onboarding is

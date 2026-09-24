@@ -52,6 +52,24 @@ of, without requiring either side to first replace the software they already run
 
 DHealth MVP 1.0 consists of five product surfaces.
 
+**Which screen each one is for — decided 2026-09-24 (ADR-060, closing DH-USABILITY-001).**
+
+```text
+DHealth Patient                              mobile-first
+Front Desk · Clinician · Lab Staff · Admin   desktop + tablet, both supported
+~390px handset                               NOT a supported primary staff-work surface
+```
+
+Tablet is a supported staff surface and must not be weakened: a workflow that works at 1280 and
+breaks at 768 is a defect, not a deferral. Staff pages must still render and remain navigable on a
+handset, but full handset optimisation and card-layout conversion are **not** required for MVP 1.0,
+and the dense workflows — clinical documentation, result entry, result release, billing,
+administration — need no dedicated 390px layout before pilot. Later tickets may add handset-friendly
+staff workflows where **observed** usage justifies them.
+
+This says nothing about patients. §7's assisted-digital strategy and law 4 below are statements
+about the people receiving care, and are unaffected.
+
 ### DHealth Exchange
 
 The shared network backbone. Responsible for transaction-scoped routing, organization boundaries,
