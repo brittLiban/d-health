@@ -1,0 +1,128 @@
+name: DH-NOTIFY-META-001 — real Meta WhatsApp qualification
+
+# ⚠️  WRITTEN, NEVER RUN. No Meta credential exists, so this workflow has never executed and is
+#     evidence of nothing. Until it has run and its artifact shows messages accepted by Meta and
+#     confirmed on a real handset, WhatsApp stays BLOCKED (ADR-003) and no document may say
+#     REAL-META-WHATSAPP-QUALIFIED.
+#
+# Deliberately `workflow_dispatch` only, and deliberately NOT part of the push-triggered pipeline.
+# Normal CI uses a deterministic fake transport and proves the code above the vendor boundary; §27
+# is explicit that a fake-provider run must never be reported as a real-provider one. This is the
+# separate, explicitly-invoked path, and it sends a real WhatsApp message to a real handset every
+# time it runs -- which is why nothing triggers it automatically.
+#
+# The delivery-receipt leg is honest about its own limitation. Meta posts status callbacks to a
+# public HTTPS URL; a GitHub-hosted runner has none without a tunnel. Run with
+# `await_delivery_seconds > 0` only against a deployment Meta can actually reach, and expect
+# SENT-without-DELIVERED otherwise. See docs/META-WHATSAPP-RUNBOOK.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      await_delivery_seconds:
+        description: >-
+          Poll this many seconds for webhook-driven DELIVERED. Leave at 0 unless Meta can reach
+          this deployment's callback URL; 0 records the wamids and stops.
+        required: true
+        default: "0"
+        type: string
+      i_know_this_is_not_production:
+        description: "Skip the non-synthetic-organization guard (only for a disposable database)"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  qualify:
+    name: real Meta Cloud API + real test handset
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: adapter
+          POSTGRES_PASSWORD: adapter
+          POSTGRES_DB: adapter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U adapter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: adapter/requirements-dev.txt
+      - run: pip install -r adapter/requirements-dev.txt
+
+      # A throwaway database, migrated the ordinary way. The qualification script additionally
+      # refuses to run against a database holding non-synthetic organizations.
+      - name: Migrate a disposable database
+        working-directory: adapter
+        env:
+          TZ: Africa/Djibouti
+          PYTHONPATH: src
+          ADAPTER_DB_HOST: localhost
+          ADAPTER_DB_PORT: "5432"
+          ADAPTER_DB_NAME: adapter
+          ADAPTER_DB_USER: adapter
+          ADAPTER_DB_PASSWORD: adapter
+        run: python -m alembic upgrade head
+
+      - name: Qualify against the real Meta WhatsApp Cloud API
+        working-directory: adapter
+        env:
+          TZ: Africa/Djibouti
+          PYTHONPATH: src
+          ADAPTER_DB_HOST: localhost
+          ADAPTER_DB_PORT: "5432"
+          ADAPTER_DB_NAME: adapter
+          ADAPTER_DB_USER: adapter
+          ADAPTER_DB_PASSWORD: adapter
+          DHEALTH_NOTIFICATIONS_ENABLED: "true"
+          DHEALTH_NOTIFICATION_PROVIDER: meta
+          # Repository secrets, never committed. Absent, `Settings.from_env` refuses to start and
+          # names the missing variable -- which is the correct outcome for a workflow run against
+          # an account that has not been provisioned yet.
+          DHEALTH_PATIENT_PUBLIC_BASE_URL: ${{ secrets.DHEALTH_PATIENT_PUBLIC_BASE_URL }}
+          META_WHATSAPP_ACCESS_TOKEN: ${{ secrets.META_WHATSAPP_ACCESS_TOKEN }}
+          META_WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.META_WHATSAPP_PHONE_NUMBER_ID }}
+          META_WHATSAPP_BUSINESS_ACCOUNT_ID: ${{ secrets.META_WHATSAPP_BUSINESS_ACCOUNT_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          META_WEBHOOK_VERIFY_TOKEN: ${{ secrets.META_WEBHOOK_VERIFY_TOKEN }}
+          META_GRAPH_API_VERSION: ${{ secrets.META_GRAPH_API_VERSION }}
+          META_TEMPLATE_LANGUAGE: ${{ secrets.META_TEMPLATE_LANGUAGE }}
+          META_TEMPLATE_PATIENT_ACCESS_FR: ${{ secrets.META_TEMPLATE_PATIENT_ACCESS_FR }}
+          META_TEMPLATE_PATIENT_UPDATE_FR: ${{ secrets.META_TEMPLATE_PATIENT_UPDATE_FR }}
+          # A NON-PATIENT test handset. No default anywhere: the script refuses to run without it
+          # rather than choosing a number to message.
+          META_QUALIFICATION_TEST_DESTINATION: ${{ secrets.META_QUALIFICATION_TEST_DESTINATION }}
+        run: |
+          python -m scripts.qualify_meta_whatsapp \
+            --evidence "$GITHUB_WORKSPACE/meta-qualification-evidence.json" \
+            --await-delivery "${{ inputs.await_delivery_seconds }}" \
+            ${{ inputs.i_know_this_is_not_production && '--i-know-this-is-not-production' || '' }}
+
+      # wamids, states and timestamps. Never the token, the message body, the patient access URL or
+      # the destination number -- the script builds the artifact and those fields do not exist in it.
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-qualification-evidence
+          path: meta-qualification-evidence.json
+          if-no-files-found: warn
+
+      - name: What this run does and does not prove
+        if: always()
+        run: |
+          echo "::notice::A green run means Meta ACCEPTED the messages. It does not by itself mean"
+          echo "::notice::a handset received them. A human must confirm on the test phone that the"
+          echo "::notice::first message carries a working link, that the release and amendment"
+          echo "::notice::messages carry NO link and NO result value, and that the original link"
+          echo "::notice::still works afterwards. Record the outcome in PROJECT_STATE.md."

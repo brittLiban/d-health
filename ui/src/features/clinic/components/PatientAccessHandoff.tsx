@@ -418,6 +418,22 @@ export function PatientAccessHandoff({
       ? buildPatientAccessUrl(window.location.origin, state.rawToken)
       : null
 
+  /*
+   * DH-NOTIFY-META-001 §6: server-derived, never a frontend constant. `null` notifications (the
+   * read failed, or an older backend) yields an empty list, which correctly offers nothing rather
+   * than guessing that some channel probably works.
+   */
+  const availableChannels = state.notifications?.available_channels ?? []
+  const canSend = availableChannels.length > 0
+  /*
+   * The selected channel must be one the deployment can send on. Derived rather than stored, so a
+   * server that stops supporting a channel cannot leave a stale selection in component state that
+   * the submit handler would then send.
+   */
+  const selectedChannel = availableChannels.includes(state.channel)
+    ? state.channel
+    : (availableChannels[0] ?? state.channel)
+
   return (
     <section className={styles.panel} aria-labelledby={`suivi-${orderId}`}>
       <h3 className={styles.heading} id={`suivi-${orderId}`}>
@@ -474,8 +490,8 @@ export function PatientAccessHandoff({
           className={styles.body}
           onSubmit={(event) => {
             event.preventDefault()
-            if (!state.consent || !state.destination.trim()) return
-            void handleIssue({ channel: state.channel, destination: state.destination.trim() })
+            if (!state.consent || !state.destination.trim() || !canSend) return
+            void handleIssue({ channel: selectedChannel, destination: state.destination.trim() })
           }}
         >
           <p>Envoyer le lien sécurisé au patient.</p>
@@ -494,21 +510,35 @@ export function PatientAccessHandoff({
             />
           </label>
 
-          <fieldset className={styles.field}>
-            <legend>Canal</legend>
-            {(['WHATSAPP', 'SMS'] as const).map((option) => (
-              <label key={option}>
-                <input
-                  type="radio"
-                  name={`channel-${orderId}`}
-                  value={option}
-                  checked={state.channel === option}
-                  onChange={() => setState((previous) => ({ ...previous, channel: option }))}
-                />
-                {channelLabel(option)}
-              </label>
-            ))}
-          </fieldset>
+          {/*
+            DH-NOTIFY-META-001 §6/§20: the channels come from the **server**, never from a constant
+            here. A hard-coded list is a UI that keeps offering SMS after the provider stops
+            supporting it -- and a clinician would then collect a patient's consent for a message
+            nothing can deliver.
+
+            With exactly one channel available -- today's state, Meta WhatsApp and no SMS provider
+            -- a radio group of one is a control with no choice in it, so the channel is stated
+            instead. §20: the clinician sees "WhatsApp", never "Meta" or a Graph API version.
+          */}
+          {availableChannels.length === 1 ? (
+            <p className={styles.field}>Canal : {channelLabel(availableChannels[0])}</p>
+          ) : (
+            <fieldset className={styles.field}>
+              <legend>Canal</legend>
+              {availableChannels.map((option) => (
+                <label key={option}>
+                  <input
+                    type="radio"
+                    name={`channel-${orderId}`}
+                    value={option}
+                    checked={selectedChannel === option}
+                    onChange={() => setState((previous) => ({ ...previous, channel: option }))}
+                  />
+                  {channelLabel(option)}
+                </label>
+              ))}
+            </fieldset>
+          )}
 
           <label className={styles.field}>
             <input
@@ -558,14 +588,21 @@ export function PatientAccessHandoff({
             <Button type="button" onClick={() => void handleIssue()} disabled={state.busy}>
               Créer le suivi patient
             </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setState((previous) => ({ ...previous, composing: true }))}
-              disabled={state.busy}
-            >
-              Créer et envoyer au patient
-            </Button>
+            {/*
+              §19/§6: offered only when the deployment can actually send. Hidden rather than
+              disabled -- a greyed-out control invites a clinician to hunt for the reason, and the
+              QR-only path beside it is the one that always works.
+            */}
+            {canSend ? (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setState((previous) => ({ ...previous, composing: true }))}
+                disabled={state.busy}
+              >
+                Créer et envoyer au patient
+              </Button>
+            ) : null}
           </div>
         </>
       ) : !state.rawToken ? (

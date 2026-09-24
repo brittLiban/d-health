@@ -486,6 +486,8 @@ describe('DH-NOTIFY-001 patient notification', () => {
         channel: null,
         destination: null,
         notifications: [],
+        // DH-NOTIFY-META-001 §6: today's real shape -- Meta WhatsApp, no SMS provider selected.
+        available_channels: ['WHATSAPP'],
       }),
       retryPatientNotification: vi.fn().mockResolvedValue(undefined),
       ...overrides,
@@ -504,7 +506,7 @@ describe('DH-NOTIFY-001 patient notification', () => {
     expect(client.issuePatientAccess).toHaveBeenCalledWith(PROVIDER_ID, ORDER_ID)
   })
 
-  it('NT2: sending is a separate, deliberate gesture behind its own control', async () => {
+  it('NT2: sending is a separate, deliberate gesture, and offers only configured channels', async () => {
     const user = userEvent.setup()
     renderHandoff(notifyClient())
 
@@ -513,8 +515,76 @@ describe('DH-NOTIFY-001 patient notification', () => {
     await user.click(screen.getByRole('button', { name: /Créer et envoyer au patient/ }))
 
     expect(screen.getByLabelText(/Numéro du patient/)).toBeVisible()
-    expect(screen.getByRole('radio', { name: 'WhatsApp' })).toBeVisible()
+    /*
+     * DH-NOTIFY-META-001 §6 tightened this. It previously asserted an SMS radio was *visible*,
+     * which was true when one provider covered both channels. With WhatsApp going directly to Meta
+     * and no SMS provider selected, offering SMS would collect a patient's consent for a message
+     * nothing can deliver. The channel list is the server's, and SMS is absent from it.
+     */
+    expect(screen.queryByRole('radio', { name: 'SMS' })).toBeNull()
+    expect(screen.getByText(/Canal : WhatsApp/)).toBeVisible()
+  })
+
+  it('NT11: a single available channel is stated, not offered as a choice of one', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient()
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+
+    // A radio group of one is a control with no choice in it.
+    expect(screen.queryByRole('radio')).toBeNull()
+    expect(screen.getByText(/Canal : WhatsApp/)).toBeVisible()
+
+    await user.type(screen.getByLabelText(/Numéro du patient/), '+25377123456')
+    await user.click(screen.getByRole('checkbox', { name: /accepte de recevoir/ }))
+    await user.click(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ }))
+
+    await waitFor(() => expect(client.issuePatientAccess).toHaveBeenCalledTimes(1))
+    expect(client.issuePatientAccess).toHaveBeenCalledWith(PROVIDER_ID, ORDER_ID, {
+      notify: {
+        channel: 'WHATSAPP',
+        destination: '+25377123456',
+        patient_consent_confirmed: true,
+      },
+    })
+  })
+
+  it('NT12: a deployment that can send on nothing offers no send control at all', async () => {
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: false,
+        channel: null,
+        destination: null,
+        notifications: [],
+        available_channels: [],
+      }),
+    })
+    renderHandoff(client)
+
+    // §19: the QR/print path is the one that always works, and it stays one gesture.
+    expect(await screen.findByRole('button', { name: /^Créer le suivi patient$/ })).toBeVisible()
+    expect(screen.queryByRole('button', { name: /Créer et envoyer au patient/ })).toBeNull()
+  })
+
+  it('NT13: both channels are offered when the server lists both', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: false,
+        channel: null,
+        destination: null,
+        notifications: [],
+        available_channels: ['SMS', 'WHATSAPP'],
+      }),
+    })
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+
+    // The component has no opinion about which channels exist -- it renders what it is told.
     expect(screen.getByRole('radio', { name: 'SMS' })).toBeVisible()
+    expect(screen.getByRole('radio', { name: 'WhatsApp' })).toBeVisible()
   })
 
   it('NT3: consent is unticked by default and gates the send', async () => {
@@ -542,7 +612,6 @@ describe('DH-NOTIFY-001 patient notification', () => {
 
     await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
     await user.type(screen.getByLabelText(/Numéro du patient/), '+25377123456')
-    await user.click(screen.getByRole('radio', { name: 'WhatsApp' }))
     await user.click(screen.getByRole('checkbox', { name: /accepte de recevoir/ }))
     await user.click(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ }))
 
@@ -602,8 +671,9 @@ describe('DH-NOTIFY-001 patient notification', () => {
     const client = notifyClient({
       getPatientNotifications: vi.fn().mockResolvedValue({
         enrolled: true,
-        channel: 'SMS',
+        channel: 'WHATSAPP',
         destination: '+25377123456',
+        available_channels: ['WHATSAPP'],
         notifications: [
           {
             id: 'n1',
@@ -648,8 +718,9 @@ describe('DH-NOTIFY-001 patient notification', () => {
     const client = notifyClient({
       getPatientNotifications: vi.fn().mockResolvedValue({
         enrolled: true,
-        channel: 'SMS',
+        channel: 'WHATSAPP',
         destination: '+25377123456',
+        available_channels: ['WHATSAPP'],
         notifications: [
           {
             id: 'n3',
@@ -671,15 +742,16 @@ describe('DH-NOTIFY-001 patient notification', () => {
 
     expect(await screen.findByText(/Vérifiez-le avec le patient/)).toBeVisible()
     // No vendor vocabulary reaches a clinical user (§18).
-    expect(screen.queryByText(/Twilio|HTTP|SID|webhook/i)).toBeNull()
+    expect(screen.queryByText(/Twilio|Meta|Graph|WABA|HTTP|SID|wamid|webhook/i)).toBeNull()
   })
 
   it('NT9: an access-link failure offers no retry, because its link cannot be rebuilt', async () => {
     const client = notifyClient({
       getPatientNotifications: vi.fn().mockResolvedValue({
         enrolled: true,
-        channel: 'SMS',
+        channel: 'WHATSAPP',
         destination: '+25377123456',
+        available_channels: ['WHATSAPP'],
         notifications: [
           {
             id: 'n4',

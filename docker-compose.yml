@@ -977,17 +977,24 @@ services:
       ADAPTER_RETRY_MULTIPLIER_SECONDS: ${ADAPTER_RETRY_MULTIPLIER_SECONDS:-1}
       ADAPTER_RETRY_MAX_SECONDS: ${ADAPTER_RETRY_MAX_SECONDS:-30}
       # Starting this service at all means sending is intended, so the default
-      # here is `true` rather than `.env`'s `false` — but every credential below
-      # is still required, and `Settings.from_env` refuses to start without them
-      # rather than running a worker that silently sends nothing (§10).
+      # here is `true` rather than `.env`'s `false` — but every Meta credential
+      # below is still required, and `Settings.from_env` refuses to start without
+      # them rather than running a worker that silently sends nothing (§10).
+      # WhatsApp goes directly to Meta's Cloud API (ADR-059); no SMS provider is
+      # selected, so this worker sends on the WhatsApp channel alone.
       DHEALTH_NOTIFICATIONS_ENABLED: ${DHEALTH_NOTIFICATIONS_ENABLED:-true}
-      DHEALTH_NOTIFICATION_PROVIDER: ${DHEALTH_NOTIFICATION_PROVIDER:-twilio}
+      DHEALTH_NOTIFICATION_PROVIDER: ${DHEALTH_NOTIFICATION_PROVIDER:-meta}
       DHEALTH_PATIENT_PUBLIC_BASE_URL: ${DHEALTH_PATIENT_PUBLIC_BASE_URL:?set DHEALTH_PATIENT_PUBLIC_BASE_URL in .env}
-      DHEALTH_NOTIFICATION_STATUS_CALLBACK_URL: ${DHEALTH_NOTIFICATION_STATUS_CALLBACK_URL:-}
-      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
-      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-      DHEALTH_SMS_FROM: ${DHEALTH_SMS_FROM:-}
-      DHEALTH_WHATSAPP_FROM: ${DHEALTH_WHATSAPP_FROM:-}
+      META_WHATSAPP_ACCESS_TOKEN: ${META_WHATSAPP_ACCESS_TOKEN:-}
+      META_WHATSAPP_PHONE_NUMBER_ID: ${META_WHATSAPP_PHONE_NUMBER_ID:-}
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: ${META_WHATSAPP_BUSINESS_ACCOUNT_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+      # No default (§3): the deployment states which Graph API version it has qualified against.
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-}
+      META_TEMPLATE_LANGUAGE: ${META_TEMPLATE_LANGUAGE:-fr}
+      META_TEMPLATE_PATIENT_ACCESS_FR: ${META_TEMPLATE_PATIENT_ACCESS_FR:-}
+      META_TEMPLATE_PATIENT_UPDATE_FR: ${META_TEMPLATE_PATIENT_UPDATE_FR:-}
       DHEALTH_NOTIFICATION_DEFAULT_REGION: ${DHEALTH_NOTIFICATION_DEFAULT_REGION:-}
     volumes:
       - adapter-audit:/var/lib/daher/audit

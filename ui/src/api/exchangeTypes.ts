@@ -882,6 +882,19 @@ export interface PatientNotificationStatus {
   channel: NotificationChannel | null
   destination: string | null
   notifications: PatientNotificationSummary[]
+  /**
+   * DH-NOTIFY-META-001 §6/§20: the channels this deployment can **actually** send on, derived
+   * server-side from the configured transport.
+   *
+   * The frontend must never decide this. A hard-coded `['WHATSAPP', 'SMS']` is a UI that keeps
+   * offering SMS forever after the provider stops supporting it, which is exactly the false
+   * advertisement §6 forbids -- a clinician would collect a patient's consent for a message
+   * nothing can deliver. Empty means notifications are off entirely.
+   *
+   * Today, with the direct Meta WhatsApp transport and no SMS provider selected, this is
+   * `['WHATSAPP']`.
+   */
+  available_channels: NotificationChannel[]
 }
 
 /**
