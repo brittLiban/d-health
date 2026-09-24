@@ -104,3 +104,42 @@
   line-height: 1.5;
   font-size: 0.95rem;
 }
+
+/*
+ * DH-NOTIFY-001 §18: the "Envoyer au patient" form.
+ *
+ * Deliberately outside `[data-print-root]`, so printing still yields the patient sheet alone --
+ * a destination number is the clinician's working data, not something to hand the patient on
+ * paper.
+ */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--space-4, 16px);
+  border: 0;
+  padding: 0;
+}
+
+.field input[type='tel'] {
+  padding: var(--space-2, 8px);
+  border: 1px solid var(--color-border, #ccc);
+  border-radius: var(--radius-2, 4px);
+  font: inherit;
+  /* Left-to-right even under an RTL locale: a phone number read right-to-left is a wrong number. */
+  direction: ltr;
+}
+
+.field legend {
+  font-size: 0.9rem;
+  font-weight: 700;
+  padding: 0;
+}
+
+.field label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: var(--space-4, 16px);
+  font-weight: 400;
+}

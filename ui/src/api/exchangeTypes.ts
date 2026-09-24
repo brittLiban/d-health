@@ -818,6 +818,73 @@ export interface PatientAccessMetadata {
 }
 
 /**
+ * DH-NOTIFY-001 §5: what a clinician must supply to have DHealth message a patient.
+ *
+ * `patient_consent_confirmed` is typed `true`, not `boolean`, mirroring the backend's
+ * `Literal[True]`. A request that does not affirm consent cannot be constructed in TypeScript and
+ * is a 422 at the server's schema boundary if one is sent anyway -- the checkbox is not the
+ * control, the type and the schema are.
+ *
+ * `destination` is as the clinician typed it. The **server** normalizes to E.164 via
+ * libphonenumber and refuses anything it cannot parse; the browser deliberately does no
+ * country-code guessing of its own, because two validators that disagree is how a number gets
+ * accepted here and rejected there.
+ */
+export interface PatientNotificationEnrollmentRequest {
+  channel: NotificationChannel
+  destination: string
+  patient_consent_confirmed: true
+}
+
+export type NotificationChannel = 'SMS' | 'WHATSAPP'
+
+export type NotificationEventType =
+  | 'ACCESS_LINK_ISSUED'
+  | 'RESULT_RELEASED'
+  | 'AMENDMENT_RELEASED'
+
+/**
+ * DH-NOTIFY-001 §7/§18: what a message's state means, stated so the UI cannot overclaim.
+ *
+ * `SENT` means the transport provider's API accepted the request -- nothing about a handset.
+ * `DELIVERED` means the provider sent an authenticated receipt saying a handset accepted it. It
+ * does **not** mean the patient read it, opened the link, understood it, or that anybody has
+ * reviewed a result. `patientNotificationWording.ts` is the only place these are turned into
+ * French, precisely so the distinction survives translation.
+ */
+export type NotificationState = 'PENDING' | 'SENDING' | 'SENT' | 'DELIVERED' | 'FAILED'
+
+/**
+ * DH-NOTIFY-001 §18: one message's operational state, for the clinician who sent it.
+ *
+ * Carries no message body, no secure URL and no provider message id -- a clinician needs to know
+ * whether the message got out and what to do if it did not, and a vendor's identifier answers
+ * neither. `retryable` is server-derived: it is false for every `ACCESS_LINK_ISSUED` row, whose
+ * secure link cannot be reconstructed, so the UI offers revoke-and-reissue instead of a retry that
+ * would send a message with no link in it.
+ */
+export interface PatientNotificationSummary {
+  id: string
+  event_type: NotificationEventType
+  channel: NotificationChannel
+  destination: string
+  state: NotificationState
+  failure_category: string | null
+  attempt_count: number
+  retryable: boolean
+  created_at: string
+  sent_at: string | null
+  delivered_at: string | null
+}
+
+export interface PatientNotificationStatus {
+  enrolled: boolean
+  channel: NotificationChannel | null
+  destination: string | null
+  notifications: PatientNotificationSummary[]
+}
+
+/**
  * DH-PATIENT-001 §26/§27: the server-owned patient result/follow-up projection. The frontend
  * never derives this by combining order status, release existence, and review disposition -- it
  * renders exactly what the Exchange says, and has no code path that could compute it otherwise.

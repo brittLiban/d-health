@@ -26,10 +26,20 @@ import {
   type ExchangeClient,
 } from '../../../api/exchangeClient'
 import { ExchangeApiError } from '../../../api/exchangeClient'
-import type { LabOrderItem, PatientAccessMetadata } from '../../../api/exchangeTypes'
+import type {
+  LabOrderItem,
+  NotificationChannel,
+  PatientAccessMetadata,
+  PatientNotificationStatus,
+} from '../../../api/exchangeTypes'
 import { Button } from '../../../design-system'
 import { buildPatientAccessUrl } from '../../patient/patientAccessUrl'
 import { PatientAccessQr } from './PatientAccessQr'
+import {
+  channelLabel,
+  failureGuidance,
+  notificationSummaryLine,
+} from './patientNotificationWording'
 import styles from './PatientAccessHandoff.module.css'
 
 export interface PatientAccessHandoffProps {
@@ -60,6 +70,20 @@ interface HandoffState {
   /** §47/§48: a truthful statement about an outcome the server could not confirm. */
   notice: string | null
   confirmingRevoke: boolean
+  /**
+   * DH-NOTIFY-001 §18: the "Envoyer au patient" flow.
+   *
+   * `composing` is the small deliberate form -- destination, channel, consent -- shown instead of
+   * the plain "Créer le suivi patient" button when the clinician chooses to send. It is a separate
+   * gesture rather than a default, because §19 keeps notification optional: a patient with no
+   * phone must still get the QR and the sheet, and the fastest path must not route through a form
+   * asking for a number they do not have.
+   */
+  composing: boolean
+  destination: string
+  channel: NotificationChannel
+  consent: boolean
+  notifications: PatientNotificationStatus | null
 }
 
 const INITIAL: HandoffState = {
@@ -71,6 +95,11 @@ const INITIAL: HandoffState = {
   error: null,
   notice: null,
   confirmingRevoke: false,
+  composing: false,
+  destination: '',
+  channel: 'SMS',
+  consent: false,
+  notifications: null,
 }
 
 function formatExpiry(value: string): string {
@@ -138,19 +167,52 @@ export function PatientAccessHandoff({
     [applyIfCurrent, client, orderId, providerId],
   )
 
+  const readNotifications = useCallback(
+    async (key: string, signal?: AbortSignal): Promise<void> => {
+      try {
+        const notifications = await client.getPatientNotifications(providerId, orderId, { signal })
+        applyIfCurrent(key, (previous) => ({ ...previous, notifications }))
+      } catch {
+        // A failed notifications read must never degrade the access panel: the QR, the printed
+        // sheet and revoke all work without it, and DH-NOTIFY-001 §19 makes those the path that
+        // must keep working. Left null, the messaging section simply does not render.
+        applyIfCurrent(key, (previous) => ({ ...previous, notifications: null }))
+      }
+    },
+    [applyIfCurrent, client, orderId, providerId],
+  )
+
   useEffect(() => {
     const controller = new AbortController()
     const key = `${providerId}::${orderId}`
     setState(INITIAL)
     void readMetadata(key, controller.signal)
+    // Independent of the metadata read and deliberately not awaited with it: a deployment with
+    // notifications switched off, or an older backend, must leave the access panel fully working.
+    void readNotifications(key, controller.signal)
     return () => controller.abort()
-  }, [orderId, providerId, readMetadata])
+  }, [orderId, providerId, readMetadata, readNotifications])
 
-  const handleIssue = useCallback(async () => {
+  const handleIssue = useCallback(
+    async (notify?: { channel: NotificationChannel; destination: string }) => {
     const key = requestKey
     setState((previous) => ({ ...previous, busy: true, error: null, notice: null }))
     try {
-      const issued = await client.issuePatientAccess(providerId, orderId)
+      // Two arguments when nothing is being sent, exactly as before DH-NOTIFY-001. Not cosmetic:
+      // §19 keeps the QR/print path the baseline, and the call it makes is unchanged -- which is
+      // what `PatientAccessHandoff.test.tsx`'s pre-existing CH2 assertion pins.
+      const issued = notify
+        ? await client.issuePatientAccess(providerId, orderId, {
+            notify: {
+              channel: notify.channel,
+              destination: notify.destination,
+              // Typed `true` in `exchangeTypes.ts`, mirroring the server's `Literal[True]`. The
+              // checkbox gates reaching this call at all; the type is what makes an unconsented
+              // request unconstructable.
+              patient_consent_confirmed: true,
+            },
+          })
+        : await client.issuePatientAccess(providerId, orderId)
       if (issued.access_mode !== 'ORDER_READ') {
         /*
          * §12: fail closed. An unexpected `LAB_SELECTION` grant means the order had no laboratory
@@ -174,12 +236,20 @@ export function PatientAccessHandoff({
         busy: false,
         rawToken: issued.access_token,
         expiresAt: issued.expires_at,
+        composing: false,
+        consent: false,
         metadata: {
           active: true,
           expires_at: issued.expires_at,
           access_mode: issued.access_mode,
         },
       }))
+      if (notify) {
+        // The server sent the link inline and recorded the outcome; read it back rather than
+        // assuming it worked. A send failure is terminal (the link cannot be rebuilt), so the
+        // clinician has to see it here -- the issuance itself deliberately succeeded regardless.
+        await readNotifications(key)
+      }
     } catch (error) {
       /*
        * §47: the response was lost, or the grant already existed. Either way, re-read
@@ -202,17 +272,51 @@ export function PatientAccessHandoff({
         }))
         return
       }
+      // A 422 is the server refusing the *destination* or the consent field -- a correctable
+      // mistake on this screen, not an ambiguous outcome. Its detail is safe to show: it names a
+      // reason class ("must include a country code"), never a provider message or a number.
+      const rejected = error instanceof ExchangeApiError && error.status === 422
+      // A 503 means this deployment cannot send at all. Saying "réessayez" would be a lie.
+      const unavailable = error instanceof ExchangeApiError && error.status === 503
       applyIfCurrent(key, (previous) => ({
         ...previous,
         busy: false,
         notice: null,
-        error:
-          conflict || !ambiguous
-            ? "La création de l'accès patient a échoué. Réessayez."
-            : "La création de l'accès patient n'a pas pu être confirmée. Réessayez.",
+        error: rejected
+          ? (error as ExchangeApiError).detail ||
+            'Ce numéro ne peut pas être utilisé. Vérifiez-le et réessayez.'
+          : unavailable
+            ? "L'envoi de messages n'est pas activé sur cette installation. Créez le suivi sans " +
+              'envoi : le QR code et le document imprimé fonctionnent.'
+            : conflict || !ambiguous
+              ? "La création de l'accès patient a échoué. Réessayez."
+              : "La création de l'accès patient n'a pas pu être confirmée. Réessayez.",
       }))
     }
-  }, [applyIfCurrent, client, orderId, providerId, readMetadata, requestKey])
+    },
+    [applyIfCurrent, client, orderId, providerId, readMetadata, readNotifications, requestKey],
+  )
+
+  const handleRetry = useCallback(
+    async (notificationId: string) => {
+      const key = requestKey
+      setState((previous) => ({ ...previous, busy: true, error: null, notice: null }))
+      try {
+        await client.retryPatientNotification(providerId, orderId, notificationId)
+      } catch {
+        // Never a blind second retry, and never a claim about what happened: re-read authoritative
+        // state below and let it say. Matching §47/§48's treatment of every other ambiguous
+        // mutation in this component.
+        applyIfCurrent(key, (previous) => ({
+          ...previous,
+          error: "La relance n'a pas pu être confirmée. Vérifiez l'état ci-dessous.",
+        }))
+      }
+      await readNotifications(key)
+      applyIfCurrent(key, (previous) => ({ ...previous, busy: false }))
+    },
+    [applyIfCurrent, client, orderId, providerId, readNotifications, requestKey],
+  )
 
   const performRevoke = useCallback(async (): Promise<boolean> => {
     const key = requestKey
@@ -355,12 +459,112 @@ export function PatientAccessHandoff({
             </Button>
           </div>
         </>
+      ) : state.composing ? (
+        /*
+         * DH-NOTIFY-001 §18: a small deliberate flow. Destination, channel, and an explicit
+         * confirmation that the patient agreed to be messaged at that number.
+         *
+         * No Twilio/Meta terminology anywhere (§18) -- a clinical user sees "SMS" and "WhatsApp",
+         * which are the things their patient has. And the consent box is unticked by default and
+         * gates the send button: §5 forbids inferring consent from registration, from having a
+         * number, or from having scanned a QR, and a pre-ticked box would be exactly that
+         * inference wearing a checkbox.
+         */
+        <form
+          className={styles.body}
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!state.consent || !state.destination.trim()) return
+            void handleIssue({ channel: state.channel, destination: state.destination.trim() })
+          }}
+        >
+          <p>Envoyer le lien sécurisé au patient.</p>
+
+          <label className={styles.field}>
+            <span>Numéro du patient</span>
+            <input
+              type="tel"
+              name="destination"
+              value={state.destination}
+              placeholder="+253 77 00 00 00"
+              autoComplete="off"
+              onChange={(event) =>
+                setState((previous) => ({ ...previous, destination: event.target.value }))
+              }
+            />
+          </label>
+
+          <fieldset className={styles.field}>
+            <legend>Canal</legend>
+            {(['WHATSAPP', 'SMS'] as const).map((option) => (
+              <label key={option}>
+                <input
+                  type="radio"
+                  name={`channel-${orderId}`}
+                  value={option}
+                  checked={state.channel === option}
+                  onChange={() => setState((previous) => ({ ...previous, channel: option }))}
+                />
+                {channelLabel(option)}
+              </label>
+            ))}
+          </fieldset>
+
+          <label className={styles.field}>
+            <input
+              type="checkbox"
+              name="consent"
+              checked={state.consent}
+              onChange={(event) =>
+                setState((previous) => ({ ...previous, consent: event.target.checked }))
+              }
+            />
+            <span>Le patient accepte de recevoir une notification à ce numéro.</span>
+          </label>
+
+          <div className={styles.actions}>
+            <Button
+              type="submit"
+              disabled={state.busy || !state.consent || !state.destination.trim()}
+            >
+              Envoyer le lien sécurisé
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() =>
+                setState((previous) => ({
+                  ...previous,
+                  composing: false,
+                  consent: false,
+                  error: null,
+                }))
+              }
+              disabled={state.busy}
+            >
+              Annuler
+            </Button>
+          </div>
+        </form>
       ) : !state.metadata?.active ? (
         <>
           <p className={styles.body}>Aucun accès patient actif.</p>
           <div className={styles.actions}>
+            {/*
+              Two separate actions, and the QR-only one is first. §19: notification is optional,
+              and a patient with no phone must reach the printed path without being routed through
+              a form asking for a number they do not have.
+            */}
             <Button type="button" onClick={() => void handleIssue()} disabled={state.busy}>
               Créer le suivi patient
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setState((previous) => ({ ...previous, composing: true }))}
+              disabled={state.busy}
+            >
+              Créer et envoyer au patient
             </Button>
           </div>
         </>
@@ -456,6 +660,42 @@ export function PatientAccessHandoff({
           </div>
         </>
       )}
+
+      {/*
+        DH-NOTIFY-001 §18: what was actually sent, in DHealth's own understated vocabulary.
+
+        `patientNotificationWording.ts` is the only place a state becomes French, precisely so that
+        "Transmis à l'opérateur" never drifts into "reçu" and "Remis au téléphone" never drifts
+        into "lu". A failure shows an action, never a provider error.
+      */}
+      {state.notifications && state.notifications.notifications.length > 0 ? (
+        <div className={styles.body}>
+          <p className={styles.sheetLabel}>Messages envoyés</p>
+          <ul className={styles.sheetList}>
+            {state.notifications.notifications.map((notification) => (
+              <li key={notification.id}>
+                {notificationSummaryLine(notification)}
+                {notification.state === 'FAILED' ? (
+                  <>
+                    {' — '}
+                    {failureGuidance(notification.failure_category)}
+                    {notification.retryable ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={state.busy}
+                        onClick={() => void handleRetry(notification.id)}
+                      >
+                        Réessayer
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {state.notice ? (
         <p className={styles.notice} role="status">

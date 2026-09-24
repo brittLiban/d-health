@@ -470,3 +470,248 @@ describe('PatientAccessHandoff — stale responses (§49)', () => {
     expect(screen.queryByText(/Un accès patient est déjà actif/i)).not.toBeInTheDocument()
   })
 })
+
+/**
+ * DH-NOTIFY-001 §5/§17/§18/§19 — the "Créer et envoyer au patient" flow.
+ *
+ * The assisted-digital tests (NT1, NT2) matter most. Law 4 says a patient with no phone must still
+ * complete the journey, so the QR-only path has to stay reachable in one gesture and the plain
+ * issuance call has to stay exactly what it was.
+ */
+describe('DH-NOTIFY-001 patient notification', () => {
+  function notifyClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
+    return makeClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: false,
+        channel: null,
+        destination: null,
+        notifications: [],
+      }),
+      retryPatientNotification: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    })
+  }
+
+  it('NT1: the QR-only path needs one gesture and sends nothing', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient()
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /^Créer le suivi patient$/ }))
+
+    // Unchanged from before this ticket: two arguments, no notification block.
+    await waitFor(() => expect(client.issuePatientAccess).toHaveBeenCalledTimes(1))
+    expect(client.issuePatientAccess).toHaveBeenCalledWith(PROVIDER_ID, ORDER_ID)
+  })
+
+  it('NT2: sending is a separate, deliberate gesture behind its own control', async () => {
+    const user = userEvent.setup()
+    renderHandoff(notifyClient())
+
+    // Both paths are offered; the QR-only one is not hidden behind the form.
+    expect(await screen.findByRole('button', { name: /^Créer le suivi patient$/ })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: /Créer et envoyer au patient/ }))
+
+    expect(screen.getByLabelText(/Numéro du patient/)).toBeVisible()
+    expect(screen.getByRole('radio', { name: 'WhatsApp' })).toBeVisible()
+    expect(screen.getByRole('radio', { name: 'SMS' })).toBeVisible()
+  })
+
+  it('NT3: consent is unticked by default and gates the send', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient()
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+    await user.type(screen.getByLabelText(/Numéro du patient/), '+25377123456')
+
+    const consent = screen.getByRole('checkbox', { name: /accepte de recevoir/ })
+    expect(consent).not.toBeChecked()
+    // §5: consent is never inferred from having a number. A filled destination is not enough.
+    expect(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ })).toBeDisabled()
+
+    await user.click(consent)
+    expect(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ })).toBeEnabled()
+    expect(client.issuePatientAccess).not.toHaveBeenCalled()
+  })
+
+  it('NT4: a confirmed send carries channel, destination and the consent affirmation', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient()
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+    await user.type(screen.getByLabelText(/Numéro du patient/), '+25377123456')
+    await user.click(screen.getByRole('radio', { name: 'WhatsApp' }))
+    await user.click(screen.getByRole('checkbox', { name: /accepte de recevoir/ }))
+    await user.click(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ }))
+
+    await waitFor(() => expect(client.issuePatientAccess).toHaveBeenCalledTimes(1))
+    expect(client.issuePatientAccess).toHaveBeenCalledWith(PROVIDER_ID, ORDER_ID, {
+      notify: {
+        channel: 'WHATSAPP',
+        destination: '+25377123456',
+        patient_consent_confirmed: true,
+      },
+    })
+  })
+
+  it('NT5: a rejected destination is shown as the correctable mistake it is', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient({
+      issuePatientAccess: vi
+        .fn()
+        .mockRejectedValue(
+          new ExchangeApiError(
+            422,
+            'VALIDATION_ERROR',
+            'destination phone number must include a country code (for example +253...)',
+          ),
+        ),
+    })
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+    await user.type(screen.getByLabelText(/Numéro du patient/), '77123456')
+    await user.click(screen.getByRole('checkbox', { name: /accepte de recevoir/ }))
+    await user.click(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ }))
+
+    // The server's own reason class, which names no provider and echoes no number back.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/country code/)
+  })
+
+  it('NT6: a deployment that cannot send says so instead of offering a retry', async () => {
+    const user = userEvent.setup()
+    const client = notifyClient({
+      issuePatientAccess: vi.fn().mockRejectedValue(new ExchangeApiError(503, 'SERVER_ERROR', 'not enabled')),
+    })
+    renderHandoff(client)
+
+    await user.click(await screen.findByRole('button', { name: /Créer et envoyer au patient/ }))
+    await user.type(screen.getByLabelText(/Numéro du patient/), '+25377123456')
+    await user.click(screen.getByRole('checkbox', { name: /accepte de recevoir/ }))
+    await user.click(screen.getByRole('button', { name: /Envoyer le lien sécurisé/ }))
+
+    const alert = await screen.findByRole('alert')
+    // §19: it points at the path that still works rather than telling them to try again.
+    expect(alert).toHaveTextContent(/QR code et le document imprimé/)
+    expect(alert).not.toHaveTextContent(/Réessayez/)
+  })
+
+  it('NT7: sent is never reported as read, and delivered never as understood', async () => {
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: true,
+        channel: 'SMS',
+        destination: '+25377123456',
+        notifications: [
+          {
+            id: 'n1',
+            event_type: 'ACCESS_LINK_ISSUED',
+            channel: 'SMS',
+            destination: '+25377123456',
+            state: 'SENT',
+            failure_category: null,
+            attempt_count: 1,
+            retryable: false,
+            created_at: '2026-09-24T10:00:00Z',
+            sent_at: '2026-09-24T10:00:01Z',
+            delivered_at: null,
+          },
+          {
+            id: 'n2',
+            event_type: 'RESULT_RELEASED',
+            channel: 'SMS',
+            destination: '+25377123456',
+            state: 'DELIVERED',
+            failure_category: null,
+            attempt_count: 1,
+            retryable: false,
+            created_at: '2026-09-24T11:00:00Z',
+            sent_at: '2026-09-24T11:00:01Z',
+            delivered_at: '2026-09-24T11:00:05Z',
+          },
+        ],
+      }),
+    })
+    renderHandoff(client)
+
+    expect(await screen.findByText(/Transmis à l’opérateur/)).toBeVisible()
+    expect(screen.getByText(/Remis au téléphone/)).toBeVisible()
+    // §18's three forbidden implications, asserted as absences.
+    expect(screen.queryByText(/\blu\b/)).toBeNull()
+    expect(screen.queryByText(/compris/)).toBeNull()
+    expect(screen.queryByText(/examiné/)).toBeNull()
+  })
+
+  it('NT8: a failed message shows an action, never a provider error', async () => {
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: true,
+        channel: 'SMS',
+        destination: '+25377123456',
+        notifications: [
+          {
+            id: 'n3',
+            event_type: 'RESULT_RELEASED',
+            channel: 'SMS',
+            destination: '+25377123456',
+            state: 'FAILED',
+            failure_category: 'INVALID_DESTINATION',
+            attempt_count: 1,
+            retryable: true,
+            created_at: '2026-09-24T12:00:00Z',
+            sent_at: null,
+            delivered_at: null,
+          },
+        ],
+      }),
+    })
+    renderHandoff(client)
+
+    expect(await screen.findByText(/Vérifiez-le avec le patient/)).toBeVisible()
+    // No vendor vocabulary reaches a clinical user (§18).
+    expect(screen.queryByText(/Twilio|HTTP|SID|webhook/i)).toBeNull()
+  })
+
+  it('NT9: an access-link failure offers no retry, because its link cannot be rebuilt', async () => {
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockResolvedValue({
+        enrolled: true,
+        channel: 'SMS',
+        destination: '+25377123456',
+        notifications: [
+          {
+            id: 'n4',
+            event_type: 'ACCESS_LINK_ISSUED',
+            channel: 'SMS',
+            destination: '+25377123456',
+            state: 'FAILED',
+            failure_category: 'TRANSIENT_PROVIDER',
+            attempt_count: 1,
+            // Server-derived: false for every access-link row (§4's revoke-and-reissue path).
+            retryable: false,
+            created_at: '2026-09-24T13:00:00Z',
+            sent_at: null,
+            delivered_at: null,
+          },
+        ],
+      }),
+    })
+    renderHandoff(client)
+
+    expect(await screen.findByText(/Lien sécurisé/)).toBeVisible()
+    expect(screen.queryByRole('button', { name: /^Réessayer$/ })).toBeNull()
+  })
+
+  it('NT10: a notifications read failure never degrades the access panel', async () => {
+    const client = notifyClient({
+      getPatientNotifications: vi.fn().mockRejectedValue(new Error('offline')),
+    })
+    renderHandoff(client)
+
+    // §19: the QR/print path is what must keep working when messaging does not.
+    expect(await screen.findByRole('button', { name: /^Créer le suivi patient$/ })).toBeVisible()
+    expect(screen.queryByText(/Messages envoyés/)).toBeNull()
+  })
+})

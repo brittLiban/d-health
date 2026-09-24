@@ -67,6 +67,9 @@ import type {
   PatientCreateOutcome,
   PatientCreateRequest,
   PatientDirectoryEntry,
+  PatientNotificationEnrollmentRequest,
+  PatientNotificationStatus,
+  PatientNotificationSummary,
   PatientReference,
   PatientReferenceBindRequest,
   ProviderEligibleLab,
@@ -1445,10 +1448,66 @@ export class ExchangeClient {
   async issuePatientAccess(
     providerId: string,
     orderId: string,
-    options: { token?: string; signal?: AbortSignal } = {},
+    options: {
+      token?: string
+      signal?: AbortSignal
+      /**
+       * DH-NOTIFY-001 §4: optional, and its optionality is Law 4 expressed in the API.
+       *
+       * Omitted, this behaves exactly as issuance did before DH-NOTIFY-001 -- a grant and a raw
+       * token, for the QR and the printed sheet. Supplied, the server additionally records the
+       * enrollment and sends the secure link **in the same request**, because that is the only
+       * moment the raw token exists anywhere: it is returned once and the Exchange can never
+       * recover it (`docs/ARCHITECTURE.md` §19). A send failure never fails the issuance.
+       */
+      notify?: PatientNotificationEnrollmentRequest
+    } = {},
   ): Promise<PatientAccessIssueOutcome> {
     return this.request<PatientAccessIssueOutcome>(
       `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/patient-access`,
+      options.notify
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ notify: options.notify }),
+            signal: options.signal,
+          }
+        : { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * DH-NOTIFY-001 §18: whether this order is enrolled for messaging, and what has been sent.
+   */
+  async getPatientNotifications(
+    providerId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientNotificationStatus> {
+    return this.request<PatientNotificationStatus>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/notifications`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * DH-NOTIFY-001 §11/§18: make one FAILED message due again.
+   *
+   * A retry of the same obligation, never a second message -- the server keeps its identity, its
+   * attempt history and its idempotency key. Refused with 409 for an access-link message, whose
+   * link cannot be rebuilt; the UI offers revoke-and-reissue for that case instead.
+   */
+  async retryPatientNotification(
+    providerId: string,
+    orderId: string,
+    notificationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PatientNotificationSummary> {
+    return this.request<PatientNotificationSummary>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}` +
+        `/notifications/${encodeURIComponent(notificationId)}/retry`,
       { method: 'POST', signal: options.signal },
       options.token,
     )

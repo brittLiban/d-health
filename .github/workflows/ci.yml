@@ -2420,11 +2420,14 @@ jobs:
           KEYCLOAK_ADAPTER_CLIENT_SECRET=ci-dummy
           KEYCLOAK_EXCHANGE_API_CLIENT_SECRET=ci-dummy
           ADAPTER_DB_PASSWORD=ci-dummy
+          DHEALTH_PATIENT_PUBLIC_BASE_URL=https://localhost
           ENVEOF
       - name: Default profile parses
         run: docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
       - name: backup profile parses
         run: COMPOSE_PROFILES=backup docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
+      - name: notify profile parses (DH-NOTIFY-001)
+        run: COMPOSE_PROFILES=notify docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
       - name: Demo compose parses
         run: docker compose -f provisioning/demo/docker-compose.demo.yml config -q
       - name: Native demo compose parses (DH-DEMO-001)
