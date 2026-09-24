@@ -6,6 +6,53 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-24, DH-NOTIFY-META-001R, directly on `master`.** From `7e9ff01`. A correction, not a
+feature: the Meta webhook existed and the runbook told operators to point Meta at it, and
+**`caddy/Caddyfile` did not route the path**. `exchange.<BASE_DOMAIN>` forwarded `/exchange/v1/*`
+and answered 404 to everything else, so a correctly configured callback terminated at the proxy.
+Nothing detected it, and nothing could have: a subscription that never verifies is
+indistinguishable from a provider that has sent nothing — which is also the true state of this
+deployment.
+
+**One exact path, on the Exchange host.**
+`https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook`, GET and POST, forwarded to
+`adapter:8000`. Not `/notifications/v1/*`: publishing the namespace would hand the public edge
+every route the adapter later grows into it, which is the same argument that scoped this vhost in
+the first place. Not `app.<BASE_DOMAIN>` either — that vhost ends in a catch-all serving the UI, so
+a mistyped callback path there would answer 200 with an HTML page, a routing mistake wearing the
+disguise of a working endpoint. On `exchange.` anything unpublished is a bare 404.
+
+**Proven through a real proxy, not asserted from the file.** Caddy 2.11.4 was run against this
+exact Caddyfile with the real `create_app()` behind it, over HTTPS: the `hub.challenge` handshake
+echoed `dh-edge-challenge-42` verbatim as `text/plain`; a wrong verify token was refused 403; a
+synthetic callback signed with a test app secret was **accepted 200 through the proxy**, and the
+same signature with one byte changed in the body was refused `invalid provider signature` — which
+is what proves the proxy delivered the raw bytes Meta's HMAC is computed over. `/exchange/v1/*`
+still answered 401 from the adapter, `/health/live`, `/health/ready` and
+`/notifications/v1/something-else` all returned Caddy's own empty 404 rather than reaching the
+application.
+
+Three negative controls, executed and reverted. Removing the route reddened three of the seven new
+tests **and** made the live edge 404 the webhook — the defect reproduced on demand. Broadening it to
+`/notifications/v1/*` reddened four, and the live probe showed `/notifications/v1/something-else`
+answering with FastAPI's `{"detail":"Not Found"}` instead of Caddy's empty body, which is how the
+wildcard's cost is visible rather than theoretical. Mutating a signed body one byte after signing
+was refused at the application, through the proxy.
+
+`adapter/tests/test_public_edge_routing.py` (7 tests) asserts the published set — exactly
+`/exchange/v1/*` and the one webhook path, a 404 catch-all, no health endpoint, no namespace
+wildcard — and pairs it with the application actually serving that path on both methods. It is a
+**static** check and says so in its own docstring: it cannot prove Caddy parses the file or that
+bytes survive a hop. Those were proven by the run above, which the suite cannot repeat — there is no
+Caddy binary and no Docker daemon in CI or in this environment.
+
+**Nothing about the provider gate changed.** No Meta credential was used, no Meta endpoint was
+contacted, no message was sent, no handset received anything, and **pilot gate 5 remains
+uncleared**. The HMAC boundary, the verify-token comparison, `wamid`-only resolution, the ignored
+`read`, the ignored inbound messages and the content-free release wording are all untouched. The
+known concern that the POST body-size limit is checked after `await request.body()` has buffered the
+request **was deliberately not fixed here** and remains open.
+
 **2026-09-24, DH-USABILITY-001, directly on `master`.** From `2395da2`. The native clinic and
 laboratory workflows were reviewed screen by screen in a real browser at three widths, and the
 defects that review found were fixed. **It is an `INTERNAL WORKFLOW REVIEW`, not a usability
@@ -971,9 +1018,11 @@ cleared yet:
 5. WhatsApp patient notification running against real credentials, not a mock (pinned P0, §E).
    **Not cleared.** DH-NOTIFY-001 built the transport, the dispatcher and the receipt webhook, and
    DH-NOTIFY-META-001 pointed WhatsApp straight at Meta's Cloud API and wrote the qualification
-   path (§C). **No real Meta endpoint has been contacted, no credential exists, no message has
-   reached a handset, and the qualification workflow has never been run.** SMS has no provider at
-   all and is not part of this gate.
+   path (§C). DH-NOTIFY-META-001R then made the callback path publicly routable, which was a
+   prerequisite nobody had noticed was missing — the proxy answered 404 to the exact URL the
+   runbook told operators to configure. **No real Meta endpoint has been contacted, no credential
+   exists, no message has reached a handset, and the qualification workflow has never been run.**
+   SMS has no provider at all and is not part of this gate.
 6. Clinical lead sign-off on the order set and partograph fields (`docs/CLINICAL-SIGNOFF.md`) —
    unrelated to the Exchange track's own gates above, but binding wherever the maternity track is
    touched. Pilot-ready is never clinically live without it.

@@ -153,6 +153,32 @@ exchange.{$BASE_DOMAIN} {
 		reverse_proxy adapter:8000
 	}
 
+	# DH-NOTIFY-META-001R — the Meta WhatsApp callback, and only it.
+	#
+	# The adapter has served GET/POST /notifications/v1/meta/webhook since
+	# DH-NOTIFY-META-001 and the runbook has told operators to configure that URL,
+	# but nothing here routed it: a correctly configured Meta callback terminated
+	# at this proxy's 404 instead of reaching the webhook. Nobody noticed because
+	# no callback has ever been received — the failure mode was a subscription that
+	# simply never verifies.
+	#
+	# ONE exact path, not `/notifications/v1/*`. The prefix is a namespace the
+	# adapter may grow into later (retry, enrolment, per-notification reads), and
+	# publishing the namespace would hand the public edge every future route in it
+	# by omission — the same argument that scoped this vhost to /exchange/v1/* in
+	# the first place. A new public notification route should have to be written
+	# here deliberately.
+	#
+	# Both methods reach the same FastAPI route: GET is Meta's hub.challenge
+	# subscription handshake, POST is the signed status callback. Caddy only
+	# routes. It does not verify the token, check the HMAC, parse the payload or
+	# touch the body — `notify/webhook.py` authenticates POSTs against the **raw**
+	# bytes before anything is parsed, and a proxy that re-encoded the body would
+	# break every genuine callback.
+	handle /notifications/v1/meta/webhook {
+		reverse_proxy adapter:8000
+	}
+
 	handle {
 		respond 404
 	}

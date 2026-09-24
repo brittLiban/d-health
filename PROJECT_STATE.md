@@ -19652,3 +19652,148 @@ fragmentation; internal architecture exposed to users.
 this one arrived, and it has **not** been cancelled. The two are on different tracks: Connect is
 about reaching an external EMR/LIS, Native is about what DHealth itself is to the people using it.
 Which one runs first is Liban's call; nothing here decides it.
+
+---
+
+## DH-NOTIFY-META-001R — the Meta webhook reaches the adapter · 2026-09-24
+
+**Start `7e9ff01` → this commit.** The ticket expected `2395da2`; HEAD had moved five commits ahead
+(DH-USABILITY-001's UI and documentation work). Nothing was reset or discarded — those commits touch
+`ui/` and documentation only and are orthogonal to this one. **No adapter source changed in this
+ticket either.** One line of routing, one new test file, four documents.
+
+### The defect
+
+```text
+the application serves      GET/POST /notifications/v1/meta/webhook
+the runbook told operators  configure that callback URL with Meta
+caddy/Caddyfile routed      /exchange/v1/*   -> adapter
+                            everything else  -> 404
+```
+
+So a correctly configured Meta callback terminated at the proxy. Nothing detected it and nothing
+could have: a subscription that never verifies looks exactly like a provider that has sent nothing,
+and this deployment's provider has sent nothing. The webhook, its tests and its runbook were all
+written against an endpoint that was unreachable from outside the Docker network.
+
+### The fix
+
+```
+exchange.{$BASE_DOMAIN}
+    handle /exchange/v1/*                  -> reverse_proxy adapter:8000   (unchanged)
+    handle /notifications/v1/meta/webhook  -> reverse_proxy adapter:8000   (new)
+    handle                                 -> respond 404
+```
+
+**Why `exchange.`** — it is already the public API edge; the webhook belongs to the backend rather
+than to the browser application; and `app.<BASE_DOMAIN>` ends in a catch-all that serves the UI, so
+a mistyped callback path there would answer **200 with an HTML page** — a routing mistake wearing
+the disguise of a working endpoint. On `exchange.` anything unpublished is a bare 404.
+
+**Why the exact path and not `/notifications/v1/*`** — the namespace is one the adapter may grow
+into (retry, enrolment, per-notification reads). Publishing the prefix hands the public edge every
+future route in it by omission, which is the same argument that scoped this vhost to
+`/exchange/v1/*` originally. NC-2 below shows that cost is real, not theoretical.
+
+### Evidence: a real proxy, a real application, a real HTTPS round trip
+
+Caddy **2.11.4** (official release binary, sha256
+`527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9`) run against **this exact
+Caddyfile** with `BASE_DOMAIN=localhost`, in front of the real `create_app()` served by uvicorn on
+`127.0.0.1:8000` with a synthetic app secret and verify token. Both the Caddy binary and the harness
+live outside the repository; neither is committed.
+
+```text
+caddy validate --adapter caddyfile --config caddy/Caddyfile      Valid configuration
+
+GET  .../meta/webhook?hub.mode=subscribe&hub.verify_token=<ok>   200, body "dh-edge-challenge-42",
+                                                                 content-type text/plain, via: Caddy
+GET  .../meta/webhook   with a wrong verify token                403
+POST .../meta/webhook   correctly signed synthetic payload       200 {"status":"ok"}
+POST .../meta/webhook   same signature, one byte changed         403 "invalid provider signature"
+POST .../meta/webhook   no signature header                      403 "missing provider signature"
+POST directly to the adapter, proxy bypassed, same bytes         200 {"status":"ok"}
+
+GET  /exchange/v1/me                                             401 (adapter, unchanged)
+GET  /health/live                                                404, empty body (Caddy)
+GET  /health/ready                                               404, empty body (Caddy)
+GET  /notifications/v1/something-else                            404, empty body (Caddy)
+```
+
+The signed-POST pair is the load-bearing one. Meta's HMAC is computed over the **raw** body; if the
+proxy decoded and re-encoded it, the correctly signed request would have failed. It did not, and a
+one-byte mutation did — so the bytes crossed the hop intact, and the signature is genuinely
+load-bearing rather than incidentally satisfied.
+
+**What this run is not.** Not Meta. Not a public certificate — `BASE_DOMAIN=localhost` uses Caddy's
+internal CA. Not the Docker topology: the daemon is permission-denied here, so `adapter` was mapped
+to loopback in `/etc/hosts` rather than resolved on the compose network, and the OpenELIS CA file
+the `lab.` vhost mounts was stubbed locally so Caddy could provision at all. What it proves is the
+routing, the methods, the challenge echo and the raw-body property — nothing about the provider.
+
+### Regression coverage
+
+`adapter/tests/test_public_edge_routing.py`, 7 tests. It parses `caddy/Caddyfile`, extracts the
+`exchange.` site block and asserts the published **set** — exactly `/exchange/v1/*` and the one
+webhook path, a `respond 404` catch-all, no health endpoint, no notification wildcard — and pairs it
+with the application actually answering that path on both methods (403 each, the documented
+fail-closed state; a 404 would mean the published path reaches nothing).
+
+Its docstring states what it is: a static check that cannot prove Caddy parses the file, cannot
+prove the upstream answers and cannot prove bytes survive the hop. The round trip above proved
+those, and the suite cannot repeat it — no Caddy binary, no Docker daemon. This file exists so the
+route cannot silently disappear between such runs, which is exactly how it came to be missing.
+
+### Negative controls — three, executed and reverted
+
+| Control | Broken | Static tests red | Live edge |
+|---|---|---|---|
+| NC-1 | the new `handle` block deleted | `test_the_meta_webhook_path_is_published_on_the_exchange_host`, `test_the_meta_webhook_is_forwarded_to_the_adapter`, `test_the_exchange_host_publishes_nothing_else` (3 of 7) | webhook GET **404**, signed POST **404** — the original defect reproduced on demand; `/exchange/v1/*` still 401 |
+| NC-2 | route broadened to `/notifications/v1/*` | the three above **plus** `test_the_notification_namespace_is_not_published_wholesale` (4 of 7) | `/notifications/v1/something-else` answered **`{"detail":"Not Found"}`** — FastAPI's body, not Caddy's empty one, proving the request now reaches the application. The status code alone (404 either way) would have hidden this; the body is what distinguishes them |
+| NC-3 | a signed body mutated one byte after signing | — | **403 `invalid provider signature`** through the proxy |
+
+Every mutation reverted; the tree is green afterwards.
+
+### What was deliberately NOT done
+
+* **No GitHub Actions work of any kind.** No workflow file touched, no stale Alembic
+  `EXPECTED_HEAD`, no branch protection, no required checks, no CI workaround. Nothing here claims
+  GitHub CI passed — it was not run and is known to be unavailable for account-side reasons.
+* **The body-size ordering was left alone.** `notify/webhook.py` still checks
+  `_MAX_CALLBACK_BODY_BYTES` *after* `await request.body()` has buffered the request, so the limit
+  rejects an oversized payload without having avoided reading it. Out of scope by instruction, still
+  true, and recorded here as the follow-up.
+* No adapter source change, no notification semantics change, no SMS provider, no new message type,
+  no template work, no Connect work.
+
+### Local verification (GitHub Actions deliberately not used)
+
+```text
+~/dh-adapter-venv/bin/python -m pytest tests/test_public_edge_routing.py
+    7 passed
+
+~/dh-adapter-venv/bin/python -m pytest tests/test_public_edge_routing.py \
+    tests/test_patient_notification_api.py tests/test_patient_notification_domain.py \
+    tests/test_patient_notification_transport.py tests/test_exchange_app_wiring.py \
+    tests/test_config.py
+    159 passed
+
+caddy validate --adapter caddyfile --config caddy/Caddyfile
+    Valid configuration
+```
+
+The full adapter suite result is recorded in the commit message. `docker compose config` was **not**
+run: the daemon is permission-denied in this environment and no compose file changed.
+
+### What is NOT true
+
+* **No Meta credential was used. No Meta endpoint was contacted. No message was sent. No handset
+  received anything.** The app secret and verify token in the round trip are synthetic strings
+  invented for it.
+* **Pilot gate 5 remains uncleared** and WhatsApp remains `BLOCKED`, not real-provider-qualified.
+  This ticket removed a prerequisite that had gone unnoticed; it did not move the gate.
+* **No deployment with a public domain exists**, so the URL this ticket routes has never been
+  resolvable from the internet.
+* **Nothing was proven about Docker networking**, TLS certificate issuance, or the compose topology.
+
+### Human Decision Required: No

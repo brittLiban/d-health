@@ -181,7 +181,10 @@ committed obligations, and the row already carries everything it needs.
 ## The webhook
 
 A delivery receipt is the only way `DELIVERED` is ever written, and
-`/notifications/v1/meta/webhook` is the only place one is accepted — two routes, because
+`/notifications/v1/meta/webhook` is the only place one is accepted — published at the public edge
+as `https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook`, and that one exact path rather
+than the `/notifications/v1/*` namespace, so a notification route added later does not become
+public by omission (DH-NOTIFY-META-001R; before it, the proxy routed neither). Two routes, because
 Meta's registration handshake and its event delivery are different things. `GET` is the
 subscription handshake: a constant-time verify-token comparison, then the raw `hub.challenge`
 echoed back as `text/plain`. `POST` carries the events, and its authority is an **HMAC-SHA256

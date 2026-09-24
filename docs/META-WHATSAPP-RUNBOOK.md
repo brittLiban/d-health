@@ -109,16 +109,32 @@ through, and `NC-META-4` exists to prove a test notices if one appears.
 
 ## The webhook
 
-DHealth exposes two routes under the configured public origin:
+**One URL, on the Exchange hostname.** DHealth serves both methods at the same path:
 
 ```
-GET  https://<your-host>/notifications/v1/meta/webhook   ← subscription handshake
-POST https://<your-host>/notifications/v1/meta/webhook   ← status events
+GET  https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook   ← subscription handshake
+POST https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook   ← status events
 ```
 
-Configure that URL in the Meta app's WhatsApp webhook settings, set the verify token to match
-`META_WEBHOOK_VERIFY_TOKEN`, and **subscribe the WABA to the `messages` field** — status events
-arrive on it, not on a separate one.
+Configure exactly that URL in the Meta app's WhatsApp webhook settings, set the verify token to
+match `META_WEBHOOK_VERIFY_TOKEN`, and **subscribe the WABA to the `messages` field** — status
+events arrive on it, not on a separate one.
+
+**`exchange.`, not `app.`** — `caddy/Caddyfile` publishes this path on the Exchange vhost only.
+That hostname is already the public API edge, the webhook belongs to the backend rather than to the
+browser application, and `app.<BASE_DOMAIN>` ends in a catch-all that serves the UI: a mistyped
+callback path there would return an HTML page with a 200, which is a routing mistake wearing the
+disguise of a working endpoint. On `exchange.` anything unpublished is a bare 404.
+
+**[Corrected 2026-09-24, DH-NOTIFY-META-001R.]** This section previously said
+`https://<your-host>/…` and left the host to the reader. The proxy did not route the path at all:
+`exchange.<BASE_DOMAIN>` forwarded only `/exchange/v1/*` and answered 404 to everything else, so a
+correctly configured callback terminated at the edge. Nothing detected it because no callback has
+ever been received — a subscription that never verifies is indistinguishable from a provider that
+has sent nothing. The route now exists, is asserted by
+`adapter/tests/test_public_edge_routing.py`, and was exercised end to end through a real Caddy
+against a real adapter (`PROJECT_STATE.md`, DH-NOTIFY-META-001R). **Still never contacted by
+Meta.**
 
 Meta will `GET` the URL with `hub.mode=subscribe`, `hub.verify_token` and `hub.challenge`. DHealth
 compares the token in constant time and echoes the raw challenge as `text/plain`. If registration
@@ -131,6 +147,11 @@ token, the webhook refuses every request and notifications truthfully stop at `S
 
 **Caddy must not buffer or rewrite the request body** on this route. A body that is decoded and
 re-encoded is not byte-identical to what Meta signed, and every genuine callback would be refused.
+The shipped configuration is a plain `reverse_proxy` with no `request_body` directive and no
+rewrite, and this was checked rather than assumed: a synthetic callback signed with a test app
+secret was accepted through a real Caddy, and the same signature with one byte changed in the body
+was refused with `invalid provider signature`. If you put another proxy, WAF or API gateway in
+front of this one, that is the property to re-check first.
 
 ---
 
@@ -167,6 +188,9 @@ Neither shows a credential.
 [ ] System User created, permanent access token issued
 [ ] both templates submitted and APPROVED (not merely submitted)
 [ ] webhook URL registered, verify token matched, WABA subscribed to `messages`
+    -- the URL is https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook and it must be
+    publicly resolvable and TLS-terminated by this deployment's own Caddy; the path is routed
+    (DH-NOTIFY-META-001R) but no deployment with a public domain exists yet
 [ ] a non-patient test handset available and its number set as
     META_QUALIFICATION_TEST_DESTINATION
 [ ] repository secrets populated

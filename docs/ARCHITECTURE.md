@@ -2147,6 +2147,16 @@ Full detail: [`PATIENT-NOTIFICATION.md`](PATIENT-NOTIFICATION.md). Decision reco
                                                                  DELIVERED
 ```
 
+**Where that callback arrives from the outside.** `https://exchange.<BASE_DOMAIN>/notifications/v1/meta/webhook`
+— the public API edge, not the browser application's hostname, and that one exact path rather than
+the `/notifications/v1/*` namespace, so that a notification route added later is not published by
+omission. `caddy/Caddyfile` routes it and nothing else in that namespace;
+`adapter/tests/test_public_edge_routing.py` asserts the set. **Corrected 2026-09-24
+(DH-NOTIFY-META-001R):** the webhook and the runbook shipped with DH-NOTIFY-META-001 and the proxy
+routed neither, so a correctly configured Meta callback terminated at the edge — invisible, because
+a subscription that never verifies looks exactly like a provider that has sent nothing, which this
+deployment's provider also has.
+
 **Why the link exists only on the left-hand path.** The raw `PatientAccessGrant` secret is returned
 exactly once and is unrecoverable afterwards (§19). A release-time message therefore cannot contain
 a working link without persisting the secret or re-issuing the grant — the first forbidden by the
