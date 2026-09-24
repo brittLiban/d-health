@@ -8124,3 +8124,120 @@ constraint is also relaxed, which §29 says to preserve.
     content-free rule this ADR sets (§10 item 8 — this ADR makes every channel carry the same
     nothing, which sidesteps rather than resolves the question); proxy/family authorization (§10
     item 9); email, voice, patient accounts, OTP and bidirectional messaging, all §28 non-goals.
+
+---
+
+## ADR-059 — ACCEPTED / IMPLEMENTED (2026-09-24, DH-NOTIFY-META-001): WhatsApp goes directly to
+## Meta's Cloud API; Twilio is removed; SMS has no selected provider
+
+**Date:** 2026-09-24 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED, TESTED,
+REAL-POSTGRESQL-QUALIFIED · **NOT REAL-META-WHATSAPP-QUALIFIED** — ADR-003's gate is unchanged and
+remains **BLOCKED** · **Decided by:** Liban (DH-NOTIFY-META-001 ticket)
+
+**Relationship to prior decisions.** This supersedes **ADR-058 decision 10 only** — the choice of
+Twilio as the Launch-1 provider. Everything else in ADR-058 stands unaltered: A′ (decision 1), the
+content-free message (2), identical release/amendment wording (3), the separate domain that never
+touches `ResultDelivery` (4), obligations committing with the release while the vendor call happens
+outside it (5), database-enforced idempotency keyed on the release version (6), `SENT` ≠
+`DELIVERED` ≠ read (7), consent as a recorded act with a named actor (8), and ADR-003's gate (9).
+ADR-002's permission — "a notifier module inside the adapter calls the WhatsApp Cloud API (or
+Twilio) directly" — is now exercised on its first branch rather than its second.
+
+### The decision
+
+**WhatsApp's production transport is the Meta WhatsApp Cloud API, called directly.**
+
+```
+    DHealth → Meta Cloud API → WhatsApp → patient
+```
+
+not
+
+```
+    DHealth → Twilio → Meta → WhatsApp → patient
+```
+
+1. **Twilio is removed entirely**, not retained as dead code. `notify/twilio.py`, its configuration,
+   its webhook route and its test group are deleted. Naming `twilio` as a provider is now a startup
+   refusal rather than a silent fallback. Git history preserves the implementation; a second
+   adapter kept "in case" would be untested code on a path nobody exercises, which is worse than
+   absent. ADR-058 decision 10's reasoning (one credential covering both channels) was sound for
+   the scope it had and is not retracted — this is a change of provider, not a correction of it.
+
+2. **SMS has no selected provider, and the system says so rather than implying otherwise.** The
+   domain still understands `SMS` as a channel; *availability* is now a server-derived fact read
+   from the configured transport and surfaced to the UI as `available_channels`. With Meta
+   configured, that list is `["WHATSAPP"]`, the staff UI offers no SMS control, and the enrolment
+   endpoint refuses an SMS channel. Choosing an SMS vendor is explicitly out of scope here.
+
+3. **The provider-independent architecture is preserved, and was tightened rather than bypassed.**
+   `NotificationTransport` still stands between the domain and the vendor. Its `send` now takes the
+   **notification event** rather than a rendered body, because a WhatsApp Business message is not
+   free text: Meta renders an approved template and DHealth supplies its name and parameters. Each
+   transport decides how an intent becomes a wire payload; rendering in the dispatcher would have
+   put provider-shaped knowledge on the wrong side of the boundary.
+
+4. **The server owns the event → approved-template mapping, and `send` has no `template_name`
+   parameter at all.** A caller-supplied template name is how a message intended as "there is an
+   update" becomes one that says something else. `tests/test_patient_notification_transport.py`
+   asserts the *absence* of that parameter on both the Protocol and the implementation rather than
+   trusting a comment, and `NC-META-5` confirms the test bites.
+
+5. **The Graph API version is required configuration with no default**, shape-validated at startup,
+   and surfaced in the operator read and the CLI `status` output. §3 asks for the version DHealth
+   has *qualified*; DHealth has qualified none, so there is nothing a default could honestly say.
+
+6. **A′ is unchanged and is now enforced in the provider payload as well as the template.** Exactly
+   one binding carries the patient-access URL — the issuance message, sent while the raw grant
+   secret is still in the issuing request's memory. The release and amendment binding takes **zero
+   parameters**, so the payload has no `components` key at all: not "no clinical parameters", no
+   parameter array whatsoever. A URL supplied for a release event is refused outright rather than
+   silently dropped. Storing the token, re-issuing the grant at send time, recovering it from the
+   digest, and moving it into a query string all remain forbidden.
+
+7. **`read` is ignored.** Meta reports it; DHealth does not record it and does not extend the state
+   machine for it. A chat thread being open is not acknowledgement, not comprehension, not review,
+   and a value in the domain would eventually be read as one of those.
+
+8. **Webhook authenticity is an HMAC-SHA256 signature over the raw request body, keyed with the
+   Meta app secret**, validated in constant time before anything is parsed; the subscription
+   handshake echoes the raw `hub.challenge` as `text/plain` after a constant-time verify-token
+   comparison. Resolution is by `wamid` and nothing else: the WABA id, the phone number id, the
+   recipient and any organization/order/notification id a payload carries are never read as
+   authority. Inbound `messages[]` are ignored entirely (§29).
+
+9. **The real-provider qualification path exists and has never been run.**
+   `.github/workflows/qualify-meta-whatsapp.yml` and `adapter/scripts/qualify_meta_whatsapp.py` are
+   `workflow_dispatch`-only, take credentials from repository secrets, refuse to run without an
+   explicitly configured non-patient test destination, and write an evidence artifact carrying
+   wamids, states and timestamps but never the token, the body or the destination. DH-NOTIFY-001
+   deliberately did not write this because an unrun workflow is the "the script exists" trap; the
+   resolution here is not to pretend, but to make every artifact state whether it ran. **It has
+   not.**
+
+10. **ADR-003's gate is unchanged and still BLOCKED.** No real Meta endpoint has been contacted, no
+    credential exists, no message has reached a handset, and pilot gate 5 is not cleared. This build
+    is `WRITTEN, TESTED, REAL-POSTGRESQL-QUALIFIED` and explicitly **not**
+    `REAL-META-WHATSAPP-QUALIFIED` or production-ready.
+
+### A source-availability limitation that shaped the design, recorded rather than buried
+
+`developers.facebook.com` was unreachable from the authoring environment — every request failed at
+the connection — so **Meta's primary documentation could not be read**, which the ticket asked for.
+The request/response shape, the webhook payload shape, the signature scheme and the subscription
+handshake below are corroborated across several independent secondary sources and match this
+repository's prior knowledge, but they are **not** verified against Meta's own current text.
+
+The response is structural rather than a disclaimer, and it is most of decision 5 and part of 4:
+no Graph API version is hard-coded, no template name is hard-coded, and the Graph `error.code` table
+is a short *refinement* over an HTTP-status classification that carries the load. An unrecognised
+code changes nothing. The first task of the qualification runbook is to confirm these shapes
+against the live API; until then, no document may describe them as verified.
+
+### Not decided here, and deliberately still open
+
+The SMS provider; email and voice (§29 non-goals); `ResultDelivery`'s semantics
+(`docs/MVP-1.0.md` §10 item 6); the per-channel sensitive-content policy beyond the content-free
+rule ADR-058 set (§10 item 8 — making every channel carry the same nothing sidesteps the question
+rather than answering it); proxy/family authorization; inbound messaging, WhatsApp Flows, patient
+accounts and OTP.

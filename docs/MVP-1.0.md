@@ -531,7 +531,7 @@ legible; item numbers are kept stable since §15 and other documents point at th
    Exchange; ADR-003's real-credential WhatsApp gate (maternity-era) is unrelated infrastructure
    that has never been wired to the Exchange.~~ **PARTIALLY RESOLVED [DH-NOTIFY-001, 2026-09-24,
    ADR-058].** SMS and WhatsApp code now exists for the Exchange — domain, content policy, durable
-   queue, dispatcher, Twilio adapter and a signed delivery-receipt webhook — and ADR-003's gate is
+   queue, dispatcher, provider adapter and a signed delivery-receipt webhook — and ADR-003's gate is
    now wired to it rather than unrelated to it. **The gate itself is unchanged and still
    `BLOCKED`:** no real provider has been contacted and no message has ever reached a handset, so
    this is resolved as *code* and unresolved as *capability*. Email and voice remain `NOT BUILT`

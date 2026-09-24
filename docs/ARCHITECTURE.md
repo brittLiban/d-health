@@ -513,6 +513,7 @@ disproportionate to the job, and it enlarges the surface area that has to be sta
 1 September pilot.
 
 Instead: a small notifier inside the adapter calls the **WhatsApp Cloud API (or Twilio) directly** —
+[2026-09-24, DH-NOTIFY-META-001: the Exchange track took the first branch. See §24 and ADR-059.]
 one HTTP call, one message type, no platform. RapidPro returns in v1.1/v1.2 when two-way messaging,
 campaigns, or SMS fallback logic are actually wanted; those are real capabilities that justify a
 real platform, and none of them are v1.
@@ -2137,11 +2138,11 @@ Full detail: [`PATIENT-NOTIFICATION.md`](PATIENT-NOTIFICATION.md). Decision reco
     │  send inline, after commit                 patient_notifications  ◄──────────────┘
     ▼                                              │
   "Voici votre lien sécurisé : <link>"             ▼  claim (lease, FOR UPDATE SKIP LOCKED)
-                                                 patient-notifier  ──► Twilio
+                                                 patient-notifier  ──► Meta Cloud API
                                                    │                     │
                                                    ▼                     ▼ status callback
-                                                 SENT            POST /notifications/v1/twilio/status
-                                                                   │  HMAC over the CONFIGURED url
+                                                 SENT            POST /notifications/v1/meta/webhook
+                                                                   │  HMAC-SHA256 over the RAW body
                                                                    ▼
                                                                  DELIVERED
 ```
@@ -2189,6 +2190,26 @@ through a form asking for a phone number, the printed sheet is unchanged, and no
 laboratory work, release, review or follow-up requires a message to have been sent.
 
 **What this does not make true.** No real provider has been contacted, no credential exists, and no
-message has ever reached a handset. ADR-003's gate is unchanged: WhatsApp/SMS stays **BLOCKED**
+message has ever reached a handset. ADR-003's gate is unchanged: WhatsApp stays **BLOCKED**
 until real credentials run the flow, pilot gate 5 is not cleared, and a passing test against the
 in-process fake proves the code above the transport boundary and nothing about delivery.
+
+**Dated correction, 2026-09-24 (DH-NOTIFY-META-001 / ADR-059).** The transport above is no longer
+Twilio. WhatsApp goes **directly to Meta's WhatsApp Cloud API** — `DHealth → Meta → WhatsApp →
+patient`, no intermediary — and Twilio is removed from the repository entirely rather than kept
+as an untested second adapter. Three consequences worth stating here rather than only in ADR-059:
+
+* `NotificationTransport.send` now takes the **notification event**, not a rendered body. A
+  WhatsApp Business message is an approved template plus parameters, so the *intent* crosses the
+  vendor boundary and each transport decides how it becomes a wire payload. The server owns the
+  event → template mapping and `send` has no `template_name` parameter at all.
+* **SMS has no selected provider.** The domain still understands the channel; availability is now
+  server-derived (`available_channels`) and the staff UI offers only what the deployment can
+  actually send on, rather than a hard-coded list.
+* The Graph API version is **required configuration with no default**, shape-validated and shown
+  in the operator read. Meta's primary documentation was unreachable from the implementing
+  environment, so nothing that could drift is a constant somebody guessed.
+
+A′ is untouched: the issuance message still carries the only link, and the release/amendment
+template takes **zero parameters** — no `components` key at all, so there is no array a value
+could be threaded through. Operator setup: `docs/META-WHATSAPP-RUNBOOK.md`.

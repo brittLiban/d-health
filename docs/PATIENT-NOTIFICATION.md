@@ -1,26 +1,41 @@
 # Patient notification — a nudge, and what it deliberately is not
 
-**DH-NOTIFY-001, ADR-058.** DHealth can now send a patient an SMS or WhatsApp message telling them
-something about their laboratory order has changed. This document is about what that message
+**DH-NOTIFY-001 (ADR-058), transport changed by DH-NOTIFY-META-001 (ADR-059).** DHealth can now
+send a patient a WhatsApp message telling them something about their laboratory order has
+changed. This document is about what that message
 contains, when it is sent, and the several things it must never be mistaken for.
 
-Read [`ARCHITECTURE.md`](ARCHITECTURE.md) §19 first — the patient access path this rides on — and
-`DECISIONS.md`'s ADR-058 for why the design is shaped the way it is.
+**Provider, stated once and plainly.** WhatsApp goes **directly to Meta's WhatsApp Cloud API** —
+`DHealth → Meta → WhatsApp → patient`, with no intermediary. Twilio was the assumed provider in
+DH-NOTIFY-001 and was removed entirely by ADR-059. **SMS has no selected provider**: the domain
+understands the channel, no deployment can currently send on it, and the staff UI is told so by
+the server rather than guessing.
+
+Read [`ARCHITECTURE.md`](ARCHITECTURE.md) §19 first — the patient access path this rides on —
+then ADR-058 and ADR-059 for why the design is shaped the way it is, and
+[`META-WHATSAPP-RUNBOOK.md`](META-WHATSAPP-RUNBOOK.md) for what an operator must configure.
 
 ---
 
 ## The one-paragraph summary
 
-A clinician issuing a patient's secure link may also send it, by SMS or WhatsApp, to a number the
+A clinician issuing a patient's secure link may also send it, by WhatsApp, to a number the
 patient agreed to. When a laboratory later releases a result, or corrects one, the patient gets a
 second message that says an update exists and nothing else — **no link, no value, no test name, no
 disposition**. They open the link they already hold, or contact their clinic. Every message is
 durably owed before anything is sent, a provider outage never affects a clinical release, and
 `DELIVERED` is written only after an authenticated receipt.
 
-**No message has ever been sent.** No real provider has been contacted, no credential exists, and
-ADR-003's gate stays **BLOCKED**. Everything below is qualified against a deterministic fake and
-real PostgreSQL 18.6.
+**No message has ever been sent.** No real Meta endpoint has been contacted, no credential
+exists, and ADR-003's gate stays **BLOCKED**. Everything below is qualified against a
+deterministic fake and real PostgreSQL 18.6. A real-provider qualification *path* now exists
+([`META-WHATSAPP-RUNBOOK.md`](META-WHATSAPP-RUNBOOK.md)) and **has never been run**.
+
+**Meta's primary documentation could not be read** from the environment this was implemented in,
+so the wire shapes are corroborated from independent secondary sources rather than verified
+against Meta's own current text. Every value that could drift — the Graph API version, the
+template names, the template language — is configuration with no default, and confirming the
+shapes against the live API is the first qualification task.
 
 ---
 
@@ -44,8 +59,8 @@ PENDING → SENDING → SENT → DELIVERED
                  ↘ FAILED
 ```
 
-* `SENT` — **the provider's API accepted the request.** That is the strongest claim an HTTP 201
-  from a messaging vendor supports. Nothing about a handset is known.
+* `SENT` — **Meta accepted the request.** That is the strongest claim a 2xx from the Cloud API
+  supports. Nothing about a handset is known.
 * `DELIVERED` — the provider sent an authenticated receipt saying a handset accepted it. It does
   **not** mean read, opened, understood, that the provider organization has the result, or that
   anyone has reviewed anything.
@@ -166,14 +181,22 @@ committed obligations, and the row already carries everything it needs.
 ## The webhook
 
 A delivery receipt is the only way `DELIVERED` is ever written, and
-`POST /notifications/v1/twilio/status` is the only place one is accepted. Its authority is an
-HMAC-SHA1 signature over the **configured** callback URL — never one derived from the incoming
-`Host` header, which a caller controls. A missing signature is refused exactly like a wrong one,
-and the comparison is constant-time.
+`/notifications/v1/meta/webhook` is the only place one is accepted — two routes, because
+Meta's registration handshake and its event delivery are different things. `GET` is the
+subscription handshake: a constant-time verify-token comparison, then the raw `hub.challenge`
+echoed back as `text/plain`. `POST` carries the events, and its authority is an **HMAC-SHA256
+signature over the raw request body**, keyed with the Meta app secret and validated in constant
+time *before* anything is parsed. A missing signature is refused exactly like a wrong one.
 
-Resolution is by provider message id and nothing else. An organization, patient or order id in the
-payload is never read as authority. Receipts are idempotent and monotonic: a terminal row is left
-alone, so a replayed or out-of-order callback is harmless.
+Resolution is by `wamid` and nothing else. The WABA id, the `metadata.phone_number_id`, the
+`recipient_id` and any organization, order or notification id a payload carries are never read as
+authority over which row is touched. Receipts are idempotent and monotonic, and defended twice:
+the webhook treats `sent` as a no-op and `apply_delivery_receipt` independently refuses to move a
+terminal row, so both guards would have to be removed for a replayed or out-of-order callback to
+walk a row backwards. `read` is ignored entirely — a chat thread being open is not
+acknowledgement, comprehension or review. Inbound `messages[]` are ignored too: patient chat is a
+non-goal, and a handler that parsed them would be the first half of an inbox nobody decided to
+build.
 
 It can change a notification's state and nothing else. It imports no clinical model, so it cannot
 reach `LabOrder`, a release version, `DoctorReview` or `ResultDelivery` — §15's requirement enforced
@@ -191,9 +214,20 @@ Off by default, and the default is the decision. Three operationally distinct st
 | **enabled and configured** | messages flow |
 | **enabled but incomplete** | a **startup refusal naming the missing variable** — never a service that boots green and silently sends nothing |
 
-`.env.example` documents all nine variables. `DHEALTH_PATIENT_PUBLIC_BASE_URL` must be `https://`: a
+`.env.example` documents the full set. `DHEALTH_PATIENT_PUBLIC_BASE_URL` must be `https://`: a
 patient access URL carries a live bearer credential in its fragment, and over `http://` that
 fragment is exposed before TLS would protect it.
+
+`META_GRAPH_API_VERSION` is **required with no default** and shape-validated. DHealth has
+qualified no Graph API version, so there is nothing a default could honestly claim, and the
+version is the single value most likely to be silently wrong after being pasted from a stale
+example. It is surfaced in the operator read and the CLI `status` output, because an operator
+who cannot see which API a deployment talks to would otherwise have to read the container's
+environment — which is also where the access token lives.
+
+Template names are configuration too, for the same reason: Meta approves templates per WhatsApp
+Business Account, so DHealth never invents one. The server owns the event → template mapping and
+`NotificationTransport.send` has no `template_name` parameter at all.
 
 Running the dispatcher:
 
@@ -210,18 +244,31 @@ python -m daher_adapter.notify.cli status     # queue state; contacts nothing
 patient about a released clinical result, and a `purge` on a stuck queue deletes exactly that —
 reached for at precisely the moment a stuck queue makes somebody want to try anything.
 
-Operators answer "is anything backing up, is the provider rejecting them, did credentials stop
-working, how old is the oldest pending message" from
-`GET /exchange/v1/notifications/operations` (platform admin). It carries counts, one age in seconds
-and a failure-category histogram — no phone number, no order, no patient, no message id, no body.
+Operators answer "is anything backing up, is Meta rejecting them, did credentials stop working,
+how old is the oldest pending message, which Graph API version is this deployment on, which
+channels can it actually send on" from `GET /exchange/v1/notifications/operations` (platform
+admin). It carries counts, one age in seconds, a failure-category histogram, the pinned Graph API
+version and the available channels — no phone number, no order, no patient, no message id, no
+body and no credential.
 
 ---
 
 ## What this does not make true
 
-* **No real provider has ever been contacted.** Every test runs against an in-process fake that has
-  no network code at all. ADR-003's gate is unchanged: WhatsApp/SMS stays **BLOCKED**, not DONE,
-  until real credentials have run the flow end to end. A passing fake is not a completion.
+* **No real Meta endpoint has ever been contacted.** Every test runs against an in-process fake or
+  a stub HTTP client with no network code at all. ADR-003's gate is unchanged: WhatsApp stays
+  **BLOCKED**, not DONE, until real credentials have run the flow to a real handset. A passing
+  fake is not a completion, and neither is a green qualification run that never reached a phone.
+* **The real-provider qualification path exists and has never been run.** See
+  [`META-WHATSAPP-RUNBOOK.md`](META-WHATSAPP-RUNBOOK.md); its own evidence artifact records
+  whether it ran, and its delivery-receipt leg is manual because a CI runner has no public URL
+  for Meta to call back.
+* **Meta's primary documentation was never read** from the implementing environment. The wire
+  shapes are corroborated from secondary sources, not verified against Meta's own current text.
+* **SMS has no provider.** The channel exists in the domain and nothing can send on it. The
+  server tells the UI which channels are available rather than the UI assuming.
+* **`read` is not recorded.** Meta reports it; DHealth ignores it. A chat thread being open is
+  not acknowledgement, comprehension, review or follow-up.
 * **Pilot gate 5 is not cleared.**
 * **No push notification exists for anything but a release or an amendment.** Not order creation,
   not acceptance, not collection, not processing.

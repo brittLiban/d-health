@@ -717,7 +717,8 @@ two need clinical sign-off; the first two need real values from the facility.
 **2026-09-24 dated note (DH-NOTIFY-001).** "WhatsApp notifications" above refers to the
 maternity-era notifier of ADR-002/ADR-003, which still does not exist. On the **Exchange** track a
 patient SMS/WhatsApp notification path now does — domain, content policy, durable queue,
-dispatcher, Twilio adapter and a signed delivery-receipt webhook (ADR-058,
+dispatcher, **direct Meta WhatsApp Cloud API** adapter and a signed delivery-receipt webhook
+(ADR-058 and ADR-059,
 `docs/PATIENT-NOTIFICATION.md`). It shares ADR-003's gate and does not clear it: **no real provider
 has been contacted, no credential is held, and no message has ever reached a handset.** The
 "WhatsApp credentials (none held yet)" placeholder above is therefore unchanged and now blocks both

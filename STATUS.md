@@ -6,6 +6,68 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-24, DH-NOTIFY-META-001, directly on `master`.** From `f9339e9`. WhatsApp now goes
+**directly to Meta's WhatsApp Cloud API** — `DHealth → Meta → WhatsApp → patient`, no intermediary
+(ADR-059). **It still has not sent a message.** No real Meta endpoint has been contacted, no
+credential exists, and ADR-003's gate is unchanged: WhatsApp stays `BLOCKED`, not `DONE`, and
+**pilot gate 5 is not cleared**. This is a transport change, not a redesign: the domain, the durable
+obligation, the idempotency key, the claim lease, the retry budget, consent, authorization and audit
+are all DH-NOTIFY-001's and untouched.
+
+**Twilio is removed entirely** rather than kept as an untested second adapter — module,
+configuration, webhook route and test group. Naming `twilio` as a provider is now a startup refusal.
+Git history preserves it; ADR-058 decision 10's reasoning was sound for its scope and is superseded,
+not corrected.
+
+**SMS has no selected provider, and the system says so.** The domain still understands the channel;
+*availability* is now server-derived from the configured transport and returned as
+`available_channels`, so the staff UI offers what the deployment can actually send on instead of a
+hard-coded list. With Meta configured that is `["WHATSAPP"]`: no SMS control is rendered, and the
+enrolment endpoint refuses the channel. Choosing an SMS vendor was explicitly out of scope.
+
+**The provider boundary was tightened rather than bypassed.** `NotificationTransport.send` now takes
+the notification *event* instead of a rendered body — a WhatsApp Business message is an approved
+template plus parameters, not free text, so the intent crosses the boundary and each transport
+decides how it becomes a wire payload. The server owns the event → template mapping and `send` has
+**no `template_name` parameter at all**, asserted on both the Protocol and the implementation rather
+than trusted.
+
+**A′ is untouched and now enforced in the payload as well as the template.** The issuance message
+carries the only link; the release/amendment binding takes **zero parameters**, so its payload has
+no `components` key at all — there is no array a value could be threaded through. A URL supplied for
+a release event is refused outright rather than dropped. `read` is ignored (a chat thread being open
+is not acknowledgement), inbound messages are ignored (§29), and the webhook resolves by `wamid`
+alone: WABA id, phone-number id, recipient and any order/notification id in a payload are never
+authority.
+
+**A limitation that shaped the design, recorded rather than buried.** `developers.facebook.com` was
+unreachable from the implementing environment, so **Meta's primary documentation was never read**.
+The wire shapes are corroborated across independent secondary sources and are **not** verified
+against Meta's own current text. The response is structural: `META_GRAPH_API_VERSION` is required
+with no default and shape-validated, template names are configuration, and the Graph `error.code`
+table is a short refinement over an HTTP-status classification that carries the load. Confirming the
+shapes against the live API is the first qualification task.
+
+**The real-provider qualification path now exists and has never been run.**
+`.github/workflows/qualify-meta-whatsapp.yml` plus `adapter/scripts/qualify_meta_whatsapp.py`:
+`workflow_dispatch` only, credentials from repository secrets, refuses to run without an explicit
+non-patient test destination, refuses a non-E.164 one, refuses a database holding non-synthetic
+organizations, and writes an evidence artifact of wamids and states carrying no token, body or
+destination. Its delivery-receipt leg is **manual** and says so — a CI runner has no public URL for
+Meta to call back.
+
+Seven negative controls executed and reverted. **One found a real test weakness**: NC-META-2's first
+run reddened only one of the two out-of-order tests, because `test_w10`'s callback sequence ended on
+a favourable status and could not see an intermediate regression. It now asserts after *each* late
+callback across five statuses; re-running the control reddens both, as it always should have.
+
+Counts, re-measured: adapter **1608 passed, 160 skipped** (from 1565/160), of which 140 are the
+notification files and 15 the real-PostgreSQL qualification. UI **844 passed** across three
+batches (324 + 264 + 256), plus the one pre-existing un-runnable test
+(`src/features/auth/logout.test.ts`, untouched by this ticket). No migration:
+this changed a transport, not a schema.
+
+
 **2026-09-24, DH-NOTIFY-001, directly on `master`.** From `f861008`. DHealth can now compose and
 hand a patient message to a transport. **It still has not sent one.** No real provider has been
 contacted, no credential exists, and ADR-003's pinned gate is unchanged: WhatsApp/SMS stays
@@ -364,7 +426,8 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   reference range, interpretation, disposition or identifier can reach a handset; obligations that
   commit inside the release transaction while the vendor call happens outside it; idempotency as a
   UNIQUE index keyed on the immutable `LabResultReleaseVersion`; a vendor-independent transport
-  with one Twilio implementation; a dispatcher using `FOR UPDATE SKIP LOCKED` with claim leases,
+  with one implementation (**Meta WhatsApp Cloud API, direct** — ADR-059 replaced DH-NOTIFY-001's
+  Twilio adapter and removed it); a dispatcher using `FOR UPDATE SKIP LOCKED` with claim leases,
   bounded retry and one transaction per message; and a delivery-receipt webhook whose authority is
   an HMAC signature over the **configured** callback URL. Evidence: 97 SQLite tests
   (`test_patient_notification_domain/api/transport.py`) and 15 real-PostgreSQL 18.6 tests
@@ -722,13 +785,24 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## E. BLOCKED / OPEN
 
-- **WhatsApp/SMS patient notification against real credentials**: **still `BLOCKED`, and the
-  pinned P0 rule is unchanged** — a mock is never done. **2026-09-24 dated update (DH-NOTIFY-001):**
-  the transport, the content policy, the durable queue, the dispatcher and the signed delivery-
-  receipt webhook now exist and are CI- and real-PostgreSQL-qualified (§C). **No real provider has
-  been contacted, no credential exists, and no message has ever reached a handset**, so this stays
-  `BLOCKED` and pilot gate 5 is not cleared. What changed is that clearing it is now a matter of
-  credentials rather than of code.
+- **WhatsApp patient notification against real credentials**: **still `BLOCKED`, and the pinned P0
+  rule is unchanged** — a mock is never done. **2026-09-24 dated update (DH-NOTIFY-001, transport
+  replaced same day by DH-NOTIFY-META-001/ADR-059):** the transport, the content policy, the durable
+  queue, the dispatcher and the signed delivery-receipt webhook exist and are CI- and
+  real-PostgreSQL-qualified (§C), and WhatsApp now goes **directly to Meta's Cloud API** rather than
+  through Twilio, which is removed. A real-provider qualification *path* also now exists
+  (`.github/workflows/qualify-meta-whatsapp.yml`, `docs/META-WHATSAPP-RUNBOOK.md`) and **has never
+  been run**. **No real Meta endpoint has been contacted, no credential exists, and no message has
+  ever reached a handset**, so this stays `BLOCKED` and pilot gate 5 is not cleared. What changed is
+  that clearing it is now a matter of credentials and one manual run, rather than of code.
+- **SMS patient notification**: **no provider selected.** The domain understands the channel and no
+  deployment can send on it; availability is server-derived, so the staff UI offers nothing it
+  cannot deliver. Choosing an SMS vendor was explicitly out of DH-NOTIFY-META-001's scope.
+- **Meta's primary documentation was never read** from the implementing environment
+  (`developers.facebook.com` unreachable). The wire shapes are corroborated from independent
+  secondary sources, not verified against Meta's own text; every value that could drift is
+  configuration with no default. Confirming them against the live API is the first qualification
+  task.
 - **`ResultDelivery` semantics**: created `PENDING` at order creation and no code path advances it
   past `PENDING`. Unchanged by DH-NOTIFY-001, deliberately: a patient's handset accepting an SMS is
   not the ordering provider organization receiving a result, and what `DELIVERED` should mean there
@@ -806,10 +880,12 @@ cleared yet:
 3. Manual live/browser demonstration of the golden path (currently: not run).
 4. A performed backup **restore drill**, not merely a script that exists (pinned P0; see
    `PROJECT_STATE.md` for current backup status).
-5. WhatsApp/SMS patient notification running against real credentials, not a mock (pinned
-   P0, §E). **Not cleared.** DH-NOTIFY-001 built the transport, the dispatcher and the
-   receipt webhook (§C); no real provider has been contacted and no message has reached a
-   handset, so clearing this is now a matter of credentials rather than of code.
+5. WhatsApp patient notification running against real credentials, not a mock (pinned P0, §E).
+   **Not cleared.** DH-NOTIFY-001 built the transport, the dispatcher and the receipt webhook, and
+   DH-NOTIFY-META-001 pointed WhatsApp straight at Meta's Cloud API and wrote the qualification
+   path (§C). **No real Meta endpoint has been contacted, no credential exists, no message has
+   reached a handset, and the qualification workflow has never been run.** SMS has no provider at
+   all and is not part of this gate.
 6. Clinical lead sign-off on the order set and partograph fields (`docs/CLINICAL-SIGNOFF.md`) —
    unrelated to the Exchange track's own gates above, but binding wherever the maternity track is
    touched. Pilot-ready is never clinically live without it.
@@ -817,6 +893,10 @@ cleared yet:
 No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
+
+**DH-NOTIFY-001 and DH-NOTIFY-META-001 both landed 2026-09-24 (§A) and neither changed what
+comes next.** The first closed the push-notification transport gap on the Exchange track; the
+second replaced its provider with a direct Meta integration. Both are orthogonal to Connect.
 
 **DH-NOTIFY-001 landed 2026-09-24 (§A) and did not change what comes next.** It closed the
 push-notification transport gap on the Exchange track, which is orthogonal to Connect; the

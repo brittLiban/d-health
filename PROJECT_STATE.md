@@ -19244,3 +19244,145 @@ here: `ResultDelivery` semantics (`docs/MVP-1.0.md` §10 item 6); the per-channe
 policy *beyond* the content-free rule (§10 item 8 — ADR-058 sidesteps this by making every channel
 carry the same nothing, which is not the same as answering it); proxy/family authorization (§10
 item 9); email, voice, patient accounts, OTP and bidirectional messaging (`§28` non-goals).
+
+---
+
+## DH-NOTIFY-META-001 — Direct Meta WhatsApp Cloud API Transport · 2026-09-24 · directly on `master`
+
+Starting point: `master` at `f9339e9` (DH-NOTIFY-001, committed locally, **not pushed** — `origin/master`
+was and is behind at `f861008`; the three local commits were preserved, never reset). Decision
+record: **ADR-059**. Operator runbook: `docs/META-WHATSAPP-RUNBOOK.md`.
+
+### What changed, and what deliberately did not
+
+WhatsApp now goes **directly to Meta's WhatsApp Cloud API**. This is a transport change and nothing
+more: the durable obligation, the idempotency key on the immutable release version, the claim lease,
+the retry budget, the consent record, the authorization boundary, the audit vocabulary and A′ are
+all DH-NOTIFY-001's and untouched. No migration — the schema is unchanged.
+
+| Area | Files |
+|---|---|
+| New transport | `notify/meta.py` |
+| Webhook, rewritten | `notify/webhook.py` (two routes: subscription handshake + events) |
+| Server-owned template mapping | `notify/templates.py` (`MetaTemplateBinding`, `meta_binding`) |
+| Boundary change | `notify/transport.py`, `notify/fake.py`, `notify/dispatcher.py` |
+| Config | `config.py` (Meta settings in, Twilio out), `app.py`, `.env.example` |
+| Channel availability | `exchange/api.py` (`available_channels`, `graph_api_version` in the ops read), `notify/cli.py` |
+| UI | `api/exchangeTypes.ts`, `clinic/components/PatientAccessHandoff.tsx` + test |
+| Qualification path | `.github/workflows/qualify-meta-whatsapp.yml`, `adapter/scripts/qualify_meta_whatsapp.py` |
+| Removed | `notify/twilio.py`, its config, its webhook route, its test group, its `.env`/compose variables |
+| Docs | ADR-059, `docs/META-WHATSAPP-RUNBOOK.md`, `docs/PATIENT-NOTIFICATION.md`, `docs/ARCHITECTURE.md` §8/§24, `STATUS.md`, `docs/MVP-1.0.md`, `README.md` |
+
+**Twilio removed entirely**, not retained. §5 permits removal where keeping an adapter would be dead
+code, and it would be: nothing exercises an SMS path because no SMS provider is selected. Git
+history preserves it. Naming `twilio` is now a startup refusal rather than a silent fallback.
+
+**The transport boundary was tightened, not bypassed.** `NotificationTransport.send` takes the
+notification *event* rather than a rendered body, because a WhatsApp Business message is an approved
+template plus parameters and a transport handed only a string would have nothing to send. Each
+transport decides how an intent becomes a wire payload; the fake renders `templates.render()`
+verbatim, which is what keeps every DH-NOTIFY-001 content assertion on `sent[].body` meaningful
+rather than merely still compiling. `send` has **no `template_name` parameter at all** — asserted on
+both the Protocol and the implementation.
+
+**SMS availability is now a server-derived fact.** `available_channels` comes from
+`transport.supports()` and is returned on the per-order read and the operator read. The UI renders
+what it is told: one channel is stated rather than offered as a radio group of one, zero channels
+hides the send control entirely. `NC-META-7` proves a hard-coded list would be caught.
+
+### The source-availability problem, and what it changed
+
+**`developers.facebook.com` was unreachable from this sandbox** — every request failed at the
+connection, confirmed against several hosts. The ticket asked for the current official documentation
+to be read before implementing provider-specific behaviour, and **it could not be**.
+
+The wire shapes implemented (send endpoint and template body, `X-Hub-Signature-256` HMAC-SHA256 over
+the raw body, the `hub.mode`/`hub.verify_token`/`hub.challenge` handshake,
+`entry[].changes[].value.statuses[]`, the `sent`/`delivered`/`read`/`failed` vocabulary) are
+corroborated across several independent secondary sources and match this repository's prior
+knowledge. They are **not verified against Meta's own current text**, and nothing in the docs claims
+otherwise.
+
+The response was structural rather than a disclaimer:
+
+* `META_GRAPH_API_VERSION` is **required with no default**, shape-validated (`^v\d+\.\d+$`), and
+  surfaced in the operator read and the CLI `status`. A guessed constant is the single most likely
+  thing to be silently wrong.
+* Template names and the template language are configuration; DHealth invents neither.
+* **HTTP status is the load-bearing failure classification**; the Graph `error.code` table is a
+  short refinement over it, and an unrecognised code changes nothing. Tested both ways.
+
+Confirming the shapes against the live API is the runbook's first qualification task.
+
+### Evidence actually executed
+
+**Adapter suite: 1608 passed, 160 skipped** (from DH-NOTIFY-001's 1565/160). The notification files
+are 140 tests: `test_patient_notification_domain.py` (34), `test_patient_notification_api.py` (21),
+`test_patient_notification_transport.py` (85 — the Meta adapter group M, the webhook group W and the
+configuration matrix, replacing the Twilio group).
+
+**Real PostgreSQL 18.6: 15 passed**, unchanged — this ticket altered no schema, and re-running the
+qualification file against a freshly-migrated database confirms the domain still behaves identically
+under `FOR UPDATE SKIP LOCKED`, the unique idempotency key and the partial provider-message-id index.
+
+**UI: 844 passed** across three vitest batches (324 + 264 + 256), `tsc -b --noEmit` clean, `oxlint`
+0 errors. One pre-existing test is un-runnable in this environment and is untouched by this ticket:
+`src/features/auth/logout.test.ts` uses `vi.stubGlobal('location', …)`, which the `vmForks` pool
+breaks, and the default pool cannot start a worker on this box at all.
+
+**Compose:** all three profiles (`default`, `notify`, `backup`) parse under `docker compose config`.
+
+### Negative controls — seven executed, each reverted, tree green afterwards
+
+| Control | Broken | Red |
+|---|---|---|
+| NC-META-1 | `mark_sent` sets `DELIVERED` | 28, the load-bearing ones `test_sent_is_not_delivered` and `test_m12_m13_acceptance_persists_the_wamid_as_sent_not_delivered`. The wide radius is the `_sent_notification` helper asserting `SENT` — a provider acceptance mistaken for delivery breaks the premise of the whole webhook group, correctly |
+| NC-META-2 | **both** out-of-order guards: the `sent` no-op in `webhook._apply` and the terminal-state refusal in `apply_delivery_receipt` | `test_w7_a_sent_callback_is_a_no_op`, `test_w10_a_late_sent_after_delivered_cannot_regress_the_state` |
+| NC-META-3 | **both** authenticity guards: the missing-signature refusal and `hmac.compare_digest` | `test_w4_an_invalid_signature_is_rejected_and_changes_nothing`, `test_w5_a_missing_signature_is_rejected`, `test_w4_a_signature_over_different_bytes_is_rejected` |
+| NC-META-4 | `carries_access_url=True` on the `RESULT_RELEASED` binding | `test_m8_m9_m11_release_and_amendment_use_the_update_template_with_no_parameters[RESULT_RELEASED]` |
+| NC-META-5 | `template_name` parameter added to `send` and honoured | `test_the_template_name_is_never_a_caller_parameter` |
+| NC-META-6 | the Meta `send()` moved inside the issuance transaction | `test_a_failed_link_send_is_terminal_and_never_fails_the_issuance` (the `TransportFailure` escapes the handler, so the issuance fails and the grant rolls back), plus `test_link_message_is_sent_inline_with_the_fragment_form` and `test_enrollment_and_retry_are_audited_without_the_destination` |
+| NC-META-7 | `availableChannels` hard-coded to `['WHATSAPP','SMS']` in the component | UI `NT2`, `NT4`, `NT11`, `NT12` |
+
+**A control found a real test weakness, and it was fixed rather than noted.** NC-META-2's first run
+reddened only `test_w7`. `test_w10`'s original callback sequence ended with a second `delivered`, so
+a row walked backwards in the middle was walked forward again before the single end-of-test
+assertion — the test could not see an intermediate regression. It now asserts after **each** late
+callback across five statuses (`sent`, `failed`, `read`, `queued`, `accepted`) rather than once at
+the end. Re-running NC-META-2 reddens both tests, as it always should have.
+
+**A control correctly did *not* go red where a reader might expect.** NC-META-4 left
+`test_a9_a10_a11_release_messages_carry_no_clinical_content` (domain) green, because the two tests
+guard different boundaries and both are needed: the domain test asserts on the **template text**
+produced by `templates.render()`, which refuses a URL for a release event independently of any Meta
+binding; the Meta test asserts on the **provider payload**, which is where the binding decides what
+a `components` array may carry. Had both failed, the two layers would not actually be independent.
+
+### What is NOT true
+
+* **No real Meta endpoint has ever been contacted.** No Business Portfolio, no WABA, no phone
+  number, no approved template, no access token, no message, no handset. Every test runs against an
+  in-process fake or a stub HTTP client with no network code.
+* **ADR-003's gate is unchanged: WhatsApp stays `BLOCKED`. Pilot gate 5 is not cleared.**
+  `REAL-META-WHATSAPP-QUALIFIED` and `PRODUCTION-READY` are explicitly not claimed.
+* **The qualification workflow has never been run**, and its own header, the script's docstring and
+  the runbook all say so. Its delivery-receipt leg is manual by construction: Meta posts callbacks
+  to a public HTTPS URL and a GitHub-hosted runner has none without a tunnel, so a run records
+  wamids and stops unless pointed at a deployment Meta can reach.
+* **§26's real acceptance sequence has not been performed** — it requires credentials, a real
+  handset and a human confirming what no automated check can (that the first message's link works,
+  that the update messages carry no link and no value, that the original link survives the
+  amendment, and that a deliberately broken credential leaves the release committed and the
+  notification owed).
+* **Meta's primary documentation was never read**, as above.
+* **SMS has no provider**, deliberately and by scope.
+* **No browser demonstration** of the changed send flow; the UI is component-tested only, the same
+  evidence level as the rest of DHealth Clinic.
+* **The `patient-notifier` compose service has still never been started.**
+
+### Human Decision Required: No outstanding items from this ticket
+
+Deliberately left open and not decided here: the SMS provider; email and voice (§29 non-goals);
+`ResultDelivery` semantics (`docs/MVP-1.0.md` §10 item 6); the per-channel sensitive-content policy
+beyond the content-free rule (§10 item 8); proxy/family authorization; inbound messaging, WhatsApp
+Flows, patient accounts and OTP.
