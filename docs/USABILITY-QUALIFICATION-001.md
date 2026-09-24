@@ -368,7 +368,7 @@ payments" is evidence about a *task*, not a licence to create a role.
 ## The handoff (§45)
 
 1. **Starting SHA** — `2395da221f44d643535a6a5f78adcf120430b623`
-2. **Ending SHA** — the commit carrying this document
+2. **Ending SHA** — `cfe7b5e882d78a829d373ccc1429fdb8e020932e`
 3. **Participants by role** — none. No clinician, no front-desk user, no laboratory staff
 4. **Scenarios completed** — none with a participant. Fourteen screens photographed and reviewed at
    three widths; C7 and L8 are the two the fixed defects belong to
