@@ -19502,11 +19502,132 @@ console error, page error or failed request at any width.
   only be filled from what participants actually say; inventing either would be the failure this
   ticket was written against.
 
-### Human Decision Required: Yes — two
+### Human Decision Required: both items answered by Liban, 2026-09-24 — and one of them answered a different question
 
-1. **Are staff phones (390px) a supported surface, or is the staff floor desktop and tablet only?**
-   The answer decides whether the open clinic-orders finding is a P2 to schedule or a non-issue. It
-   is a product decision, not an implementation one, and nothing here should guess it.
-2. **Who are the three participants, and when?** One clinician, one front-desk user, one laboratory
-   technician with release authority, a day between them. Until that happens no amount of further
-   automated work changes the label on this ticket.
+**Decision 1 — staff identity stays minimal. Recorded verbatim in effect:**
+
+```text
+Name              required
+Role(s)           required
+Login identity    required
+Phone             OPTIONAL
+Email             optional unless technically required for authentication
+```
+
+*"Do not block staff onboarding because a personal phone number is missing."* If MFA, password
+recovery or on-call alerting later needs one, that is introduced deliberately as its own work rather
+than arriving as a quietly-required field. **A facility's phone/WhatsApp stays separate from a staff
+member's personal contact details** and must never be collected through the same field.
+
+This matches what exists today, which is worth stating so nobody "implements" it: staff identity is
+the Keycloak identity (`identity_id`, `display_name`, `email`) plus memberships and roles.
+`PractitionerReferenceRecord` carries `display_name` and no contact field at all; `contact_value`
+belongs to **patient** references only. Nothing in the platform UI or facility enrollment asks a
+staff member for a telephone number. So the decision is a **constraint on future work**, not a change
+to present code — and DH-NOTIFY-001's patient destination, which is a patient's number given with
+explicit consent, is untouched by it and unrelated.
+
+**Decision 2 — the three participants, defined by what they actually do:**
+
+| Code | Who they must be |
+|---|---|
+| `F1` | Front desk / receptionist — someone who **actually** registers patients and handles walk-ins, appointments and check-in, and may take payment |
+| `C1` | Clinician — preferably a doctor who **regularly** orders laboratory tests and reviews results |
+| `L1` | Laboratory staff — an actual technician or senior laboratory staff member who understands receiving orders, collection, processing, result entry and ideally release |
+
+*"These need to be people who genuinely perform those jobs. Do not substitute developers or
+executives unless they actually perform the workflow."*
+
+**Do not train them on DHealth before the session.** Give them scenarios and observe. Hesitation, a
+wrong click, "what does this mean?", and any moderator help **are the evidence** — not noise to be
+tidied out of the record.
+
+**No further automated work may be done to try to upgrade the label** (Liban, explicitly). The
+findings and fixes in this ticket stand as they are.
+
+### Still open — the question decision 1 did not answer
+
+Decision 1 is about staff phone **numbers**. This ticket's open question was about the staff
+**viewport**: whether a 390px-wide screen is a surface DHealth supports for staff, or whether the
+staff floor is desktop and tablet only. The two were conflated in the phrasing of the original
+question ("are staff phones a supported surface"), which was this file's fault, so the question is
+restated here rather than treated as answered:
+
+> **Does a member of staff ever do clinic or laboratory work on a handset (390px), or is the staff
+> floor desktop (1280) and tablet (768) only?**
+
+It matters for exactly one open finding: at 390px the clinic orders table's actions (`Suivi
+patient`, `Choisir un laboratoire`) are reachable only by scrolling the table sideways. If handsets
+are out of scope, that finding closes as a non-issue and the tablet behaviour is already correct. If
+they are in scope, it needs a card layout below a breakpoint — a redesign, and one that belongs in
+`DHEALTH-NATIVE-MVP-1.0` rather than being retro-fitted here.
+
+---
+
+## ▶ NEXT — DHEALTH-NATIVE-MVP-1.0 — Clinic + Lab Operating Product Specification · queued 2026-09-24
+
+**A product-definition ticket. Nothing below is built yet, and none of it may be built without an
+explicit instruction to do so** (Liban, 2026-09-24): *"Do NOT implement the full native MVP yet
+unless explicitly instructed."* In particular **do not start Calendar, Billing, Visits, Samples or
+Reception** because they appear in the shape below — appearing in a hypothesis is not authorization,
+and DH-USABILITY-001 §43 already forbade building them.
+
+### The hypothesis going in
+
+**Roles — four, and deliberately only four:**
+
+```text
+Front Desk        Clinician        Lab Staff        Admin
+```
+
+Backend safety capabilities stay separate **where they need to be** — lab result release is the
+named example, and ADR-044 already keeps entry and release as distinct authorities — but that
+separation must not surface as a large visible role taxonomy. A person holds a job, not a permission
+matrix.
+
+**Clinic sections:**
+
+```text
+Today    Calendar    Patients    Visits    Orders    Results    Billing
+```
+
+**Laboratory sections:**
+
+```text
+Today    Reception    Orders    Samples    Results    Release    Billing
+```
+
+Today's shipped navigation is `Today / Patients / Orders / Results` for a provider and
+`Today / Orders / Results` for a laboratory (`ui/src/features/staff/staffSections.ts`), derived from
+real authority, with nothing listed that cannot be used. That rule survives into the specification:
+a section that does nothing is a promise the product has not kept.
+
+### The core product law this specification is judged against
+
+> **Ask only for information DHealth actually needs. Derive everything else.**
+
+And the four failure modes named with it: large required forms; duplicate entry; unnecessary role
+fragmentation; internal architecture exposed to users.
+
+### What DH-USABILITY-001 hands it
+
+* A P0 and five P1s already fixed, so the first human session is not spent on defects a reviewer
+  could have found (`docs/USABILITY-QUALIFICATION-001.md` §A.3).
+* Two open findings with their reasons, one of which — the clinic orders table at handset width —
+  is a layout question this specification should settle rather than patch (§A.4, O-1).
+* The required-field audit (§A.5): the native patient form already asks for a name and nothing else,
+  which is the standard the new screens have to match rather than regress from.
+* **An empty product-gap list** (§B.5). It stays empty until participants fill it. Calendar,
+  Visits, Reception, Samples and Billing appear in the hypothesis above as things to *test*, not as
+  a backlog to implement — §34 wants, for each one: who asked, what workflow triggered it, how often
+  it appeared, whether the workflow is impossible without it, and whether a manual workaround
+  exists.
+* **An untested role hypothesis** (§B.6). The four roles above are the thing to evaluate, not a
+  conclusion.
+
+### The sequencing question this file should state plainly
+
+`DH-CONNECT-ADAPTER-001` (first real partner adapter, §I of `STATUS.md`) was the next ticket before
+this one arrived, and it has **not** been cancelled. The two are on different tracks: Connect is
+about reaching an external EMR/LIS, Native is about what DHealth itself is to the people using it.
+Which one runs first is Liban's call; nothing here decides it.

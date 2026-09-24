@@ -223,7 +223,7 @@ now uses the design system's own warning pair.
 
 | | Severity | Finding | Why it is still open |
 | --- | --- | --- | --- |
-| O-1 | **P2** | At 768 and 390 the clinic orders table's action controls (`Suivi patient`, `Choisir un laboratoire`, `Parcours`) are reachable only by scrolling the table sideways. The clipped status badge is the only affordance. | The honest fix is a card layout below a breakpoint, which is a redesign of the screen rather than a defect fix. §29 names desktop, tablet and *the mobile patient view* — a clinician's phone is not a stated target, which is what keeps this at P2 rather than P1. Somebody should decide whether staff phones are in scope before the redesign is built. |
+| O-1 | **P2** | At 768 and 390 the clinic orders table's action controls (`Suivi patient`, `Choisir un laboratoire`, `Parcours`) are reachable only by scrolling the table sideways. The clipped status badge is the only affordance. | The honest fix is a card layout below a breakpoint, which is a redesign of the screen rather than a defect fix. §29 names desktop, tablet and *the mobile patient view* — a clinician's handset is not a stated target, which is what keeps this at P2 rather than P1. **Still open, and waiting on one question**: does a member of staff ever do clinic or laboratory work on a 390px screen, or is the staff floor desktop and tablet only? If handsets are out of scope this closes as a non-issue and the tablet behaviour is already correct; if they are in scope it belongs to `DHEALTH-NATIVE-MVP-1.0`, not to a retro-fit here. (The 2026-09-24 decision about staff **phone numbers** is a different matter and is recorded in `PROJECT_STATE.md`.) |
 | O-2 | **P2** | Pressing `Examiner` on the results queue renders the detail *below* the queue and the history cards, with no scroll-into-view and no focus move. With a long queue the panel opens off-screen. | Focus management is worth doing deliberately across all four detail panels at once, not one screen at a time, and it interacts with the accessibility work §30 says not to damage. |
 | O-3 | **P3** | 20px of page overflow at 390px on the result detail, from the four-column observations table. | `table-layout: fixed` was tested and removes it, at the cost of changing how every clinical values table lays out at every width. Not worth that trade for 20px; recorded with the tested fix so the next person does not have to find it again. |
 | O-4 | **P3** | On the laboratory history rows, `Voir le contenu exact` wraps to three lines beside its row. | Cosmetic. §24: do not let P3 consume the ticket. |
@@ -302,19 +302,33 @@ This is the instrument. It is empty because nobody has sat at the screen. Fillin
 turns `INTERNAL WORKFLOW REVIEW` into a qualification, and nothing else does — §40 is explicit that
 automated browser tests are not a substitute.
 
-### B.1 Participants required (§4, §44)
+### B.1 Participants required (§4, §44) — defined by Liban, 2026-09-24
 
-| Code | Role | Status |
+Three, and each is defined by **the job they actually do**, not by a job title on a badge.
+
+| Code | Who this must be | Status |
 | --- | --- | --- |
-| `Participant C1` | Clinician | **Not recruited** |
-| `Participant F1` | Front desk / reception | **Not recruited** |
-| `Participant L1` | Laboratory staff (with release authority for L7/L8) | **Not recruited** |
+| `Participant F1` | Front desk / receptionist — someone who **actually** registers patients and handles walk-ins, appointments and check-in, and may take payment | **Not recruited** |
+| `Participant C1` | Clinician — preferably a doctor who **regularly** orders laboratory tests and reviews results | **Not recruited** |
+| `Participant L1` | Laboratory staff — an actual technician or senior laboratory staff member who understands receiving orders, collection, processing, result entry and ideally release (needed for L7/L8) | **Not recruited** |
+
+> *"These need to be people who genuinely perform those jobs. Do not substitute developers or
+> executives unless they actually perform the workflow."*
+
+A substitution is not a shortcut to the label — it removes the only thing that makes the session
+evidence. Someone who has never registered a walk-in cannot hesitate in the place a receptionist
+hesitates.
 
 ### B.2 Moderator rule (§6)
 
 The moderator explains the **scenario**, never the interface. "Order a CBC and glucose for this
 patient" is a scenario. "Click Ordres, then Nouveau" is coaching, and it destroys the measurement.
-Hesitations are the data.
+
+**Do not train them on DHealth before the session** (Liban, 2026-09-24). Give them the scenario and
+watch. A hesitation, a wrong click, "what does this mean?", and any moment the moderator has to
+help **are the findings** — they are recorded as usability evidence, not smoothed out of the
+record. A session in which nobody hesitated because they were shown the answer first has measured
+nothing.
 
 ### B.3 Scenarios and what to record
 
@@ -409,9 +423,17 @@ payments" is evidence about a *task*, not a licence to create a role.
 18. **Automated test counts** — 882 UI tests, 881 passing, 14 new, 5 negative controls run
 19. **Unresolved issues** — §A.4, plus the whole of Part B and Part C
 20. **Recommendation for `DHEALTH-NATIVE-MVP-1.0`** — do not treat this document as usability
-    evidence. Fund one clinician, one front-desk user and one laboratory technician for a day, run
-    Part B unchanged, and let §34's gap list be written by them. The structural defects that would
-    have wasted that day are now fixed, which is the most this environment could contribute
+    evidence. Fund `F1`, `C1` and `L1` as §B.1 defines them for a day, run Part B unchanged, and
+    let §34's gap list be written by them. The structural defects that would have wasted that day
+    are now fixed, which is the most this environment could contribute.
+    **The specification is queued** (`PROJECT_STATE.md`, 2026-09-24) with a hypothesis of four roles
+    — Front Desk, Clinician, Lab Staff, Admin — and of clinic and laboratory section sets that add
+    Calendar, Visits, Billing, Reception, Samples and Release to what ships today. Those names are
+    **things to test in Part B, not a backlog**: §B.5 stays empty until participants ask for them,
+    and nothing in that hypothesis is authorization to build. The law the specification is judged
+    against is the one this ticket audited against — *ask only for information DHealth actually
+    needs, derive everything else* — and §A.5 is the standard it must not regress from: the native
+    patient form asks for a name and nothing else
 
 ```text
 WOULD A CLINICIAN USE THIS TOMORROW?

@@ -850,10 +850,21 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   automated browser tests are not a substitute. The instrument for the sessions is written out and
   empty in [`docs/USABILITY-QUALIFICATION-001.md`](docs/USABILITY-QUALIFICATION-001.md) Part B;
   what is needed is one clinician, one front-desk participant and one laboratory participant for a
-  day. Two P2s stay open with stated reasons (order actions reachable only by scrolling a table at
-  tablet/phone; a result detail that opens below the queue with no scroll or focus move), and one
-  question belongs to a human rather than to a developer's guess: whether staff phones are a
-  supported surface at all.
+  day — **defined 2026-09-24**: they must be people who genuinely do those jobs (not developers or
+  executives), and they are **not** to be trained on DHealth before the session; hesitation, a wrong
+  click and any moderator help are the evidence. Two P2s stay open with stated reasons (order
+  actions reachable only by scrolling a table at tablet/handset width; a result detail that opens
+  below the queue with no scroll or focus move), and one question is still unanswered: **does a
+  member of staff ever work on a 390px screen, or is the staff floor desktop and tablet only?** It
+  decides whether the first of those two closes as a non-issue.
+- **Staff identity stays minimal — decided 2026-09-24, and it is a constraint on future work rather
+  than a change to present code.** Name, role(s) and login identity are required; **phone is
+  optional**; email is optional unless authentication technically needs it. Staff onboarding is
+  never blocked for want of a personal telephone number, and a facility's phone/WhatsApp stays
+  separate from a staff member's personal contact details. MFA, password recovery and on-call
+  alerting, if they ever need a number, are introduced deliberately as their own work. Nothing today
+  asks a staff member for one: staff identity is the Keycloak identity plus memberships and roles,
+  and `contact_value` belongs to **patient** references only.
 - **WhatsApp patient notification against real credentials**: **still `BLOCKED`, and the pinned P0
   rule is unchanged** — a mock is never done. **2026-09-24 dated update (DH-NOTIFY-001, transport
   replaced same day by DH-NOTIFY-META-001/ADR-059):** the transport, the content policy, the durable
@@ -962,6 +973,25 @@ cleared yet:
 No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
+
+**NEXT: `DHEALTH-NATIVE-MVP-1.0` — Clinic + Lab Operating Product Specification.** Queued
+2026-09-24 after DH-USABILITY-001. It is a **product-definition** ticket: *"Do NOT implement the
+full native MVP yet unless explicitly instructed."* The hypothesis it carries in is four roles
+(Front Desk, Clinician, Lab Staff, Admin — with backend safety capabilities such as result release
+kept separate where needed, but never surfaced as a large role taxonomy), a clinic of
+`Today / Calendar / Patients / Visits / Orders / Results / Billing`, and a laboratory of
+`Today / Reception / Orders / Samples / Results / Release / Billing`. Those section names are
+**things to test with real participants, not a backlog**: Calendar, Billing, Visits, Samples and
+Reception must not be started inside it, and DH-USABILITY-001's product-gap list stays empty until
+participants fill it. The law it is judged against is *ask only for information DHealth actually
+needs, derive everything else*, with four named failure modes: large required forms, duplicate
+entry, unnecessary role fragmentation, and internal architecture exposed to users. Full shape:
+`PROJECT_STATE.md`'s ▶ NEXT block.
+
+**`DH-CONNECT-ADAPTER-001` is not cancelled** — it is the next ticket on the *Connect* track, and
+the paragraph below still describes it accurately. Which of the two runs first is a human decision
+and is not made here: Connect is about reaching an external EMR/LIS, Native is about what DHealth
+itself is to the people using it.
 
 **DH-NOTIFY-001 and DH-NOTIFY-META-001 both landed 2026-09-24 (§A) and neither changed what
 comes next.** The first closed the push-notification transport gap on the Exchange track; the
