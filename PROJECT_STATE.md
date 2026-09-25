@@ -20040,9 +20040,9 @@ Authorization, with real tokens captured from real browser logins:
 | NC-NATIVE-1 | adapter told to expect `EXCHANGE_OIDC_AUDIENCE=not-the-real-audience` | PHASE A fails; NEG-2 stays green; PHASE A passes again after revert | the journey depends on the *real* token being *really* validated, not on the browser merely completing a login |
 | NC-NATIVE-2 | every `LAB_RESULT_RELEASER` role assignment deleted | PHASE C fails while PHASE A and PHASE B still pass | release is a distinct authority, and the qualification can tell when it is missing |
 
-**NC-NATIVE-3 and NC-NATIVE-4 were not run.** The tenant control needs a cross-tenant membership
-inserted and removed, and the draft-exposure control needs a guard broken in adapter source; both
-are worth having and neither was reached in this pass. Recorded as owed rather than implied.
+**NC-NATIVE-3 and NC-NATIVE-4 were not run in this pass.** Both were closed the next day by
+DHEALTH-NATIVE-MVP-1.0R — see that entry at the end of this file for the mutations, the tests that
+went red, and what each would have exposed.
 
 ### Not qualified here, and not claimed
 
@@ -20078,5 +20078,103 @@ L6 browser       11 passed (golden journey 6, authorization 5), 16.8s
 L7 manual        8 screenshots at 1280 and 768 read by eye; no overflow, no console error,
                  no failed request; the technician's navigation correctly lacks Résultats
 ```
+
+### Human Decision Required: No
+
+---
+
+## DHEALTH-NATIVE-MVP-1.0R — the two owed negative controls, executed · 2026-09-25
+
+**Start `eccb543` → this commit.** HEAD was exactly as expected, tree clean. Nothing from
+DHEALTH-NATIVE-MVP-1.0 was rewritten; this only turns two honest "owed" lines into observed
+evidence.
+
+Both mutations were made to **real production code**, exercised through the **real browser
+qualification against the real native stack**, and reverted. The only committed change is one new
+qualification phase and a locator fix — no product code differs from `eccb543`.
+
+### NC-NATIVE-3 — the tenant boundary
+
+**Two attempts, and the first one is worth recording.** The obvious mutation — removing the
+membership check in `AuthorizationService.require_membership` — changed nothing: NEG-3 stayed green.
+`require_clinician` does **not** delegate to `require_membership`; it performs its own membership
+lookup and its own `ResourceNotFound`. Mutating the wrong function is exactly how a negative control
+can quietly prove nothing, and it is why "the test went red" is the only acceptable evidence.
+
+```python
+# adapter/src/daher_adapter/exchange/authorization.py, require_clinician
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
++           elsewhere = self._memberships.list_for_identity(principal.identity_id)
++           membership = elsewhere[0] if elsewhere else None
++       if membership is None:
+            ...raise ResourceNotFound(...)
+```
+
+**Invariant broken:** a clinician's membership in their *own* organization became authority over any
+organization they asked about.
+
+**Red:** `02-authorization.spec.ts` → `NEG-3: a clinician cannot read the laboratory organization as
+if it were their provider`, with `Expected value: 200 / Received array: [401, 403, 404]` — the
+server answered **200** where the test demands a refusal. `NEG-4`, `NEG-5` and `PHASE A` stayed
+green, which is the right blast radius: those exercise different gates.
+
+**Enabled behaviour:** a clinician of `Clinique Démo DHealth` could read `Laboratoire Démo
+DHealth`'s orders — one tenant reading another tenant's clinical work through the public edge with a
+genuine token.
+
+**Reverted**, verified by `grep -c NC-NATIVE adapter/src/daher_adapter/exchange/authorization.py` → 0
+and a clean `git diff` on that file.
+
+### NC-NATIVE-4 — entered is not released
+
+The clinic's `Résultats` screen is the provider review queue, and the guard is one line in
+`ReviewRepository.list_queue_for_provider`:
+
+```python
+                .where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+-                   LabOrder.status == LabOrderStatus.COMPLETED.value,
+                )
+```
+
+**Invariant broken:** every order carries an unbound `PENDING` review row from *creation* time
+(orders.py). `COMPLETED` is a state only an authorized release produces, so that predicate is what
+keeps an entered-but-unreleased result out of a clinician's queue. Without it, the obligation
+surfaces the moment the laboratory has typed values.
+
+**Red:** `01-golden-journey.spec.ts` → `PHASE B3 — entered is not released: the clinic sees nothing
+yet`, a phase added by this ticket precisely so the boundary has an assertion to break.
+
+**What the browser exposed:** the clinician's screen showed **`Résultats à examiner (1)`** with
+`Patient Démo Alpha` and an `Examiner` button, for an order the laboratory had entered and **not**
+released. The card's own line read *"Résultat historique — aucune version de libération
+enregistrée"* — the product offering a clinician a result to review while stating, in the same
+breath, that no release version exists.
+
+**Reverted**, verified by `grep -c NC-NATIVE adapter/src/daher_adapter/exchange/results.py` → 0 and a
+clean `git diff` on that file.
+
+### After restoration
+
+```text
+native browser qualification   12 passed (17.9s)  -- 7 journey phases + 5 authorization refusals
+adapter focused regression    112 passed          -- test_exchange_authorization_service.py,
+                                                     test_exchange_results_api.py, test_demo_seed.py
+tsc -p e2e/tsconfig.json      clean
+git diff (product code)       empty
+```
+
+The adapter image was rebuilt from the restored source before that run, so the green result is the
+real implementation, not a stale container.
+
+### What this changes about the gates
+
+**Nothing.** Two owed controls are now observed evidence about the *qualification suite*; no pilot
+gate moves, DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`, the patient
+surface and the amendment cycle are still unqualified, and pilot gate 3 stays advanced-not-cleared
+because it asks for a manual demonstration.
 
 ### Human Decision Required: No

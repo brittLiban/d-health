@@ -42,6 +42,7 @@ Keycloak sign-in:
 | A | `demo-clinician` | opens the synthetic patient, prescribes the demo analysis, routes the order to the demo laboratory, and reads the order reference off the orders table |
 | B | `demo-lab-tech` | finds **that same reference** in the laboratory queue, accepts, records collection, starts analysis, fills every required template field, saves, completes entry |
 | B2 | `demo-lab-tech` | has **no** `Résultats` section at all — entry and release are separate authorities (ADR-044) |
+| B3 | `demo-clinician` | sees **nothing**: the values are entered and not released, so there is no result and no review obligation. `list_queue_for_provider`'s `LabOrder.status == COMPLETED` gate is what enforces that, and removing it is negative control NC-NATIVE-4 |
 | C | `demo-releaser` | reviews the completed result and releases it explicitly |
 | D | `demo-clinician` | sees the released version, confirms the tab says which version is current, records a review disposition against it |
 
@@ -52,6 +53,23 @@ taken from real browser logins**: an unauthenticated browser gets Keycloak rathe
 an unauthenticated API call gets 401; a clinician cannot read the laboratory's queue or its orders;
 a technician cannot act as the provider; an invented organization id is refused rather than
 answered with an empty list.
+
+## Whether the suite can actually see these boundaries break
+
+Four mutations have been applied to real product code and reverted, each to check that the test
+claiming a boundary would notice its absence (`PROJECT_STATE.md` carries the diffs and the observed
+failures):
+
+| Control | Broken | Red |
+| --- | --- | --- |
+| NC-NATIVE-1 | the adapter expects a different OIDC audience | the journey, before any workflow proceeds |
+| NC-NATIVE-2 | every `LAB_RESULT_RELEASER` assignment deleted | `PHASE C`, while entry still passes |
+| NC-NATIVE-3 | `require_clinician` accepts a membership held in *another* organization | `NEG-3` — the cross-tenant read answered **200** |
+| NC-NATIVE-4 | the provider review queue's `LabOrder.status == COMPLETED` gate removed | `PHASE B3` — an entered, unreleased result appeared in the clinician's list |
+
+NC-3 is worth one line of warning: the first attempt mutated `require_membership` and **nothing went
+red**, because `require_clinician` performs its own membership lookup rather than delegating.
+Mutating the wrong function is how a control quietly proves nothing.
 
 ## What it does not do
 

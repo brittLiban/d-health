@@ -73,7 +73,13 @@ async function signIn(page: Page, who: { username: string; password: string }): 
  * therefore begins at the real Keycloak login form.
  */
 async function openSection(page: Page, section: string): Promise<void> {
-  await page.getByRole('button', { name: section, exact: true }).click()
+  // Scoped to the navigation landmark: the "Aujourd'hui" home page also offers quick-access
+  // buttons with the same words, and an unscoped lookup is ambiguous exactly when the home page
+  // has something to link to.
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: section, exact: true })
+    .click()
 }
 
 test.describe.configure({ mode: 'serial' })
@@ -177,8 +183,32 @@ test.describe('DHEALTH-NATIVE-MVP-1.0 golden journey', () => {
     // ADR-044 keeps entry and release as separate authorities. The demo technician holds LAB_TECH
     // and not LAB_RESULT_RELEASER, so the section that releases does not exist for them -- absence
     // is not the access control (the server refuses too), but it is what the product promises.
-    await expect(page.getByRole('button', { name: 'Ordres', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Résultats', exact: true })).toHaveCount(0)
+    await expect(
+      page.getByRole('navigation').getByRole('button', { name: 'Ordres', exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('navigation').getByRole('button', { name: 'Résultats', exact: true }),
+    ).toHaveCount(0)
+  })
+
+  test('PHASE B3 — entered is not released: the clinic sees nothing yet', async ({ page }) => {
+    watchForBrowserProblems(page)
+
+    // The whole point of the release step. At this moment the laboratory has entered every value
+    // and marked entry complete, and no authorized release has happened. The clinician must not be
+    // offered that result, and must not be given a review obligation against it -- an entered value
+    // is a laboratory's working state, not a clinical finding anybody may act on.
+    //
+    // `list_queue_for_provider` is what enforces this: it is gated on `LabOrder.status ==
+    // COMPLETED`, which only a release produces. Every order carries an unbound PENDING review row
+    // from creation time, so without that gate this screen would show an obligation for work the
+    // laboratory has not finished releasing. See NC-NATIVE-4.
+    await signIn(page, CLINICIAN)
+    await openSection(page, 'Résultats')
+
+    await expect(page.getByText('Aucun résultat disponible')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText(PATIENT)).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^Examiner/ })).toHaveCount(0)
   })
 
   test('PHASE C — a releaser releases the result explicitly', async ({ page }) => {

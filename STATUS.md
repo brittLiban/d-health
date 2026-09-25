@@ -34,10 +34,15 @@ still boots the whole clinical stack.
 
 **Authorization was exercised negatively, not just positively.** Five refusals with real tokens from
 real logins: unauthenticated browser, unauthenticated API, clinician reading the laboratory's queue,
-technician acting as the provider, invented organization id. Two negative controls were executed and
-reverted: pointing the adapter at a different OIDC audience made the journey fail before any
-workflow proceeded, and deleting every `LAB_RESULT_RELEASER` assignment made the release phase fail
-while entry still worked.
+technician acting as the provider, invented organization id. **Four negative controls have now been
+executed and reverted** — two with the ticket, two closed the next day by DHEALTH-NATIVE-MVP-1.0R:
+pointing the adapter at a different OIDC audience made the journey fail before any workflow
+proceeded; deleting every `LAB_RESULT_RELEASER` assignment made the release phase fail while entry
+still worked; weakening the tenant check in `require_clinician` made the clinician's cross-tenant
+read answer **200** and turned `NEG-3` red; and removing the `LabOrder.status == COMPLETED` gate
+from the provider review queue put an **entered-but-unreleased** result in the clinician's
+"Résultats à examiner" list, turning the new `PHASE B3` red. Each mutation was in real product code,
+each was reverted, and the suite is green against the restored implementation.
 
 **What this is not.** Not usability qualification — DH-USABILITY-001 stays `INTERNAL WORKFLOW
 REVIEW — NOT USER-QUALIFIED`, no F1/C1/L1 session has happened, and automated execution is not
