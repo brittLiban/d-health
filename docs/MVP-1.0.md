@@ -498,6 +498,26 @@ sandbox's Docker cannot pull real image blobs from the CDN, so the demo stack ha
 booted anywhere yet. See `PROJECT_STATE.md`'s DH-DEMO-001 entry and `STATUS.md` §D for the full
 evidence matrix.
 
+**2026-09-25 dated update (DHEALTH-NATIVE-DEPLOY-001):** two sentences of the note above are now
+false and are corrected rather than left standing. (1) "this sandbox's Docker cannot pull real image
+blobs from the CDN, so the demo stack has never actually booted anywhere yet" — it has: in CI
+(DH-DEMO-001's own boot job) and, from DHEALTH-NATIVE-MVP-1.0 onward, locally, with images fetched
+out-of-band and loaded because the blob CDN is still unreachable. (2) The Native topology is no
+longer defined by a file called *demo*. `docker-compose.native.yml` is the canonical Native
+deployment — PostgreSQL, Keycloak, the adapter, the UI, Caddy, and nothing else, requiring no
+OpenMRS, OpenELIS or MariaDB service, image or hostname — and the demo is now a thin overlay on it
+that adds demo users, a separate database name and the seed authority.
+
+**What that changes about the rows above: nothing.** This is deployment shape, not product
+capability. No row moves to a higher qualification level because of it. What *did* move, in
+DHEALTH-NATIVE-MVP-1.0 and this ticket, is that the golden journey of §4 has now been walked in a
+real Chromium against real Keycloak on this topology (12 tests: 7 journey phases plus 5
+authorization refusals), including the *entered-is-not-released* boundary, and survived a stack
+restart with its order, release and review intact. That is still **synthetic data, one operator, no
+clinician**: DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`, and nothing
+here is production-deployed, pilot-ready, clinically live, or disaster-recovery qualified.
+`docs/ARCHITECTURE.md` §25 describes the two deployment tracks.
+
 ## 9. Explicit out-of-scope list
 
 DHealth MVP 1.0 does **not** require:

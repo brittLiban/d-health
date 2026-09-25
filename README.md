@@ -461,26 +461,61 @@ opening a firewall port:
 ssh -L 8080:127.0.0.1:8080 user@your-vm
 ```
 
+## Deploying DHealth Native (DHEALTH-NATIVE-DEPLOY-001)
+
+The foundation above is the **maternity / reference-connector track** — OpenMRS, OpenELIS, MariaDB,
+and everything they need. The **DHealth Native product** is a separate, much smaller deployment
+that requires none of it: PostgreSQL, Keycloak, the Exchange adapter, the staff/patient UI, and
+Caddy. Five services.
+
+```bash
+cp deploy/native/native.env.example .env.native
+# fill in BASE_DOMAIN, KEYCLOAK_PUBLIC_URL and the five secrets — Compose refuses to
+# render without them, and no required secret has a working default
+docker compose -f docker-compose.native.yml --env-file .env.native up -d --wait
+```
+
+| URL | Serves |
+|---|---|
+| `https://app.<BASE_DOMAIN>` | the DHealth staff workspace and the patient surface |
+| `https://id.<BASE_DOMAIN>` | Keycloak (`dhealth-exchange` realm) |
+| `https://exchange.<BASE_DOMAIN>` | the Exchange API — `/exchange/v1/*` and the single Meta webhook path |
+
+Caddy is the only container publishing host ports, and it publishes only those three vhosts.
+Container health endpoints are deliberately not among them: `/health/ready` answers **404** at the
+edge while the adapter behind it is healthy.
+
+This deployment has been clean-booted from empty volumes, migrated to Alembic head, and qualified
+in a real browser against real Keycloak with the full synthetic golden journey and a 5-case
+authorization suite. It is **not** production-deployed, pilot-ready, clinically live, or
+disaster-recovery qualified, and `BASE_DOMAIN=localhost` exercises Caddy's internal CA rather than
+public certificate issuance. See `docs/ARCHITECTURE.md` §25 and `PROJECT_STATE.md`'s
+DHEALTH-NATIVE-DEPLOY-001 entry.
+
 ## Native demo environment (DH-DEMO-001)
 
-If you want the native DHealth Clinic → Exchange → DHealth Lab loop with synthetic data — no
-50-minute OpenMRS/OpenELIS boot, no real patient data — use the dedicated demo Compose project
-instead of the foundation above:
+If you want the native Clinic → Exchange → Lab loop with synthetic data and demo logins already
+seeded — no 50-minute OpenMRS/OpenELIS boot, no real patient data — the demo is a thin **overlay**
+on the Native deployment above (it adds demo users, a separate database name, and the seed
+authority; it redefines no service image):
 
 ```bash
 ./scripts/demo/up.sh       # builds, starts, waits for healthy, seeds the synthetic baseline
 ./scripts/demo/status.sh   # health summary + demo login usernames (passwords: demo/native/demo.env)
 ./scripts/demo/reset.sh    # restores the deterministic baseline, clears everything a demo run created
 ./scripts/demo/down.sh     # stops (keeps data); `down.sh -v` also deletes the demo's own volumes
+./scripts/demo/qualify-journey.sh   # the real-browser golden journey against this stack
 ```
 
-This runs the real Keycloak/adapter/DHealth-UI/Caddy code and configuration (`docker-compose.
-native-demo.yml` `extends:` the real service definitions above) as its own independent Compose
-project (`dhealth-native-demo`) — it never starts, waits on, or otherwise touches any
-`openmrs-*`/`openelis-*` container or volume from the foundation above. All data is synthetic; a
-three-fact safety boundary (`adapter/src/daher_adapter/exchange/demo_seed.py`) refuses to run
-against anything that is not unambiguously this demo's own database. See `docs/ARCHITECTURE.md`
-§18 and `PROJECT_STATE.md`'s DH-DEMO-001 entry for full detail.
+Those scripts pass both files (`docker-compose.native.yml` **and**
+`docker-compose.native-demo.yml`), so the demo runs the identical production topology plus demo-only
+additions, as its own Compose project (`dhealth-native-demo`) — it never starts, waits on, or
+otherwise touches any `openmrs-*`/`openelis-*` container or volume from the foundation above. All
+data is synthetic; a three-fact safety boundary
+(`adapter/src/daher_adapter/exchange/demo_seed.py`) refuses to run against anything that is not
+unambiguously this demo's own database, and the marker table its third fact requires is created
+only by a demo-only init script — a production deployment has no line that could write it. See
+`docs/ARCHITECTURE.md` §18 and §25 and `PROJECT_STATE.md`'s DH-DEMO-001 entry for full detail.
 
 ## Reaching the system through the reverse proxy (DH-016)
 

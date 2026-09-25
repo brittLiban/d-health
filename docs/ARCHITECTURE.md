@@ -1543,6 +1543,17 @@ Full decision record: **ADR-050** (`DECISIONS.md`). Implementation and qualifica
 
 ## 18. Native demo environment topology (DH-DEMO-001) — added 2026-09-18
 
+> **Superseded in part, 2026-09-25 (DHEALTH-NATIVE-DEPLOY-001) — see §25.** This section is
+> preserved as the accurate record of how the native demo was built and what `extends:` actually
+> does, and its three-fact reset boundary still governs. Two things below are no longer current:
+> the demo is now a thin **overlay** on `docker-compose.native.yml` rather than a self-contained
+> project built by `extends:`-ing `docker-compose.yml`, and the PostgreSQL service is now called
+> `dhealth-db` with no `db.openelis.org` alias — the name reuse this section describes as
+> deliberate was a real consequence of `extends:` merging `depends_on`, and §25 explains why it
+> was nevertheless the wrong thing to ship as the product's deployment. The evidence-boundary
+> bullets at the end of this section are also superseded: real Keycloak interactive login and the
+> real-browser golden journey were both qualified by DHEALTH-NATIVE-MVP-1.0 (2026-09-24).
+
 A dedicated Compose project, `docker-compose.native-demo.yml`, exists so the native Clinic →
 Exchange → Lab loop can be booted and demonstrated **without** the historical OpenMRS/OpenELIS
 reference-connector stack (§2) becoming healthy — that stack is preserved untouched, never
@@ -2232,3 +2243,79 @@ as an untested second adapter. Three consequences worth stating here rather than
 A′ is untouched: the issuance message still carries the only link, and the release/amendment
 template takes **zero parameters** — no `components` key at all, so there is no array a value
 could be threaded through. Operator setup: `docs/META-WHATSAPP-RUNBOOK.md`.
+
+
+## 25. Two deployment tracks (DHEALTH-NATIVE-DEPLOY-001) — added 2026-09-25
+
+DHealth has **two intentionally distinct deployment topologies** (**ADR-061**). Neither is a fork of the other,
+neither is obsolete, and neither pretends to be the other.
+
+| | Maternity / reference-connector track | DHealth Native track |
+|---|---|---|
+| File | `docker-compose.yml` (§2) | `docker-compose.native.yml` |
+| Services | OpenMRS O3 + MariaDB, OpenELIS + PostgreSQL, Keycloak, adapter, UI, Caddy | PostgreSQL, Keycloak, adapter, UI, Caddy |
+| Reachable at | `emr.`, `lab.`, `id.` | `app.`, `id.`, `exchange.` |
+| Identity realm | `daher` (plus `dhealth-exchange`) | `dhealth-exchange` |
+| Status | real clinical software, preserved, unchanged | canonical Native deployment shape |
+
+```text
+                       Internet
+                          │
+                 Caddy (the only container publishing host ports)
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+   app.<domain>     exchange.<domain>   id.<domain>
+   daher-ui            adapter            keycloak
+   (nginx)            (FastAPI)       (+ keycloak-config one-shot)
+                          └────────┬────────┘
+                                   ▼
+                              dhealth-db  (PostgreSQL 16)
+                              (+ dhealth-db-hardening one-shot)
+                              tenants: keycloak, dhealth_exchange
+```
+
+**Native requires none of** `openmrs-db` (MariaDB), `openmrs-backend`, `openmrs-frontend`,
+`openmrs-gateway`, `openmrs-demo-preflight`, `openmrs-maternity-config`, `openmrs-prenatal-panel`,
+`openelis-db`, `openelis-db-hardening`, `openelis-certs`, `openelis-admin-password`,
+`openelis-webapp`, `openelis-fhir`, `openelis-frontend`. Not as a dependency, not as an image, not
+as a hostname. `adapter/tests/test_native_deployment_topology.py` asserts that as a property of the
+file rather than trusting it to stay true.
+
+**Why this file does not use `extends:`.** §18's demo topology did, and that was the right call
+there — extending guarantees the demo cannot drift from the real service definitions. But Compose
+**merges** `depends_on` from the base file and gives an override no way to *remove* an entry
+(DH-DEMO-001 verified this empirically). Every extended service therefore arrived carrying the
+maternity track's dependency graph, and the only way to make the graph resolve was to keep the
+names those dependencies pointed at — which is why the native demo's PostgreSQL was called
+`openelis-db` and aliased `db.openelis.org` while running no OpenELIS at all. Inherited
+configuration, read later as product truth. `docker-compose.native.yml` inherits nothing and pays
+the stated cost: it must be edited alongside `docker-compose.yml` when the adapter's environment
+contract changes. That trade is written at the top of the file.
+
+**The demo is now an overlay, not a second topology.** `docker-compose.native-demo.yml` is applied
+*on top of* the production file and adds only what makes an environment a demo: the
+`keycloak-demo-users` one-shot, the `dhealth_native_demo` database name,
+`ADAPTER_DEMO_ENVIRONMENT=1`, the demo marker-table init script, and its own volumes. It redefines
+no image. `scripts/demo/*.sh` name both files.
+
+**Reset safety became structural.** DH-DEMO-001's three-fact boundary (§18) is unchanged, but the
+marker-table DDL moved out of the now-shared `init-tenant-databases.sh` into
+`demo/native/db-init/mark-demo-environment.sh`. A production deployment therefore contains no line
+of SQL that could create the marker `demo_seed.py`'s reset path requires — verified on a clean
+production boot: no marker table, 0 organizations, 0 patients, 0 orders.
+
+**The environment contract fails closed.** `deploy/native/native.env.example` separates what is
+REQUIRED (`BASE_DOMAIN`, `KEYCLOAK_PUBLIC_URL`, and four passwords plus one client secret, each
+declared `${VAR:?...}` so Compose refuses to render without them) from what is optional, from what
+is deliberately absent — no `OMRS_*`/`OE_*` variables, no demo variables, no Meta credentials. No
+required secret has a working default.
+
+**The public edge publishes only intended surfaces.** `deploy/native/Caddyfile` serves three
+vhosts; `exchange.` publishes `/exchange/v1/*` and the single exact path
+`/notifications/v1/meta/webhook` (256 KiB `request_body` limit, ADR-059/DH-NOTIFY-META-001R2) and
+answers 404 to everything else. Container health endpoints (`/health`, `/health/ready`) are
+**not** published: they answer 404 at the edge while the container behind is healthy.
+
+Qualification evidence, negative controls, and the explicit list of what this does **not** claim
+(not production deployed, not pilot ready, not clinically live, not DR/security/human-usability
+qualified): `PROJECT_STATE.md`'s DHEALTH-NATIVE-DEPLOY-001 entry.

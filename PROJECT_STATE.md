@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DH-USABILITY-001,
-> 2026-09-24 — this parenthetical has now gone stale three times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-DEPLOY-001,
+> 2026-09-25 — this parenthetical has now gone stale four times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -20176,5 +20176,148 @@ real implementation, not a stale container.
 gate moves, DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`, the patient
 surface and the amendment cycle are still unqualified, and pilot gate 3 stays advanced-not-cleared
 because it asks for a manual demonstration.
+
+### Human Decision Required: No
+
+---
+
+## DHEALTH-NATIVE-DEPLOY-001 — the canonical Native deployment · 2026-09-25
+
+**Start `f5ad78f` → this commit. New decision: ADR-061.** HEAD was exactly as expected, tree clean. The historical
+maternity/reference deployment is untouched; nothing from the preceding tickets was rewritten.
+
+### Before and after
+
+```text
+BEFORE                                   AFTER
+docker-compose.native-demo.yml           docker-compose.native.yml      (the product)
+  extends: docker-compose.yml              standalone, extends nothing
+  openelis-db  (postgres:16-alpine)        dhealth-db
+    alias db.openelis.org                  no alias
+  openelis-db-hardening                    dhealth-db-hardening
+  keycloak, keycloak-exchange-config       keycloak, keycloak-config
+  adapter, daher-ui, caddy                 adapter, daher-ui, caddy
+  keycloak-demo-users                    +
+  demo seed authority                    docker-compose.native-demo.yml (the overlay)
+                                           demo users, demo DB name, seed authority
+```
+
+The inherited names were not sloppiness. `extends:` was the right call for DH-DEMO-001 -- it
+guarantees the service definitions cannot drift from the ones the real stack runs -- but Compose
+**merges** `depends_on` from the base file and gives a local override no way to remove an entry
+(DH-DEMO-001 verified that directly and recorded it). So every extended service arrived carrying
+the maternity track's dependency graph, and the only way to make it boot was to keep the names those
+dependencies pointed at. A deployment called `openelis-db`, aliased `db.openelis.org`, running no
+OpenELIS.
+
+The canonical file inherits nothing and pays the cost of saying so: ~90 lines that must be changed
+alongside `docker-compose.yml` when the adapter's environment contract changes. That trade is
+written at the top of the file rather than left to be discovered.
+
+### Final Native service graph
+
+```text
+                       Internet
+                          │
+                 Caddy 2.11.4 (ports 80/443 -- the only published ports)
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+   daher-ui          adapter            keycloak 26.7.1
+   (nginx)           (FastAPI)          (+ keycloak-config one-shot)
+                          └────────┬────────┘
+                                   ▼
+                          dhealth-db  PostgreSQL 16.15
+                          (+ dhealth-db-hardening one-shot)
+                          two tenants: keycloak, dhealth_exchange
+```
+
+**Historical services Native no longer requires, at all:** `openmrs-db` (MariaDB),
+`openmrs-backend`, `openmrs-frontend`, `openmrs-gateway`, `openmrs-demo-preflight`,
+`openmrs-maternity-config`, `openmrs-prenatal-panel`, `openelis-db`, `openelis-db-hardening`,
+`openelis-certs`, `openelis-admin-password`, `openelis-webapp`, `openelis-fhir`,
+`openelis-frontend`. Fourteen services, none of them in the Native graph and none pulled by it.
+
+### Commands
+
+```bash
+# production
+cp deploy/native/native.env.example .env.native      # then fill in the required values
+docker compose -f docker-compose.native.yml --env-file .env.native up -d --wait
+
+# demo (the same topology plus demo users, demo database name and seed authority)
+scripts/demo/up.sh
+scripts/demo/qualify-journey.sh
+scripts/demo/reset.sh
+scripts/demo/down.sh            # -v also deletes the demo's volumes
+```
+
+### Qualification, by level
+
+| | Evidence |
+|---|---|
+| **Q1** config | `docker compose config` renders both the production file and the demo overlay; the rendered production graph contains **zero** matches for openmrs/openelis/mariadb |
+| **Q2** clean boot | from empty volumes: `dhealth-db` healthy, `dhealth-db-hardening` exited 0, `keycloak` healthy, `keycloak-config` exited 0, `adapter` healthy, `daher-ui` healthy, `caddy` healthy. Boot exit 0 |
+| **Q3** no legacy services | the graph created exactly 7 containers on 5 images (postgres:16-alpine, keycloak 26.7.1, daher-health/adapter, daher-health/ui, caddy:2-alpine); `docker ps -a \| grep -c openmrs\|openelis\|mariadb` = **0** across the whole host |
+| **Q4** authentication | real Chromium → Caddy → Keycloak login form → PKCE callback → authenticated staff shell, against `https://id.localhost` |
+| **Q5** golden journey | **12 passed** — 7 journey phases (clinic order → routing → lab accept → collection → processing → entry → *entered-is-not-released* → release → clinician review) + 5 authorization refusals |
+| **Q6** restart | `stop` then `up` with volumes kept: `1 orders, 1 releases, 1 reviews, 2 orgs` before and after, alembic still at head, app/id/exchange answering 200/200/401 |
+| migrations | empty database → `0032_patient_notifications` through the adapter's existing entrypoint. No second migration system |
+| tenancy | over **TCP with password auth**: keycloak→keycloak ALLOWED, keycloak→Exchange REFUSED, adapter→Exchange ALLOWED, adapter→keycloak REFUSED, and both wrong-password cases REFUSED |
+| public edge | `app` 200, `id` realm 200, `exchange/v1/me` **401**, `/health/ready` **404** (published nowhere), `/notifications/v1/meta/webhook` **403** (published, failing closed without credentials) |
+| production data boundary | a clean production boot has no `dhealth_demo_environment` table and **0 organizations, 0 patients, 0 orders** |
+| topology tests | `adapter/tests/test_native_deployment_topology.py`, **11 passed** |
+
+### Negative controls — five executed and reverted
+
+| Control | Mutation | Red |
+|---|---|---|
+| NC-NATIVE-DEPLOY-1 | `adapter` given `depends_on: openelis-webapp` | `test_the_native_deployment_names_no_legacy_service_image_or_hostname` |
+| NC-NATIVE-DEPLOY-2 | `dhealth-db` aliased back to `db.openelis.org` | that test **plus** `test_every_native_service_reaches_the_database_by_its_real_name` |
+| NC-NATIVE-DEPLOY-3 | `ADAPTER_DEMO_ENVIRONMENT: "1"` added to the production adapter | `test_the_native_deployment_never_sets_the_demo_seed_authority` and `test_the_demo_overlay_is_the_only_place_demo_authority_is_granted` |
+| NC-NATIVE-DEPLOY-4 | `GRANT CONNECT ON DATABASE keycloak TO adapter` in the running database | the tenancy probe: `adapter -> keycloak database` reported **ALLOWED** where REFUSED is required |
+| NC-NATIVE-DEPLOY-5 | `validate_header` returns a fabricated principal for any token | `NEG-2` — an unauthenticated request returned **200** instead of 401 — and `PHASE A`, because the fabricated subject holds no membership |
+
+**A control caught a mistake in its own harness, and it is worth recording.** NC-5's first run
+rebuilt nothing (the build context had been cleaned up), so the container still ran the unmutated
+image and both tests passed -- a green that proved nothing. The second run rebuilt and reddened
+both. Then the revert failed too, because the backup had been taken *after* the first mutation; the
+file was restored from git instead, verified by `grep -c NC-NATIVE-DEPLOY-5` → 0 and a clean
+`git diff`. A control is only evidence when the thing under test actually changed.
+
+### Also fixed on the way
+
+* `demo/native/demo.env` gained `POSTGRES_SUPERUSER_PASSWORD`: the production topology gives the
+  database superuser its own credential instead of reusing the adapter's, and the overlay must
+  satisfy the file it sits on. Found by the overlay refusing to render -- the fail-closed contract
+  working.
+* The golden journey's lab-queue step now opens the order from **its own card** rather than by
+  patient name. Two orders for one patient is an ordinary queue state and the by-name locator is
+  ambiguous exactly then; found when repeated negative-control runs left a second order behind.
+* The demo-environment marker table moved out of the now-shared `init-tenant-databases.sh` into
+  `demo/native/db-init/mark-demo-environment.sh`. Had it stayed, every production database would
+  have been born carrying the marker that tells `demo_seed.py` it may delete things.
+
+### What is NOT claimed
+
+Not production deployed. Not pilot ready. Not clinically live. Not disaster-recovery qualified --
+backup/restore is the next separate concern and was deliberately untouched. Not security qualified.
+Not human-usability qualified: DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT
+USER-QUALIFIED`. Not Connect integrated. `BASE_DOMAIN=localhost` means Caddy's internal CA, so
+nothing here is evidence about public certificate issuance, DNS, or a real domain.
+
+**Environment deviation, disclosed:** dockerd cannot pull from Docker Hub's blob CDN here, so images
+were fetched with `crane` and loaded, which loses the RepoDigest a digest-pinned reference needs. A
+local-only, uncommitted override pointed the two digest-pinned services at tags for these runs; the
+bytes are the pinned ones. `postgres:16-alpine` carries a TODO for a digest that must be recorded
+from a machine that can pull.
+
+### Recommendation for the next ticket, not started
+
+**Backup and restore for the canonical Native deployment.** The pinned P0 is explicit that a script
+which exists is not a performed restore drill, and this deployment now has exactly one stateful
+volume worth protecting (`dhealth-db-data`) plus Keycloak's realm state inside it. A ticket that
+takes a backup of a running Native stack, destroys the volume, restores, and then re-runs the
+golden journey against the restored database would convert the oldest pinned P0 into evidence. It
+is deliberately not begun here.
 
 ### Human Decision Required: No

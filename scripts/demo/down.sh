@@ -14,7 +14,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-COMPOSE=(docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
+# DHEALTH-NATIVE-DEPLOY-001: the demo is an overlay on the canonical Native deployment, so every
+# demo command names both files -- the production topology first, then the demo's own additions.
+COMPOSE=(docker compose -f docker-compose.native.yml -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
 
 if [[ "${1:-}" == "-v" ]]; then
     echo "Stopping the DHealth Native Demo AND deleting its volumes (Postgres data, Caddy TLS state)..."

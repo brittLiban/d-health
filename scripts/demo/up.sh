@@ -11,7 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-COMPOSE=(docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
+# DHEALTH-NATIVE-DEPLOY-001: the demo is an overlay on the canonical Native deployment, so every
+# demo command names both files -- the production topology first, then the demo's own additions.
+COMPOSE=(docker compose -f docker-compose.native.yml -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
 
 # Only for this script's own `echo` lines below (the compose commands above already read
 # demo.env directly via `--env-file`) -- so the printed usernames reflect whatever demo.env
@@ -30,14 +32,14 @@ echo
 # fragile across Compose versions.
 #
 # Named explicitly rather than passing no services (which would mean "wait on every service in
-# the project"): `keycloak-exchange-config`, `keycloak-demo-users`, and `openelis-db-hardening`
+# the project"): `keycloak-config`, `keycloak-demo-users`, and `dhealth-db-hardening`
 # are one-shot `restart: "no"` jobs that exit 0 when done -- Compose's own `--wait` can treat an
 # exited container as "not ready" even at exit 0 unless something still-running depends on it via
 # `service_completed_successfully`. Waiting only on the long-lived services avoids that ambiguity
 # entirely; those one-shots still run to completion first because the long-lived services
 # `depends_on` them.
 "${COMPOSE[@]}" up -d --build
-"${COMPOSE[@]}" up -d --wait --wait-timeout 300 openelis-db keycloak adapter daher-ui caddy
+"${COMPOSE[@]}" up -d --wait --wait-timeout 300 dhealth-db keycloak adapter daher-ui caddy
 
 echo "Seeding deterministic synthetic baseline..."
 "${COMPOSE[@]}" exec -T adapter python -m daher_adapter.exchange.demo_seed reset

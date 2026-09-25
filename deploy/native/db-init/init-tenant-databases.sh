@@ -1,5 +1,7 @@
 #!/bin/bash
-# DH-DEMO-001 — native demo's own PostgreSQL bootstrap.
+# DHealth Native — PostgreSQL tenant bootstrap (DH-DEMO-001, generalized by
+# DHEALTH-NATIVE-DEPLOY-001 into a shared deployment primitive used by BOTH the canonical
+# production topology and the demo overlay).
 #
 # Unlike `openelis-config/postgres-init/zz-daher-extra-databases.sh` (which co-tenants Keycloak
 # and the adapter on OpenELIS's own clinlims database and is part of the preserved
@@ -22,7 +24,7 @@ set -euo pipefail
 : "${ADAPTER_DB_USER:?init-tenant-databases.sh: ADAPTER_DB_USER not set}"
 : "${ADAPTER_DB_PASSWORD:?init-tenant-databases.sh: ADAPTER_DB_PASSWORD not set}"
 
-echo "[dhealth-native-demo] creating Keycloak and adapter demo databases"
+echo "[dhealth-native] creating the Keycloak and Exchange tenant databases"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-SQL
 	DO \$\$
@@ -50,22 +52,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
 	 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${ADAPTER_DB_NAME}')\gexec
 SQL
 
-# DH-DEMO-001 §"RESET SAFETY IS P0": one of three independent facts `demo_seed.py` checks before
-# any destructive statement -- a marker table that only ever exists in a database this exact
-# script created. Deliberately raw DDL, never an Alembic migration: a demo-only marker must never
-# appear in a real deployment's schema, and this script never runs against one. Created directly
-# inside the adapter's own database (not the `postgres` bootstrap database) so the seed script,
-# which already connects there, can check it with the same connection it uses for everything else.
-# GRANT SELECT explicitly: created by $POSTGRES_USER (the bootstrap superuser), but read by the
-# adapter connecting as $ADAPTER_DB_USER -- caught by this ticket's own real-PostgreSQL
-# qualification (2026-09-18): a table's creator does not implicitly grant other roles any
-# privilege on it, so without this the adapter's own safety check would fail with a permission
-# error instead of confirming the marker, refusing to run at all even in a genuine demo.
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$ADAPTER_DB_NAME" <<-SQL
-	CREATE TABLE IF NOT EXISTS dhealth_demo_environment (marker text PRIMARY KEY);
-	INSERT INTO dhealth_demo_environment (marker) VALUES ('dhealth-native-demo')
-	  ON CONFLICT DO NOTHING;
-	GRANT SELECT ON dhealth_demo_environment TO ${ADAPTER_DB_USER};
-SQL
+# DHEALTH-NATIVE-DEPLOY-001: the demo-environment marker table used to be written here. It moved
+# to demo/native/db-init/mark-demo-environment.sh when this script became a shared deployment
+# primitive -- a marker asserting "this is a demo database" must never be written by anything the
+# canonical production deployment runs, and docker-compose.native.yml no longer has a line that
+# could reference it.
 
-echo "[dhealth-native-demo] done: ${KEYCLOAK_DB_NAME} (owner ${KEYCLOAK_DB_USER}), ${ADAPTER_DB_NAME} (owner ${ADAPTER_DB_USER})"
+echo "[dhealth-native] done: ${KEYCLOAK_DB_NAME} (owner ${KEYCLOAK_DB_USER}), ${ADAPTER_DB_NAME} (owner ${ADAPTER_DB_USER})"

@@ -6,6 +6,53 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-25, DHEALTH-NATIVE-DEPLOY-001, directly on `master`.** From `f5ad78f`. **DHealth Native
+has a canonical production-shaped deployment of its own: `docker-compose.native.yml`.** Five
+services — PostgreSQL, Keycloak, the Exchange adapter, the UI, Caddy — and nothing else. Clean-booted
+from empty volumes, migrated to `0032_patient_notifications`, qualified with real Keycloak and a
+real browser carrying the full synthetic golden journey, and restarted without losing a row.
+
+**The repository now has two deployment tracks, deliberately distinct (ADR-061).** The historical
+OpenMRS/OpenELIS maternity/reference deployment in `docker-compose.yml` is untouched and remains
+reproducible; the Native product deployment describes only itself. Neither pretends to be the other,
+and neither is obsolete.
+
+**What this separation actually fixed.** The native demo had proved Native could boot without
+OpenMRS/OpenELIS, but it built its topology by `extends:`-ing services out of the historical file —
+and Compose merges `depends_on` from the base with no way for an override to remove an entry. Every
+extended service therefore arrived carrying the maternity track's dependency graph, and the visible
+symptom was a PostgreSQL service **named `openelis-db`, aliased to `db.openelis.org`, in a
+deployment running no OpenELIS at all**. Inherited configuration, not product truth. The canonical
+file inherits nothing: the database is `dhealth-db`, Keycloak's JDBC URL and the adapter's DB host
+both name it, and `adapter/tests/test_native_deployment_topology.py` (11 tests) asserts the graph
+mentions no OpenMRS/OpenELIS service, image, dependency or hostname at all.
+
+**The demo is now an overlay on that topology**, not a second definition of it: production file plus
+demo users, the demo database name and the seed authority. DH-DEMO-001's three-fact destructive-reset
+boundary is intact and is now *structural* — the demo marker table moved out of the shared
+`init-tenant-databases.sh` into a demo-only script, so a production deployment has no line that could
+write it. Verified on a clean production boot: no marker table, **0 organizations, 0 patients,
+0 orders**.
+
+**Qualification, by level.** Compose renders (both files); clean boot from empty volumes with every
+service healthy and no OpenMRS/OpenELIS/MariaDB container anywhere on the host; Alembic reaches head
+on an empty database through the existing entrypoint; PostgreSQL tenant isolation proven over
+**TCP with password authentication** in six cases including wrong-password denial; real Keycloak
+Authorization Code + PKCE in a real Chromium; the 12-test golden journey and authorization suite
+green against this topology; and a stop/start that kept the journey's order, release and review.
+The public edge publishes exactly `app.`, `id.` and `exchange.` plus the one Meta callback path —
+`/health/ready` answers **404** at the edge while the container is healthy behind it.
+
+**Five negative controls executed and reverted**, each naming what reddened: a legacy `depends_on`,
+an `openelis` hostname alias, `ADAPTER_DEMO_ENVIRONMENT=1` in the production file, a relaxed database
+GRANT, and an authentication bypass that made an **unauthenticated request return 200**.
+
+**What this does NOT claim.** Not production deployed, not pilot ready, not clinically live, not
+disaster-recovery qualified, not security qualified, not human-usability qualified, not Connect
+integrated. `BASE_DOMAIN=localhost` means Caddy's internal CA — nothing here is evidence about
+public certificate issuance. DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT
+USER-QUALIFIED`. Backup/restore is the next separate concern and was deliberately not touched.
+
 **2026-09-25, DHEALTH-NATIVE-MVP-1.0, directly on `master`.** From `08b9bc9`. **A real browser has
 carried one synthetic diagnostic order through the whole native product for the first time.** Real
 Chromium, real Keycloak login, the real UI behind the real Caddy edge, the real adapter, real

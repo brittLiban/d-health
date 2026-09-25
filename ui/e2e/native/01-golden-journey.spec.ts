@@ -137,11 +137,15 @@ test.describe('DHEALTH-NATIVE-MVP-1.0 golden journey', () => {
     await expect(page.getByText(LAB_ORG).first()).toBeVisible()
 
     await openSection(page, 'Ordres')
-    // The SAME order, identified by the reference the clinic screen showed.
+    // The SAME order, identified by the reference the clinic screen showed -- and opened from
+    // THAT card, not by patient name. A laboratory queue holding two orders for one patient is an
+    // ordinary state (a repeat test, a second visit), and a by-name locator is ambiguous exactly
+    // then. Scoping to the card is also what makes "the same order" a real claim rather than a
+    // coincidence when the queue has one entry.
     const card = page.locator('li,div').filter({ hasText: orderReference }).first()
     await expect(card).toBeVisible({ timeout: 30_000 })
 
-    await page.getByRole('button', { name: new RegExp(`Examiner l.ordre de ${PATIENT}`) }).click()
+    await card.getByRole('button', { name: new RegExp(`Examiner l.ordre de ${PATIENT}`) }).click()
     await page.getByRole('button', { name: "Accepter l'ordre" }).click()
 
     await page.getByRole('button', { name: 'Enregistrer la collecte' }).click()

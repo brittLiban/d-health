@@ -1,123 +1,57 @@
-# DHealth Native Demo (DH-DEMO-001)
+# DHealth Native Demo — an OVERLAY on the canonical Native deployment (DH-DEMO-001, re-shaped by
+# DHEALTH-NATIVE-DEPLOY-001).
 #
-# A dedicated, independent Compose project for the native DHealth Clinic -> Exchange -> DHealth
-# Lab loop -- distinct project name (`name:` below), distinct volumes, distinct network, so it can
-# never collide with, depend on, or be torn down by anything the real `docker-compose.yml` owns.
-# That independence is deliberate, not incidental: it is what makes "the native demo must not
-# require OpenMRS/OpenELIS to become healthy" a structural property rather than a timing
-# coincidence, and what makes `scripts/demo/down.sh -v` safe -- it can only ever remove THIS
-# project's own volumes, never the maternity/reference-connector track's `clinlims`/`openmrs-data`
-# ones (see AGENTS.md's "preserve backward compatibility" rule and the ticket's own "RESET SAFETY
-# IS P0" section).
+#     docker compose -f docker-compose.native.yml -f docker-compose.native-demo.yml \
+#         --env-file demo/native/demo.env up -d
 #
-# `keycloak`, `keycloak-exchange-config`, `adapter`, and `daher-ui` below are `extends:`-ed
-# straight from the real `docker-compose.yml` -- same image, same build context, same
-# environment/healthcheck/volumes as the real stack runs, not a second, independently-maintained
-# copy that could silently drift. Only `openelis-db`/`openelis-db-hardening` (a lightweight,
-# OpenELIS-free Postgres standing in for the real co-tenant database so this demo never needs
-# OpenELIS's own image) and `caddy` (a narrower vhost list, no openmrs-gateway/openelis-frontend)
-# are genuinely native-demo-specific. The two reused service NAMES `openelis-db`/
-# `openelis-db-hardening` are deliberate -- `keycloak` and `adapter`'s own `depends_on` blocks
-# (copied in unmodified by `extends:`) reference those exact names, and Compose's `extends`
-# merges `depends_on` from the base file rather than letting a local override remove an entry
-# (verified directly: an attempt to override `depends_on` to drop one dependency left the base
-# file's own extra entry in place and Compose refused to parse until a same-named service
-# existed) -- so reusing the names is what lets every other field come across with zero overrides,
-# not an attempt to disguise this demo as the real OpenELIS database.
+# (`scripts/demo/up.sh` is the supported way to say that.)
 #
-# Real PostgreSQL only (see demo/native/db-init/) -- SQLite is never used anywhere in this file.
+# What changed, and why it matters. This file used to be the ONLY place a standalone DHealth
+# Native topology existed, and it built one by `extends:`-ing services out of docker-compose.yml.
+# That worked, and it is how DH-DEMO-001 proved Native could boot without OpenMRS/OpenELIS -- but
+# Compose's `extends` merges `depends_on` from the base file and gives a local override no way to
+# remove an entry, so every extended service arrived carrying the maternity track's dependency
+# graph. The result was a demo with a PostgreSQL service named `openelis-db`, aliased to
+# `db.openelis.org`, running no OpenELIS at all.
+#
+# `docker-compose.native.yml` is now the product topology, written in its own terms. This file is
+# what it always should have been: the demo's own additions on top of it.
+#
+#     Native production topology  +  demo users  +  demo seed authority  +  demo credentials
+#                                 =  Native demo
+#
+# **RESET SAFETY IS STILL P0 and is unchanged.** `demo_seed.py` refuses to clear a single row
+# unless all three independent facts hold: the connected database is named `dhealth_native_demo`
+# (set below, never by the production file), the `dhealth_demo_environment` marker row exists
+# (created only by this project's own db-init run), and `ADAPTER_DEMO_ENVIRONMENT=1` is in the
+# adapter's own environment (set below, and nowhere else in this repository). A production Native
+# deployment satisfies none of them, which
+# `adapter/tests/test_native_deployment_topology.py` asserts structurally.
+#
+# Its own project name and its own volumes, so `scripts/demo/down.sh -v` can only ever remove this
+# demo's data -- never the production deployment's, never the maternity track's.
 name: dhealth-native-demo
 
-x-common-env: &common-env
-  TZ: Africa/Djibouti
-
 services:
-  # ---------------------------------------------------------------------------
-  # A lightweight, OpenELIS-free PostgreSQL standing in for the real stack's
-  # `openelis-db` -- same two tenant databases (Keycloak, the adapter), zero
-  # clinlims schema, zero OE_*-named variables to satisfy.
-  # ---------------------------------------------------------------------------
-  openelis-db:
-    image: postgres:16-alpine
-    # TODO(DH-DEMO-001): digest not pinned -- this sandbox's Docker cannot reach
-    # production.cloudfront.docker.com to pull and record one (confirmed 2026-09-18, same CDN gap
-    # already documented for this repo's other postgres:16-alpine attempts). Record the resolved
-    # digest from the CI boot job's own `docker inspect` output in a follow-up commit, per
-    # AGENTS.md's explicit "never fabricate a digest you have not pulled -- leave a TODO instead."
-    # This exact tag is already CI-PostgreSQL-qualified across ~30 prior tickets (16.15 at time of
-    # writing), so the version itself is proven even though the digest is not yet pinned.
-    restart: unless-stopped
+  dhealth-db:
     environment:
-      <<: *common-env
-      POSTGRES_USER: postgres
-      POSTGRES_DB: postgres
-      POSTGRES_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in demo.env}
-      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
-      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
-      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD in demo.env}
+      # The demo's own database name. One of `demo_seed.py`'s three safety facts.
       ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_native_demo}
-      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
-      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in demo.env}
     volumes:
+      # Demo data, in a demo volume. Named so it cannot collide with the production deployment's.
       - native-demo-db-data:/var/lib/postgresql/data
-      - ./demo/native/db-init/init-tenant-databases.sh:/docker-entrypoint-initdb.d/init-tenant-databases.sh:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-    networks:
-      internal:
-        # `keycloak`'s own extended block hard-codes this hostname in KC_DB_URL (see
-        # docker-compose.yml) -- aliasing it here means that field needs no override.
-        aliases: [db.openelis.org]
+      - ./deploy/native/db-init/init-tenant-databases.sh:/docker-entrypoint-initdb.d/init-tenant-databases.sh:ro
+      # The marker table only this demo ever creates -- the second of the three safety facts.
+      - ./demo/native/db-init/mark-demo-environment.sh:/docker-entrypoint-initdb.d/zz-mark-demo-environment.sh:ro
 
-  # One-shot tenancy hardening, converging an existing demo volume the same way the real stack's
-  # own `openelis-db-hardening` converges an existing maternity-track volume (see
-  # demo/native/db-init/harden-tenancy.sh's own header for why this is a separate script, not a
-  # shared one).
-  openelis-db-hardening:
-    image: postgres:16-alpine
-    restart: "no"
-    depends_on:
-      openelis-db:
-        condition: service_healthy
+  dhealth-db-hardening:
     environment:
-      <<: *common-env
-      PGHOST: openelis-db
-      PGPORT: 5432
-      PGUSER: postgres
-      PGPASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in demo.env}
-      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
-      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
       ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_native_demo}
-      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
-    entrypoint: ["/usr/local/bin/harden-tenancy"]
-    read_only: true
-    volumes:
-      - ./demo/native/db-init/harden-tenancy.sh:/usr/local/bin/harden-tenancy:ro
-    tmpfs:
-      - /tmp:size=8m,mode=1777
-    networks: [internal]
 
-  keycloak:
-    extends:
-      file: docker-compose.yml
-      service: keycloak
-    networks:
-      internal:
-        aliases: [keycloak.openelis.org]
-
-  keycloak-exchange-config:
-    extends:
-      file: docker-compose.yml
-      service: keycloak-exchange-config
-    networks: [internal]
-
-  # DH-DEMO-001: reconciles the three fixed-username demo Keycloak users (see
-  # keycloak/reconcile-demo-users.sh) -- additive/idempotent, the same convergence idiom
-  # `keycloak-exchange-config`'s own reconciler already uses, never a realm import.
+  # Reconciles the three fixed-username demo Keycloak users -- additive and idempotent, the same
+  # convergence idiom the Exchange client reconciler uses, never a realm import. It creates
+  # accounts; it does not weaken authentication. Every demo login goes through the same real
+  # Authorization Code + PKCE path a production login does.
   keycloak-demo-users:
     image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
     restart: "no"
@@ -127,8 +61,8 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "/opt/daher/reconcile-demo-users.sh"]
     environment:
-      <<: *common-env
-      KEYCLOAK_INTERNAL_URL: http://keycloak.openelis.org:8080
+      TZ: ${TZ:-Africa/Djibouti}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
       KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in demo.env}
       DEMO_CLINICIAN_USERNAME: ${DEMO_CLINICIAN_USERNAME:-demo-clinician}
@@ -145,102 +79,36 @@ services:
     networks: [internal]
 
   adapter:
-    extends:
-      file: docker-compose.yml
-      service: adapter
+    depends_on:
+      # The demo's own extra dependency: the three demo accounts must exist before `demo_seed.py`
+      # can discover each one's Keycloak-assigned `sub`.
+      keycloak-demo-users:
+        condition: service_completed_successfully
     environment:
-      <<: *common-env
-      ADAPTER_DB_HOST: openelis-db
-      ADAPTER_DB_PORT: 5432
       ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_native_demo}
-      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
-      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in demo.env}
-      # DHEALTH-NATIVE-MVP-1.0 (2026-09-25): the issuer is the PUBLIC one, the JWKS URL is the
-      # internal one, and the split is the whole point. Keycloak mints `iss` from the origin the
-      # browser reaches it on (`KC_HOSTNAME`, i.e. KEYCLOAK_PUBLIC_URL); the adapter fetches signing
-      # keys over the Docker network, where `https://id.localhost` does not resolve and Caddy's
-      # internal CA is not trusted. docker-compose.yml already derives it exactly this way; this
-      # file had both hardcoded to the internal URL, which only agreed with reality while no
-      # browser could sign in at all. With a real login the token's `iss` is the public one, the
-      # hardcoded internal issuer did not match it, and `/exchange/v1/me` answered 401 to a
-      # perfectly valid token -- the app then showed "Votre session a expiré" to a user who had
-      # just successfully authenticated.
-      EXCHANGE_OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}/realms/dhealth-exchange
-      EXCHANGE_OIDC_JWKS_URL: http://keycloak.openelis.org:8080/realms/dhealth-exchange/protocol/openid-connect/certs
-      EXCHANGE_OIDC_AUDIENCE: dhealth-exchange-api
-      # DH-DEMO-001 "RESET SAFETY IS P0": the ONLY compose file that ever sets this. `demo_seed.py`
-      # refuses to run unless it reads exactly `1` here -- one of three independent facts checked
-      # (alongside the ADAPTER_DB_NAME value and the dhealth_demo_environment marker table).
+      # The ONLY place in this repository that sets this. The third of `demo_seed.py`'s three
+      # independent safety facts, and the one a production deployment can never satisfy by
+      # accident.
       ADAPTER_DEMO_ENVIRONMENT: ${ADAPTER_DEMO_ENVIRONMENT:?set ADAPTER_DEMO_ENVIRONMENT=1 in demo.env}
-      # Read only by `demo_seed.py` (via `os.environ` directly, never through `Settings`) to
-      # discover each demo user's own Keycloak-assigned `sub` -- see that module's own docstring
-      # for why this must be discovered, never assumed fixed. Not used by the running FastAPI
-      # app at all; the real adapter never talks to Keycloak's admin API.
-      DEMO_KEYCLOAK_ADMIN_URL: http://keycloak.openelis.org:8080
+      # Read only by `demo_seed.py`, never by the running FastAPI app: the real adapter never
+      # talks to Keycloak's admin API.
+      DEMO_KEYCLOAK_ADMIN_URL: http://keycloak:8080
       DEMO_KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
       DEMO_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in demo.env}
       DEMO_CLINICIAN_USERNAME: ${DEMO_CLINICIAN_USERNAME:-demo-clinician}
       DEMO_LAB_TECH_USERNAME: ${DEMO_LAB_TECH_USERNAME:-demo-lab-tech}
       DEMO_RELEASER_USERNAME: ${DEMO_RELEASER_USERNAME:-demo-releaser}
-    depends_on:
-      keycloak-demo-users:
-        condition: service_completed_successfully
-    networks: [internal]
-
-  daher-ui:
-    extends:
-      file: docker-compose.yml
-      service: daher-ui
-    networks: [internal]
 
   caddy:
-    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
-    restart: unless-stopped
-    init: true
-    depends_on:
-      daher-ui:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-    environment:
-      <<: *common-env
-      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN in demo.env}
-    ports:
-      - "${CADDY_HTTP_PORT:-80}:80"
-      - "${CADDY_HTTPS_PORT:-443}:443"
     volumes:
-      - ./demo/native/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/native/Caddyfile:/etc/caddy/Caddyfile:ro
       - native-demo-caddy-data:/data
       - native-demo-caddy-config:/config
-    # DHEALTH-NATIVE-MVP-1.0 (2026-09-25): the healthcheck below fetches the app through Caddy's
-    # own `app.<domain>` vhost, which is the right thing to check -- but `app.localhost` does not
-    # resolve inside this Alpine container. musl does not special-case the `.localhost` TLD the way
-    # a browser and glibc do, so `wget` failed with "bad address" on every attempt, the container
-    # never became healthy, and `scripts/demo/up.sh`'s own `--wait` ended in
-    # "container ... is unhealthy" even though Caddy was serving all three vhosts correctly.
-    # Found by booting the demo for the browser qualification. Mapping the name to loopback keeps
-    # the check meaningful (it still goes through the real vhost and the real TLS) rather than
-    # weakening it to a port probe.
-    extra_hosts:
-      - "app.${BASE_DOMAIN:-localhost}:127.0.0.1"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -q --no-check-certificate --spider https://app.$${BASE_DOMAIN}/ || exit 1
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-    networks: [internal]
 
 volumes:
   native-demo-db-data:
   native-demo-caddy-data:
   native-demo-caddy-config:
-  # Referenced by the `adapter` service's own volumes list, copied in unmodified by `extends:`
-  # (docker-compose.yml's own `adapter-audit` volume declaration is not itself carried across --
-  # only the service block is, so the top-level volume it references must be declared here too).
+  # Declared because the production file's `adapter` service mounts it. Demo-scoped like every
+  # other volume here, because the project name scopes it.
   adapter-audit:
-
-networks:
-  internal:

@@ -1,0 +1,311 @@
+# DHealth Native — the canonical production-shaped deployment (DHEALTH-NATIVE-DEPLOY-001).
+#
+# This file is the product. It contains exactly the services DHealth Native needs and nothing else:
+#
+#                            Internet
+#                               │
+#                             Caddy
+#                 ┌─────────────┼─────────────┐
+#                 ▼             ▼             ▼
+#            DHealth UI     Exchange       Keycloak
+#                               └──────┬──────┘
+#                                      ▼
+#                                 dhealth-db
+#
+# **Standalone on purpose — nothing here `extends:` docker-compose.yml.** The native demo does,
+# and that was the right trade for proving the application could boot without OpenMRS/OpenELIS:
+# `extends:` guarantees the service definitions cannot drift from the ones the real stack runs.
+# But Compose's `extends` *merges* `depends_on` from the base and gives a local override no way to
+# remove an entry (DH-DEMO-001 verified this directly), so every extended service arrives carrying
+# the maternity track's dependency graph with it. That is why the demo has a PostgreSQL service
+# called `openelis-db` aliased to `db.openelis.org` while running no OpenELIS at all: inherited
+# configuration, not product truth.
+#
+# A production topology has to be able to describe itself. So the roughly ninety lines below are
+# written out rather than inherited, and the cost -- two places that must be changed together when
+# the adapter's environment contract changes -- is paid deliberately and stated here rather than
+# discovered later. `adapter/tests/test_native_deployment_topology.py` is what keeps the two
+# honest: it asserts this graph mentions no OpenMRS/OpenELIS service, image or hostname at all.
+#
+# The historical maternity/reference-connector deployment in docker-compose.yml is untouched and
+# remains reproducible. Two deployment tracks, deliberately distinct, neither pretending to be the
+# other.
+#
+# Operator entry point:
+#     cp deploy/native/native.env.example .env.native   # then fill in the required values
+#     docker compose -f docker-compose.native.yml --env-file .env.native up -d --wait
+#
+# ⚠️ With BASE_DOMAIN=localhost Caddy issues from its own INTERNAL CA. That proves routing,
+# origins and cookie behaviour; it is not public certificate issuance and must never be read as
+# though it were.
+name: dhealth-native
+
+x-common-env: &common-env
+  TZ: ${TZ:-Africa/Djibouti}
+
+services:
+  # ---------------------------------------------------------------------------
+  # dhealth-db — PostgreSQL, two tenants: Keycloak and the Exchange adapter.
+  #
+  # Named for what it is. The historical stack co-tenants these on OpenELIS's own database
+  # (ADR-001), which is why that name exists there and why it does not exist here.
+  # ---------------------------------------------------------------------------
+  dhealth-db:
+    image: postgres:16-alpine
+    # TODO(DHEALTH-NATIVE-DEPLOY-001): digest not pinned. This environment's Docker cannot reach
+    # Docker Hub's blob CDN to pull and record one, and AGENTS.md forbids fabricating a digest
+    # that has not been pulled. Record the resolved digest from a machine that can pull.
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_exchange}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD}
+    volumes:
+      - dhealth-db-data:/var/lib/postgresql/data
+      - ./deploy/native/db-init/init-tenant-databases.sh:/docker-entrypoint-initdb.d/init-tenant-databases.sh:ro
+    healthcheck:
+      # Readiness of the server, not merely a listening port: `pg_isready` answers only once the
+      # cluster will accept connections, which is what every dependent service actually needs.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [internal]
+
+  # One-shot tenancy hardening. `init-tenant-databases.sh` runs only on a fresh volume (Postgres's
+  # own initdb.d contract); this converges an existing one, so an upgrade of a deployment that
+  # predates a hardening change is not left weaker than a fresh install.
+  dhealth-db-hardening:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      dhealth-db:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      PGHOST: dhealth-db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_exchange}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+    entrypoint: ["/usr/local/bin/harden-tenancy"]
+    read_only: true
+    volumes:
+      - ./deploy/native/db-init/harden-tenancy.sh:/usr/local/bin/harden-tenancy:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Keycloak — the only identity provider. There is no other authentication path in this
+  # deployment, in production or in the demo overlay: ADR-050's Authorization Code + PKCE against
+  # the `dhealth-exchange` realm and the `dhealth-native-ui` public client is how a browser gets
+  # in, and `EXCHANGE_OIDC_AUDIENCE` is what the adapter insists a token was minted for.
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
+    restart: unless-stopped
+    depends_on:
+      dhealth-db:
+        condition: service_healthy
+      dhealth-db-hardening:
+        condition: service_completed_successfully
+    # `start`, not `start-dev`: dev mode disables HTTPS enforcement and uses an in-memory cache,
+    # neither of which should be one flag away on a clinical box. Caddy terminates TLS.
+    command: ["start", "--import-realm", "--optimized=false"]
+    environment:
+      <<: *common-env
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://dhealth-db:5432/${KEYCLOAK_DB_NAME:-keycloak}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME_STRICT: "false"
+      # The origin a BROWSER reaches Keycloak on. Every issuer, redirect and login form action is
+      # built from it: DHEALTH-NATIVE-MVP-1.0 found that leaving it internal makes the login form
+      # post credentials to a hostname only the Docker network can resolve, so nobody can sign in.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:?set KEYCLOAK_PUBLIC_URL (e.g. https://id.example.org)}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN}
+      # Resolved into the committed realm JSON at import time, which is what keeps secrets out of
+      # the repository.
+      KEYCLOAK_EXCHANGE_API_CLIENT_SECRET: ${KEYCLOAK_EXCHANGE_API_CLIENT_SECRET:?set KEYCLOAK_EXCHANGE_API_CLIENT_SECRET}
+    volumes:
+      - ./keycloak/realm-config/dhealth-exchange-realm.json:/opt/keycloak/data/import/dhealth-exchange-realm.json:ro
+    healthcheck:
+      # Keycloak 26 serves health on the MANAGEMENT port 9000, not 8080, and the image ships no
+      # curl. Asserts the body says UP rather than that a port is open: during realm import the
+      # port is open and the server is not ready.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/localhost/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q UP <&3
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks: [internal]
+
+  # `--import-realm` deliberately refuses to overwrite an existing realm, which is safe
+  # persistence behaviour and also means a client added after a deployment's first boot would
+  # never arrive. This one-shot reconciles the Exchange client in place, additively.
+  keycloak-config:
+    image: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
+    restart: "no"
+    read_only: true
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/daher/reconcile-exchange.sh"]
+    environment:
+      <<: *common-env
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN}
+      DAHER_APP_PUBLIC_URL: ${DAHER_APP_PUBLIC_URL:-https://app.${BASE_DOMAIN}}
+    volumes:
+      - ./keycloak/reconcile-exchange.sh:/opt/daher/reconcile-exchange.sh:ro
+      - ./keycloak/mappers:/opt/daher/mappers:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: [ALL]
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # adapter — DHealth Exchange. Its entrypoint runs `alembic upgrade head` before serving, so a
+  # clean deployment converges an empty database to the current head with no separate migration
+  # step and no second migration system.
+  # ---------------------------------------------------------------------------
+  adapter:
+    image: daher-health/adapter:0.1.0
+    build:
+      context: ./adapter
+      target: runtime
+    restart: unless-stopped
+    init: true
+    read_only: true
+    depends_on:
+      dhealth-db:
+        condition: service_healthy
+      dhealth-db-hardening:
+        condition: service_completed_successfully
+      keycloak-config:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      ADAPTER_DB_HOST: dhealth-db
+      ADAPTER_DB_PORT: 5432
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_exchange}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD}
+      ADAPTER_AUDIT_PATH: /var/lib/daher/audit/audit.jsonl
+      ADAPTER_RETRY_MAX_ATTEMPTS: ${ADAPTER_RETRY_MAX_ATTEMPTS:-5}
+      ADAPTER_RETRY_MULTIPLIER_SECONDS: ${ADAPTER_RETRY_MULTIPLIER_SECONDS:-1}
+      ADAPTER_RETRY_MAX_SECONDS: ${ADAPTER_RETRY_MAX_SECONDS:-30}
+      # The issuer is the PUBLIC origin (that is what a real token's `iss` carries) and the JWKS
+      # URL is the internal one (that is what this container can reach). The split is deliberate;
+      # collapsing it to the internal URL makes the adapter answer 401 to perfectly valid tokens.
+      EXCHANGE_OIDC_ISSUER: ${EXCHANGE_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL}/realms/dhealth-exchange}
+      EXCHANGE_OIDC_JWKS_URL: ${EXCHANGE_OIDC_JWKS_URL:-http://keycloak:8080/realms/dhealth-exchange/protocol/openid-connect/certs}
+      EXCHANGE_OIDC_AUDIENCE: ${EXCHANGE_OIDC_AUDIENCE:-dhealth-exchange-api}
+    volumes:
+      - adapter-audit:/var/lib/daher/audit
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          body=json.load(urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5));
+          assert body == {'status': 'up'}
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+  daher-ui:
+    image: daher-health/ui:0.1.0
+    build:
+      context: ./ui
+      target: runtime
+    restart: unless-stopped
+    healthcheck:
+      # 127.0.0.1, not localhost: this image's musl libc resolves localhost to ::1 first and nginx
+      # binds 0.0.0.0 only.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # caddy — the only container publishing host ports. Everything else stays on the internal
+  # network, which is what makes "the adapter's health endpoints are not public" structural rather
+  # than a matter of nobody having typed the URL.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    init: true
+    depends_on:
+      daher-ui:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      adapter:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/native/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    # `app.<domain>` does not resolve inside this Alpine container -- musl does not special-case
+    # the `.localhost` TLD, and a real deployment's DNS is external. Mapping it to loopback keeps
+    # the healthcheck a real request through the real vhost and the real TLS.
+    extra_hosts:
+      - "app.${BASE_DOMAIN}:127.0.0.1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --no-check-certificate --spider https://app.$${BASE_DOMAIN}/ || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+volumes:
+  dhealth-db-data:
+  caddy-data:
+  caddy-config:
+  adapter-audit:
+
+networks:
+  internal:

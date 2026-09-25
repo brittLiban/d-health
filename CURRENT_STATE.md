@@ -1923,3 +1923,47 @@ negative controls executed and reverted; thirteen platform scenes at 1280/768/39
 Keycloak account provisioning, role removal, membership reactivation. Still not run, still not
 claimed: no real browser used by a person, no E2E, no live stack, no real Keycloak, and no CI
 conclusion.
+
+---
+
+## 2026-09-25 — a live stack, a real browser, and a Native deployment of its own
+
+This entry exists because the paragraph above it ("**Not run, and not claimed:** no real browser has
+been used by a person … no E2E; no live stack; no real Keycloak") was true when DH-MVP-ONBOARD-001
+wrote it and is **no longer true**. It is left standing as that ticket's accurate record and
+superseded here rather than edited.
+
+**What now runs, observed rather than written.** DHealth Native boots as five services —
+PostgreSQL 16, Keycloak 26, the Exchange adapter, the staff/patient UI, Caddy — from
+`docker-compose.native.yml`, on empty volumes, to Alembic head `0032_patient_notifications`. A real
+Chromium completes a real Keycloak Authorization Code + PKCE login through Caddy and walks the whole
+golden journey: clinic order → routing → lab accept → collection → processing → result entry →
+*entered is not released* → release → clinician review. **12 tests pass** — 7 journey phases and 5
+authorization refusals using browser-captured tokens. A stop/start keeps the order, the release and
+the review. PostgreSQL tenant isolation is proven over TCP with password authentication, in six
+cases including wrong-password denial.
+
+**What that is still not.** One operator, not a clinician. Synthetic data throughout. No person other
+than the implementing agent's driver has used the product, so **DH-USABILITY-001 remains `INTERNAL
+WORKFLOW REVIEW — NOT USER-QUALIFIED`** and stays there until F1/C1/L1 participate. `BASE_DOMAIN=
+localhost` means Caddy's internal CA, so this says nothing about public certificates, DNS, or a real
+domain. And it is **not** production-deployed, pilot-ready, clinically live, disaster-recovery
+qualified, security qualified, or Connect-integrated.
+
+**The honest read of the deployment itself.** Until today the only way to boot Native was a file
+called *demo*, whose PostgreSQL service was named `openelis-db` and aliased `db.openelis.org` while
+running no OpenELIS — an artifact of Compose `extends:` merging `depends_on` with no way to remove
+an entry, not a design choice about the product. `docker-compose.native.yml` inherits nothing, names
+its database `dhealth-db`, and a test suite asserts the rendered graph mentions no OpenMRS/OpenELIS
+service, image, dependency or hostname at all. The demo is now an overlay on it. The historical
+maternity/reference-connector stack in `docker-compose.yml` is untouched and remains the real
+production topology for that track; **the repo now has two deployment tracks on purpose**, and
+neither is obsolete.
+
+**Oldest unmet P0, unchanged and now more sharply scoped.** Backup plus a *performed* restore drill
+still does not exist. Native's entire state is one volume (`dhealth-db-data`), which makes the drill
+smaller than it has ever been — and still not done. Nothing in this entry touches it.
+
+**CI executed nothing for this work.** The billing refusal recorded in the DH-MVP-ONBOARD-001 entry
+above still stands, so every claim here is local qualification, and the image blobs it ran on were
+fetched out-of-band because this environment's dockerd still cannot reach Docker Hub's blob CDN.

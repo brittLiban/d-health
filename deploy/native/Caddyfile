@@ -1,0 +1,101 @@
+# DHealth Native — the public edge (DHEALTH-NATIVE-DEPLOY-001).
+#
+# The routing for the canonical Native deployment, and for the demo overlay that sits on top of
+# it: one file, so the demo cannot drift away from what production publishes.
+#
+# Three vhosts, because Native has three public surfaces. `emr.<domain>` and `lab.<domain>` do not
+# appear: OpenMRS and OpenELIS are the preserved reference/maternity track and are not part of
+# this deployment at all. The routing decisions themselves are the ones ADR-027, ADR-050 and
+# DH-EX-008 already settled -- this is a narrower service list, not a second routing design.
+#
+# What is deliberately NOT published, and must stay that way: the adapter's `/health/live`,
+# `/health/ready` and `/health/exchange-ready`, Keycloak's management port 9000, and every
+# notification route except the one Meta callback below. `exchange.<domain>` ends in a bare 404 so
+# a route added to the adapter later does not become public by omission.
+#
+# ⚠️ With BASE_DOMAIN=localhost this uses Caddy's INTERNAL CA -- a locally trusted certificate,
+# not a public one. It proves routing, origins and cookie behaviour; it proves nothing about
+# public certificate issuance.
+
+{
+	admin off
+}
+
+(common) {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# id.<domain> — Keycloak. Identical role to caddy/Caddyfile's own id. vhost.
+# ---------------------------------------------------------------------------
+id.{$BASE_DOMAIN} {
+	import common
+	reverse_proxy keycloak:8080 {
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Port 443
+	}
+}
+
+# ---------------------------------------------------------------------------
+# exchange.<domain> — DHealth Exchange API. Identical scoping to caddy/Caddyfile's own
+# exchange. vhost (DH-EX-008): only /exchange/v1/* is reachable, everything else 404s.
+# ---------------------------------------------------------------------------
+exchange.{$BASE_DOMAIN} {
+	import common
+
+	handle /exchange/v1/* {
+		reverse_proxy adapter:8000
+	}
+
+	# The Meta WhatsApp callback, and only it (DH-NOTIFY-META-001R/R2). One exact path, never
+	# `/notifications/v1/*`: that prefix is a namespace the adapter may grow into, and publishing
+	# the namespace would hand the edge every future route in it by omission.
+	#
+	# Published even in a deployment with notifications switched off, because the adapter fails
+	# closed on it (403 without an app secret and verify token) and because the alternative is the
+	# defect DH-NOTIFY-META-001R found: an operator configures the callback with Meta, the proxy
+	# 404s it, and a subscription that never verifies is indistinguishable from a provider that
+	# has sent nothing.
+	#
+	# The body limit matches `_MAX_CALLBACK_BODY_BYTES` exactly. A stricter edge would refuse
+	# callbacks the application considers legal, and that error would appear only on Meta's
+	# dashboard, never in DHealth's own logs. Caddy only routes here: it does not verify the
+	# token, check the HMAC or touch the body, and the plain `reverse_proxy` below is what keeps
+	# the raw bytes Meta signed intact across the hop.
+	handle /notifications/v1/meta/webhook {
+		request_body {
+			max_size 256KiB
+		}
+		reverse_proxy adapter:8000
+	}
+
+	handle {
+		respond 404
+	}
+}
+
+# ---------------------------------------------------------------------------
+# app.<domain> — DHealth Clinic / DHealth Lab (same static build, same same-origin Exchange
+# routing as caddy/Caddyfile's own app. vhost, DH-CLINIC-004A). No /openmrs/* or
+# /OpenELIS-Global/* handling here -- this demo never runs either backend, so there is nothing
+# for those paths to reach, and no CSRF-cookie-rewrite concern that only applies to them.
+# ---------------------------------------------------------------------------
+app.{$BASE_DOMAIN} {
+	import common
+
+	handle /exchange/v1/* {
+		reverse_proxy adapter:8000
+	}
+
+	handle {
+		reverse_proxy daher-ui:80
+	}
+}

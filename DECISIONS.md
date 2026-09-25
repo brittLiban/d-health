@@ -8306,3 +8306,82 @@ table is being reconsidered anyway, and where fixing it once is cheaper than pat
 Whether staff ever *read* DHealth on a handset (as opposed to working in it); whether a future
 handset-specific staff view is a responsive layout or a different product surface; and anything
 about the patient surface, which this decision does not touch.
+
+---
+
+## ADR-061 — ACCEPTED (2026-09-25, DHEALTH-NATIVE-DEPLOY-001): DHealth has two deployment tracks,
+## and the Native one inherits nothing from the other
+
+**Date:** 2026-09-25 · **Status:** ACCEPTED (architecture) · **Scope:** deployment topology for both
+tracks · **Supersedes nothing; constrains** DH-DEMO-001's demo project (ADR-047's environment is
+unaffected)
+
+### The decision
+
+```text
+docker-compose.yml               maternity / reference-connector track
+                                 OpenMRS O3 + MariaDB, OpenELIS + PostgreSQL,
+                                 Keycloak, adapter, UI, Caddy
+                                 preserved, unchanged, still the real production
+                                 topology for that track
+
+docker-compose.native.yml        DHealth Native product
+                                 PostgreSQL, Keycloak, adapter, UI, Caddy
+                                 requires no OpenMRS/OpenELIS/MariaDB service,
+                                 image, dependency or hostname
+                                 defined standalone -- `extends:` nothing
+
+docker-compose.native-demo.yml   an OVERLAY on the Native file
+                                 demo users + demo database name + seed authority
+                                 defines no service image of its own
+```
+
+1. **Native is deployable without the connector track.** Not "can be booted in a demo" — a
+   canonical, production-shaped file that names only what the product needs.
+2. **The Native file inherits nothing.** It duplicates service definitions rather than extending
+   them, and accepts the maintenance cost that follows.
+3. **The demo is an overlay, never a second topology.** Anything demo-only lives in the overlay or
+   in `demo/native/`, including the reset marker table.
+4. **Required secrets fail closed.** Every credential the Native deployment needs is declared
+   `${VAR:?}` so Compose refuses to render without it. No required secret has a default that would
+   work.
+5. **The historical stack is never deprecated by this.** Both files must stay reproducible.
+
+### Why duplication, when `extends:` was the right answer before
+
+DH-DEMO-001 chose `extends:` deliberately and for a good reason: an extended service cannot drift
+from the definition the real stack runs. That reason still holds for a *demo*. It does not hold for
+the product's own deployment, because of a Compose property DH-DEMO-001 verified empirically —
+**`depends_on` is merged from the base file and an override cannot remove an entry.**
+
+The consequence was not cosmetic. Every extended service arrived carrying the maternity track's
+dependency graph, so the only way to make the graph resolve was to keep the names those dependencies
+pointed at. The visible result was a PostgreSQL service **named `openelis-db`, aliased
+`db.openelis.org`, in a deployment running no OpenELIS at all**. Nobody decided that; it was
+inherited configuration, and it would eventually have been read as a statement about what DHealth
+Native requires. A product whose deployment file cannot describe the product is a documentation
+defect with a runtime shape.
+
+So the trade is stated rather than discovered: **~90 duplicated lines that must be edited alongside
+`docker-compose.yml` when the adapter's environment contract changes**, in exchange for a
+deployment file that is true. The mitigation is a test, not discipline —
+`adapter/tests/test_native_deployment_topology.py` asserts the exact service set, the absence of any
+legacy marker, the absence of `extends:`, that every service reaches the database by its real name,
+and that demo authority appears only in the overlay.
+
+### Consequences accepted
+
+- Two files to maintain, and a real risk of divergence in the adapter's environment block. The
+  topology tests catch structural divergence; they cannot catch a *semantically* stale variable.
+- Native and the connector track cannot share one Keycloak deployment as written; each names its
+  own. Running both at once on one host is not a supported configuration and was not qualified.
+- The Native file's `app.` vhost serves both the staff workspace and the patient surface from one
+  origin, as the UI already assumed.
+
+### What this does not decide
+
+Which track a given facility gets (that is enrollment, ADR-053/ADR-055, and per-facility). Anything
+about backup and restore, which remains the oldest unmet P0 and is deliberately untouched here.
+Whether the two tracks ever converge on one file — they may, once the connector track's own
+deployment is revisited, and this decision does not prejudge it. Nothing about certificates, DNS, or
+a real domain: the qualification ran on `localhost` with Caddy's internal CA.
