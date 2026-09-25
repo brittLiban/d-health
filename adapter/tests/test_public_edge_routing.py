@@ -30,6 +30,7 @@ from sqlalchemy import Engine
 
 from daher_adapter.app import create_app
 from daher_adapter.config import Settings
+from daher_adapter.notify.webhook import _MAX_CALLBACK_BODY_BYTES as META_MAX_CALLBACK_BYTES
 
 CADDYFILE = Path(__file__).resolve().parents[2] / "caddy" / "Caddyfile"
 
@@ -67,6 +68,26 @@ def _handled_paths(block: str) -> list[str]:
     return re.findall(r"^\s*handle\s+(\S+)\s*\{", without_comments, flags=re.MULTILINE)
 
 
+def _handler_body(block: str, path: str) -> str:
+    """The body of one ``handle <path> { ... }``, brace-matched.
+
+    Brace-matched rather than regex-terminated: the webhook handler now contains a nested
+    ``request_body { ... }``, and a non-greedy match to the first ``}`` would stop inside it and
+    report that the route no longer reaches the adapter.
+    """
+    marker = f"handle {path} {{"
+    start = block.index(marker) + len(marker)
+    depth = 1
+    for index in range(start, len(block)):
+        if block[index] == "{":
+            depth += 1
+        elif block[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return block[start:index]
+    raise AssertionError(f"unbalanced braces in the handler for {path}")
+
+
 @pytest.fixture(scope="module")
 def exchange_block() -> str:
     return _site_block("exchange.{$BASE_DOMAIN}")
@@ -79,21 +100,37 @@ def test_the_meta_webhook_path_is_published_on_the_exchange_host(exchange_block:
 
 def test_the_meta_webhook_is_forwarded_to_the_adapter(exchange_block: str) -> None:
     """Published is not the same as forwarded: the handler must reach the adapter."""
-    handler = re.search(
-        rf"handle\s+{re.escape(META_WEBHOOK_PATH)}\s*\{{(.*?)\}}", exchange_block, flags=re.DOTALL
+    assert "reverse_proxy adapter:8000" in _handler_body(exchange_block, META_WEBHOOK_PATH)
+
+
+def test_the_meta_webhook_carries_an_edge_body_limit_matching_the_application(
+    exchange_block: str,
+) -> None:
+    """DH-NOTIFY-META-001R2: the same bound, one hop earlier.
+
+    Defence in depth rather than the control -- ``notify/webhook.py`` reads the body incrementally
+    and refuses at the bound whatever any proxy did or failed to do. What this adds is that an
+    oversized request from the internet need not reach the application at all.
+
+    The two values must agree. An edge stricter than the application would reject callbacks DHealth
+    considers legal, and nobody would diagnose it: Meta's delivery dashboard would show an error
+    that never appears in DHealth's own logs.
+    """
+    body = _handler_body(exchange_block, META_WEBHOOK_PATH)
+    assert "request_body" in body, "the callback route declares no edge body limit"
+    limit = re.search(r"max_size\s+(\S+)", body)
+    assert limit is not None, "request_body is present with no max_size"
+    assert limit.group(1) == "256KiB", (
+        f"the edge limit is {limit.group(1)}; the application accepts "
+        f"{META_MAX_CALLBACK_BYTES} bytes and the two must agree"
     )
-    assert handler is not None, "the webhook handle block is missing"
-    assert "reverse_proxy adapter:8000" in handler.group(1)
+    assert META_MAX_CALLBACK_BYTES == 256 * 1024
 
 
 def test_the_exchange_api_route_is_unchanged(exchange_block: str) -> None:
     """B. The pre-existing public surface must survive this ticket exactly."""
     assert EXCHANGE_PREFIX in _handled_paths(exchange_block)
-    handler = re.search(
-        rf"handle\s+{re.escape(EXCHANGE_PREFIX)}\s*\{{(.*?)\}}", exchange_block, flags=re.DOTALL
-    )
-    assert handler is not None
-    assert "reverse_proxy adapter:8000" in handler.group(1)
+    assert "reverse_proxy adapter:8000" in _handler_body(exchange_block, EXCHANGE_PREFIX)
 
 
 def test_the_exchange_host_publishes_nothing_else(exchange_block: str) -> None:

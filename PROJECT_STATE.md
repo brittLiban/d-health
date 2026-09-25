@@ -19797,3 +19797,155 @@ run: the daemon is permission-denied in this environment and no compose file cha
 * **Nothing was proven about Docker networking**, TLS certificate issuance, or the compose topology.
 
 ### Human Decision Required: No
+
+---
+
+## DH-NOTIFY-META-001R2 — the callback body is bounded while it is read · 2026-09-25
+
+**Start `e081fe6` → this commit.** HEAD was exactly the expected commit, tree clean, nothing to
+adapt or preserve beyond leaving it alone. One note for the record: the ticket described `e081fe6`
+as local and unpushed, and by the time this ticket ran it **was** on the remote —
+`git ls-remote origin master` returned it, and `origin/master..HEAD` was empty. No push was issued
+from here in either ticket.
+
+### The defect, confirmed present before touching anything
+
+```python
+raw = await request.body()
+if len(raw) > _MAX_CALLBACK_BODY_BYTES:
+    raise HTTPException(413, ...)
+```
+
+The constant's own comment said the limit existed so "an unauthenticated caller must not be able to
+make the server allocate arbitrary memory before the signature has even been checked". The code
+asked Starlette to aggregate the whole body and consulted the limit afterwards. The limit was real;
+the sentence justifying it was not true of the code beneath it. This is the one unauthenticated POST
+surface the product has: anybody who can reach the URL and set a signature header gets that far.
+
+### The fix
+
+`_read_bounded_body(request, *, max_bytes)` consumes `request.stream()`, checks
+`seen + len(chunk) > max_bytes` **before** appending, and raises `CallbackTooLarge` without adding
+the offending chunk — and without reading on to compute a final length nobody needs. Twelve lines,
+one call site, no abstraction anybody has to learn.
+
+```text
+accepted maximum            262,144 bytes (256 KiB), unchanged
+exactly 262,144             accepted -- the bound is inclusive
+262,145                     413, before JSON parsing, before any state change
+what DHealth holds          at most the bound, at the moment it gives up
+```
+
+Authentication order is untouched: configuration → signature header present → bounded read →
+size refusal → HMAC over the exact accepted bytes → JSON → events. The 413 carries no body content,
+and the new log line (`patient_notification_webhook_payload_too_large`) carries no payload, no
+signature and no identifier, because everything about an unauthenticated oversized request is
+attacker-controlled.
+
+### What is claimed, and what is not
+
+**Claimed:** DHealth never asks for the whole body, and never accumulates more than the limit it
+advertises.
+
+**Not claimed anywhere:** anything about allocation inside uvicorn, Caddy or the kernel. A single
+ASGI message can arrive larger than the entire bound, in which case that chunk exists before the
+application can refuse it — `test_the_bounded_reader_refuses_a_single_chunk_larger_than_the_bound`
+exists specifically to state that limit rather than hide it. The docstring, `docs/ARCHITECTURE.md`,
+`docs/PATIENT-NOTIFICATION.md` and this entry all say the narrow thing.
+
+### Edge defence in depth
+
+`caddy/Caddyfile`, inside the existing one-path handle block and nowhere else:
+
+```
+request_body {
+    max_size 256KiB
+}
+```
+
+Validated against the Caddy actually used (2.11.4): `caddy validate` → `Valid configuration`, then
+exercised live. The value is deliberately identical to `_MAX_CALLBACK_BODY_BYTES`; a stricter edge
+would refuse callbacks the application considers legal and the error would appear only on Meta's
+delivery dashboard, never in DHealth's logs.
+`test_the_meta_webhook_carries_an_edge_body_limit_matching_the_application` fails if one moves
+without the other. `/exchange/v1/*`, the published route set, the 404 catch-all and GET verification
+are all unchanged.
+
+### Real local round trip — Caddy 2.11.4 → real FastAPI, HTTPS
+
+```text
+1 GET verification                 "dh-r2-challenge" echoed verbatim
+2 signed callback (326 bytes)      200
+3 same signature, 1 byte mutated   403   (raw-byte HMAC intact across the hop)
+4 signed, exactly 262,144 bytes    200   (the two bounds agree)
+5 signed, 262,145 bytes            413   answered by CADDY -- empty body
+6 unsigned 8 MiB                   413   never reaches the application
+7 /notifications/v1/something-else 404   Caddy
+8 /exchange/v1/me                  401   adapter, unchanged
+9 /health/ready                    404   Caddy
+   direct to the adapter, 262,145  413   the application's own bound, alone
+```
+
+Same honest limits as last time: `BASE_DOMAIN=localhost` with Caddy's internal CA, `adapter` mapped
+to loopback rather than resolved on the compose network (the Docker daemon is still
+permission-denied here), and a stubbed OpenELIS CA file so Caddy could provision. Harness and
+system state torn down afterwards.
+
+### Negative controls — four, executed and reverted
+
+| Control | Mutation | Red | Why that proves the property |
+|---|---|---|---|
+| NC-BODY-1 | `_read_bounded_body` body replaced with `await request.body()` + length check — the original defect | `test_the_bounded_reader_stops_at_one_byte_over_and_never_reads_the_rest`, `test_the_bounded_reader_refuses_a_single_chunk_larger_than_the_bound` | Both assert on which chunks were **consumed**. `body()` drains the stream, so the 8 MiB trailing chunk is read. Every HTTP-level 413 test stayed **green** — which is exactly the evidence that the pre-existing test could never have caught this |
+| NC-BODY-2 | `>` became `>=` at the bound | `test_the_bounded_reader_accepts_exactly_the_maximum`, `…stops_at_one_byte_over…`, `test_a_callback_of_exactly_the_maximum_is_accepted_over_http` | The bound is inclusive; an off-by-one silently refuses a legal Meta batch |
+| NC-BODY-3 | signature computed over `json.dumps(json.loads(raw))` | `test_a_signature_does_not_carry_across_a_byte_different_encoding`, plus `test_a_callback_of_exactly_the_maximum_is_accepted_over_http` and `test_w13[unparseable]` as correct collateral | Whitespace padding vanishes under normalisation and unparseable bodies now throw before the signature check — three different symptoms of the same defect |
+| NC-BODY-4 | `request_body` removed from the Caddyfile | `test_the_meta_webhook_carries_an_edge_body_limit_matching_the_application`; live probe case 5 still 413 but the **body changed** from Caddy's empty response to `{"detail":"payload too large"}` | Status code alone cannot tell the boundaries apart; the body can. It also confirms the application's bound stands alone when the edge is gone |
+
+### Tests
+
+`tests/test_patient_notification_transport.py` — nine added, one strengthened:
+
+* four against `_read_bounded_body` over a controllable ASGI receive channel that records every
+  chunk actually consumed (exact bytes returned; exactly the maximum; one byte over with an 8 MiB
+  trailing chunk that must never be requested; one oversized chunk);
+* three through the real route (exactly 256 KiB accepted; one byte over refused; a signature not
+  carrying across a byte-different encoding of the same JSON);
+* two on state (a plausible but unsigned callback naming a real `wamid` changes nothing; an
+  oversized correctly-signed callback for a real `wamid` changes nothing);
+* the pre-existing `test_an_oversized_callback_is_refused_before_it_is_parsed` kept, with a
+  docstring recording that it passed against the defective implementation and why.
+
+`tests/test_public_edge_routing.py` — one added (the edge limit matches the application), and its
+handler parsing made brace-aware, because a nested `request_body { … }` block broke the old
+non-greedy regex.
+
+### Local verification — measured in this ticket, not inherited
+
+```text
+pytest tests/test_patient_notification_transport.py        94 passed
+pytest tests/test_public_edge_routing.py                    8 passed
+pytest  (full adapter suite)                             1625 passed, 160 skipped, 696s
+caddy validate --adapter caddyfile --config caddy/Caddyfile
+                                                         Valid configuration
+```
+
+The previous entry measured 1615/160 for the same suite; +10 is this ticket's nine new tests plus
+the edge-limit assertion. `docker compose config` was not run — no compose file changed and the
+daemon is permission-denied here. No GitHub Actions evidence exists or is claimed.
+
+### Not done, deliberately
+
+No GitHub Actions work: no workflow touched, no Alembic `EXPECTED_HEAD`, no branch protection, no
+CI workaround, and nothing here claims GitHub CI passed. No notification semantics changed — `read`
+still ignored, inbound messages still ignored, `wamid` still the only authority, `SENT` still not
+`DELIVERED`, message content untouched, no change to grants, consent, `ResultDelivery` or
+`ConnectorDeliveryObligation`.
+
+### What is NOT true
+
+* **No Meta credential was used, no Meta endpoint contacted, no message sent, no handset receipt.**
+  The secrets in the round trip are synthetic strings invented for it.
+* **Pilot gate 5 remains uncleared** and WhatsApp remains `BLOCKED`.
+* **No real patient data.** Every payload is synthetic and every `wamid` is invented.
+* **Nothing was proven about the Docker topology, TLS issuance, or a public domain** — none exists.
+
+### Human Decision Required: No

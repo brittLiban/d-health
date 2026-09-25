@@ -176,6 +176,23 @@ exchange.{$BASE_DOMAIN} {
 	# bytes before anything is parsed, and a proxy that re-encoded the body would
 	# break every genuine callback.
 	handle /notifications/v1/meta/webhook {
+		# DH-NOTIFY-META-001R2 — the same 256 KiB bound the application enforces, one hop
+		# earlier. Defence in depth, not the control: `notify/webhook.py` reads the body
+		# incrementally and refuses at the bound whatever any proxy in front of it did, and
+		# that reader is what the security property rests on. This means an oversized
+		# request from the internet does not have to reach the application at all.
+		#
+		# Scoped to this one handle block, so it applies to this callback and nothing else --
+		# `/exchange/v1/*` is untouched, and a clinical upload elsewhere is not silently
+		# capped at a messaging vendor's callback size. GET carries no body and is unaffected.
+		#
+		# The value is deliberately identical to `_MAX_CALLBACK_BODY_BYTES`. Making the edge
+		# stricter would reject callbacks the application considers legal, which is a failure
+		# mode nobody would diagnose from Meta's side: the delivery dashboard would show an
+		# error DHealth's own logs had never seen.
+		request_body {
+			max_size 256KiB
+		}
 		reverse_proxy adapter:8000
 	}
 

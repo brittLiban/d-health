@@ -6,6 +6,56 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-25, DH-NOTIFY-META-001R2, directly on `master`.** From `e081fe6`. The second correction
+to DH-NOTIFY-META-001, and the one its own source comment had been promising since the day it
+shipped. `_MAX_CALLBACK_BODY_BYTES = 256 * 1024` was introduced so that "an unauthenticated caller
+must not be able to make the server allocate arbitrary memory before the signature has even been
+checked", and the route did:
+
+```python
+raw = await request.body()          # aggregates the entire body
+if len(raw) > _MAX_CALLBACK_BODY_BYTES:
+    raise HTTPException(413, ...)   # ... and only then consults the limit
+```
+
+The limit was real and enforced. It was also applied *after* DHealth had asked Starlette for
+everything the caller chose to send, on the one unauthenticated POST surface the product has.
+
+**Now bounded while reading.** `_read_bounded_body` consumes `request.stream()` chunk by chunk,
+checks the running total **before** appending, and refuses at the bound without adding the offending
+chunk and without reading on to compute a length nobody needs. Exactly 256 KiB is legal; one byte
+more is a 413 that never reaches JSON parsing and never touches a notification row.
+
+**The claim is deliberately narrow.** DHealth never asks for the whole body and never accumulates
+more than the limit it advertises. Nothing here bounds what uvicorn, Caddy or the kernel may hold —
+a single ASGI message can arrive larger than the entire limit, and no application code can prevent
+that. The docstring, the docs and the tests all say so rather than implying the stronger property.
+
+**Caddy applies the same 256 KiB on the same one route**, so an oversized internet request need not
+reach the application at all. Defence in depth, not the control: the reader refuses whatever any
+proxy did or failed to do. The two values are identical on purpose — an edge stricter than the
+application would reject callbacks DHealth considers legal, and the error would show only on Meta's
+delivery dashboard, never in DHealth's logs. A test fails if one is changed without the other.
+
+**Verified through the same real proxy the previous ticket used.** Caddy 2.11.4 against this exact
+Caddyfile, real `create_app()` behind it: the challenge handshake still echoes verbatim; a signed
+callback is accepted; the same signature with one byte changed is refused; a signed body of exactly
+262,144 bytes is **accepted** (the two bounds agree); 262,145 bytes is refused **by Caddy**, with
+Caddy's own empty body; an unsigned 8 MiB body never reaches the application; `/exchange/v1/*`,
+the health endpoints and the unpublished notification paths all behave exactly as before.
+
+Four negative controls, executed and reverted. Restoring `await request.body()` reddened the two
+tests that observe consumption — and **left every HTTP-level 413 test green**, which is the point:
+the pre-existing oversized-callback test could never have caught this, because `TestClient` has
+already assembled the body before the route runs. An off-by-one at the bound reddened the
+exact-maximum tests. Authenticating normalised JSON instead of raw bytes reddened the byte-different
+encoding test. Removing the edge limit left the live 413 in place but changed *who answered it* from
+Caddy's empty body to the application's JSON — which is how the two boundaries are told apart.
+
+Adapter suite re-measured; counts in `PROJECT_STATE.md`. No GitHub Actions work of any kind, and no
+claim that GitHub CI passed. No Meta credential, no Meta endpoint, no message, no handset: **pilot
+gate 5 remains uncleared.**
+
 **2026-09-24, DH-NOTIFY-META-001R, directly on `master`.** From `7e9ff01`. A correction, not a
 feature: the Meta webhook existed and the runbook told operators to point Meta at it, and
 **`caddy/Caddyfile` did not route the path**. `exchange.<BASE_DOMAIN>` forwarded `/exchange/v1/*`

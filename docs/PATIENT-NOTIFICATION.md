@@ -191,6 +191,20 @@ echoed back as `text/plain`. `POST` carries the events, and its authority is an 
 signature over the raw request body**, keyed with the Meta app secret and validated in constant
 time *before* anything is parsed. A missing signature is refused exactly like a wrong one.
 
+**The body is bounded while it arrives, at 256 KiB.** This route is the one unauthenticated POST
+surface DHealth has, and the signature cannot be checked until there are bytes to check it against,
+so the bytes are counted as they come rather than measured once they have all arrived: DHealth reads
+the request incrementally, refuses at the bound, and never accumulates more than it. Exactly 256 KiB
+is legal; one byte more is a 413 that never reaches JSON parsing or touches a notification row.
+Caddy applies the same limit on the callback route one hop earlier, so an oversized request from the
+internet need not reach the application at all — defence in depth, not the control.
+**[Corrected 2026-09-25, DH-NOTIFY-META-001R2.]** Until then the route called `request.body()` and
+checked the length afterwards: the limit was real but it was applied *after* asking for everything
+the caller chose to send, which is not what the code's own comment claimed. Note what is still not
+claimed: nothing here bounds what uvicorn, Caddy or the kernel may hold — a single chunk can arrive
+larger than the whole limit. The property is that **DHealth never asks for the whole body and never
+accumulates more than the limit it advertises**.
+
 Resolution is by `wamid` and nothing else. The WABA id, the `metadata.phone_number_id`, the
 `recipient_id` and any organization, order or notification id a payload carries are never read as
 authority over which row is touched. Receipts are idempotent and monotonic, and defended twice:

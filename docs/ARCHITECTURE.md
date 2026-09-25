@@ -2157,6 +2157,15 @@ routed neither, so a correctly configured Meta callback terminated at the edge �
 a subscription that never verifies looks exactly like a provider that has sent nothing, which this
 deployment's provider also has.
 
+**And it arrives bounded.** 256 KiB, enforced twice: Caddy caps the request on that one route, and
+the application reads the body incrementally and refuses at the same bound whatever the proxy did.
+The application's reader is the control; the edge is defence in depth. **Corrected 2026-09-25
+(DH-NOTIFY-META-001R2):** the route previously called `request.body()` and measured the result, so
+the limit applied only after DHealth had asked for everything an unauthenticated caller chose to
+send. What is claimed now is narrow and true — DHealth never requests the whole body and never
+accumulates past its limit — and not the stronger thing an ASGI application cannot promise, which is
+anything about what the server, the proxy or the kernel holds.
+
 **Why the link exists only on the left-hand path.** The raw `PatientAccessGrant` secret is returned
 exactly once and is unrecoverable afterwards (§19). A release-time message therefore cannot contain
 a working link without persisting the secret or re-issuing the grant — the first forbidden by the

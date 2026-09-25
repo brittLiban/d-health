@@ -19,6 +19,7 @@ the flow to a real handset (``docs/META-WHATSAPP-RUNBOOK.md``).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import inspect
@@ -29,6 +30,7 @@ from typing import Any
 
 import pytest
 from exchange_support import make_lab
+from fastapi import Request
 from fastapi.testclient import TestClient
 from notify_support import (
     SYNTHETIC_DESTINATION,
@@ -61,7 +63,11 @@ from daher_adapter.notify.models import (
     PatientNotificationAttempt,
 )
 from daher_adapter.notify.transport import NotificationTransport, TransportFailure
-from daher_adapter.notify.webhook import meta_signature
+from daher_adapter.notify.webhook import (
+    CallbackTooLarge,
+    _read_bounded_body,
+    meta_signature,
+)
 
 APP_SECRET = "unit-test-app-secret-not-real"  # noqa: S105 - fixture value
 VERIFY_TOKEN = "unit-test-verify-token-not-real"  # noqa: S105 - fixture value
@@ -1104,11 +1110,242 @@ def test_the_webhook_fails_closed_when_meta_is_not_configured(tmp_path, engine) 
 
 
 def test_an_oversized_callback_is_refused_before_it_is_parsed(tmp_path, engine) -> None:
+    """One byte over the bound is refused.
+
+    DH-NOTIFY-META-001R2 kept this test and stopped relying on it. It passed against the original
+    implementation, which called ``await request.body()`` and measured the result afterwards -- a
+    413 says the limit is enforced *somewhere*, and says nothing at all about whether DHealth asked
+    for the whole body first. `TestClient` has already assembled the payload by the time the route
+    runs, so this shape of test structurally cannot see the defect. The tests below can.
+    """
     app = _webhook_app(tmp_path, engine)
     raw = b"x" * (256 * 1024 + 1)
     with TestClient(app) as client:
         response = client.post("/notifications/v1/meta/webhook", content=raw, headers=_signed(raw))
     assert response.status_code == 413
+    # Nothing of the request may come back: the body is attacker-controlled and unauthenticated.
+    assert response.json() == {"detail": "payload too large"}
+
+
+# ---------------------------------------------------------------------------------------------
+# DH-NOTIFY-META-001R2: the callback body is bounded WHILE it is read, not measured afterwards.
+#
+# The original code was `raw = await request.body()` followed by `if len(raw) > MAX`. Its own
+# comment said an unauthenticated caller "must not be able to make the server allocate arbitrary
+# memory before the signature has even been checked", and the code did the opposite: it asked
+# Starlette to aggregate everything the caller chose to send, and consulted the limit only once it
+# had all of it.
+#
+# What is proven below is a property of DHealth's own code: it never requests the whole body, and
+# it never accumulates more than the limit it advertises. What is NOT proven, anywhere, is
+# anything about allocation inside uvicorn, Caddy or the kernel -- a single ASGI message can arrive
+# larger than the entire bound, and no application code can prevent that.
+# ---------------------------------------------------------------------------------------------
+
+MAX_BODY = 256 * 1024
+
+
+def _asgi_request(chunks: list[bytes]) -> tuple[Request, list[int]]:
+    """A real Starlette ``Request`` over a receive channel this test controls.
+
+    ``consumed`` records the size of every chunk the application actually asked for, which is the
+    observation that distinguishes a bounded reader from a buffering one: a reader that gives up at
+    the bound never asks for what follows.
+    """
+    consumed: list[int] = []
+    remaining = list(chunks)
+
+    async def receive() -> dict[str, Any]:
+        if not remaining:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        chunk = remaining.pop(0)
+        consumed.append(len(chunk))
+        return {"type": "http.request", "body": chunk, "more_body": bool(remaining)}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/notifications/v1/meta/webhook",
+        "headers": [(b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+    return Request(scope, receive), consumed
+
+
+def test_the_bounded_reader_returns_the_exact_bytes_it_was_given() -> None:
+    """A. Below the bound: every byte, in order, unmodified. These are the bytes Meta signed."""
+    chunks = [b'{"object":"whats', b'app_business_acc', b'ount","entry":[]}']
+    request, consumed = _asgi_request(chunks)
+
+    raw = asyncio.run(_read_bounded_body(request, max_bytes=MAX_BODY))
+
+    assert raw == b"".join(chunks)
+    assert consumed == [len(chunk) for chunk in chunks]
+
+
+def test_the_bounded_reader_accepts_exactly_the_maximum() -> None:
+    """B. The bound is inclusive: exactly 256 KiB is a legal callback, not a rejected one."""
+    chunks = [b"x" * (64 * 1024)] * 4
+    request, _consumed = _asgi_request(chunks)
+
+    raw = asyncio.run(_read_bounded_body(request, max_bytes=MAX_BODY))
+
+    assert len(raw) == MAX_BODY
+
+
+def test_the_bounded_reader_stops_at_one_byte_over_and_never_reads_the_rest() -> None:
+    """C + D. The load-bearing test of this ticket.
+
+    256 KiB arrives in four chunks, then one byte crosses the bound, then eight megabytes follow.
+    The eight megabytes must never be requested: DHealth has already decided, and reading on to
+    discover a final length it will never use is the whole defect.
+
+    ``await request.body()`` drains the stream to completion, so under the original implementation
+    the last chunk *is* consumed and this assertion fails. That is what makes this test evidence
+    rather than decoration -- see NC-BODY-1.
+    """
+    never_read = b"z" * (8 * 1024 * 1024)
+    chunks = [b"x" * (64 * 1024)] * 4 + [b"!", never_read]
+    request, consumed = _asgi_request(chunks)
+
+    with pytest.raises(CallbackTooLarge):
+        asyncio.run(_read_bounded_body(request, max_bytes=MAX_BODY))
+
+    # Five chunks offered and taken; the sixth never asked for.
+    assert consumed == [64 * 1024] * 4 + [1]
+    assert len(never_read) not in consumed
+    assert sum(consumed) <= MAX_BODY + 1
+
+
+def test_the_bounded_reader_refuses_a_single_chunk_larger_than_the_bound() -> None:
+    """D. One oversized chunk is refused without being accumulated.
+
+    The honest limit of this: by the time the application sees it, that chunk already exists --
+    the ASGI server built it. DHealth declining to copy it into its own buffer is all application
+    code can do, and is what this asserts.
+    """
+    request, consumed = _asgi_request([b"y" * (MAX_BODY + 1), b"more"])
+
+    with pytest.raises(CallbackTooLarge):
+        asyncio.run(_read_bounded_body(request, max_bytes=MAX_BODY))
+
+    assert consumed == [MAX_BODY + 1]
+
+
+def _padded_callback(total_bytes: int) -> bytes:
+    """A real Meta-shaped callback padded with insignificant JSON whitespace to an exact length.
+
+    Whitespace between tokens, so the payload stays valid and semantically identical while its raw
+    encoding reaches the byte count the bound is defined in.
+    """
+    base = _status_payload("wamid.SYNTHETIC-PADDED", "delivered")
+    assert base.startswith(b"{")
+    padding = total_bytes - len(base)
+    assert padding >= 0, "base payload already exceeds the requested size"
+    return b"{" + b" " * padding + base[1:]
+
+
+def test_a_callback_of_exactly_the_maximum_is_accepted_over_http(tmp_path, engine) -> None:
+    """B, through the real route: exactly 256 KiB is not refused for size."""
+    raw = _padded_callback(MAX_BODY)
+    assert len(raw) == MAX_BODY
+    assert json.loads(raw)["object"] == "whatsapp_business_account"
+
+    app = _webhook_app(tmp_path, engine)
+    with TestClient(app) as client:
+        response = client.post("/notifications/v1/meta/webhook", content=raw, headers=_signed(raw))
+
+    assert response.status_code == 200, response.text
+
+
+def test_a_callback_one_byte_over_the_maximum_is_refused_over_http(tmp_path, engine) -> None:
+    """C, through the real route. The pair with the test above is what pins the boundary."""
+    raw = _padded_callback(MAX_BODY + 1)
+    assert len(raw) == MAX_BODY + 1
+
+    app = _webhook_app(tmp_path, engine)
+    with TestClient(app) as client:
+        response = client.post("/notifications/v1/meta/webhook", content=raw, headers=_signed(raw))
+
+    assert response.status_code == 413
+
+
+def test_a_signature_does_not_carry_across_a_byte_different_encoding(tmp_path, engine) -> None:
+    """E. The HMAC input is the raw bytes, not the parsed object.
+
+    Two encodings of the *same* JSON: one compact, one with whitespace. They parse to equal
+    dictionaries, so any validator working from parsed or canonicalised content would accept the
+    signature of one for the other. Meta's scheme does not, and neither does this route.
+    """
+    payload = json.loads(_status_payload("wamid.SYNTHETIC-ENCODING", "delivered"))
+    compact = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    spaced = json.dumps(payload, indent=2).encode("utf-8")
+    assert compact != spaced
+    assert json.loads(compact) == json.loads(spaced)
+
+    app = _webhook_app(tmp_path, engine)
+    with TestClient(app) as client:
+        signed_for_compact = _signed(compact)
+        assert (
+            client.post(
+                "/notifications/v1/meta/webhook", content=compact, headers=signed_for_compact
+            ).status_code
+            == 200
+        )
+        # Same signature, same meaning, different bytes.
+        reused = client.post(
+            "/notifications/v1/meta/webhook", content=spaced, headers=signed_for_compact
+        )
+
+    assert reused.status_code == 403
+    assert reused.json() == {"detail": "invalid provider signature"}
+
+
+def test_a_plausible_but_unsigned_callback_changes_nothing(tmp_path, engine, sessions) -> None:
+    """F. Signature precedes trust: a well-formed payload naming a real wamid is still refused."""
+    repos = build_repos(sessions)
+    notification_id, wamid, _ = _sent_notification(sessions, repos, "Lab R2F", "r2f")
+    raw = _status_payload(wamid, "delivered")
+
+    app = _webhook_app(tmp_path, engine)
+    with TestClient(app) as client:
+        response = client.post(
+            "/notifications/v1/meta/webhook",
+            content=raw,
+            headers={"X-Hub-Signature-256": "sha256=" + "0" * 64},
+        )
+
+    assert response.status_code == 403
+    with sessions() as session:
+        assert session.get(PatientNotification, notification_id).state == (
+            NotificationState.SENT.value
+        )
+
+
+def test_an_oversized_callback_naming_a_real_wamid_changes_nothing(
+    tmp_path, engine, sessions
+) -> None:
+    """G. The size refusal happens before the payload is anything but bytes.
+
+    The body is a genuine, correctly signed receipt for a live notification, padded past the bound.
+    If the row moved, the route would have parsed and applied something it had already decided was
+    too large to read.
+    """
+    repos = build_repos(sessions)
+    notification_id, wamid, _ = _sent_notification(sessions, repos, "Lab R2G", "r2g")
+    base = _status_payload(wamid, "delivered")
+    raw = b"{" + b" " * (MAX_BODY + 1 - len(base)) + base[1:]
+    assert len(raw) == MAX_BODY + 1
+
+    app = _webhook_app(tmp_path, engine)
+    with TestClient(app) as client:
+        response = client.post("/notifications/v1/meta/webhook", content=raw, headers=_signed(raw))
+
+    assert response.status_code == 413
+    with sessions() as session:
+        assert session.get(PatientNotification, notification_id).state == (
+            NotificationState.SENT.value
+        )
 
 
 # ---------------------------------------------------------------------------------------------

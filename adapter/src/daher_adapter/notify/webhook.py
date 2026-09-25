@@ -52,13 +52,58 @@ from daher_adapter.notify.repository import PatientNotificationRepository
 logger = logging.getLogger("daher_adapter.notify.webhook")
 
 #: Meta batches status events, so this is more generous than a single-message provider needs while
-#: still being a bound: an unauthenticated caller must not be able to make the server allocate
-#: arbitrary memory before the signature has even been checked.
+#: still being a bound.
+#:
+#: **Corrected by DH-NOTIFY-META-001R2.** This constant's original comment claimed an
+#: unauthenticated caller "must not be able to make the server allocate arbitrary memory before the
+#: signature has even been checked", and the code did not deliver that: it called
+#: ``await request.body()`` -- which aggregates the *whole* body -- and measured the result
+#: afterwards. The limit rejected an oversized payload only after having asked for all of it. See
+#: ``_read_bounded_body``.
 _MAX_CALLBACK_BODY_BYTES = 256 * 1024
 
 #: The only ``object`` value this endpoint will process. A payload for some other Meta product
 #: reaching this URL is a misconfiguration, not an event.
 _EXPECTED_OBJECT = "whatsapp_business_account"
+
+
+class CallbackTooLarge(Exception):
+    """Raised by ``_read_bounded_body`` when accepting the next chunk would cross the bound."""
+
+
+async def _read_bounded_body(request: Request, *, max_bytes: int) -> bytes:
+    """The callback body, consumed incrementally, never accumulating more than ``max_bytes``.
+
+    DH-NOTIFY-META-001R2. The route this serves is the one unauthenticated POST surface DHealth
+    has: anybody who can reach the URL and set a signature header gets this far, and the signature
+    cannot be checked until there are bytes to check it against. So the bytes have to be bounded
+    *while* they arrive rather than measured once they have all arrived.
+
+    ``request.stream()`` yields the ASGI body messages as they come. The running total is checked
+    **before** a chunk is appended, and the offending chunk is never added to the buffer: crossing
+    the bound stops the read there rather than reading on in order to compute a final length nobody
+    needs. What DHealth holds at the moment it gives up is therefore at most ``max_bytes``.
+
+    What this does *not* claim, and must not be documented as claiming: it says nothing about
+    allocation inside the ASGI server. Uvicorn (or Caddy, or a kernel socket buffer) may have read
+    or be holding more than this, and a single ASGI message may itself arrive larger than the whole
+    bound -- in which case that one chunk exists in memory before this function can refuse it. The
+    property here is narrower and still worth having: **DHealth never asks for the whole body and
+    never accumulates more than the limit it advertises.**
+
+    Returns the exact bytes received, in order, unmodified -- no decoding, no normalisation. They
+    are the bytes Meta signed and the bytes the HMAC is computed over.
+    """
+    chunks: list[bytes] = []
+    seen = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if seen + len(chunk) > max_bytes:
+            raise CallbackTooLarge
+        chunks.append(chunk)
+        seen += len(chunk)
+    return b"".join(chunks)
 
 
 def meta_signature(app_secret: str, raw_body: bytes) -> str:
@@ -68,9 +113,10 @@ def meta_signature(app_secret: str, raw_body: bytes) -> str:
     dependency on one, and so the validation -- the part that matters for security -- is readable in
     one place.
 
-    The raw bytes matter and are why ``webhook`` reads ``request.body()`` before parsing anything:
-    JSON that is decoded and re-encoded is not byte-identical to what Meta signed, so a validator
-    working from a parsed object rejects every genuine callback and would be "fixed" by removing it.
+    The raw bytes matter, and are why the route authenticates the exact bytes
+    ``_read_bounded_body`` accepted before anything is parsed: JSON that is decoded and re-encoded
+    is not byte-identical to what Meta signed, so a validator working from a parsed object rejects
+    every genuine callback and would then be "fixed" by removing it.
     """
     digest = hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
@@ -155,11 +201,19 @@ def build_notification_webhook_router(
                 status_code=status.HTTP_403_FORBIDDEN, detail="missing provider signature"
             )
 
-        raw = await request.body()
-        if len(raw) > _MAX_CALLBACK_BODY_BYTES:
+        # DH-NOTIFY-META-001R2: bounded *while* reading, not measured afterwards. `request.body()`
+        # here would aggregate everything an unauthenticated caller chose to send and only then
+        # consult the limit -- which is what this code used to do, and what its own comment claimed
+        # it did not. The response carries no body content and the log line carries no payload,
+        # signature or identifier: everything about an unauthenticated oversized request is
+        # attacker-controlled.
+        try:
+            raw = await _read_bounded_body(request, max_bytes=_MAX_CALLBACK_BODY_BYTES)
+        except CallbackTooLarge:
+            logger.warning("patient_notification_webhook_payload_too_large")
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload too large"
-            )
+            ) from None
 
         # Signature over the raw bytes, **before** anything is parsed or trusted. Validating shape
         # first would turn this route into an oracle telling an unauthenticated caller which fields

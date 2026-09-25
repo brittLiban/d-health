@@ -145,6 +145,14 @@ Every `POST` must carry `X-Hub-Signature-256`, an HMAC-SHA256 of the **raw** bod
 `META_APP_SECRET`. DHealth validates before parsing. Without both the app secret and the verify
 token, the webhook refuses every request and notifications truthfully stop at `SENT`.
 
+**The callback body is capped at 256 KiB, in two places.** Caddy applies `request_body { max_size
+256KiB }` on this one route, and the application reads the body incrementally and refuses at the
+same bound regardless of what any proxy in front of it did. Both values are deliberately identical:
+an edge stricter than the application would reject callbacks DHealth considers legal, and the error
+would appear only on Meta's delivery dashboard, never in DHealth's own logs. If a genuine Meta batch
+ever exceeds this, raise **both** — `_MAX_CALLBACK_BODY_BYTES` in `notify/webhook.py` and the
+Caddyfile — and a test will fail if you raise only one.
+
 **Caddy must not buffer or rewrite the request body** on this route. A body that is decoded and
 re-encoded is not byte-identical to what Meta signed, and every genuine callback would be refused.
 The shipped configuration is a plain `reverse_proxy` with no `request_body` directive and no
