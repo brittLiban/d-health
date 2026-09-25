@@ -2319,3 +2319,80 @@ answers 404 to everything else. Container health endpoints (`/health`, `/health/
 Qualification evidence, negative controls, and the explicit list of what this does **not** claim
 (not production deployed, not pilot ready, not clinically live, not DR/security/human-usability
 qualified): `PROJECT_STATE.md`'s DHEALTH-NATIVE-DEPLOY-001 entry.
+
+
+## 26. Native disaster recovery (DHEALTH-NATIVE-RECOVERY-001) — added 2026-09-25
+
+The recovery model is **rebuild infrastructure from source control, restore only what is
+irreplaceable.** Three things are irreplaceable; everything else is in Git or in the operator's
+hands. Decision record: **ADR-062**. Full inventory, runbook and qualification boundary:
+`docs/NATIVE-RECOVERY.md`.
+
+```text
+   SOURCE CONTROL                 BACKUP ARCHIVE                OPERATOR CUSTODY
+   topology (compose)             exchange.dump                 BASE_DOMAIN, public URLs
+   migrations                     keycloak.dump                 every database password
+   realm + client definition      adapter-audit.tar.gz          the Keycloak admin password
+   Caddyfile                                                    the Exchange client secret
+   application images             + MANIFEST (sha256 each)      the backup passphrase
+        │                               │                              │
+        └───────────────────────────────┴──────────────────────────────┘
+                                        ▼
+                             a working DHealth Native deployment
+```
+
+**Two databases and one file volume.** The Exchange database is the clinical record. The Keycloak
+database is *who the staff are* — realm and client definitions are reconstructible from Git, user
+rows are not, and without them every `exchange_identities.subject` points at a subject that no
+longer exists: the clinical data restores and nobody can sign in to read it. The adapter's audit
+trail is file-backed, so no database dump contains it.
+
+**Whole databases, never a table list.** This is what makes the scope future-proof: a table added by
+a later ticket is in the archive the day it exists. Notification, patient-access, Connect and audit
+state are all covered by construction rather than by enumeration, and the drill proves it with a
+whole-database row census, table for table, rather than by naming the tables it happens to care about.
+
+**Two profile-gated one-shots**, `native-backup` and `native-restore`, defined in
+`docker-compose.native.yml` itself and built from `deploy/native/backup/Dockerfile` — derived from
+the same `postgres:16-alpine` the deployment runs, so `pg_dump`/`pg_restore` can never be a different
+major version from the server. Nothing depends on them and no `up` can start them. The encryption
+passphrase is named in **no** Compose file: Compose interpolates profile-gated services too, so a
+`${BACKUP_ENCRYPTION_PASSPHRASE:?}` there would break `docker compose config` for every operator who
+has never taken a backup. The wrappers pass it by name at run time.
+
+**Encryption is unchanged from ADR-025:** `openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:`. A
+different scheme would have been a decision, not a refactor.
+
+**The Native backup takes no Keycloak admin REST export**, unlike the historical sidecar. The realm
+and its clients are reconstructed from `keycloak/realm-config/dhealth-exchange-realm.json` plus
+`keycloak/reconcile-exchange.sh`, both in Git; what is not reproducible is the user rows, and those
+are in the database dump. Skipping the export also keeps client secrets out of the archive entirely.
+
+**Tenant isolation is part of the restore.** `CREATE DATABASE` grants `CONNECT` to `PUBLIC`, so a
+drop-and-recreate restore silently un-hardens the deployment — the defect the 2026-08-13 maternity
+drill found *after* it ran (`backup/restore-drill.md` §3). The Native restore re-hardens inline,
+preserves table ownership as recorded in the archive's own table of contents (never `--no-owner`),
+and then proves isolation over TCP with real passwords in six cases including both wrong-password
+denials. The drill runs that probe **between** the restore and the next `up`, because `up` re-runs
+`dhealth-db-hardening` and would otherwise mask a restore that failed to re-harden.
+
+**Everything is verified in staging before anything can change.** Decrypt → allowlist the archive's
+members (four exact basenames, which is stronger than filtering `..`) → check the format version →
+require three components named by the *restore script*, not by the manifest → re-compute every
+SHA-256 → refuse an Alembic revision this codebase does not contain → refuse a target with live
+sessions → require the Exchange database to be named by hand. Only then is one announced apply step
+entered. `adapter/tests/test_native_recovery_tooling.py` asserts that ordering, because the ordering
+is the safety property.
+
+**Two things this section also records about the deployment itself**, both found by needing them:
+
+* `docker-compose.native.yml` passed the adapter **no notification environment at all**, so
+  DH-NOTIFY-001/ADR-058's whole feature was unreachable in the canonical Native deployment and the
+  Meta webhook route §25 publishes could only ever answer 403. Now present, off by default. This is
+  precisely the cost §25 warned about — two files that must change together — and it was invisible
+  until a ticket needed durable notification state.
+* The recovery services run as root inside the container with **named capabilities** rather than
+  ambient ones: `DAC_READ_SEARCH` for the backup (the adapter's audit files are mode 0600 under its
+  own uid, and `cap_drop: [ALL]` takes away root's ability to read them — observed, not assumed),
+  and `DAC_OVERRIDE, CHOWN, FOWNER` for the restore, which must put those files back under that uid.
+  The alternative was loosening audit file permissions, which is the wrong trade.

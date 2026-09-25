@@ -34,7 +34,10 @@ NATIVE_ENV_EXAMPLE = REPO / "deploy" / "native" / "native.env.example"
 #: mentions any of them has re-acquired the coupling this file exists to prevent.
 LEGACY_MARKERS = ("openmrs", "openelis", "mariadb", "clinlims", "maternity")
 
-#: The services the canonical Native deployment is, exactly.
+#: The services the canonical Native deployment is, exactly. `native-backup`/`native-restore`
+#: (DHEALTH-NATIVE-RECOVERY-001) are in this set because they are defined in this file, but they are
+#: in the `recovery` profile and nothing depends on them, so no `up` can start them --
+#: `test_the_recovery_services_cannot_be_started_by_an_ordinary_up` is what holds that.
 EXPECTED_NATIVE_SERVICES = {
     "dhealth-db",
     "dhealth-db-hardening",
@@ -43,7 +46,12 @@ EXPECTED_NATIVE_SERVICES = {
     "adapter",
     "daher-ui",
     "caddy",
+    "native-backup",
+    "native-restore",
 }
+
+#: The two that must never run unless an operator asks for them by name.
+RECOVERY_SERVICES = ("native-backup", "native-restore")
 
 
 def _directives(path: Path) -> str:

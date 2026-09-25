@@ -23,7 +23,11 @@ if (!baseURL) {
 
 export default defineConfig({
   testDir: './native',
-  testMatch: /.*\.spec\.ts/,
+  // Narrowed by DHEALTH-NATIVE-RECOVERY-001, which added `03-`/`04-` specs to the same directory:
+  // this config means "the golden journey and its authorization boundaries", and must keep meaning
+  // exactly that. The recovery specs have their own config (`native-recovery.config.ts`) because
+  // they are only meaningful against a deployment that has just been restored.
+  testMatch: /0[12]-.*\.spec\.ts/,
   // A full clinic -> lab -> release -> review -> patient journey through a real browser, real
   // Keycloak round trips and real database writes is not a 30-second test.
   timeout: 240_000,

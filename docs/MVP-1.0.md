@@ -518,6 +518,37 @@ clinician**: DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUA
 here is production-deployed, pilot-ready, clinically live, or disaster-recovery qualified.
 `docs/ARCHITECTURE.md` §25 describes the two deployment tracks.
 
+**2026-09-25 dated update (DHEALTH-NATIVE-RECOVERY-001):** **pilot gate 4 — a *performed* restore
+drill rather than a script that exists — is now cleared for the Native/Exchange track.** It is the
+first of `STATUS.md` §H's gates to clear, and the oldest unmet pinned P0 on this side of the
+repository.
+
+What was actually done: a populated synthetic Native deployment was backed up to one encrypted
+archive, **every durable volume was then deleted** (`down -v` — PostgreSQL holding both databases,
+the adapter's file-backed audit trail, Caddy's data), a clean deployment was rebuilt from source
+control and proved *not* to contain the source state, the archive was restored into it, PostgreSQL
+tenant isolation was re-proved over TCP with real passwords, the **same staff identity from before
+the backup** signed in through real Keycloak in a real Chromium, the **same order, release version
+and clinician review** were found through the real product, and a **new complete clinical workflow**
+was then carried out on the restored deployment. Seven negative controls were executed and reverted.
+
+**What this changes about the rows above: nothing.** Recovery is not a clinical capability, and no
+row moves. One row's *deployment* reality did change on the way through, though: this file's
+DH-NOTIFY-001 notification work was **unreachable in the canonical Native deployment** until today —
+`docker-compose.native.yml` passed the adapter no notification environment at all, so the Meta
+webhook route the previous ticket published at the edge could only ever answer 403. That block now
+exists, off by default. The feature's qualification level is unchanged and ADR-003's gate is
+untouched: **WhatsApp stays `BLOCKED`, pilot gate 5 is not cleared**, and the durable notification
+state this drill recovered was created on the `fake` provider, which has no network code at all.
+
+**Still not cleared, and not claimed:** off-site recovery (no archive has left the host, and Native
+has no uploader — if gate 4 is read as requiring off-site too, it is not cleared), scheduled backup
+for Native, restore at realistic data volume, real Keycloak token-validation qualification (gate 1),
+manual live demonstration (gate 3), real-provider messaging (gate 5), clinical sign-off (gate 6),
+human usability (DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`), and any
+production deployment. The maternity/reference-connector track keeps its own recovery status: its
+2026-08-13 drill stays partially verified and still owes a re-run. Detail: `docs/NATIVE-RECOVERY.md`.
+
 ## 9. Explicit out-of-scope list
 
 DHealth MVP 1.0 does **not** require:

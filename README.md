@@ -709,6 +709,37 @@ docker exec daher-health-adapter-1 python -c \
 
 ## Backup and restore
 
+**Two deployment tracks, two backups (ADR-061).** Pick the one matching what you are running.
+
+### DHealth Native (`docker-compose.native.yml`)
+
+```bash
+read -rs BACKUP_ENCRYPTION_PASSPHRASE && export BACKUP_ENCRYPTION_PASSPHRASE
+
+scripts/native/backup.sh                       # encrypted backup of a LIVE deployment, no downtime
+scripts/native/backup.sh --status              # last result, and the archives, decrypting nothing
+scripts/native/restore.sh verify <archive>     # re-check hashes; touches no database
+scripts/native/restore.sh restore <archive> --confirm-destroy-database dhealth_exchange
+scripts/native/restore.sh verify-tenancy       # run this BETWEEN a restore and the next `up`
+```
+
+**Full runbook, with the durable-state inventory and the exact recovery order:
+[`docs/NATIVE-RECOVERY.md`](docs/NATIVE-RECOVERY.md).** Two databases plus the adapter audit volume
+are backed up; the topology, migrations, realm definition and Caddy certificates are rebuilt from
+this repository instead.
+
+A **performed destructive drill** exists for this track as of 2026-09-25: the volumes were deleted,
+the archive restored into a clean deployment, and the same clinical records found again through a
+real browser — then a new workflow completed. `scripts/native/qualify-recovery.sh` is that drill, and
+it destroys the deployment it is pointed at, so it refuses to run without
+`--yes-destroy-this-deployment` and refuses `.env.native` outright unless told twice.
+
+⚠️ **Off-site is required by default and not implemented for Native.** An unconfigured production run
+ends `FAILED` with its encrypted local archive retained. Nothing has ever left the host, so **off-site
+recovery is not qualified**; there is no Native scheduler yet either.
+
+### Maternity / reference-connector (`docker-compose.yml`)
+
 ```bash
 docker compose --profile backup run --rm \
   -e BACKUP_ENCRYPTION_PASSPHRASE="<your-passphrase>" \
@@ -728,6 +759,9 @@ documents two traps found by actually performing one:
 - That drop-and-recreate then **discards tenant isolation**, because a fresh PostgreSQL database
   grants `CONNECT` to `PUBLIC`. Re-run the hardening and re-verify all nine cases afterwards. The
   restore is not complete until that passes.
+
+That second trap is why the Native restore re-hardens inline and then proves isolation over TCP
+before it will report success. This track's own drill still owes a re-run.
 
 ## Not yet present
 

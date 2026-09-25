@@ -225,6 +225,33 @@ services:
       EXCHANGE_OIDC_ISSUER: ${EXCHANGE_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL}/realms/dhealth-exchange}
       EXCHANGE_OIDC_JWKS_URL: ${EXCHANGE_OIDC_JWKS_URL:-http://keycloak:8080/realms/dhealth-exchange/protocol/openid-connect/certs}
       EXCHANGE_OIDC_AUDIENCE: ${EXCHANGE_OIDC_AUDIENCE:-dhealth-exchange-api}
+      # Patient notification (DH-NOTIFY-001/ADR-058, Meta WhatsApp per DH-NOTIFY-META-001/ADR-059).
+      #
+      # Added by DHEALTH-NATIVE-RECOVERY-001, which found this block missing: this file published
+      # `/notifications/v1/meta/webhook` at the edge while passing the adapter no META_* variable at
+      # all, so the route could only ever answer 403 and the whole notification feature was
+      # unreachable in the canonical Native deployment. Exactly the cost this file's header warns
+      # about -- two places that must change together -- caught by needing durable notification
+      # state to prove recovery of it.
+      #
+      # Off by default and every value optional, which is the frictionless state config.py's
+      # `_notification_settings` documents. Turning it ON makes a missing credential a refusal to
+      # start rather than a deployment that looks fine and silently sends nothing.
+      DHEALTH_NOTIFICATIONS_ENABLED: ${DHEALTH_NOTIFICATIONS_ENABLED:-false}
+      DHEALTH_NOTIFICATION_PROVIDER: ${DHEALTH_NOTIFICATION_PROVIDER:-meta}
+      # Native knows its own patient origin, so this is derived rather than demanded -- unlike the
+      # historical stack, where the patient surface is not served from a DHealth-owned vhost.
+      DHEALTH_PATIENT_PUBLIC_BASE_URL: ${DHEALTH_PATIENT_PUBLIC_BASE_URL:-https://app.${BASE_DOMAIN}}
+      DHEALTH_NOTIFICATION_DEFAULT_REGION: ${DHEALTH_NOTIFICATION_DEFAULT_REGION:-}
+      META_WHATSAPP_ACCESS_TOKEN: ${META_WHATSAPP_ACCESS_TOKEN:-}
+      META_WHATSAPP_PHONE_NUMBER_ID: ${META_WHATSAPP_PHONE_NUMBER_ID:-}
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: ${META_WHATSAPP_BUSINESS_ACCOUNT_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-}
+      META_TEMPLATE_LANGUAGE: ${META_TEMPLATE_LANGUAGE:-fr}
+      META_TEMPLATE_PATIENT_ACCESS_FR: ${META_TEMPLATE_PATIENT_ACCESS_FR:-}
+      META_TEMPLATE_PATIENT_UPDATE_FR: ${META_TEMPLATE_PATIENT_UPDATE_FR:-}
     volumes:
       - adapter-audit:/var/lib/daher/audit
     tmpfs:
@@ -299,6 +326,123 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # native-backup / native-restore — disaster recovery (DHEALTH-NATIVE-RECOVERY-001).
+  #
+  # Both are in the `recovery` profile, so no ordinary `up` can start them and nothing in the
+  # service graph depends on them. They are one-shots an operator invokes:
+  #
+  #     scripts/native/backup.sh                       take an encrypted backup now
+  #     scripts/native/restore.sh verify <archive>      check one, touching no database
+  #     scripts/native/restore.sh restore <archive>     destructive, requires naming the database
+  #
+  # The encryption passphrase is deliberately NOT named anywhere in this file. Compose interpolates
+  # profile-gated services too, so a `${BACKUP_ENCRYPTION_PASSPHRASE:?}` here would make
+  # `docker compose config` fail for every operator who has never taken a backup. The wrappers pass
+  # it through by name at run time and the payload scripts require it; a topology test asserts this
+  # file never mentions it.
+  #
+  # Where archives go: NATIVE_BACKUP_DIR is a bind mount, never a named volume. A named volume in
+  # this project would be destroyed by the same `down -v` that a real disaster simulates -- an
+  # archive that dies with the thing it was protecting is not a backup. The default keeps it in the
+  # repository working tree (gitignored) so a first run works; a production deployment points it at
+  # separate storage. docs/NATIVE-RECOVERY.md says this in the place an operator will read it.
+  # ---------------------------------------------------------------------------
+  native-backup:
+    profiles: ["recovery"]
+    image: daher-health/native-backup:0.1.0
+    build:
+      context: ./deploy/native/backup
+    restart: "no"
+    read_only: true
+    # Root inside the container, deliberately. The adapter writes its audit files mode 0600 as its
+    # own uid 10001, and a backup that cannot read the audit trail would either fail or -- worse --
+    # quietly produce a smaller archive. The alternative is loosening those file permissions, which
+    # is the wrong trade. This is a one-shot with a read-only root filesystem, no capabilities, a
+    # read-only mount of the volume it copies, and no published port; the historical backup sidecar
+    # runs as root for the same reason.
+    user: "0:0"
+    depends_on:
+      dhealth-db:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/native-backup"]
+    environment:
+      <<: *common-env
+      PGHOST: dhealth-db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_exchange}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      NATIVE_BACKUP_STAGING_DIR: /tmp/native-backup
+      # Production default: a run with no off-site destination ends FAILED with its encrypted local
+      # archive retained. Native has no uploader yet, so this is the honest state of the contract
+      # rather than a relaxation of it.
+      BACKUP_REQUIRE_OFFSITE: ${BACKUP_REQUIRE_OFFSITE:-true}
+    volumes:
+      # Read-only: a backup has no business writing to the audit trail it is copying.
+      - adapter-audit:/audit:ro
+      - ${NATIVE_BACKUP_DIR:-./backup/native-archives}:/backup
+    # Staging lives in RAM, so a decrypted dump never touches a disk even transiently. Sized for a
+    # pilot-scale deployment; a larger one raises it, and the runbook says so.
+    tmpfs:
+      - /tmp:size=1g,mode=0700
+    # Root alone is not enough to read another uid's 0600 file: that ability IS a capability, and
+    # `cap_drop: [ALL]` takes it away. Granting exactly the read-side one -- observed, not guessed:
+    # without it `tar` reports "can't open audit/exchange-audit.jsonl: Permission denied" -- keeps
+    # everything else dropped, including every capability that could modify anything.
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    networks: [internal]
+
+  native-restore:
+    profiles: ["recovery"]
+    image: daher-health/native-backup:0.1.0
+    build:
+      context: ./deploy/native/backup
+    restart: "no"
+    read_only: true
+    # Root, so `tar --numeric-owner` can restore the audit files still owned by the adapter's uid
+    # 10001. Extracting them as any other user would leave a trail the application cannot append to.
+    user: "0:0"
+    depends_on:
+      dhealth-db:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/native-restore"]
+    environment:
+      <<: *common-env
+      PGHOST: dhealth-db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      # The tenant passwords, so the post-restore isolation proof can authenticate over TCP as the
+      # real roles. Unix-socket trust would prove nothing about tenancy.
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_exchange}
+      ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
+      ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD}
+      NATIVE_BACKUP_STAGING_DIR: /tmp/native-restore
+    volumes:
+      # Writable here, unlike the backup service: restoring the file-backed audit trail is part of
+      # restoring the deployment.
+      - adapter-audit:/audit
+      - ${NATIVE_BACKUP_DIR:-./backup/native-archives}:/backup:ro
+      # The repository's own migrations, so the tool can refuse an archive whose Alembic revision
+      # this codebase does not contain. Unmounted is a refusal, not a skipped check.
+      - ./adapter/migrations/versions:/migrations/versions:ro
+    tmpfs:
+      - /tmp:size=1g,mode=0700
+    # Restoring the audit trail means writing into a directory owned by another uid and putting the
+    # files back under that uid with their original modes. Those are three capabilities, named
+    # rather than implied by "run as root": everything else stays dropped.
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE, CHOWN, FOWNER]
     networks: [internal]
 
 volumes:

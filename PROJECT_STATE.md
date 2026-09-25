@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-DEPLOY-001,
-> 2026-09-25 — this parenthetical has now gone stale four times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-RECOVERY-001,
+> 2026-09-25 — this parenthetical has now gone stale five times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -20365,5 +20365,263 @@ enrollment is ADR-055, not ADR-053). The exec bit on `scripts/demo/qualify-journ
 `100644` by DHEALTH-NATIVE-MVP-1.0 and therefore not runnable as `./scripts/demo/qualify-journey.sh`
 as documented, was fixed in this ticket's commit — a previous ticket's defect riding along, disclosed
 rather than folded in silently.
+
+### Human Decision Required: No
+
+---
+
+## DHEALTH-NATIVE-RECOVERY-001 — we destroyed DHealth Native and brought it back · 2026-09-25
+
+**Start `7e082a7` → this commit. New decision: ADR-062.** HEAD was `7e082a7`
+(`docs(DHEALTH-NATIVE-DEPLOY-001)`), tree clean, nothing newer to preserve — so the starting state was
+exactly the canonical Native deployment the ticket assumed. Nothing was reset, rebased or squashed.
+
+### The claim, in one sentence
+
+A populated synthetic DHealth Native deployment was backed up to one encrypted archive; **every
+durable volume was deleted**; a clean deployment was rebuilt from source control and proved not to
+hold the source state; the archive was restored; tenant isolation was re-proved over TCP **before**
+anything started; and then the **pre-backup staff identity signed in through real Keycloak in a real
+Chromium** and the **same order, release version and clinician review** were found through the real
+product — after which a **complete new clinical workflow** was carried out on the recovered
+deployment.
+
+### Durable-state inventory (observed, not assumed)
+
+| | Class | Where |
+|---|---|---|
+| Exchange database `dhealth_exchange` — clinical record, patient-access grants, notification rows, Connect rows, `exchange_security_audit_events` | **MUST BACK UP** | `dhealth-db-data` |
+| Keycloak database `keycloak` — the **user rows** | **MUST BACK UP** | same volume |
+| Adapter audit trail `audit.jsonl` + `exchange-audit.jsonl` (364 bytes after one journey) | **MUST BACK UP** | `adapter-audit` |
+| PostgreSQL roles, and their passwords | RECONSTRUCTIBLE + OPERATOR-SUPPLIED | init script + operator |
+| Database grants / tenant hardening | RECONSTRUCTIBLE, and actively re-established by the restore | — |
+| Keycloak realm, clients, mappers, roles | RECONSTRUCTIBLE | `keycloak/realm-config/` + reconcilers, in Git |
+| Alembic schema | RECONSTRUCTIBLE | migrations, applied by the adapter entrypoint |
+| Caddy data/config (ACME cache, internal CA) | RECONSTRUCTIBLE | destroyed in the drill; came back serving all three vhosts |
+| Compose topology, Caddyfile, images | RECONSTRUCTIBLE | Git |
+| Every password, client secret, the backup passphrase | **OPERATOR-SUPPLIED** | never in the archive, Git or a Compose file |
+| Container filesystems, logs, Keycloak cache, connector heartbeat | EPHEMERAL | — |
+
+**Two databases and one file volume.** The asymmetry that matters: the Keycloak *realm* is
+reconstructible and the Keycloak *users* are not — lose those rows and the clinical record restores
+perfectly while nobody can sign in to read it, because every `exchange_identities.subject` points at
+a subject that no longer exists. That is why the Native backup takes **no** Keycloak admin REST
+export (unlike the historical sidecar): the reproducible half is reproduced from Git, and skipping
+the export keeps client secrets out of the archive entirely.
+
+### What was built
+
+Option **B** of the ticket's three: a Native-specific implementation sharing the repository's
+primitives, not its code. The historical `backup/backup.sh` understands MariaDB, OpenMRS,
+`clinlims` and a live realm export; Native's understands two PostgreSQL databases and one volume.
+Bending one into the other would have been larger, not smaller, and would have put the maternity
+track's real clinical software one bug away from a Native change.
+
+```text
+deploy/native/backup/Dockerfile          postgres:16-alpine + openssl (not in the base image)
+deploy/native/backup/native-backup.sh    pg_dump x2 + tar + MANIFEST + openssl enc
+deploy/native/backup/native-restore.sh   verify | verify-tenancy | restore
+scripts/native/_compose.sh               one definition of "which deployment"
+scripts/native/backup.sh                 operator entry, --status
+scripts/native/restore.sh                operator entry, destructive path needs the DB named
+scripts/native/recovery-sentinels.sh     capture | assert-absent | assert-present
+scripts/native/qualify-recovery.sh       the 20-step destructive drill
+ui/e2e/native/03-recovery-source.spec.ts grant + notification, through the real UI
+ui/e2e/native/04-recovery-proof.spec.ts  13 tests: the same records, then new work
+adapter/tests/test_native_recovery_tooling.py   28 structural guarantees
+```
+
+`native-backup` and `native-restore` are **profile-gated one-shots in `docker-compose.native.yml`
+itself** — the production file, not a demo one — so the tooling under test is the tooling a
+production operator would run. No `up` can start them and nothing depends on them.
+
+### The archive
+
+`dhealth-native-<UTC>.tar.gz.enc`, **118 720 bytes** for this drill. AES-256-CBC, PBKDF2, salted,
+passphrase by environment — ADR-025's mechanism, unchanged on purpose. Contents: `MANIFEST`,
+`exchange.dump` (195 391 B), `keycloak.dump`, `adapter-audit.tar.gz`. The manifest records format
+version, UTC timestamp, both database names and owners, the Alembic revision read **from the
+database**, the PostgreSQL server version, both dump start timestamps, the consistency boundary, and
+a byte size plus SHA-256 per component. No secret of any kind.
+
+**Whole databases, never a table list** — so notification, patient-access, Connect and audit state
+are in the archive by construction rather than by enumeration, and a table added by a later ticket is
+covered the day it exists.
+
+### The drill, and what each step proved
+
+| Step | Evidence |
+|---|---|
+| 1 config | both compose files render |
+| 2 clean source | 5 services healthy, baseline **0 orders**, seeded |
+| 3 source state | **12 passed** — the real-browser golden journey and its 5 authorization refusals |
+| 4 extra durable state | **1 passed** — patient access issued *with* a notification through the real UI: 1 grant, 1 enrollment, 1 notification, 1 attempt, state **SENT** on provider `fake`. Plus a synthetic Connect installation (inserted with SQL, disclosed below) |
+| 5 sentinels | order, patient, release version, review, org ids, 3 Keycloak `user_entity.id`s, a SHA-256 of the released observations, a **51-table census**, audit file 364 B |
+| 6 backup | **3s**, 118 720 B |
+| 7 archive hygiene | begins with an openssl salt header, contains no recognisable plaintext, nothing but `*.enc` and `last-run.status` in the directory, and the archive verifies |
+| 8 **destruction** | `down -v` — **4s** |
+| 9 absence | **0 containers**, **0 Native/demo volumes** on the host; the archive survives outside them |
+| 10 clean target | rebuilt from source control, **97s**, revision `0032_patient_notifications`, **0 orders, 0 organizations** |
+| 11 **clean target is clean** | every sentinel id ABSENT, including all three Keycloak user ids |
+| 12 stop | adapter, keycloak, caddy, UI stopped; only the database up |
+| 13 restore | **8s** including verification, apply, ownership check and the tenancy proof |
+| 14 **tenancy, before any `up`** | 6/6 over TCP with real passwords, both wrong-password denials included |
+| 15 start | **50s** restore-complete → application ready; edge `app` 200, `id` realm 200, `exchange/v1/me` **401** |
+| 16 **the same objects** | 10/10 sentinels; **every table returned, 51 of 51**, and the whole-database row census identical table for table; audit file 364 B again; notification `SENT` with **0 DELIVERED**; Connect installation `synthetic-recovery-drill:REGISTERED` |
+| 17 **the real product** | **13 passed** — recovered identity login, same order, release + review, lab side, patient grant, authorization, then a whole new journey |
+| 18 immutability | sentinels re-asserted after the new work: released content still hashes the same. 2 orders (1 restored + 1 new), 2 release versions, 2 reviews, **attempts still 1** |
+| 19 cleanup | the captured grant deleted; no plaintext, dump, manifest or passphrase file survives |
+| 20 summary | **RECOVERY DRILL PASSED**, exit 0 |
+
+### Recovery sentinels — the defence against the obvious false green
+
+The demo baseline seeds organisations and a patient with **fixed names**, so a clean environment that
+was merely re-seeded looks identical on screen. Every "same record" claim is therefore keyed on
+identifiers captured before the backup, asserted absent on the clean target and present afterwards:
+
+```text
+order                ea0b18bf-… (the clinic table shows its first 8 characters, which is the
+                                 same string the browser assertion looks for)
+release version      2ea07ec7-…  v1
+review               65c153b3-…  NO_FOLLOW_UP_REQUIRED
+patient              f3e576cb-…
+release fingerprint  sha256 over the version's bound observations, 2 of them
+keycloak users       demo-clinician / demo-lab-tech / demo-releaser, by user_entity.id
+```
+
+The Keycloak ids are the check that separates **restored identity state** from **a reconciler having
+run again**: the clean target's `keycloak-demo-users` one-shot creates the same three usernames with
+brand-new ids, and only a restore brings the original ids back (`3/3 by id`). The reconciler was read
+before being trusted — it looks a user up and `update users/$id`, never deleting — so the ids survive
+the post-restore boot.
+
+### Tenant isolation is part of the restore
+
+`CREATE DATABASE` grants `CONNECT` to `PUBLIC`, so a drop-and-recreate restore silently un-hardens the
+deployment. The 2026-08-13 maternity drill did exactly that and found out afterwards
+(`backup/restore-drill.md` §3). Here the restore re-hardens inline, preserves table ownership as
+recorded in the archive's own table of contents, and then proves isolation over TCP. **The proof runs
+between the restore and the next `up`**, because `up` re-runs `dhealth-db-hardening` and would
+otherwise mask a restore that had not done its job — that ordering is asserted by a test and
+demonstrated by NC-RECOVERY-4.
+
+### Negative controls — seven executed and reverted
+
+| Control | Mutation | What went red |
+|---|---|---|
+| **NC-1** incomplete backup | `native-backup.sh` omits `adapter-audit.tar.gz` from archive and manifest | `verify` and `restore` both: *"required component 'adapter-audit.tar.gz' is missing from the archive"*. The required set is named in the restore script, not read from the manifest — otherwise a backup that forgot a component produces a manifest that agrees with itself perfectly |
+| **NC-2** corrupt component | a byte appended to `exchange.dump` **after** the manifest was written | *"exchange.dump MISMATCH (manifest 195391/8ed6015713dc, actual 195392/df0b040fdb3f)"* → *"1 component(s) failed integrity verification -- no database was touched"*. Orders 2 → 2 |
+| **NC-3** wrong passphrase | restore with `this-is-not-the-passphrase` | *"decryption failed -- wrong passphrase or corrupt archive. Nothing was read from it and no database was touched."* Target unchanged: `2\|2\|2` before and after |
+| **NC-4** tenancy not re-hardened | the inline `REVOKE ALL PRIVILEGES ON DATABASE … FROM PUBLIC` removed from `restore_database` | the restore's own tenancy proof reported **`keycloak role -> exchange database ALLOWED`** and **`adapter role -> keycloak database ALLOWED`** — 2 of 6 cases wrong — and refused: *"the deployment is NOT tenant-isolated"*. The standalone `verify-tenancy`, run before any `up` could re-harden it, reported the same two. Reverted; `git diff` on the payload empty |
+| **NC-5** false-green fresh state | destroy, boot the clean product, **skip the restore** | **all ten** sentinel checks WRONG (`the same order exists: expected 1, got 0`; the release fingerprint expected a hash and got nothing; `the same Keycloak user rows returned: expected 3, found 0`) and `RECOVERY-2` failed — **while all five services reported healthy and `app` answered 200**. A green "stack healthy" cannot satisfy this ticket |
+| **NC-6** identity state missing | the recovered clinician deleted from Keycloak, Exchange data left intact | `RECOVERY-1 — the pre-backup identity signs in through real Keycloak after the restore` **failed**, with the Exchange side fully intact (1 order, 4 identities) and Keycloak rows matching the sentinel id down to **0**. Clinical data without identity state is not a recovered deployment |
+| **NC-7** read-only recovery | `ALTER DATABASE … SET default_transaction_read_only = on` | `RECOVERY-7 — a NEW order can be prescribed and routed after recovery` failed, while **2 orders stayed readable**. Old data readable, new work impossible — detected. Reverted, and writability re-proved |
+
+**NC-7 taught something about its own revert.** The first attempt issued
+`ALTER DATABASE … RESET default_transaction_read_only` over a connection **to the mutated database** —
+which is itself a write, and was refused, so the control reported a successful revert while leaving
+the database read-only. It has to be issued from another database (`-d postgres`). Caught by reading
+the revert line instead of trusting it; the corrected run shows `none` and a passing write probe.
+
+### Four defects this ticket found, three of them in its own instruments
+
+1. **`docker-compose.native.yml` passed the adapter no notification environment at all.**
+   DH-NOTIFY-001/ADR-058's whole feature was unreachable in the canonical Native deployment, and the
+   Meta webhook route DHEALTH-NATIVE-DEPLOY-001 published at the edge could only ever answer 403.
+   Precisely the two-files-must-change-together cost ADR-061 wrote down, invisible until a ticket
+   needed durable notification state. Now present, **off by default**.
+2. **An ownership check that would have weakened a security property.** The first version asserted
+   every table belongs to the tenant role. The demo overlay's `dhealth_demo_environment` marker is
+   deliberately owned by the superuser so the application cannot write the fact that authorizes a
+   destructive reset — the check now compares against the archive's own table of contents instead.
+3. **A census built on a statistics estimate.** `pg_stat_user_tables.n_live_tup` lags until
+   autovacuum catches up, so the source under-reported rows created seconds earlier while the freshly
+   restored side reported them correctly — the drill failed on its own instrument. Now exact counts
+   via `query_to_xml`. A census that can make an unchanged database disagree with itself is not
+   evidence.
+4. **A silent `set -e` exit.** `scripts/native/_compose.sh` declares `set -euo pipefail` and is
+   *sourced*, so the drill runs under `-e` whatever its own header says. `LEAKED="$(grep … | wc -l)"`
+   — where finding nothing is the **success** case — ended a whole run with no message at all, twice.
+   Fixed with `|| true` and the trap written down at the `source` line.
+
+### Also observed and recorded
+
+* The lab queue defaults to `Nouveaux`, so a completed order lives under `Terminés`. RECOVERY-4
+  asserted against the default queue and failed — the test being wrong about the product, not the
+  product having lost the order.
+* `demo/native/demo.env` now sets `DHEALTH_NOTIFICATIONS_ENABLED=true` with provider `fake`, so the
+  demo has notifications on. `notify/fake.py` has no network code of any kind and names the native
+  demo running offline as its reason for existing. `demo_seed reset`'s `TRUNCATE … CASCADE` clears the
+  notification tables along with the grants they reference, so the demo reset boundary is unaffected.
+* 8 local adapter test failures were a **missing declared dependency** (`phonenumbers`, in
+  `requirements.txt`, absent from the local venv) rather than a regression; installing it fixed them.
+  No application source changed in this ticket.
+
+### Measured timings — measurements, not an RTO
+
+```text
+clean source deployment up + seeded             108s
+source golden journey (real browser)             24s
+encrypted backup                                  3s
+destruction (down -v)                              4s
+clean target deployment up (no restore yet)       97s
+restore (verify + apply + tenancy proof)           8s
+restore complete -> application ready             50s
+browser recovery proof + post-recovery journey    23s
+archive size                                 118 720 bytes
+```
+
+One workstation, one run, **~118 KB of data**. Nothing here says anything about a clinic-year, and the
+1 GiB `tmpfs` staging size is a pilot-scale assumption. Setting an operational target needs a
+realistic dataset and a real host.
+
+### What this clears, and what it does not
+
+**Pilot gate 4 — a performed restore drill rather than a script that exists — is CLEARED for the
+Native/Exchange track** (`STATUS.md` §H). First of the six to clear.
+
+**Not cleared, and not claimed:** **off-site recovery** (no archive has left this host; Native has no
+uploader; the production contract still *requires* off-site, so an unconfigured production run ends
+`FAILED` with its local archive retained — and if gate 4 is read as requiring off-site too, it is not
+cleared). No Native backup scheduler. No restore at realistic data volume. No passphrase rotation. Not
+production deployed, pilot ready, clinically live, security qualified, Connect integrated. **Gate 5
+(WhatsApp) is untouched** — ADR-003 stays `BLOCKED`, and this drill's notification reached `SENT`,
+never `DELIVERED`, because only a signed provider receipt writes that. **Gate 1** (real Keycloak token
+validation), **gate 3** (manual live demonstration) and **gate 6** (clinical sign-off) unchanged.
+DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`.
+
+**The maternity/reference-connector track keeps its own recovery status.** Its 2026-08-13 drill is
+still partially verified and still owes a re-run; `backup/backup.sh`, `backup/scheduler.sh`,
+`backup/Dockerfile` and `docker-compose.yml` are **byte-identical** to before this ticket (only scope
+notes were added to that directory's two documents). This entry does not retire it.
+
+### Disclosed deviations
+
+* The drill ran on the canonical Native topology **plus the demo overlay**, which supplies synthetic
+  staff identities and a deterministic baseline a production deployment deliberately lacks. The
+  backup and restore tooling exercised is the production tooling, reading the production env
+  contract; the overlay changes nothing about what is captured or how it is restored.
+* `BASE_DOMAIN=localhost`, so Caddy issues from its own internal CA. Destroying `caddy-data`
+  regenerates that CA — harmless here, an availability concern with ACME rate limits on a real domain.
+* The **synthetic Connect installation was inserted with SQL**, because this deployment exposes no
+  interface for registering a connector and building a vendor adapter was explicitly out of scope. Its
+  only job is to stop "Connect durable state survives" being a vacuous claim about an empty table.
+  Every core qualification record was created by clicking the real product.
+* Application images were **not rebuilt** during the drill: this environment's dockerd cannot reach
+  the registry for base-image metadata. The drill builds only the recovery tooling image and uses the
+  deployment's existing application images, which is also the right behaviour for a recovery
+  rehearsal. The two digest-pinned services still run through an uncommitted local-images override,
+  and `postgres:16-alpine` — inherited by the backup image — remains **not digest-pinned** (open P1).
+* No GitHub Actions file was touched. CI executed nothing; the billing refusal already on record
+  stands, and the `native-demo-boot` breakage disclosed by DHEALTH-NATIVE-DEPLOY-001 is unchanged.
+
+### Recommendation for the next ticket, not started
+
+**Off-site durability for Native backups, and a schedule.** The gate that just cleared has exactly one
+named hole, and the production contract already fails closed around it — every unconfigured run
+reports `FAILED`, which is the correct state of an unbuilt feature and also an alarm nobody wants
+ringing indefinitely. A ticket that adds an uploader, exercises it against a disposable
+S3-compatible target, and then restores **from the off-site copy** would close it. A Native scheduler
+belongs in the same ticket. Deliberately not begun here.
 
 ### Human Decision Required: No

@@ -48,3 +48,10 @@ openmrs-config/modules/*/*/target/
 # DHEALTH-NATIVE-MVP-1.0: the browser golden-journey report, written at the repository root by
 # scripts/demo/qualify-journey.sh. Evidence of a run, not part of the source.
 native-journey-results.json
+
+# ---- DHEALTH-NATIVE-RECOVERY-001: Native encrypted backup archives ----
+# The default NATIVE_BACKUP_DIR. Archives are encrypted, but an encrypted clinical backup is still
+# a clinical backup and has no business in version control. Production points NATIVE_BACKUP_DIR at
+# separate storage anyway (docs/NATIVE-RECOVERY.md §3).
+backup/native-archives/
+native-recovery-results.json

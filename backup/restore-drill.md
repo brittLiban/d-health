@@ -1,5 +1,16 @@
 # Restore drill — performed 2026-08-13
 
+> **Read this as history, 2026-09-25 (DHEALTH-NATIVE-RECOVERY-001).** This is the
+> **2026-08-13 OpenMRS/OpenELIS** drill, for the maternity / reference-connector track. It is kept
+> exactly as it was written, including its own two unmet acceptance legs and the tenancy
+> re-hardening gate it identified after the fact — that gate is the reason the Native restore
+> re-hardens inline and then proves it, and it remains this track's own outstanding item.
+>
+> It is **not** the Native drill and was never re-run by DHEALTH-NATIVE-RECOVERY-001. The Native
+> destructive recovery qualification is `docs/NATIVE-RECOVERY.md` plus `PROJECT_STATE.md`'s
+> DHEALTH-NATIVE-RECOVERY-001 entry. This document is not superseded by it; the two cover different
+> deployments.
+
 **Ticket:** DH-015 (pinned P0) · **Status: PERFORMED, PARTIAL COVERAGE.** Two acceptance legs could
 not be exercised because the data they need does not exist yet. They are named in §6 and the drill
 **must be re-run** before pilot-ready is claimed.

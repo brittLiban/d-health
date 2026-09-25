@@ -8385,3 +8385,102 @@ about backup and restore, which remains the oldest unmet P0 and is deliberately 
 Whether the two tracks ever converge on one file — they may, once the connector track's own
 deployment is revisited, and this decision does not prejudge it. Nothing about certificates, DNS, or
 a real domain: the qualification ran on `localhost` with Caddy's internal CA.
+
+---
+
+## ADR-062 — ACCEPTED (2026-09-25, DHEALTH-NATIVE-RECOVERY-001): Native recovery restores only what
+## cannot be rebuilt, and a restore that has not proven tenancy is not finished
+
+**Date:** 2026-09-25 · **Status:** ACCEPTED / IMPLEMENTED (operations) · **Scope:** disaster recovery
+for the canonical Native deployment (ADR-061) · **Reuses** ADR-025's encryption and passphrase
+custody unchanged · **Does not touch** the maternity/reference-connector track's own backup (DH-014)
+or its 2026-08-13 drill (DH-015)
+
+### The decision
+
+```text
+   rebuild from SOURCE CONTROL          restore from the ARCHIVE
+   ---------------------------          ------------------------
+   compose topology                     the Exchange database
+   Alembic migrations                   the Keycloak database
+   Keycloak realm + client definition    the adapter audit volume
+   Caddyfile, and Caddy's ACME cache
+   application images                   supplied by the OPERATOR
+   PostgreSQL roles                     ------------------------
+   database grants / tenant hardening    every password and client secret
+                                        the backup passphrase
+```
+
+1. **Restore only what is irreplaceable.** Three components, whole databases plus one file volume.
+2. **Dump whole databases, never a table list.** A table a later ticket adds is in the archive the day
+   it exists.
+3. **No Keycloak admin REST realm export.** The realm and its clients are reconstructed from Git;
+   only the user rows are irreplaceable, and they are in the database dump.
+4. **Every check happens in staging; one announced step applies.** Integrity is re-computed, not
+   inferred from successful decryption, and the required component list lives in the restore tool
+   rather than in the manifest.
+5. **A restore is not finished until tenant isolation has been proven over TCP**, and the proof must
+   be run *before* the next `docker compose up`.
+6. **Off-site remains required by default and is not implemented for Native.** An unconfigured
+   production run ends `FAILED` with its encrypted local archive retained.
+
+### Why the Keycloak database is MUST BACK UP and its realm is not
+
+The realm JSON and the reconciler are in Git, so the realm, its clients, its roles and its mappers
+come back from a `git clone`. **Who the staff are does not.** Every `exchange_identities.subject` is a
+Keycloak subject id; lose those rows and the clinical record restores perfectly while nobody can sign
+in to read it, and re-creating accounts with the same usernames mints *new* subjects that match
+nothing. That asymmetry is the whole reason the two are classified differently, and the drill asserts
+it by identifier: the clean target's reconciler creates the same three usernames with new ids, and
+only a restore brings the original ids back.
+
+Skipping the REST export has a second benefit that made it easy: an admin export can contain client
+secrets, and not taking one keeps them out of the archive entirely.
+
+### Why tenancy is re-established by the restore and not left to the next boot
+
+`CREATE DATABASE` grants `CONNECT` to `PUBLIC`. A restore that drops and recreates therefore *un-hardens*
+the deployment, silently. The 2026-08-13 maternity drill did exactly this and noticed afterwards
+(`backup/restore-drill.md` §3, recorded as a defect in the procedure).
+
+Two layers now exist and both are deliberate: the restore re-hardens inline, immediately after
+`CREATE DATABASE`, and `dhealth-db-hardening` converges it again on the next `up`. The consequence
+that matters is about *evidence*, not redundancy: because `up` re-hardens, a check run after `up`
+would pass even if the restore had not done its job. **The proof therefore has to happen between the
+restore and the next `up`**, over TCP with real passwords — a Unix-socket `trust` connection
+authorizes by local uid and says nothing about tenancy. `verify-tenancy` exists as its own command for
+exactly that reason, and the negative control that removes the inline re-hardening is what shows the
+ordering is load-bearing rather than tidy.
+
+Ownership is preserved rather than stripped, and verified against the archive's own table of
+contents. `--no-owner` would hand every table to the superuser and leave the tenant role unable to
+write its own data — the same class of defect, one step along. Verifying against the archive rather
+than against "everything belongs to the tenant role" was not the first attempt: the demo overlay's
+marker table is deliberately owned by the superuser so the application cannot write the fact that
+authorizes a destructive reset, and a stricter check would have quietly required that property to be
+given up.
+
+### Consequences accepted
+
+* **Two backup implementations to maintain.** Native's shares the repository's primitives with the
+  historical sidecar but not its code. A bug fixed in one is not fixed in the other, which is the
+  price of the historical track's real clinical software never being destabilised by Native work.
+* **Off-site is a failing default, not a silent one.** Every unconfigured production run reports
+  `FAILED`. That is louder than it is convenient, and it is the correct state of an unbuilt feature.
+* **No scheduler for Native.** Backups are invoked by hand until a follow-up builds one.
+* **The passphrase is in no Compose file at all.** Compose interpolates profile-gated services, so a
+  `${...:?}` there would break `docker compose config` for every operator who has never taken a
+  backup.
+* **The recovery one-shots run as root with named capabilities** (`DAC_READ_SEARCH` to read the
+  adapter's 0600 audit files; `DAC_OVERRIDE, CHOWN, FOWNER` to put them back under its uid). The
+  alternative was loosening audit-file permissions.
+* **A brief cross-database consistency window** is accepted and documented rather than closed by
+  freezing clinical operations: two hot `pg_dump` runs seconds apart, both timestamps in the manifest.
+
+### Not decided here
+
+Off-site destination, retention policy, or encryption-at-rest for the storage the archives land on.
+Passphrase rotation, or re-encrypting existing archives. PBKDF2 iteration count, which stays at
+openssl's default because changing it would be a format decision. Recovery time objectives — the
+drill's timings are measurements from one workstation with a tiny dataset and are deliberately not
+written as targets. Whether the maternity track's own backup should eventually adopt any of this.

@@ -6,6 +6,49 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-25, DHEALTH-NATIVE-RECOVERY-001, directly on `master`.** From `7e082a7`. **DHealth Native
+has been destroyed and brought back.** A populated synthetic deployment was backed up to one
+encrypted archive; **every durable volume was then deleted**; a clean deployment was rebuilt from
+source control and proved not to hold the source state; the archive was restored; PostgreSQL tenant
+isolation was re-proved over TCP **before** anything was started; and then, in a real Chromium, the
+**pre-backup staff identity signed in through real Keycloak** and the **same order, release version
+and clinician review** were found through the real product — followed by a complete **new** clinical
+workflow on the recovered deployment. 13 browser tests, seven negative controls executed and
+reverted.
+
+**Pilot gate 4 — a *performed* restore drill rather than a script that exists — is CLEARED for the
+Native/Exchange track (§H).** It is the first of the six to clear. Two caveats travel with it and are
+stated there: **off-site durability is still unexercised** (no archive has left the host, Native has
+no uploader, and the production contract still *requires* off-site — so an unconfigured production
+run ends `FAILED` with its local archive retained), and the **maternity/reference-connector track
+keeps its own recovery status**, its 2026-08-13 drill still partially verified and still owing a
+re-run. Decision: **ADR-062**. Runbook: `docs/NATIVE-RECOVERY.md`.
+
+**What is backed up, and what is deliberately not.** Two databases and one file volume: the Exchange
+database, the Keycloak database, and the adapter's file-backed audit trail. Whole databases, never a
+table list — so notification, patient-access, Connect and audit state are covered by construction,
+proved by a whole-database row census that matched table for table. Topology, migrations, the realm
+and client definition, PostgreSQL roles and Caddy's certificates are rebuilt from this repository
+instead; every password and the backup passphrase stay in the operator's own custody, and the
+passphrase is named in no Compose file at all.
+
+**One defect in the previous ticket's own work, found by needing it.**
+`docker-compose.native.yml` passed the adapter **no notification environment**, so DH-NOTIFY-001's
+whole feature was unreachable in the canonical Native deployment and the Meta webhook route
+DHEALTH-NATIVE-DEPLOY-001 published at the edge could only ever answer 403. Exactly the
+two-files-must-change-together cost ADR-061 wrote down. Now present, **off by default**. ADR-003 is
+untouched: **WhatsApp stays `BLOCKED` and pilot gate 5 is not cleared** — the notification state this
+drill recovered was created on the `fake` provider, which has no network code at all, and its
+notification reached `SENT`, never `DELIVERED`, because only a signed provider receipt writes that.
+
+**What this does NOT claim.** Off-site recovery. A Native backup schedule. Restore at realistic data
+volume (the archive was ~118 KB). Production deployment, pilot readiness, clinical liveness, security
+qualification, real-provider messaging, Connect vendor qualification. DH-USABILITY-001 remains
+`INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`. `BASE_DOMAIN=localhost`, Caddy's internal CA, one
+workstation, synthetic data throughout, no real patient data, no real Meta endpoint contacted, and no
+GitHub Actions file touched.
+
+
 **2026-09-25, DHEALTH-NATIVE-DEPLOY-001, directly on `master`.** From `f5ad78f`. **DHealth Native
 has a canonical production-shaped deployment of its own: `docker-compose.native.yml`.** Five
 services — PostgreSQL, Keycloak, the Exchange adapter, the UI, Caddy — and nothing else. Clean-booted
@@ -1161,8 +1204,8 @@ authentication (§C), has never been runtime/browser-qualified (§D).
 
 ## H. Pilot gates
 
-Gates that must all clear before any real-patient pilot on the Exchange track, none of which have
-cleared yet:
+Gates that must all clear before any real-patient pilot on the Exchange track. One (gate 4) cleared
+on 2026-09-25; the rest have not:
 
 1. Real Keycloak qualification of token validation/authorization (currently: not run, §E). Realm/
    client reconciliation is now real-Keycloak-qualified (§C) — narrower than this gate.
@@ -1172,7 +1215,23 @@ cleared yet:
    capacity, §I).
 3. Manual live/browser demonstration of the golden path (currently: not run).
 4. A performed backup **restore drill**, not merely a script that exists (pinned P0; see
-   `PROJECT_STATE.md` for current backup status).
+   `PROJECT_STATE.md` for current backup status). **CLEARED for the Native/Exchange track,
+   2026-09-25, DHEALTH-NATIVE-RECOVERY-001** — and cleared in the strong sense the gate was written
+   to demand: a populated synthetic deployment was backed up, **every durable volume was deleted**,
+   a clean deployment was rebuilt from source control, the encrypted archive was restored, tenant
+   isolation was re-proved over TCP, the pre-backup staff identity signed in through real Keycloak
+   in a real browser, the same order, release version and clinician review were found through the
+   real product, and a new clinical workflow was completed afterwards. Seven negative controls were
+   executed and reverted. Runbook: `docs/NATIVE-RECOVERY.md`; evidence:
+   `PROJECT_STATE.md`'s DHEALTH-NATIVE-RECOVERY-001 entry.
+   **Two things this does NOT clear, stated so the gate is not over-read.** (a) **Off-site
+   durability is unexercised** — no archive has left the host, the Native image carries no uploader,
+   and the production contract still *requires* off-site by default, which means an unconfigured
+   production backup run ends `FAILED` with its local archive retained. If this gate is read as also
+   requiring off-site recovery, it is **not** cleared. (b) The **maternity/reference-connector
+   track keeps its own separate status** — its 2026-08-13 drill (`backup/restore-drill.md`) remains
+   partially verified and still owes a re-run; nothing here changes that, and this entry must never
+   be read as retiring it.
 5. WhatsApp patient notification running against real credentials, not a mock (pinned P0, §E).
    **Not cleared.** DH-NOTIFY-001 built the transport, the dispatcher and the receipt webhook, and
    DH-NOTIFY-META-001 pointed WhatsApp straight at Meta's Cloud API and wrote the qualification

@@ -1967,3 +1967,57 @@ smaller than it has ever been — and still not done. Nothing in this entry touc
 **CI executed nothing for this work.** The billing refusal recorded in the DH-MVP-ONBOARD-001 entry
 above still stands, so every claim here is local qualification, and the image blobs it ran on were
 fetched out-of-band because this environment's dockerd still cannot reach Docker Hub's blob CDN.
+
+---
+
+## 2026-09-25 — the oldest unmet P0 on the Native side is now evidence
+
+This entry exists because the paragraph above it ("**Oldest unmet P0, unchanged and now more sharply
+scoped.** Backup plus a *performed* restore drill still does not exist") was true when
+DHEALTH-NATIVE-DEPLOY-001 wrote it, earlier the same day, and is **no longer true**. It is left
+standing and superseded here rather than edited.
+
+**What was actually performed, not written.** A populated synthetic DHealth Native deployment was
+backed up to one encrypted archive. Every durable volume was then **deleted** — the PostgreSQL data
+directory holding both databases, the adapter's file-backed audit trail, Caddy's data — and the
+absence verified. A clean deployment was rebuilt from source control and proved *not* to contain the
+source state. The archive was restored into it, tenant isolation was re-proved over TCP with real
+passwords, and then, in a real Chromium: **the same staff account from before the backup signed in
+through real Keycloak**, the **same order, the same release version and the same clinician review**
+were found on the screens a clinician actually uses, the pre-backup patient-access grant still opened
+exactly its own order, and a **complete new clinical workflow** was carried out afterwards — new
+order, collection, analysis, entry, release by the separate release authority, review. 13 browser
+tests. Seven negative controls executed and reverted.
+
+**Why "the same" is a real claim here.** The demo baseline seeds organisations and a patient with
+fixed names, so a clean environment that was merely re-seeded looks identical on screen. Every
+"same record" assertion is therefore keyed on identifiers captured before the backup — including the
+Keycloak `user_entity.id` values, which is the check that separates *restored identity state* from
+*a reconciler having recreated the same usernames*. Those identifiers were proved **absent** on the
+clean target and **present** afterwards, and the released observations were re-hashed to the same
+SHA-256.
+
+**Two defects this found in work from earlier the same day.** The canonical Native deployment passed
+the adapter **no notification environment at all**, so DH-NOTIFY-001's whole feature was unreachable
+there and the Meta webhook route DHEALTH-NATIVE-DEPLOY-001 published at the edge could only ever
+answer 403 — exactly the "two files must change together" cost that ticket had written down, found
+because this one needed durable notification state to recover. And the drill caught **its own
+instrument** being wrong twice: an ownership check that would have forced the demo marker table
+(deliberately superuser-owned, so the application cannot write the fact authorizing a destructive
+reset) to belong to the tenant role, and a table census built on `pg_stat_user_tables.n_live_tup`, a
+statistics estimate that lags — it made an unchanged database disagree with itself. Both are now
+right; a census that can do that is not evidence.
+
+**What is still not true.** **Off-site recovery is not qualified** — no archive has ever left this
+host, Native has no uploader, and the production contract still *requires* off-site by default, so an
+unconfigured production run ends `FAILED` with its local archive retained. There is no Native backup
+scheduler. Nothing here is a statement about restore time at realistic data volume: the archive was
+~118 KB. And the **maternity/reference-connector track keeps its own recovery status** — its
+2026-08-13 drill remains partially verified and still owes a re-run; this entry does not retire it.
+
+**Still not production-deployed, pilot-ready, clinically live, security qualified, human-usability
+qualified, or Connect-integrated.** DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT
+USER-QUALIFIED`. ADR-003's WhatsApp gate remains `BLOCKED`: the notification state this drill
+recovered was created on the `fake` provider, which contains no network code at all. `BASE_DOMAIN=
+localhost` and Caddy's internal CA, on one workstation. CI executed nothing — the billing refusal
+already on record still stands.

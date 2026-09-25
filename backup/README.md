@@ -1,5 +1,15 @@
 # Backup sidecar (DH-014)
 
+> **Scope, clarified 2026-09-25 (DHEALTH-NATIVE-RECOVERY-001).** This directory is the
+> **maternity / reference-connector** track's backup: MariaDB, OpenMRS, OpenELIS's `clinlims`, and a
+> live Keycloak realm export. It is unchanged by that ticket and still describes its own deployment
+> accurately.
+>
+> **DHealth Native has its own, separate backup and recovery:** `docs/NATIVE-RECOVERY.md`, with its
+> own tooling under `deploy/native/backup/` and `scripts/native/`. Two deployment tracks (ADR-061),
+> two recovery stories, and **neither is evidence about the other**. In particular the performed
+> destructive drill recorded for Native says nothing about this one.
+
 When started with production encryption and off-site settings, the sidecar runs
 `/usr/local/bin/daher-backup` once nightly at `BACKUP_HOUR_UTC`. It covers both
 database engines, the live Keycloak realm, OpenMRS data, and the adapter audit volume, then writes
