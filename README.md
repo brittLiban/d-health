@@ -475,6 +475,12 @@ cp deploy/native/native.env.example .env.native
 docker compose -f docker-compose.native.yml --env-file .env.native up -d --wait
 ```
 
+⚠️ **That exact command line has not been executed verbatim anywhere.** The environment this was
+qualified in cannot pull image blobs from Docker Hub's CDN, so every boot added an uncommitted
+`-f` override remapping two digest-pinned images to locally loaded tags. Everything else below is
+observed; this one line is reasoned. Relatedly, `postgres:16-alpine` in that file is **not
+digest-pinned** yet (an open P1) — pin it from a machine that can pull before any real deployment.
+
 | URL | Serves |
 |---|---|
 | `https://app.<BASE_DOMAIN>` | the DHealth staff workspace and the patient surface |

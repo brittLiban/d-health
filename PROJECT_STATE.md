@@ -20320,4 +20320,50 @@ takes a backup of a running Native stack, destroys the volume, restores, and the
 golden journey against the restored database would convert the oldest pinned P0 into evidence. It
 is deliberately not begun here.
 
+
+### Two things this ticket breaks or leaves undemonstrated, found in review after the commit
+
+**1. CI's native-demo jobs will fail at `config` the next time CI runs. Not fixed here, by
+instruction.** `.github/workflows/ci.yml` invokes `docker compose -f docker-compose.native-demo.yml
+--env-file demo/native/demo.env` alone — at the `config -q` check (line ~2434) and throughout the
+`native-demo-boot` job (lines ~2485, ~2506, ~2522). That worked while the demo file was
+self-contained. It is now an **overlay**: on its own it declares services with no `image` and no
+`build`, so Compose will reject it. The fix is one added `-f docker-compose.native.yml` in four
+places, exactly as `scripts/demo/*.sh` already do.
+
+This ticket's instructions say **DO NOT work on GitHub Actions**, so no workflow file was touched
+and this is recorded rather than repaired. It is currently invisible because the billing refusal
+noted in the DH-MVP-ONBOARD-001 entry means no job has started for any recent commit — so nothing
+will *report* this until billing is restored, at which point two jobs go red for a known reason.
+**Follow-up ticket, small and mechanical: add `-f docker-compose.native.yml` ahead of
+`-f docker-compose.native-demo.yml` in the four `ci.yml` invocations.**
+
+**2. The README's production command has not been run verbatim.** Every boot in this qualification
+used an additional uncommitted `-f` override mapping the two digest-pinned images to loaded tags,
+because this environment's dockerd cannot reach Docker Hub's blob CDN. So
+
+```bash
+docker compose -f docker-compose.native.yml --env-file .env.native up -d --wait
+```
+
+is **written and reasoned, not demonstrated**. What *was* demonstrated is that same file plus one
+override that changes only two image references. The distinction is small and is stated because the
+repo's rule is to state it.
+
+**Also carried, unchanged from before this ticket:** `postgres:16-alpine` in
+`docker-compose.native.yml` is **not digest-pinned** and carries the same TODO the demo file carried
+at `f5ad78f`. CLAUDE.md requires every image pinned; this one cannot be, honestly, from here — the
+historical stack pins `postgres:14.4`, a different tag whose digest is not reusable, and the `crane`
+binary used to fetch manifests was removed with the rest of the harness. It must be recorded from a
+machine that can pull. **Open P1, inherited rather than introduced.**
+
+**Resolved in review, so not carried:** `docker-compose.native.yml` does declare
+`name: dhealth-native` (line 41), so a `down --remove-orphans` against it cannot reach the
+maternity stack's containers — the historical file resolves to `daher-${FACILITY_ID:-default}`.
+Two wrong ADR cross-references inside ADR-061 were corrected (DH-DEMO-001 has no ADR of its own;
+enrollment is ADR-055, not ADR-053). The exec bit on `scripts/demo/qualify-journey.sh`, committed
+`100644` by DHEALTH-NATIVE-MVP-1.0 and therefore not runnable as `./scripts/demo/qualify-journey.sh`
+as documented, was fixed in this ticket's commit — a previous ticket's defect riding along, disclosed
+rather than folded in silently.
+
 ### Human Decision Required: No

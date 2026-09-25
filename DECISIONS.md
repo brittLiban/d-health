@@ -8313,8 +8313,8 @@ about the patient surface, which this decision does not touch.
 ## and the Native one inherits nothing from the other
 
 **Date:** 2026-09-25 · **Status:** ACCEPTED (architecture) · **Scope:** deployment topology for both
-tracks · **Supersedes nothing; constrains** DH-DEMO-001's demo project (ADR-047's environment is
-unaffected)
+tracks · **Supersedes nothing; constrains** DH-DEMO-001's demo project, which has no ADR of its
+own (`docs/ARCHITECTURE.md` §18 and the 2026-09-18 dated note under ADR-043 are its record)
 
 ### The decision
 
@@ -8380,7 +8380,7 @@ and that demo authority appears only in the overlay.
 
 ### What this does not decide
 
-Which track a given facility gets (that is enrollment, ADR-053/ADR-055, and per-facility). Anything
+Which track a given facility gets (that is enrollment and participation mode, ADR-055, and per-facility). Anything
 about backup and restore, which remains the oldest unmet P0 and is deliberately untouched here.
 Whether the two tracks ever converge on one file — they may, once the connector track's own
 deployment is revisited, and this decision does not prejudge it. Nothing about certificates, DNS, or

@@ -47,6 +47,21 @@ The public edge publishes exactly `app.`, `id.` and `exchange.` plus the one Met
 an `openelis` hostname alias, `ADAPTER_DEMO_ENVIRONMENT=1` in the production file, a relaxed database
 GRANT, and an authentication bypass that made an **unauthenticated request return 200**.
 
+**Known consequence, deliberately not repaired: CI's two native-demo jobs will fail at `config`.**
+`.github/workflows/ci.yml` passes `-f docker-compose.native-demo.yml` alone in four places; that file
+is now an overlay and cannot render by itself. This ticket's instructions forbade touching GitHub
+Actions, so it is recorded instead — the fix is one added `-f docker-compose.native.yml` per call,
+exactly as `scripts/demo/*.sh` already do. Nothing reports it today because the billing refusal means
+no job starts.
+
+**One README command is written, not demonstrated.** Every boot here added an uncommitted override
+remapping two digest-pinned images to locally loaded tags, because this environment's dockerd cannot
+reach Docker Hub's blob CDN. The bare `docker compose -f docker-compose.native.yml --env-file
+.env.native up -d --wait` has therefore never been executed verbatim. `postgres:16-alpine` in that
+file also remains **not digest-pinned** — an open P1 inherited from the demo file, which must be
+recorded from a machine that can pull.
+
+
 **What this does NOT claim.** Not production deployed, not pilot ready, not clinically live, not
 disaster-recovery qualified, not security qualified, not human-usability qualified, not Connect
 integrated. `BASE_DOMAIN=localhost` means Caddy's internal CA — nothing here is evidence about
