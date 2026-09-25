@@ -19949,3 +19949,134 @@ still ignored, inbound messages still ignored, `wamid` still the only authority,
 * **Nothing was proven about the Docker topology, TLS issuance, or a public domain** — none exists.
 
 ### Human Decision Required: No
+
+---
+
+## DHEALTH-NATIVE-MVP-1.0 — the native golden journey, in a real browser · 2026-09-25
+
+**Start `08b9bc9` → this commit.** HEAD was exactly the expected commit, tree clean. DH-USABILITY-001,
+DH-NOTIFY-META-001R and DH-NOTIFY-META-001R2 are all preserved; nothing was reset, rebased or
+squashed.
+
+### The runtime
+
+```text
+Chromium 153.0.8010.12 (Playwright 1.63.0)
+        │  https://app.localhost, https://id.localhost, https://exchange.localhost
+        ▼
+Caddy 2.11.4            demo/native/Caddyfile -- id./app./exchange. only
+        ├─────────────► Keycloak 26.7.1        realm dhealth-exchange, client dhealth-native-ui
+        ├─────────────► DHealth UI             the real production bundle behind nginx
+        └─────────────► adapter (FastAPI)      /exchange/v1/* , same-origin through app.
+                                │
+                                ▼
+                        PostgreSQL 16.15       alembic head 0032_patient_notifications
+```
+
+**Not required, and not started: OpenMRS, OpenELIS, MariaDB, the maternity connector stack.** The
+native demo stands alone, as DH-DEMO-001 intended. (The *main* `docker-compose.yml` is still
+coupled — `adapter` depends on the OpenELIS database image, `caddy` on `openmrs-gateway` and
+`openelis-frontend` — which is why the separate demo file exists.)
+
+Commands: `scripts/demo/up.sh`, `scripts/demo/qualify-journey.sh` (new), `scripts/demo/reset.sh`,
+`scripts/demo/down.sh`. Readiness is `docker compose --wait` against each service's own healthcheck;
+the qualification additionally refuses to start unless the edge is already answering.
+
+### Five defects, each of which alone made the journey impossible
+
+Every one was found by trying to do the thing rather than by reading the code. DH-DEMO-001 was
+`WRITTEN`; it had never been `DEMONSTRATED`, and this is what that difference was hiding.
+
+| # | Defect | Symptom | Fix |
+|---|---|---|---|
+| 1 | `demo/native/demo.env` lacked `DHEALTH_PATIENT_PUBLIC_BASE_URL` | `scripts/demo/up.sh` died at compose interpolation, before a container started. DH-NOTIFY-001 added that `:?` variable to a service in the shared file **after** the demo shipped, and Compose interpolates every service in a file it `extends:` from | added to `demo.env` |
+| 2 | the demo Caddy healthcheck fetched `https://app.$BASE_DOMAIN/` from inside its own Alpine container | musl does not special-case the `.localhost` TLD, so `wget` failed with "bad address" forever; the container never became healthy and `up.sh --wait` ended in `container ... is unhealthy` while Caddy was serving all three vhosts correctly | `extra_hosts` maps the name to loopback, keeping the check a real request through the real vhost |
+| 3 | the demo never set `KEYCLOAK_PUBLIC_URL` | Keycloak fell back to `http://keycloak.openelis.org:8080` and built **the login form's action** from it. The browser posted the password to a hostname that exists only on the Docker network: `ERR_NAME_NOT_RESOLVED`, blank page. **Nobody had ever signed in to this demo** | set to `https://id.localhost` in `demo.env` |
+| 4 | the three demo users had no e-mail, first name or last name | the realm's `VERIFY_PROFILE` required action stopped every login at "Mettre à jour les informations du compte" | `reconcile-demo-users.sh` now sets them (`@demo.invalid`, RFC 2606) — the narrow carve-out the 2026-09-24 staff-identity decision anticipated: *"email is optional unless authentication technically requires it"* |
+| 5 | the demo hardcoded the adapter's OIDC issuer to the internal URL | with a public `KC_HOSTNAME`, real tokens carry the public `iss`. The adapter rejected them: `/exchange/v1/me` answered **401 to a perfectly valid token** and the app showed "Votre session a expiré" to a user who had just authenticated | issuer derives from `KEYCLOAK_PUBLIC_URL` (JWKS stays internal — `docker-compose.yml` already had exactly this split) |
+| 6 | `demo_seed.py` never created a `FacilityEnrollment` | `find_whole_order_eligible_labs` narrows by route and offering and then asks `operational_findings_in_session`, which fails closed on a missing enrollment: *"cet établissement n'a pas de dossier d'adhésion"*. The laboratory was never an eligible destination, **the routing panel opened empty, and the golden journey could not be completed by anyone** | the seed converges one NATIVE, `READY_FOR_ROUTING` enrollment per demo organization |
+
+Defects 3 and 5 are a pair: the demo was configured for a Keycloak no browser could use, and an
+adapter that agreed with it.
+
+### The journey — every step performed by clicking the real control
+
+| Step | Result |
+|---|---|
+| clinician signs in through the real Keycloak form | **PASS** |
+| lands in the provider workspace, organization and role shown from the token's own memberships | **PASS** |
+| opens the synthetic patient, prescribes `Analyse de démonstration A` | **PASS** |
+| routes the order to `Laboratoire Démo DHealth` (a separate, explicit act) | **PASS** |
+| order appears in the clinic's own orders table with the destination laboratory | **PASS** |
+| technician signs in; the SAME order reference is in the laboratory queue | **PASS** |
+| accepts the order | **PASS** |
+| records collection | **PASS** |
+| starts analysis | **PASS** |
+| enters every required structured value and saves | **PASS** |
+| completes entry | **PASS** |
+| the technician has **no** `Résultats` section — entry ≠ release (ADR-044) | **PASS** |
+| releaser signs in, reviews the completed result, releases it explicitly | **PASS** |
+| clinic sees the released version; the tab says which result is current (DH-USABILITY-001 §13) | **PASS** |
+| clinician records a review disposition against that version | **PASS** |
+| no console error, no failed request anywhere in the journey | **PASS** |
+
+Persisted state read back from PostgreSQL afterwards — assertion only, never a workflow write:
+`status=COMPLETED, releases=1, release_versions=1, doctor_reviews=1`.
+
+Authorization, with real tokens captured from real browser logins:
+
+| | Asked | Answer |
+|---|---|---|
+| NEG-1 | unauthenticated browser opens the app | real Keycloak login, no workspace |
+| NEG-2 | unauthenticated `GET /exchange/v1/me` | 401 |
+| NEG-3 | clinician reads the laboratory's queue and its orders | refused |
+| NEG-4 | technician acts as the provider organization | refused |
+| NEG-5 | invented organization id | refused, not an empty 200 |
+
+### Negative controls — two executed and reverted
+
+| Control | Mutation | Red | Why it proves the property |
+|---|---|---|---|
+| NC-NATIVE-1 | adapter told to expect `EXCHANGE_OIDC_AUDIENCE=not-the-real-audience` | PHASE A fails; NEG-2 stays green; PHASE A passes again after revert | the journey depends on the *real* token being *really* validated, not on the browser merely completing a login |
+| NC-NATIVE-2 | every `LAB_RESULT_RELEASER` role assignment deleted | PHASE C fails while PHASE A and PHASE B still pass | release is a distinct authority, and the qualification can tell when it is missing |
+
+**NC-NATIVE-3 and NC-NATIVE-4 were not run.** The tenant control needs a cross-tenant membership
+inserted and removed, and the draft-exposure control needs a guard broken in adapter source; both
+are worth having and neither was reached in this pass. Recorded as owed rather than implied.
+
+### Not qualified here, and not claimed
+
+* **The patient surface.** No order-scoped grant was carried through a real browser. Phase E of the
+  ticket is unrun.
+* **The amendment cycle.** The journey stops at the first released version and its review.
+* **Human usability.** DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`.
+  Nothing here is evidence about a person, and no F1/C1/L1 session has happened.
+* **Any public deployment.** `BASE_DOMAIN=localhost`, Caddy's internal CA, one machine.
+* **Pilot gate 3** (manual live/browser demonstration) is *advanced*, not cleared: that gate says
+  **manual**, and this is automated.
+
+### Environment deviations, disclosed
+
+Docker is reachable **as root** on this box (the unprivileged user is not in the `docker` group,
+which is what earlier tickets recorded as "daemon permission-denied"). Image pulls still fail:
+dockerd times out on Docker Hub's blob CDN. The images were fetched with `crane` and loaded, which
+loses the RepoDigest, so a **local-only** compose override pointed the two digest-pinned services at
+tags. The bytes are the pinned ones — keycloak, python-slim and nginx-alpine tags were verified to
+still match their pinned digests, and caddy and node were fetched *by* the pinned digest. That
+override lives outside the repository and is not committed. The adapter and UI images were built
+from the committed Dockerfiles with only their `FROM` digests rewritten to the same tags.
+
+### Local verification, by level
+
+```text
+L1 config        docker compose config parses; caddy validate not re-run (Caddyfile unchanged)
+L2 component     not re-run: no UI or adapter source changed except demo_seed.py
+L3 PostgreSQL    real PostgreSQL 16.15; alembic head 0032_patient_notifications applied at boot
+L4 Keycloak      real 26.7.1, real realm, real login form, real PKCE round trip
+L5 runtime       5 services healthy behind real Caddy
+L6 browser       11 passed (golden journey 6, authorization 5), 16.8s
+L7 manual        8 screenshots at 1280 and 768 read by eye; no overflow, no console error,
+                 no failed request; the technician's navigation correctly lacks Résultats
+```
+
+### Human Decision Required: No

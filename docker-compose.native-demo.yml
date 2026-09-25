@@ -155,7 +155,17 @@ services:
       ADAPTER_DB_NAME: ${ADAPTER_DB_NAME:-dhealth_native_demo}
       ADAPTER_DB_USER: ${ADAPTER_DB_USER:-adapter}
       ADAPTER_DB_PASSWORD: ${ADAPTER_DB_PASSWORD:?set ADAPTER_DB_PASSWORD in demo.env}
-      EXCHANGE_OIDC_ISSUER: http://keycloak.openelis.org:8080/realms/dhealth-exchange
+      # DHEALTH-NATIVE-MVP-1.0 (2026-09-25): the issuer is the PUBLIC one, the JWKS URL is the
+      # internal one, and the split is the whole point. Keycloak mints `iss` from the origin the
+      # browser reaches it on (`KC_HOSTNAME`, i.e. KEYCLOAK_PUBLIC_URL); the adapter fetches signing
+      # keys over the Docker network, where `https://id.localhost` does not resolve and Caddy's
+      # internal CA is not trusted. docker-compose.yml already derives it exactly this way; this
+      # file had both hardcoded to the internal URL, which only agreed with reality while no
+      # browser could sign in at all. With a real login the token's `iss` is the public one, the
+      # hardcoded internal issuer did not match it, and `/exchange/v1/me` answered 401 to a
+      # perfectly valid token -- the app then showed "Votre session a expiré" to a user who had
+      # just successfully authenticated.
+      EXCHANGE_OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.openelis.org:8080}/realms/dhealth-exchange
       EXCHANGE_OIDC_JWKS_URL: http://keycloak.openelis.org:8080/realms/dhealth-exchange/protocol/openid-connect/certs
       EXCHANGE_OIDC_AUDIENCE: dhealth-exchange-api
       # DH-DEMO-001 "RESET SAFETY IS P0": the ONLY compose file that ever sets this. `demo_seed.py`
@@ -202,6 +212,17 @@ services:
       - ./demo/native/Caddyfile:/etc/caddy/Caddyfile:ro
       - native-demo-caddy-data:/data
       - native-demo-caddy-config:/config
+    # DHEALTH-NATIVE-MVP-1.0 (2026-09-25): the healthcheck below fetches the app through Caddy's
+    # own `app.<domain>` vhost, which is the right thing to check -- but `app.localhost` does not
+    # resolve inside this Alpine container. musl does not special-case the `.localhost` TLD the way
+    # a browser and glibc do, so `wget` failed with "bad address" on every attempt, the container
+    # never became healthy, and `scripts/demo/up.sh`'s own `--wait` ended in
+    # "container ... is unhealthy" even though Caddy was serving all three vhosts correctly.
+    # Found by booting the demo for the browser qualification. Mapping the name to loopback keeps
+    # the check meaningful (it still goes through the real vhost and the real TLS) rather than
+    # weakening it to a port probe.
+    extra_hosts:
+      - "app.${BASE_DOMAIN:-localhost}:127.0.0.1"
     healthcheck:
       test:
         - CMD-SHELL

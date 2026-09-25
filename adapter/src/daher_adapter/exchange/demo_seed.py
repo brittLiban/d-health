@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.config import Settings
@@ -50,7 +50,13 @@ from daher_adapter.exchange.membership import (
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
 )
-from daher_adapter.exchange.models import OrganizationRole, OrganizationType
+from daher_adapter.exchange.models import (
+    FacilityEnrollment,
+    OnboardingStatus,
+    OrganizationRole,
+    OrganizationType,
+    ParticipationMode,
+)
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.patients import PatientRepository
 from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepository
@@ -281,6 +287,23 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
     )
     routes.upsert(provider_organization_id=provider.id, lab_organization_id=lab.id, active=True)
 
+    # DHEALTH-NATIVE-MVP-1.0 (2026-09-25): the facility enrollment DH-MVP-ONBOARD-001 requires,
+    # which this seed never created.
+    #
+    # `find_whole_order_eligible_labs` narrows by route and offering and then asks
+    # `operational_findings_in_session` whether the laboratory may receive new work. That function
+    # fails closed on a missing `FacilityEnrollment` -- "cet établissement n'a pas de dossier
+    # d'adhésion" -- and there was no such row for either demo organization, so the laboratory was
+    # never an eligible destination, the routing step offered an empty list, and **the demo's
+    # golden journey could not be completed by anyone**. Found by driving it in a real browser: the
+    # order was created, the routing panel opened, and there was nothing in it to choose.
+    #
+    # NATIVE for both, because that is what this demo is: DHealth's own screens are the workflow,
+    # no connector exists, and `READY_FOR_ROUTING` is reachable only by a NATIVE facility in this
+    # release. Converged like everything else here rather than inserted blindly.
+    _ensure_enrollment(session_factory, provider.id)
+    _ensure_enrollment(session_factory, lab.id)
+
     entry, _created = catalog.create_entry(code=CATALOG_CODE, display_name=CATALOG_DISPLAY_NAME)
     offering, _created = catalog.create_offering(
         lab_organization_id=lab.id, catalog_entry_id=entry.id
@@ -383,6 +406,31 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             "in isolation, never when run via scripts/demo/up.sh or reset.sh)",
             file=sys.stderr,
         )
+
+
+def _ensure_enrollment(session_factory, organization_id) -> None:
+    """One NATIVE, routing-ready enrollment per demo organization. Idempotent.
+
+    Written directly against the model rather than through the platform-admin onboarding API
+    because this seed has no HTTP client and no platform-admin token, and because the demo's
+    baseline is declared, not walked through a wizard. The row it writes is the same shape that
+    wizard produces for a NATIVE facility that has completed onboarding.
+    """
+    with session_factory() as session, session.begin():
+        existing = session.scalar(
+            select(FacilityEnrollment).where(FacilityEnrollment.organization_id == organization_id)
+        )
+        if existing is None:
+            session.add(
+                FacilityEnrollment(
+                    organization_id=organization_id,
+                    participation_mode=ParticipationMode.NATIVE.value,
+                    onboarding_status=OnboardingStatus.READY_FOR_ROUTING.value,
+                )
+            )
+            return
+        existing.participation_mode = ParticipationMode.NATIVE.value
+        existing.onboarding_status = OnboardingStatus.READY_FOR_ROUTING.value
 
 
 def _find_or_create_organization(

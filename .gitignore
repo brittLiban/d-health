@@ -44,3 +44,7 @@ openmrs-config/modules/*/*/target/
 .idea/
 .vscode/
 *.swp
+
+# DHEALTH-NATIVE-MVP-1.0: the browser golden-journey report, written at the repository root by
+# scripts/demo/qualify-journey.sh. Evidence of a run, not part of the source.
+native-journey-results.json

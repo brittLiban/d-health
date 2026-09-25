@@ -6,6 +6,47 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-25, DHEALTH-NATIVE-MVP-1.0, directly on `master`.** From `08b9bc9`. **A real browser has
+carried one synthetic diagnostic order through the whole native product for the first time.** Real
+Chromium, real Keycloak login, the real UI behind the real Caddy edge, the real adapter, real
+PostgreSQL 16.15: clinic order → routing → laboratory acceptance → collection → processing →
+structured entry → explicit release by a separate authority → the clinic seeing the released
+version → a clinician review recorded against it. 11 browser tests pass, and the run asserts it
+produced no console error and no failed request. Reproduction: `docs/NATIVE-GOLDEN-JOURNEY.md`.
+
+**Five defects stood between the demo and its own golden journey, and every one of them blocked it
+completely.** They are listed in full in `PROJECT_STATE.md`; the shape of them matters more than the
+list: `scripts/demo/up.sh` could not interpolate its compose file (a variable DH-NOTIFY-001 added
+later), its Caddy healthcheck could never pass, its Keycloak built every login form action from an
+internal hostname the browser cannot resolve, its demo users lacked the profile fields Keycloak's
+own VERIFY_PROFILE demands, its adapter validated tokens against the wrong issuer, and its seed
+never created the facility enrollment that `find_whole_order_eligible_labs` requires — so the
+routing step offered an empty list and **the journey was impossible to finish**. DH-DEMO-001 was
+`WRITTEN` and had never been `DEMONSTRATED`. Now it has.
+
+**The stack is genuinely native.** PostgreSQL, Keycloak, adapter, UI, Caddy — no OpenMRS, no
+OpenELIS, no MariaDB, no maternity connector infrastructure. That separation was DH-DEMO-001's own
+work and it holds: the service named `openelis-db` in the demo file is a plain `postgres:16-alpine`
+keeping the name the adapter's config expects. The *main* `docker-compose.yml` remains coupled —
+its `adapter` depends on the OpenELIS database image and its `caddy` on `openmrs-gateway` and
+`openelis-frontend` — which is why the demo file exists and why `scripts/qualify-native-auth.sh`
+still boots the whole clinical stack.
+
+**Authorization was exercised negatively, not just positively.** Five refusals with real tokens from
+real logins: unauthenticated browser, unauthenticated API, clinician reading the laboratory's queue,
+technician acting as the provider, invented organization id. Two negative controls were executed and
+reverted: pointing the adapter at a different OIDC audience made the journey fail before any
+workflow proceeded, and deleting every `LAB_RESULT_RELEASER` assignment made the release phase fail
+while entry still worked.
+
+**What this is not.** Not usability qualification — DH-USABILITY-001 stays `INTERNAL WORKFLOW
+REVIEW — NOT USER-QUALIFIED`, no F1/C1/L1 session has happened, and automated execution is not
+evidence about a person. Not a patient-surface qualification: the assisted-digital path was not
+exercised in a browser. Not an amendment qualification. Not a public deployment: `BASE_DOMAIN=
+localhost` with Caddy's internal CA. **Pilot gate 3 (manual live/browser demonstration of the golden
+path) is advanced by this and is not declared cleared** — that gate says *manual*, and this is
+automated; a human has not yet driven it end to end. Gates 1, 2, 4, 5 and 6 are untouched.
+
 **2026-09-25, DH-NOTIFY-META-001R2, directly on `master`.** From `e081fe6`. The second correction
 to DH-NOTIFY-META-001, and the one its own source comment had been promising since the day it
 shipped. `_MAX_CALLBACK_BODY_BYTES = 256 * 1024` was introduced so that "an unauthenticated caller

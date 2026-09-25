@@ -47,9 +47,21 @@ until "$kcadm" config credentials --config "$config" --server "$server" \
     sleep 3
 done
 
+# DHEALTH-NATIVE-MVP-1.0 (2026-09-25): first/last name and an e-mail address are not decoration
+# here. The `dhealth-exchange` realm has Keycloak's VERIFY_PROFILE required action enabled, so a
+# user without them is stopped after authenticating by "Mettre à jour les informations du compte"
+# and never reaches the application -- which is what every browser attempt at this demo did, until
+# a real browser was finally pointed at it. This is the narrow carve-out the staff-identity
+# decision of 2026-09-24 anticipated: "email is optional unless authentication technically requires
+# it". Here it does.
+#
+# `@demo.invalid` by construction: `.invalid` is reserved by RFC 2606 and can never be delivered
+# to, so no synthetic demo account can ever resemble or collide with a real staff address.
 reconcile_user() {
     local username=$1
     local password=$2
+    local first_name=$3
+    local last_name=$4
     local -a ids=()
 
     mapfile -t ids < <("$kcadm" get users --config "$config" -r "$realm" \
@@ -59,7 +71,10 @@ reconcile_user() {
         "$kcadm" create users --config "$config" -r "$realm" \
             -s "username=$username" \
             -s enabled=true \
-            -s emailVerified=true >/dev/null
+            -s emailVerified=true \
+            -s "email=$username@demo.invalid" \
+            -s "firstName=$first_name" \
+            -s "lastName=$last_name" >/dev/null
         mapfile -t ids < <("$kcadm" get users --config "$config" -r "$realm" \
             -q "username=$username" -F id --format csv --noquotes)
     fi
@@ -75,7 +90,10 @@ reconcile_user() {
     # contract" discipline as reconcile-exchange.sh's own client update below its create step.
     "$kcadm" update "users/$user_id" --config "$config" -r "$realm" \
         -s enabled=true \
-        -s emailVerified=true >/dev/null
+        -s emailVerified=true \
+        -s "email=$username@demo.invalid" \
+        -s "firstName=$first_name" \
+        -s "lastName=$last_name" >/dev/null
     "$kcadm" set-password --config "$config" -r "$realm" \
         --userid "$user_id" --new-password "$password" >/dev/null
 
@@ -89,8 +107,8 @@ reconcile_user() {
     echo "$username -> $user_id"
 }
 
-reconcile_user "$DEMO_CLINICIAN_USERNAME" "$DEMO_CLINICIAN_PASSWORD"
-reconcile_user "$DEMO_LAB_TECH_USERNAME" "$DEMO_LAB_TECH_PASSWORD"
-reconcile_user "$DEMO_RELEASER_USERNAME" "$DEMO_RELEASER_PASSWORD"
+reconcile_user "$DEMO_CLINICIAN_USERNAME" "$DEMO_CLINICIAN_PASSWORD" "Démo" "Clinicien"
+reconcile_user "$DEMO_LAB_TECH_USERNAME" "$DEMO_LAB_TECH_PASSWORD" "Démo" "Technicien"
+reconcile_user "$DEMO_RELEASER_USERNAME" "$DEMO_RELEASER_PASSWORD" "Démo" "Libérateur"
 
 echo "DHealth Native Demo users reconciled: $DEMO_CLINICIAN_USERNAME, $DEMO_LAB_TECH_USERNAME, $DEMO_RELEASER_USERNAME"
