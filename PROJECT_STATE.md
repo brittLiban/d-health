@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-SEC-001,
-> 2026-09-26 — this parenthetical has now gone stale seven times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-ACCESS-001,
+> 2026-09-26 — this parenthetical has now gone stale eight times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -20922,3 +20922,209 @@ in **one** invocation, so a silently-skipped step cannot hide between two of the
 6. native production topology OpenMRS/OpenELIS/MariaDB mentions -> 0
 7. running containers      -> adapter, caddy, daher-ui, dhealth-db, keycloak (nothing else)
 ```
+
+---
+
+## DHEALTH-NATIVE-ACCESS-001 — Staff Access Lifecycle (2026-09-26) — DONE
+
+**Start:** `191dd5b` (DHEALTH-NATIVE-SEC-001's ending commit; local HEAD matched it exactly, tree
+clean, verified before any edit).
+
+### What this closes, and what it does not
+
+DHEALTH-NATIVE-SEC-001's **P1 (finding F1)**: *authority could be granted through DHealth and
+withdrawn only by a database administrator.* That was never a backend defect — the authorization
+engine already refused a withdrawn membership and a removed role on the very next request, with the
+same still-valid token, which is exactly what SEC-6 and SEC-7 proved. What was missing was any way
+for a facility administrator to **cause** that state:
+`OrganizationMembershipRepository.set_inactive` and `OrganizationRoleAssignmentRepository.remove`
+both existed with no caller, so the security suite produced the state with `psql`.
+
+**The P1 is now fully closed**, on the standard the ticket set: not "another repository method has a
+caller" but a supported product path. A facility's own administrator signs in, opens
+**`Équipe et accès`**, clicks, reads a confirmation naming the person and the establishment,
+confirms — and the colleague's already-signed-in browser is refused on its next request, holding the
+token it was issued before the click. Qualified in a real Chromium (ACCESS-13).
+
+### Built
+
+**`adapter/src/daher_adapter/exchange/staff_access.py`** (new) — four operations, deliberately only
+four: deactivate a membership, reactivate it, add one allowed organization role, remove one. The
+domain logic lives here rather than in `api.py` (already 8400 lines) so the transaction ordering is
+stated once and cannot diverge between the four endpoints.
+
+```
+POST   /exchange/v1/organizations/{id}/memberships/{membership_id}/deactivate
+POST   /exchange/v1/organizations/{id}/memberships/{membership_id}/reactivate
+PUT    /exchange/v1/organizations/{id}/memberships/{membership_id}/roles/{role}
+DELETE /exchange/v1/organizations/{id}/memberships/{membership_id}/roles/{role}
+```
+
+Each is one transaction: **lock the organization row** → **re-check the actor's own ORG_ADMIN inside
+that lock** → prove the target membership belongs to this organization → mutate, flush, evaluate the
+invariant, audit. All of it commits or rolls back together.
+
+`GET .../memberships` already existed and is the staff directory read, used unchanged. Nothing was
+duplicated.
+
+**UI** — `ui/src/features/team/TeamAccessPage.tsx`, a staff section gated on a new
+`canAdministerTeam` capability. It renders outside `ClinicProvider`/`LabProvider` and loads no
+patient, order or result.
+
+**Migration `0033_staff_access_lifecycle`** — widens exactly one CHECK constraint, creates no table.
+Three event types: `membership_deactivated`, `membership_reactivated`, `role_removed`.
+
+### Three decisions that were the ticket's real content
+
+**1. The organization row is the lock, not the membership row.** Two administrators removing *each
+other's* `ORG_ADMIN` touch two different rows; a per-row lock lets both read "there are two
+administrators", both pass, and the organization end with **zero** — locked out with no way back
+except platform intervention. Qualified against real PostgreSQL (`pg1`, `pg2`, `pg3`), never
+inferred from SQLite, because SQLAlchemy's SQLite dialect **omits `FOR UPDATE` entirely** and
+SQLite's own writer serialization would make those tests pass for a reason unrelated to the lock
+being taken.
+
+**2. The last-active-administrator rule is a transition rule, not a floor.** No policy for this
+existed anywhere in the repository — no ADR, no code, no test (grepped). It refuses an operation
+that takes an organization from one-or-more active `ORG_ADMIN` to zero. An organization that
+*already* has none is **not** frozen: that state is reachable today (`POST .../memberships` will
+create a CLINICIAN-only membership), and a floor would refuse every repair in exactly the
+organizations needing one. It binds a **platform administrator too** — stricter than §12's literal
+"ORG_ADMIN action" wording, chosen deliberately and safe because granting `ORG_ADMIN` is never
+blocked by the rule, so a replacement is simply added first. Self-removal needs no separate rule;
+it is the same code path.
+
+**3. The actor's authority is checked twice, and the second check is the one that matters.**
+`require_org_admin` runs in its own earlier session. Without re-reading inside the lock, an
+administrator deactivated a moment ago could still finish the request they had already begun —
+§14's forbidden case, reachable only as a race. A platform administrator is exempt from the re-read
+because they have no membership row to re-read.
+
+### Semantics, recorded rather than invented
+
+- **Deactivation** — `status` ACTIVE → INACTIVE. The row survives, so every review, release,
+  amendment and order naming it stays attributable. Not "deleted", and the UI never says so.
+- **Reactivation** — the **same row**, never a duplicate, restoring the roles still attached. Role
+  rows survive deactivation and `assign` refuses an inactive membership, so that was already the
+  model (§9: do not silently redesign). Handled rather than hidden: the API response states the
+  roles and the UI confirmation names them before the administrator commits. Role *removal*
+  deliberately works on an inactive membership, which is how somebody is restored with **less**
+  authority than they left with.
+- **Role add** — idempotent; re-granting a held role commits nothing and answers 200.
+- **Role remove** — the operation that closes the P1 most directly; effective on the next request,
+  no logout, no refresh.
+- **Keycloak boundary** — nothing here disables, deletes or modifies a Keycloak identity. Qualified
+  in ACCESS-3: after deactivation the same human still signs in for real and keeps their other
+  establishment.
+- **`PLATFORM_ADMIN`** — not an `OrganizationRole` at all. The `{role}` path parameter is a plain
+  `str` validated in DHealth's own code rather than typed as an enum, so the check is reachable and
+  breakable by a negative control instead of being enforced invisibly by FastAPI's request parsing.
+  The database's CHECK constraints refuse the value as a second layer.
+
+### A second defect found and fixed along the way
+
+**`scripts/demo/reset.sh` could not recover a deactivated membership.** `demo_seed`'s
+`_grant_membership` called `memberships.create` (insert-first-wins, so a re-seed resolves to the
+existing INACTIVE row) and then `roles.assign`, which refuses an inactive membership — so **one**
+deactivated membership made `reset.sh` raise, with no supported way back to the baseline. Already
+latently true (SEC-6 reached that state with `psql`), and
+`docs/NATIVE-SECURITY-QUALIFICATION.md` §1 told operators reset was the recovery — a claim the code
+could not honour. Reproduced first, then fixed by converging the membership's status, and pinned by
+`test_bs5_reseeding_restores_a_membership_that_was_deactivated`. Inside `seed_baseline`'s own
+contract ("restore the deterministic baseline"), not an expansion of DH-DEMO-001's
+`_WORKFLOW_TABLES`.
+
+### Demo baseline: five personas now, not three
+
+`demo-admin` (ORG_ADMIN at Clinique Démo) and `demo-lab-admin` (ORG_ADMIN at Laboratoire Démo) join
+the existing clinician / lab tech / releaser. **Two administrators rather than one shared between
+the organizations, deliberately** — a single administrator of both would legitimately succeed
+everywhere and ACCESS-5 would prove nothing. Both hold ORG_ADMIN and **no clinical role**, which is
+both the honest shape of a facility administrator and the configuration that was unreachable before
+this ticket. Neither carries a Keycloak realm role; a facility administrator is not a platform
+administrator.
+
+### Two of this session's own false results, recorded so they are not repeated
+
+**An absolute audit count in a suite that runs twice.** ACCESS-6 asserted
+`auditRows('membership_deactivated', self.membership_id) === 0`. It passed on a fresh database and
+went red on the second run — correctly, because `exchange_security_audit_events` is deliberately
+**not** in `_WORKFLOW_TABLES`: a row recording that someone's authority changed is not workflow
+state, and a demo reset is not a reason to erase it. Rewritten as a before/after delta. Every other
+audit assertion in the suite was already a delta; this one was the exception and it was the one that
+was order-dependent.
+
+**A `psql` boolean rendered as `true`, not `t`.** ACCESS-12's audit-detail assertion concatenated
+`(created_at IS NOT NULL)` into a `||` expression, where PostgreSQL renders the full word rather
+than the `t` psql prints for a bare boolean column. Red for that reason alone, with all three
+identifiers already correct.
+
+### Evidence
+
+- **1708 adapter unit tests pass**, zero failures (44 new in
+  `test_dhealthaccess001_staff_access.py`, 1 new in `test_demo_seed.py`). `ruff check` and
+  `ruff format --check` clean on every file this ticket touches; the 5 remaining repository-wide
+  ruff findings are pre-existing in `tests/test_native_recovery_tooling.py` and untouched.
+- **UI: 154 tests pass across the 12 test files in the directly affected areas** (`features/staff`,
+  `features/workspace`, `features/team`, and the three `App.*` suites) — measured as one vitest
+  invocation rather than added up per directory, because `features/staff` already contains
+  `staffSections.test.ts` and a per-directory sum double-counts it. 27 of those are the new
+  `TeamAccessPage` tests.
+  `tsc --noEmit` clean.
+- **Real PostgreSQL:** `tests/integration/test_dhealthaccess001_postgres_qualification.py` — ten
+  tests covering §25-A/B/C/D, the two lockout races and the six-way variant, unique role assignment
+  under concurrency, and transactional audit coupling.
+- **Real Keycloak + real browser:** `ui/e2e/native/07-access-lifecycle.spec.ts` — 16 tests, its own
+  config and its own report (`scripts/demo/qualify-access.sh`, `native-access-results.json`), so
+  this document's "31 security tests" keeps meaning what it says.
+
+### What this ticket may NOT claim
+
+Not a penetration test, not an independent audit, not a compliance statement of any kind. No
+production deployment, no public certificate authority, no real domain, no real patient data —
+`BASE_DOMAIN=localhost`, Caddy's internal CA, one workstation, synthetic data throughout. **No pilot
+gate is created or cleared.** It does not make the Exchange pilot-ready. "A facility administrator
+can revoke staff authority" is a statement about this qualified local runtime, not about any
+facility in Djibouti.
+
+### Deliberately NOT resolved — still open, not quietly marked done
+
+- **Successful sensitive-read audit policy** — still `Human Decision Required: Yes`, unchanged (see
+  DHEALTH-NATIVE-SEC-001's entry above and `docs/NATIVE-SECURITY-QUALIFICATION.md` §6). This ticket
+  added **mutation** audit only, and the `Équipe et accès` listing deliberately did not become the
+  excuse for a broad read-audit regime.
+- **Session and idle timeout policy** — still `Human Decision Required: Yes`, unchanged (§7). This
+  ticket proves revocation works *while the session is still alive*, which makes the timeout
+  question less urgent, not answered.
+- **G1** SPA fallback, **G2** staff response cache policy, **G3** Keycloak admin console reachable,
+  **G4** no CSP/Permissions-Policy, **G5** no password policy and no MFA — all untouched.
+- **SEC-19** multi-organization context isolation — still not built. The demo baseline still has no
+  identity holding memberships in two organizations; ACCESS-3 creates one temporarily and removes
+  it, which is not the establishment-switch race SEC-19 describes.
+- **NC-SEC-6** (logout negative control) and the **in-page refresh-failure path** — still owed.
+
+### Remaining access/admin gaps — the next admin ticket's material
+
+1. **A facility cannot create a staff member's first membership.** `Équipe et accès` administers
+   existing memberships; attaching somebody new still requires a platform administrator, because
+   DHealth has no invitation flow, no account creation, and no way for a facility to reach an
+   identity that has never signed in. Deliberately out of scope (§23). **This is the largest
+   remaining gap.**
+2. **No self-service Keycloak account creation, password reset, or MFA enrollment** anywhere.
+3. **Global identity disablement does not exist**, and is deliberately a separate platform
+   capability rather than anything an ORG_ADMIN can reach.
+4. **The platform-scope `FacilityTeam` section still does not revoke or reactivate.** A platform
+   administrator does have the four endpoints available to them (`require_org_admin` admits platform
+   authority), so nothing is unreachable — it simply is not that screen's purpose. Recorded as a
+   follow-up rather than widened here.
+5. **`Réglages` / facility setup** still does not exist; that remains DH-MVP-ADMIN-001's.
+6. **The concurrency races are qualified at the *service* layer, not through two HTTP connections.**
+   All ten PostgreSQL tests call `StaffAccessService` directly on separate threads, which is the
+   layer the organization lock lives in and therefore the layer where the invariant either holds or
+   does not. An end-to-end two-browser race is not run, and nothing here claims one was.
+7. **The legacy `POST .../memberships` grant path does not take the organization lock.** The four new
+   endpoints serialize against each other per organization; that older endpoint does not, so a
+   role grant racing a deactivation can still land a role on a row that has just gone INACTIVE. Not
+   a security hole — an inactive membership grants nothing, and roles surviving deactivation is the
+   documented model — but it is why the claim is "the four new endpoints serialize per organization",
+   never "all lifecycle operations serialize". Qualified as `pg6`.

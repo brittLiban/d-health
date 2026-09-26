@@ -71,6 +71,13 @@ services:
       DEMO_LAB_TECH_PASSWORD: ${DEMO_LAB_TECH_PASSWORD:?set DEMO_LAB_TECH_PASSWORD in demo.env}
       DEMO_RELEASER_USERNAME: ${DEMO_RELEASER_USERNAME:-demo-releaser}
       DEMO_RELEASER_PASSWORD: ${DEMO_RELEASER_PASSWORD:?set DEMO_RELEASER_PASSWORD in demo.env}
+      # DHEALTH-NATIVE-ACCESS-001: one facility administrator per demo organization. Neither gets
+      # a Keycloak realm role -- ORG_ADMIN is an Exchange-database fact, and a facility
+      # administrator is not a platform administrator.
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo-admin}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD in demo.env}
+      DEMO_LAB_ADMIN_USERNAME: ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}
+      DEMO_LAB_ADMIN_PASSWORD: ${DEMO_LAB_ADMIN_PASSWORD:?set DEMO_LAB_ADMIN_PASSWORD in demo.env}
     volumes:
       - ./keycloak/reconcile-demo-users.sh:/opt/daher/reconcile-demo-users.sh:ro
     tmpfs:
@@ -98,6 +105,10 @@ services:
       DEMO_CLINICIAN_USERNAME: ${DEMO_CLINICIAN_USERNAME:-demo-clinician}
       DEMO_LAB_TECH_USERNAME: ${DEMO_LAB_TECH_USERNAME:-demo-lab-tech}
       DEMO_RELEASER_USERNAME: ${DEMO_RELEASER_USERNAME:-demo-releaser}
+      # DHEALTH-NATIVE-ACCESS-001: usernames only. The seed looks each one up in Keycloak by
+      # username to learn the `sub` a real login will carry; it never needs their passwords.
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo-admin}
+      DEMO_LAB_ADMIN_USERNAME: ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}
 
   caddy:
     volumes:

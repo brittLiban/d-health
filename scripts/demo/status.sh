@@ -37,6 +37,11 @@ echo "Demo logins (usernames only -- passwords are in demo/native/demo.env):"
 echo "  ${DEMO_CLINICIAN_USERNAME}  (clinic)"
 echo "  ${DEMO_LAB_TECH_USERNAME}   (lab technician)"
 echo "  ${DEMO_RELEASER_USERNAME}   (result releaser)"
+# DHEALTH-NATIVE-ACCESS-001: one facility administrator per organization, each holding ORG_ADMIN and
+# no clinical role -- so each lands directly on Équipe et accès, and neither can administer the
+# other's establishment.
+echo "  ${DEMO_ADMIN_USERNAME:-demo-admin}      (clinic — Équipe et accès)"
+echo "  ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}  (lab — Équipe et accès)"
 echo
 
 echo "Open: https://app.${BASE_DOMAIN}   (DHealth Clinic / DHealth Lab)"

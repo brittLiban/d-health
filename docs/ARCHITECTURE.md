@@ -1904,12 +1904,96 @@ membership with role assignments — so they are not two mechanisms:
 ```
 
 The second is **ensure/add**, never replace: a role absent from a request body is not a removal
-request, and this API has no endpoint that revokes a role or a membership. The `Équipe et accès`
-section on the facility detail is built to that shape rather than around it — held roles render
-ticked and disabled, inactive memberships are listed but not editable, and there is no control whose
-label implies a removal the server would not perform. `PersonRolePicker` is shared by the wizard and
-that section for the same reason the endpoints are shared: two copies of a search-select-roles panel
-would drift, and the drift would be in what an operator is told a role means.
+request. ~~and this API has no endpoint that revokes a role or a membership~~ — **corrected
+2026-09-26, DHEALTH-NATIVE-ACCESS-001: four such endpoints now exist; see "The staff access
+lifecycle" below.** `POST .../memberships` itself is unchanged and is still purely additive.
+
+The platform-scope `Équipe et accès` section on the facility detail is still built to the
+ensure/add shape — held roles render ticked and disabled, inactive memberships are listed but not
+editable, and there is no control whose label implies a removal. That is now a **scope** decision
+rather than a missing capability: staff access is a facility's own to manage, and this section exists
+for the narrower platform job of attaching somebody when the facility cannot yet do it itself, most
+often its very first administrator. `PersonRolePicker` is shared by the wizard and that section for
+the same reason the endpoints are shared: two copies of a search-select-roles panel would drift, and
+the drift would be in what an operator is told a role means.
+
+### The staff access lifecycle — DHEALTH-NATIVE-ACCESS-001
+
+DHEALTH-NATIVE-SEC-001 found a P1 that was not a backend defect. The authorization engine already
+refused a withdrawn membership and a removed role on the very next request (see §"Authority is read
+per request" below); what no facility administrator could do was *cause* that state.
+`OrganizationMembershipRepository.set_inactive` and `OrganizationRoleAssignmentRepository.remove`
+existed with no caller, so the security suite produced the state with `psql`. Authority was
+grantable through DHealth and withdrawable only by a database administrator.
+
+`exchange/staff_access.py` is the supported path. Four operations, deliberately only four:
+
+```
+   POST   /organizations/{id}/memberships/{membership_id}/deactivate
+   POST   /organizations/{id}/memberships/{membership_id}/reactivate
+   PUT    /organizations/{id}/memberships/{membership_id}/roles/{role}
+   DELETE /organizations/{id}/memberships/{membership_id}/roles/{role}
+```
+
+Each is one transaction, in one order that must not change:
+
+```
+   1. lock the ORGANIZATION row (FOR UPDATE)
+         the serialization point for this organization's whole lifecycle
+   2. re-check the actor's own ACTIVE membership + ORG_ADMIN, inside that lock
+         require_org_admin already ran, in an EARLIER session -- an administrator
+         deactivated since then must not finish the request they had begun
+   3. resolve the target membership and prove it belongs to THIS organization
+         a real membership in another tenant is reported "not found", never "elsewhere"
+   4. mutate -> flush -> evaluate the invariant -> write the audit row
+         all committing or rolling back together (DH-EX-002R)
+```
+
+**The organization-level lock, not a per-membership one, and that is the whole point.** Two
+administrators removing *each other's* `ORG_ADMIN` touch two different membership rows. A per-row
+lock lets both read "there are two administrators", both pass, and the organization end with
+**zero** — administratively locked out with no way back except platform intervention. Coarse on
+purpose: contention here is a screen with one person on it.
+
+**The last-active-administrator invariant is a transition rule, not a floor.** It refuses an
+operation that takes an organization from one-or-more active `ORG_ADMIN` memberships to zero. An
+organization that *already* has none is not frozen — that state is reachable today, since
+`POST .../memberships` will create a membership holding only `CLINICIAN` — and a floor would refuse
+every repair in exactly the organizations needing one. No policy for this existed anywhere in the
+repository before this ticket. It binds a platform administrator too, which is stricter than the
+ticket's literal wording and is recorded as a choice: granting `ORG_ADMIN` is never blocked by the
+rule, so the recovery direction stays open and a replacement is simply added first. Self-removal
+needs no separate rule; it is the same code path.
+
+**Reactivation restores the roles still attached.** Deactivation changes `status` and nothing else,
+so role rows survive it, and `assign` refuses an inactive membership. That is the pre-existing model,
+observed rather than redesigned — both the API response and the UI confirmation name those roles
+before the fact, and role *removal* deliberately works on an inactive membership so somebody can be
+restored with less authority than they left with.
+
+**Organization access is not a Keycloak account.** Nothing here disables, deletes or modifies a
+Keycloak identity. A physician working at two clinics keeps their sign-in and their other clinic when
+one of them withdraws access. Global identity disablement, if ever wanted, is a separate platform
+capability with its own authority model.
+
+**`PLATFORM_ADMIN` cannot be granted here**, because it is not an `OrganizationRole` at all — it is a
+Keycloak realm role. The `{role}` path parameter is a plain string validated against
+`ALLOWED_ROLES_BY_ORG_TYPE` in DHealth's own code rather than typed as an enum, so the check is
+reachable and breakable by a negative control instead of being enforced invisibly by request parsing;
+the database's `CHECK` constraints refuse the value as a second layer.
+
+**The UI is `ui/src/features/team/TeamAccessPage.tsx`** — the first facility-owned administration
+surface, an `Équipe et accès` staff section gated on `canAdministerTeam`. Reaching it required making
+an `ORG_ADMIN`-only membership *usable*: `isUsableMembership` excluded it on the stated grounds that
+"administration is a later ticket's surface", which was the same P1 in user-facing form. It renders
+outside `ClinicProvider`/`LabProvider` and loads no patient, order or result. `Aujourd'hui` is now
+conditional on holding a clinical capability, so an administrator with none lands on Équipe et accès
+rather than an empty work relay.
+
+Migration `0033` widens one `CHECK` constraint and creates no table: `membership_deactivated`,
+`membership_reactivated`, `role_removed`. No *refusal* event was added — a refusal is not a mutation,
+and the last-administrator 409 deliberately does not reach the file-backed refusal writer either,
+whose `authorization_refused` vocabulary would misreport an actor who is in fact authorized.
 
 A successful attach re-reads `GET /organizations/{id}/enrollment/readiness`. Staffing is a readiness
 condition, so the blocker the operator just cleared has to disappear because the server says so —
@@ -2417,6 +2501,13 @@ performs a **live database read** of the caller's membership and roles. The cons
 worth designing for: **withdrawing a membership or a role takes effect on the very next request,
 with the same unexpired token** — there is no window in which a stale claim still opens a door, and
 no need to wait for a token to expire or force a re-login.
+
+DHEALTH-NATIVE-SEC-001 proved that property and simultaneously found that **nothing in the product
+could exercise it**: the withdrawal had no supported caller, so its own tests produced the state with
+`psql` (P1/F1). DHEALTH-NATIVE-ACCESS-001 closed that — see "The staff access lifecycle" in §25 for
+the four endpoints, the organization-level lock, and the last-active-administrator invariant. The
+paragraph above is what makes those endpoints sufficient: because authority is re-read per request,
+revocation needs no session invalidation, no token blacklist and no forced logout.
 
 The same property makes the model symmetric: a role *added* mid-session is honoured immediately by
 the server. The browser's own navigation can lag, because `StaffApp` loads `/me` once per

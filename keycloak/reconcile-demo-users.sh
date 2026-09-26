@@ -7,14 +7,17 @@ set -euo pipefail
 # docker-compose.yml stack; the demo compose file is the only caller.
 #
 # These users carry NO Keycloak realm role. `dhealth-platform-admin` is the only realm role this
-# realm defines and none of the three demo personas need it -- organization-scoped authority
-# (CLINICIAN/LAB_TECH/LAB_RESULT_RELEASER) is an Exchange-database concept
+# realm defines and none of the five demo personas need it -- organization-scoped authority
+# (ORG_ADMIN/CLINICIAN/LAB_TECH/LAB_RESULT_RELEASER) is an Exchange-database concept
 # (OrganizationMembership + OrganizationRoleAssignment), granted by `demo_seed.py` directly, never
-# by anything stored in Keycloak. This script's only job is that three real, real-password-login
-# accounts exist; `demo_seed.py` discovers each one's own Keycloak-assigned `id` (the JWT `sub` a
-# real login will carry) by asking Keycloak directly rather than assuming a fixed value survives
-# a fresh volume (Keycloak's Admin REST API does not guarantee honoring a caller-supplied `id` on
-# create across every version).
+# by anything stored in Keycloak. That includes the two ORG_ADMIN personas added by
+# DHEALTH-NATIVE-ACCESS-001: a facility administrator is emphatically *not* a platform
+# administrator, and giving either one a realm role would quietly make it one.
+#
+# This script's only job is that five real, real-password-login accounts exist; `demo_seed.py`
+# discovers each one's own Keycloak-assigned `id` (the JWT `sub` a real login will carry) by asking
+# Keycloak directly rather than assuming a fixed value survives a fresh volume (Keycloak's Admin
+# REST API does not guarantee honoring a caller-supplied `id` on create across every version).
 
 realm=dhealth-exchange
 server=${KEYCLOAK_INTERNAL_URL:-http://keycloak.openelis.org:8080}
@@ -29,6 +32,14 @@ kcadm=/opt/keycloak/bin/kcadm.sh
 : "${DEMO_LAB_TECH_PASSWORD:?set DEMO_LAB_TECH_PASSWORD}"
 : "${DEMO_RELEASER_USERNAME:?set DEMO_RELEASER_USERNAME}"
 : "${DEMO_RELEASER_PASSWORD:?set DEMO_RELEASER_PASSWORD}"
+# DHEALTH-NATIVE-ACCESS-001: one facility administrator per demo organization. Two, not one, so
+# the cross-organization boundary is a question this baseline can actually ask -- a single admin of
+# both organizations would legitimately succeed everywhere. Like the three above, these carry NO
+# Keycloak realm role: ORG_ADMIN is an Exchange-database fact granted by `demo_seed.py`.
+: "${DEMO_ADMIN_USERNAME:?set DEMO_ADMIN_USERNAME}"
+: "${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD}"
+: "${DEMO_LAB_ADMIN_USERNAME:?set DEMO_LAB_ADMIN_USERNAME}"
+: "${DEMO_LAB_ADMIN_PASSWORD:?set DEMO_LAB_ADMIN_PASSWORD}"
 
 trap 'rm -f "$config"' EXIT
 
@@ -110,5 +121,7 @@ reconcile_user() {
 reconcile_user "$DEMO_CLINICIAN_USERNAME" "$DEMO_CLINICIAN_PASSWORD" "Démo" "Clinicien"
 reconcile_user "$DEMO_LAB_TECH_USERNAME" "$DEMO_LAB_TECH_PASSWORD" "Démo" "Technicien"
 reconcile_user "$DEMO_RELEASER_USERNAME" "$DEMO_RELEASER_PASSWORD" "Démo" "Libérateur"
+reconcile_user "$DEMO_ADMIN_USERNAME" "$DEMO_ADMIN_PASSWORD" "Démo" "Administration"
+reconcile_user "$DEMO_LAB_ADMIN_USERNAME" "$DEMO_LAB_ADMIN_PASSWORD" "Démo" "Administration Labo"
 
-echo "DHealth Native Demo users reconciled: $DEMO_CLINICIAN_USERNAME, $DEMO_LAB_TECH_USERNAME, $DEMO_RELEASER_USERNAME"
+echo "DHealth Native Demo users reconciled: $DEMO_CLINICIAN_USERNAME, $DEMO_LAB_TECH_USERNAME, $DEMO_RELEASER_USERNAME, $DEMO_ADMIN_USERNAME, $DEMO_LAB_ADMIN_USERNAME"

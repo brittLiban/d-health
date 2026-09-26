@@ -163,13 +163,74 @@ quietly omitted.
 
 | ID | Severity | Finding |
 |---|---|---|
-| **F1** | **P1** | **Authority can be granted and never withdrawn through the product.** `OrganizationMembershipRepository.set_inactive` and `OrganizationRoleAssignmentRepository.remove` both exist and **neither has a caller** in `api.py` or the UI. `POST .../memberships` grants; nothing revokes. SEC-6 and SEC-7 prove the backend fails closed *given* the withdrawn state — they do **not** prove an administrator can reach it, and the suite produces that state with direct SQL for exactly this reason. |
+| **F1** | **P1** — **CLOSED by DHEALTH-NATIVE-ACCESS-001, 2026-09-26** | **Authority can be granted and never withdrawn through the product.** `OrganizationMembershipRepository.set_inactive` and `OrganizationRoleAssignmentRepository.remove` both exist and **neither has a caller** in `api.py` or the UI. `POST .../memberships` grants; nothing revokes. SEC-6 and SEC-7 prove the backend fails closed *given* the withdrawn state — they do **not** prove an administrator can reach it, and the suite produces that state with direct SQL for exactly this reason. **→ See §5.1 below for the disposition.** |
 | **G1** | P2 | **SPA fallback path confusion.** `app.<domain>`'s catch-all returns **200 text/html** for `/health/ready`, `/notifications/v1/*`, `/api/*`, `/admin/*` — the SPA shell, byte-identical to `/`. No data is disclosed; the harm is that a misconfigured callback, probe or monitor looks healthy. This is the class of defect DH-NOTIFY-META-001R already found once. The `exchange.` vhost is correctly a bare 404. Pinned by SEC-EDGE-4. |
 | **G2** | P2 | **No cache policy on authenticated staff clinical responses.** `no-store` is set on exactly eight handlers, all patient-access/notification. Orders, results, release versions, the review queue and the patient directory send no cache directive at all. Pinned by SEC-17. |
 | **G3** | P3 | **Keycloak's admin console is reachable at `id.<domain>/admin/`.** Login-protected, and the console is how this deployment is administered, so restricting it is a supportability decision rather than a bug fix. |
 | **G4** | P3 | **No `Content-Security-Policy` and no `Permissions-Policy`** on the application origin. Writing a correct CSP requires a resource inventory this ticket did not do; guessing one was explicitly out of scope. Pinned by SEC-EDGE-7. |
 | **G5** | P3 | **No password policy configured** in the realm, and no MFA. Brute-force protection is on and is the current compensating control. |
 | **H1** | — | **Harness bug, fixed here:** `ui/e2e/support/adminApi.ts`'s `createSetupClient` creates a client with **no audience mapper**, so tokens minted from it would be refused for a reason unrelated to whatever a test believed it was proving. It survived because DH-CLINIC-004B never executed. `securityAdmin.ts`'s own client adds the mapper. |
+
+### 5.1 F1's disposition — closed by DHEALTH-NATIVE-ACCESS-001
+
+    found in DHEALTH-NATIVE-SEC-001 (2026-09-26)
+        ↓
+    closed by DHEALTH-NATIVE-ACCESS-001 (2026-09-26)
+
+**The original finding is not edited away, and it was not a backend defect.** What this
+qualification proved — that a withdrawn membership and a removed role are refused on the very next
+request, against a still-valid token — was correct then and is correct now. What was missing was any
+way for a facility administrator to *cause* that state: the two repository methods had no caller, so
+SEC-6 and SEC-7 had to reach into PostgreSQL with `psql`, and that is exactly what made it a P1
+rather than a note.
+
+**What now exists** (`docs/ARCHITECTURE.md`, `adapter/src/daher_adapter/exchange/staff_access.py`):
+four organization-scoped, role-scoped, audited endpoints — deactivate a membership, reactivate it,
+add one allowed organization role, remove one — reached by a facility's own administrator on an
+`Équipe et accès` screen (`ui/src/features/team/TeamAccessPage.tsx`). Each is one transaction that
+locks the organization row, re-checks the actor's own `ORG_ADMIN` *inside* that lock, proves the
+target membership belongs to the organization, mutates, and writes its audit row in the same
+transaction. Three new audit event types: `membership_deactivated`, `membership_reactivated`,
+`role_removed`.
+
+**The closure standard applied.** The P1 was that *a facility administrator could not do this*, so
+adding endpoints alone would not have closed it. `ui/e2e/native/07-access-lifecycle.spec.ts` drives
+the real screen in a real Chromium: the administrator clicks, reads a confirmation naming the person
+and the establishment, confirms, and the colleague's already-signed-in browser — holding a token
+issued before the click — is refused on its next request.
+
+**SEC-6 and SEC-7 were deliberately NOT rewritten to use the new API.** They answer a different
+question ("does the backend fail closed *given* this state?") from the new suite's ("can an
+administrator *reach* that state?"), and neither subsumes the other. Both still run, and the new
+suite has its own config and its own report (`scripts/demo/qualify-access.sh`,
+`native-access-results.json`) so that this document's "31 security tests" keeps meaning what it says.
+
+**A second, narrower defect this closure uncovered and fixed.** §1 above tells an operator that
+`scripts/demo/reset.sh` plus re-running the demo user reconciliation is the recovery for a run killed
+with a membership left inactive. That was **false**. `demo_seed`'s `_grant_membership` called
+`memberships.create` (insert-first-wins, so a re-seed resolves to the existing INACTIVE row) and then
+`roles.assign`, which refuses an inactive membership — so one deactivated membership made `reset.sh`
+raise, with no supported way back to the baseline. Reproduced, then fixed by converging the
+membership's status, and pinned by `adapter/tests/test_demo_seed.py`'s `test_bs5_...`. It was latent
+before (only `psql` could reach it, which is what SEC-6 did); it is ordinary now that withdrawing
+access is a supported product action.
+
+**Negative controls for the closure** are recorded in `PROJECT_STATE.md`'s DHEALTH-NATIVE-ACCESS-001
+entry rather than in §4 above, so this document's own "six negative controls" count keeps meaning
+what it says. They break the new guards specifically: the membership active-state filter, the
+clinician role check, the target-organization ownership check, the last-administrator protection and
+the organization-type role matrix.
+
+**Still open, and explicitly not touched by that ticket:** G1 (SPA fallback), G2 (staff cache
+policy), G3 (Keycloak admin console), G4 (CSP/Permissions-Policy), G5 (password policy/MFA), §6
+(successful-read audit policy — `HUMAN DECISION REQUIRED`), §7 (session/timeout policy — `HUMAN
+DECISION REQUIRED`), and §8's owed items including SEC-19 (multi-organization context isolation) and
+NC-SEC-6. None of those is resolved, and none was quietly marked so.
+
+**One new gap it records rather than fixes:** there is still no way to create a staff member's
+*first* membership from inside a facility. A platform administrator does it (`FacilityTeam`), because
+DHealth has no invitation or account-creation flow at all — deliberately out of that ticket's scope.
+See `PROJECT_STATE.md`.
 
 **One thing that looked like a finding and is not.** `/me` lists a withdrawn membership rather than
 omitting it — but it carries `membership_status`, and `isUsableMembership` refuses any membership

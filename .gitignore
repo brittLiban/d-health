@@ -59,3 +59,8 @@ native-recovery-results.json
 # DHEALTH-NATIVE-SEC-001: the security qualification report, written at the repository root by
 # scripts/demo/qualify-security.sh. Evidence of a run, not part of the source.
 native-security-results.json
+
+# DHEALTH-NATIVE-ACCESS-001: the staff access lifecycle qualification report, written at the
+# repository root by scripts/demo/qualify-access.sh. Evidence of a run, not part of the source --
+# same treatment as its three siblings above.
+native-access-results.json

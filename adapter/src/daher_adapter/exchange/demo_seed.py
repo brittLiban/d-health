@@ -53,6 +53,7 @@ from daher_adapter.exchange.membership import (
 from daher_adapter.exchange.models import (
     FacilityEnrollment,
     OnboardingStatus,
+    OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
     ParticipationMode,
@@ -241,6 +242,7 @@ def _demo_user_identity(
 
 
 def _grant_membership(
+    session_factory: sessionmaker[Session],
     memberships: OrganizationMembershipRepository,
     roles: OrganizationRoleAssignmentRepository,
     *,
@@ -248,9 +250,39 @@ def _grant_membership(
     identity_id: uuid.UUID,
     org_roles: list[OrganizationRole],
 ) -> None:
+    """Converge one demo membership and its roles toward the declared baseline.
+
+    **The status convergence is not decoration, and it was a real bug.** Before
+    DHEALTH-NATIVE-ACCESS-001 this function created the membership and assigned the roles, and
+    nothing else. `create` is insert-first-wins, so on a re-seed it returns the *existing* row --
+    including an existing row whose status is INACTIVE -- and `assign` then refuses an inactive
+    membership with `MembershipInactive`. So a demo database holding one deactivated membership made
+    `reset.sh` **crash**, and there was no supported way back to the baseline.
+
+    That was already latently true (a `psql` deactivation could reach it, which is precisely what
+    DHEALTH-NATIVE-SEC-001's SEC-6 did), and `docs/NATIVE-SECURITY-QUALIFICATION.md` told an
+    operator that `reset.sh` plus re-running the user reconciliation was the recovery -- a claim
+    this function could not honour. DHEALTH-NATIVE-ACCESS-001 turns it from latent into ordinary:
+    withdrawing access is now a supported product action, so a killed qualification run leaves
+    exactly this state behind. Reproduced before fixing.
+
+    Converging the status is squarely inside `seed_baseline`'s own contract rather than an expansion
+    of it. DH-DEMO-001's "DO NOT EXPAND THE DOMAIN" governs which *tables* a reset clears --
+    workflow state, never baseline configuration -- and this adds nothing to either list. A
+    membership the baseline declares ACTIVE, left INACTIVE, simply means the baseline was not
+    restored, and restoring it is the whole job. It is additive in the sense that matters: no row is
+    deleted, no history is discarded, and the membership keeps its identity and its audit trail.
+    """
     membership, _created = memberships.create(
         organization_id=organization_id, identity_id=identity_id
     )
+    if membership.status != OrganizationMembershipStatus.ACTIVE.value:
+        with session_factory() as session, session.begin():
+            memberships.set_status_in_session(
+                session,
+                membership_id=membership.id,
+                status=OrganizationMembershipStatus.ACTIVE,
+            )
     for role in org_roles:
         roles.assign(membership_id=membership.id, role=role)
 
@@ -361,6 +393,7 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             username=os.environ.get("DEMO_CLINICIAN_USERNAME", "demo-clinician"),
         )
         _grant_membership(
+            session_factory,
             memberships,
             roles,
             organization_id=provider.id,
@@ -377,6 +410,7 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             username=os.environ.get("DEMO_LAB_TECH_USERNAME", "demo-lab-tech"),
         )
         _grant_membership(
+            session_factory,
             memberships,
             roles,
             organization_id=lab.id,
@@ -393,11 +427,59 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             username=os.environ.get("DEMO_RELEASER_USERNAME", "demo-releaser"),
         )
         _grant_membership(
+            session_factory,
             memberships,
             roles,
             organization_id=lab.id,
             identity_id=releaser_identity,
             org_roles=[OrganizationRole.LAB_RESULT_RELEASER],
+        )
+
+        # DHEALTH-NATIVE-ACCESS-001: one facility administrator per organization.
+        #
+        # Two administrators rather than one shared between both organizations, deliberately. The
+        # cross-organization boundary is only a real question if the caller genuinely *is* an
+        # administrator somewhere else -- an identity holding ORG_ADMIN in both would legitimately
+        # succeed everywhere and would prove nothing about tenant isolation.
+        #
+        # ORG_ADMIN only, and no clinical role. That is the honest shape of a facility
+        # administrator (ADR-044 and `require_clinician` both refuse an ORG_ADMIN who holds only
+        # that), and it is also the configuration that was unreachable before this ticket: such a
+        # membership was not "usable" in the staff application, so its holder could not open a
+        # single screen. Seeding it clinical roles as well would quietly hide whether the new
+        # administration surface is reachable on its own.
+        admin_identity = _demo_user_identity(
+            identities,
+            issuer=issuer,
+            keycloak_base_url=keycloak_base_url,
+            admin_user=admin_user,
+            admin_password=admin_password,
+            username=os.environ.get("DEMO_ADMIN_USERNAME", "demo-admin"),
+        )
+        _grant_membership(
+            session_factory,
+            memberships,
+            roles,
+            organization_id=provider.id,
+            identity_id=admin_identity,
+            org_roles=[OrganizationRole.ORG_ADMIN],
+        )
+
+        lab_admin_identity = _demo_user_identity(
+            identities,
+            issuer=issuer,
+            keycloak_base_url=keycloak_base_url,
+            admin_user=admin_user,
+            admin_password=admin_password,
+            username=os.environ.get("DEMO_LAB_ADMIN_USERNAME", "demo-lab-admin"),
+        )
+        _grant_membership(
+            session_factory,
+            memberships,
+            roles,
+            organization_id=lab.id,
+            identity_id=lab_admin_identity,
+            org_roles=[OrganizationRole.ORG_ADMIN],
         )
     else:
         print(  # noqa: T201 -- CLI tool, stdout is the intended channel

@@ -6,7 +6,44 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
-**2026-09-26, DHEALTH-NATIVE-SEC-001, directly on `master`.** From `3d058c6`. **DHealth Native's
+**2026-09-26, DHEALTH-NATIVE-ACCESS-001, directly on `master`.** From `191dd5b`. **A facility
+administrator can now actually revoke staff authority through DHealth, and the same still-valid
+browser token loses that authority on its very next request.** This closes DHEALTH-NATIVE-SEC-001's
+**P1** (see below): the authorization engine was always correct, but nothing in the product could
+produce a withdrawn membership or a removed role, so that ticket's own suite had to reach into
+PostgreSQL with `psql`.
+
+Four organization-scoped, role-scoped, audited operations — deactivate a membership, reactivate it,
+add one allowed organization role, remove one — reached by a facility's own administrator on an
+**`Équipe et accès`** screen. Each is one transaction that locks the organization row, re-checks the
+actor's own `ORG_ADMIN` *inside* that lock, proves the target membership belongs to the organization,
+and writes its audit row alongside the change. **Administrative lockout is prevented**: an operation
+may not take an organization from one-or-more active administrators to zero, a rule that binds a
+platform administrator too and that no policy in this repository previously defined.
+
+Qualified with **16 real-browser tests** against real Keycloak 26.7.1, real Caddy, real adapter and
+real PostgreSQL 16 (`scripts/demo/qualify-access.sh`), **ten real-PostgreSQL concurrency tests**
+including two administrators removing each other's `ORG_ADMIN` simultaneously, and **1708 adapter
+unit tests**. Full record: `PROJECT_STATE.md`'s DHEALTH-NATIVE-ACCESS-001 entry, disposition in
+`docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
+
+**What it does not claim.** Not penetration tested, not audited, not certified. No production
+deployment, no public CA, no real domain, no real patient data. **No pilot gate is created or
+cleared.** Withdrawing organization access is emphatically **not** disabling a Keycloak account: a
+physician working at two clinics keeps their sign-in and their other clinic, which is qualified
+rather than asserted.
+
+**One gap it deliberately leaves open, and it is the largest one:** a facility still cannot create a
+staff member's *first* membership. Attaching somebody new requires a platform administrator, because
+DHealth has no invitation flow and no account creation at all. Out of scope by instruction, recorded
+as the next admin ticket's material.
+
+**The two `HUMAN DECISION REQUIRED` items below are unchanged and unanswered** — successful-read
+audit policy, and session/timeout policy. This ticket added mutation audit only.
+
+---
+
+**2026-09-26, DHEALTH-NATIVE-SEC-001.** From `3d058c6`. **DHealth Native's
 security boundaries have been exercised against the real runtime, and the load-bearing guards were
 deliberately broken to prove the qualification can see them fail.** Real Chromium, real Caddy, real
 Keycloak 26.7.1, real adapter, real PostgreSQL 16: **31 security tests** covering authentication
@@ -23,7 +60,10 @@ against the real runtime, including deliberate negative controls.* **Not** penet
 independently audited, not certified against any regime, not production secure.
 `BASE_DOMAIN=localhost`, Caddy's internal CA, one workstation, synthetic data.
 
-**One P1 finding, and it is a gap in the product rather than in a guard.** **Authority can be
+**One P1 finding, and it is a gap in the product rather than in a guard.** **[CLOSED 2026-09-26 by
+DHEALTH-NATIVE-ACCESS-001 — see §A's entry above and
+`docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1. Kept unedited below because the finding was correct and
+the record of it is worth more than a tidy page.]** **Authority can be
 granted and never withdrawn.** `OrganizationMembershipRepository.set_inactive` and
 `OrganizationRoleAssignmentRepository.remove` both exist and **neither has a caller** anywhere in
 `api.py` or the UI. `POST .../memberships` grants access; nothing revokes it. The backend is
@@ -644,8 +684,12 @@ wizard rather than copied, so both routes to a membership stay one implementatio
 attach re-reads readiness, so the `administrator_present` blocker clears because the server says so.
 **Nothing on the screen removes access**: `POST .../memberships` is ensure/add and this API revokes
 nothing, so held roles render ticked and disabled, inactive memberships are listed but not editable,
-and there is no control whose label implies a removal the server would refuse. Revocation,
-invitations and Keycloak provisioning remain out of scope and unbuilt.
+and there is no control whose label implies a removal the server would refuse. ~~Revocation,
+invitations and Keycloak provisioning remain out of scope and unbuilt.~~ **[Corrected 2026-09-26,
+DHEALTH-NATIVE-ACCESS-001: revocation is built, on the *facility-owned* `Équipe et accès` staff
+screen, not this platform-scope section — which still does not remove anything, now as a scope
+decision rather than a missing capability. Invitations and Keycloak provisioning remain out of scope
+and unbuilt.]**
 
 **2026-09-21, DH-MVP-ONBOARD-001 correction, directly on `master`.** Two ticket-owned gaps closed,
 from `1621ca6`. **The wizard's first-administrator step now performs the action it offered**: the
@@ -840,11 +884,44 @@ DHEALTH-NATIVE-RECOVERY-001):
 | Patient status *screen* itself (`ui/src/features/patient/`) | **no** — the restored grant was replayed at the API only |
 | Correction and post-release amendment lifecycle (DH-LAB-005) | no |
 | Platform / facility-enrollment screens (DH-MVP-ONBOARD-001) | no |
+| Facility-owned `Équipe et accès`: an ORG_ADMIN-only account reaching a workspace at all, and a real click withdrawing a colleague's access (DHEALTH-NATIVE-ACCESS-001) | **yes** |
 
 **What the table does not say.** It is runtime qualification on synthetic data with one operator —
 not usability qualification, not production deployment, not a public-certificate claim, and not
 evidence about any surface marked *no*. Detail: `docs/NATIVE-GOLDEN-JOURNEY.md`,
 `docs/NATIVE-RECOVERY.md`.
+
+- **Organization staff access lifecycle, DHEALTH-NATIVE-ACCESS-001** (2026-09-26): the supported
+  product path for withdrawing staff authority, which is what closes DHEALTH-NATIVE-SEC-001's P1.
+  Four operations (`exchange/staff_access.py`) — deactivate a membership, reactivate it, add one
+  allowed organization role, remove one — each **one transaction** that locks the organization row,
+  **re-checks the actor's own `ORG_ADMIN` inside that lock**, proves the target membership belongs to
+  the organization, then mutates and audits together. The organization row rather than the membership
+  row is the lock because two administrators removing *each other's* `ORG_ADMIN` touch two different
+  rows, and a per-row lock lets both pass and the organization reach **zero** administrators. The
+  **last-active-administrator invariant is a transition rule, not a floor** (an organization that
+  already has none is not frozen, since that state is reachable through the existing grant endpoint),
+  it binds a platform administrator too, and no policy for it existed anywhere in the repository
+  before this ticket. Reactivation restores the roles still attached — the pre-existing model,
+  observed rather than redesigned, and stated in both the API response and the UI confirmation.
+  Nothing touches Keycloak: withdrawing organization access leaves the person's sign-in and their
+  other establishments alone, qualified rather than asserted. `PLATFORM_ADMIN` cannot be granted
+  because it is not an `OrganizationRole`; the `{role}` path parameter is a plain `str` validated in
+  DHealth's own code precisely so that check is reachable by a negative control rather than enforced
+  invisibly by request parsing, with the database's CHECK constraints as the second layer. UI:
+  `Équipe et accès` (`ui/src/features/team/`), the first facility-owned administration surface, which
+  required making an `ORG_ADMIN`-only membership *usable* — its previous exclusion was the same P1 in
+  user-facing form. Migration `0033_staff_access_lifecycle` widens one CHECK constraint and creates no
+  table (`membership_deactivated`, `membership_reactivated`, `role_removed`). Evidence: **1708
+  adapter unit tests**, **154 UI tests** across the directly affected areas (one measured vitest
+  invocation, not a per-directory sum), **ten real-PostgreSQL
+  concurrency tests** (`test_dhealthaccess001_postgres_qualification.py`, covering §25-A/B/C/D and
+  the lockout races — `FOR UPDATE` is a no-op on SQLite, so this claim is PostgreSQL-only by
+  necessity), and **16 real-Keycloak/real-Chromium tests** (`scripts/demo/qualify-access.sh`). A
+  second defect was found and fixed en route: `reset.sh` could not recover a deactivated membership,
+  which made this document's own stated recovery path false — reproduced, fixed, pinned. **Not**
+  penetration tested, **not** audited, no pilot gate created or cleared, and a facility still cannot
+  create a staff member's *first* membership (§F).
 
 - **Patient notification domain, transport and dispatcher, DH-NOTIFY-001** (2026-09-24,
   ADR-058): a durable patient-notification domain separate from `ResultDelivery` in every respect
@@ -1207,7 +1284,8 @@ section is production-deployed, human-qualified, or evidence about real patients
   `ui/src/features/platform/`, DH-MVP-ONBOARD-001) — the control plane for joining the network.
   A platform operator enrols an organization and its enrollment in one transaction, attaches a first
   administrator found through a bounded platform-only identity lookup — or attaches people later
-  from the facility's **Équipe et accès** section, which grants access and never removes it —
+  from the platform-scope facility **Équipe et accès** section, which grants access and never removes
+  it (the *facility-owned* screen of the same name does remove it — DHEALTH-NATIVE-ACCESS-001) —
   records `NATIVE` or `CONNECT` explicitly, captures a Connect facility's software/vendor/version/hosting and the interfaces it
   reports, and reads a server-derived answer to whether production orders may be routed there.
   **Four facts stay separate**: enrolled, configured, operationally ready, production-routable.
@@ -1447,8 +1525,10 @@ Four distinct facts, and collapsing any two of them would be a false claim:
 | **Real-patient pilot** | **no**, on either track, and three of six pilot gates remain uncleared (§H) |
 
 "The frontends are wired" is therefore an accurate statement about the **diagnostic workflow only**.
-There is still no `Réglages`/administration surface (§I), the patient status screen has not been
-rendered in a browser, and the correction/amendment lifecycle has not been browser-exercised (§D).
+There is still no `Réglages`/facility-setup surface (§I) — DHEALTH-NATIVE-ACCESS-001 added one
+narrow facility-owned administration screen (`Équipe et accès`, staff access lifecycle) and nothing
+else; the patient status screen has not been rendered in a browser, and the correction/amendment
+lifecycle has not been browser-exercised (§D).
 
 ## H. Pilot gates
 

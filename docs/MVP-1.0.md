@@ -891,9 +891,14 @@ consequences: ADR-054.
 
 Three things this note does **not** claim. The maternity/reference-connector track is untouched and
 still reached at `?app=maternity` (ADR-042/043), deliberately outside the staff product's navigation.
-No facility-setup or administration surface exists yet — there is no `Réglages` navigation item,
+~~No facility-setup or administration surface exists yet — there is no `Réglages` navigation item,
 because DH-MVP-ADMIN-001 owns that and a navigation entry leading to "Bientôt" is worse than its
-absence. And nothing here changes §6's laws or §13's boundaries: colour in this product carries
+absence.~~ **[Corrected 2026-09-26, DHEALTH-NATIVE-ACCESS-001: one narrow facility-owned
+administration surface now exists — `Équipe et accès`, gated on `ORG_ADMIN`. There is still no
+`Réglages` item and no facility-setup surface; that remains DH-MVP-ADMIN-001's, and the
+"navigation-entry-leading-to-Bientôt" rule is why the new section arrived only once it did something.
+See §10's admin gap entry for what a facility still cannot do.]** And nothing here changes §6's laws
+or §13's boundaries: colour in this product carries
 workflow responsibility (a step is complete, something is owed, this stopped) and never clinical
 interpretation, no result value is coloured by its magnitude, and no clinical value — typed, drafted,
 released, or amended — is persisted to `localStorage`, `sessionStorage`, `IndexedDB`, a cookie, or a

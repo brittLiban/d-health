@@ -7,16 +7,26 @@
  * database directly.
  *
  * One deliberate exception, and it is the most important thing in this file to understand:
- * `setMembershipStatus` and `removeRole` write **SQL directly against the Exchange
- * database**. That is not a shortcut — it is a finding. DHealth's product has no revocation path
- * at all: `OrganizationMembershipRepository.set_inactive` and
- * `OrganizationRoleAssignmentRepository.remove` both exist in
- * `adapter/src/daher_adapter/exchange/membership.py` and **neither has a single caller** in
- * `api.py` or the UI (confirmed by grep at 3d058c6). Authority can be granted through
- * `POST .../memberships` and never withdrawn through any supported interface. So these two
- * helpers produce the database state that a revocation feature *would* produce, and the tests
- * that use them prove what the backend does when it sees that state — which is a genuinely
- * different claim from "an administrator can revoke access", and is reported as such.
+ * `setMembershipStatus` and `removeRole` write **SQL directly against the Exchange database**.
+ *
+ * ── Why, when this was written, and what changed ──
+ *
+ * ~~That is not a shortcut — it is a finding. DHealth's product has no revocation path at all:
+ * `set_inactive` and `remove` both exist and **neither has a single caller** in `api.py` or the UI
+ * (confirmed by grep at 3d058c6).~~
+ *
+ * **Corrected 2026-09-26, DHEALTH-NATIVE-ACCESS-001: that gap is closed.** Both methods now have
+ * production callers, reached by a facility administrator through four endpoints and an
+ * `Équipe et accès` screen. It was a real finding (DHEALTH-NATIVE-SEC-001's P1/F1) and it is now
+ * recorded as closed in `docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
+ *
+ * **These two helpers stay, and SEC-6/SEC-7 keep using them, deliberately.** Rewriting those tests
+ * to revoke through the new API would quietly change what they prove. Their claim is *"the backend
+ * fails closed **given** a withdrawn membership or role"* — a property of the authorization engine
+ * that must hold however the state arose, including a state no endpoint produces. The separate
+ * claim, *"an administrator can **reach** that state through the product"*, belongs to
+ * `07-access-lifecycle.spec.ts`, which uses the real endpoints and no SQL to cause anything.
+ * Neither suite subsumes the other, so both exist.
  */
 import { execFileSync } from 'node:child_process'
 

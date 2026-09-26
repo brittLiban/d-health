@@ -58,6 +58,11 @@ echo "Demo logins (usernames only -- passwords are in demo/native/demo.env, neve
 echo "  ${DEMO_CLINICIAN_USERNAME:-demo-clinician}  (clinic)"
 echo "  ${DEMO_LAB_TECH_USERNAME:-demo-lab-tech}    (lab technician)"
 echo "  ${DEMO_RELEASER_USERNAME:-demo-releaser}    (result releaser)"
+# DHEALTH-NATIVE-ACCESS-001: one facility administrator per organization. Each holds ORG_ADMIN and
+# no clinical role, so each lands directly on Équipe et accès -- and neither can administer the
+# other's establishment, which is the boundary the access qualification exercises.
+echo "  ${DEMO_ADMIN_USERNAME:-demo-admin}      (clinic — Équipe et accès)"
+echo "  ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}  (lab — Équipe et accès)"
 echo
 echo "Run scripts/demo/status.sh for a health summary, scripts/demo/reset.sh to restore the"
 echo "baseline, or scripts/demo/down.sh to stop."
