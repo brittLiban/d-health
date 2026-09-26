@@ -39,6 +39,7 @@ from daher_adapter.exchange.models import (
     ExchangeSecurityAuditEvent,
     OrganizationMembership,
     OrganizationRole,
+    OrganizationRoleAssignment,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
 
@@ -1075,3 +1076,54 @@ def test_a_role_name_that_is_not_an_organization_role_is_refused_before_any_look
             membership_id=uuid.uuid4(),
             role_name="PLATFORM_ADMIN",
         )
+
+
+def test_a_role_the_org_type_no_longer_permits_can_still_be_removed(
+    client: TestClient, world, sessions: sessionmaker[Session], role_assignments
+) -> None:
+    """A role row that exists must always be withdrawable through the product.
+
+    **Found by this ticket's own NC-ACCESS-5, and it was a real defect.** That control widened
+    `ALLOWED_ROLES_BY_ORG_TYPE` so a PROVIDER could hold `LAB_TECH`, ACCESS-10 then granted one
+    (which is why it went red), and reverting the control left a real `LAB_TECH` row at a provider
+    that the product **could not remove**: `remove_role` validated against the org-type matrix
+    first and answered 422 before it ever looked at the membership.
+
+    That is the P1 this whole ticket exists to close, reintroduced in miniature -- authority that
+    exists and cannot be withdrawn. The matrix now governs only what may be *granted*.
+
+    The row is created through the repository rather than the API on purpose: no supported endpoint
+    can produce it, which is precisely why the removal path has to cope with it. A migration that
+    narrows the matrix, or a role retired from an organization type, would reach the same state.
+    """
+    provider, admin = world["provider_id"], world["admin_a"]
+    membership_id = uuid.UUID(world["clinician"]["membership"])
+
+    # Stand in for a row created under a wider matrix, or by an older release.
+    with sessions() as session, session.begin():
+        session.add(
+            OrganizationRoleAssignment(
+                membership_id=membership_id, role=OrganizationRole.LAB_TECH.value
+            )
+        )
+    assert OrganizationRole.LAB_TECH.value in role_assignments.list_for_membership(membership_id)
+
+    removed = _remove_role(client, admin["token"], provider, str(membership_id), "LAB_TECH")
+    assert removed.status_code == 200, removed.text
+    assert OrganizationRole.LAB_TECH.value not in role_assignments.list_for_membership(
+        membership_id
+    )
+
+
+def test_removal_still_refuses_a_value_that_names_no_real_role(client: TestClient, world) -> None:
+    """The half of the gate removal keeps. `PLATFORM_ADMIN` and an invented role cannot name a row
+    that exists, so refusing them costs nothing and keeps the 422 honest."""
+    for forbidden in ("PLATFORM_ADMIN", "SUPER_ADMIN", "not-a-role"):
+        response = _remove_role(
+            client,
+            world["admin_a"]["token"],
+            world["provider_id"],
+            world["clinician"]["membership"],
+            forbidden,
+        )
+        assert response.status_code == 422, f"{forbidden}: {response.text}"

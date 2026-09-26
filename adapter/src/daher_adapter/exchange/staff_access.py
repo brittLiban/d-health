@@ -345,9 +345,23 @@ class StaffAccessService:
         from an already-signed-in browser lose that authority, with no logout and no token refresh,
         because every ``require_*`` reads the role set from the database on every request.
 
-        The role is validated against the organization-type matrix first, so a request naming a role
-        this organization could never hold is a 422 rather than a misleading "not held" 409."""
-        role = self._require_allowed_role(role_name, organization_id=organization_id)
+        **Removal deliberately does NOT check the organization-type matrix, and that is a fix rather
+        than an omission.** It used to. The consequence was found by this ticket's own NC-ACCESS-5:
+        that control widened `ALLOWED_ROLES_BY_ORG_TYPE` so a provider could hold `LAB_TECH`, a real
+        `LAB_TECH` row was written at a provider, and then reverting the control made that row
+        **unremovable through the product** -- `_require_allowed_role` answered 422 before the
+        endpoint ever looked at the membership. A role that exists and cannot be withdrawn is the
+        exact shape of the P1 this ticket was written to close, reintroduced in miniature.
+
+        So removal validates only that the value names a real `OrganizationRole`. `PLATFORM_ADMIN`,
+        a typo and an invented role are still refused, because none of them can name a row that
+        exists. But any of the four real roles is removable whenever a membership actually holds it,
+        whatever the organization's type now permits -- removal only ever *reduces* authority, so
+        refusing it protects nothing and strands the row instead.
+
+        `ALLOWED_ROLES_BY_ORG_TYPE` therefore governs what may be **granted**, which is where a
+        matrix belongs; it never governs what may be taken away."""
+        role = self._require_organization_role(role_name)
         with self._sessions.begin() as session:
             target = self._open(
                 session,
@@ -472,21 +486,38 @@ class StaffAccessService:
 
     # -- helpers ----------------------------------------------------------------------------------
 
+    def _require_organization_role(self, role_name: str) -> OrganizationRole:
+        """Is this value one of the four real organization roles at all?
+
+        The gate that refuses ``PLATFORM_ADMIN``, a typo and an invented role. Deliberately separate
+        from the org-type matrix below, because the two questions are not the same and are needed at
+        different moments: **removal** asks only this one (see ``remove_role``), **granting** asks
+        both.
+
+        ``PLATFORM_ADMIN`` fails here because it is not an ``OrganizationRole`` member -- it is a
+        Keycloak realm role, so no organization administrator can manufacture platform authority
+        through this module. That is structural rather than a list this code consults, which is
+        exactly why NC-ACCESS-5 could not make it succeed without inventing an enum member."""
+        try:
+            return OrganizationRole(role_name)
+        except ValueError as error:
+            raise ForbiddenRole(f"{role_name!r} is not an organization role") from error
+
     def _require_allowed_role(
         self, role_name: str, *, organization_id: uuid.UUID
     ) -> OrganizationRole:
-        """The application-layer allowed-role gate.
+        """The gate for **granting**: a real organization role, *and* one this organization's type
+        may hold.
 
         Two refusals collapse into one ``ForbiddenRole``: a value that is not an
         ``OrganizationRole`` at all (``PLATFORM_ADMIN``, a typo, an invented role) and a real
         organization role this organization's *type* may not hold (``LAB_TECH`` at a provider). Both
         are the same answer to the caller -- this role cannot be granted here -- and distinguishing
-        them would tell a
-        caller which non-organization role names exist."""
-        try:
-            role = OrganizationRole(role_name)
-        except ValueError as error:
-            raise ForbiddenRole(f"{role_name!r} is not an organization role") from error
+        them would tell a caller which non-organization role names exist.
+
+        Deliberately **not** used by ``remove_role``: see that method's own docstring for the trap
+        that created (a real role row the product could no longer withdraw)."""
+        role = self._require_organization_role(role_name)
         try:
             organization = self._organizations.get(organization_id)
         except OrganizationNotFound as error:

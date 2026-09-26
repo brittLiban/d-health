@@ -24,8 +24,11 @@ platform administrator too and that no policy in this repository previously defi
 Qualified with **16 real-browser tests** against real Keycloak 26.7.1, real Caddy, real adapter and
 real PostgreSQL 16 (`scripts/demo/qualify-access.sh`), **ten real-PostgreSQL concurrency tests**
 including two administrators removing each other's `ORG_ADMIN` simultaneously, and **1708 adapter
-unit tests** and **920 UI tests across all 59 UI test files**. Full record: `PROJECT_STATE.md`'s
-DHEALTH-NATIVE-ACCESS-001 entry, disposition in `docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
+unit tests** and **920 UI tests across all 59 UI test files**. **Five negative controls executed and
+reverted**, each naming what reddened — including an organization driven to **zero active
+administrators** and a clinic administrator deactivating a laboratory's technician. Full record:
+`PROJECT_STATE.md`'s DHEALTH-NATIVE-ACCESS-001 entry, disposition in
+`docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
 
 **What it does not claim.** Not penetration tested, not audited, not certified. No production
 deployment, no public CA, no real domain, no real patient data. **No pilot gate is created or

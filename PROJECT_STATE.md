@@ -21061,10 +21061,16 @@ identifiers already correct.
 
 ### Evidence
 
-- **1708 adapter unit tests pass**, zero failures (44 new in
+- **1708 adapter unit tests passed** on the last full measured run, zero failures (44 new in
   `test_dhealthaccess001_staff_access.py`, 1 new in `test_demo_seed.py`). `ruff check` and
   `ruff format --check` clean on every file this ticket touches; the 5 remaining repository-wide
   ruff findings are pre-existing in `tests/test_native_recovery_tooling.py` and untouched.
+
+  **Two more tests were added after that run** (the unremovable-role regression below), so
+  `test_dhealthaccess001_staff_access.py` now measures **46** on its own — that file was re-run. The
+  **whole-suite figure of 1708 is therefore stale by exactly those two and has not been
+  re-measured**, and is left as the last number actually observed rather than 1708+2 written down as
+  if it had been. Re-run `pytest tests/ --ignore=tests/integration` to replace it.
 - **UI: 920 tests across all 59 test files, every file accounted for.** 154 of those are the 12
   files in the directly affected areas (`features/staff`, `features/workspace`, `features/team` and
   the three `App.*` suites), 27 of which are the new `TeamAccessPage` tests. `tsc --noEmit` clean;
@@ -21083,7 +21089,98 @@ identifiers already correct.
   under concurrency, and transactional audit coupling.
 - **Real Keycloak + real browser:** `ui/e2e/native/07-access-lifecycle.spec.ts` — 16 tests, its own
   config and its own report (`scripts/demo/qualify-access.sh`, `native-access-results.json`), so
-  this document's "31 security tests" keeps meaning what it says.
+  this document's "31 security tests" keeps meaning what it says. Run **twice consecutively with no
+  reset in between**, deliberately: an access-lifecycle suite that only passes on a pristine database
+  is a suite whose assertions are coupled to run order, and one of them was (see below).
+
+### Negative controls — five executed against the real stack, each reverted
+
+Each control broke **one** production guard, rebuilt and restarted the adapter container (a control
+run against an unrebuilt image measures nothing at all), ran the unit file and the real-stack suite,
+then reverted with `git checkout --` and proved the revert with an empty `git status --porcelain`.
+The demo baseline was restored after each one, because a control that *succeeds* leaves real
+withdrawn access behind. The driver refuses to start on a dirty tree, so no control can silently run
+on top of an unreverted previous one.
+
+| Control | What was broken | What went red |
+|---|---|---|
+| **NC-ACCESS-1** | `OrganizationMembershipRepository.find_active` stopped filtering on `status == ACTIVE` — the read every `require_*` depends on. `find_active_in_session` left intact, so only the protected-request path was affected | **ACCESS-3: expected 404, received 200.** A membership deactivated through the product authorized the provider's orders again on the next request. Also **ACCESS-9**. Unit: `test_deactivation_revokes_org_access_on_the_next_request_with_the_same_token`, `test_a_deactivated_admin_cannot_administer_with_their_still_valid_token` (2 failed, 42 passed) |
+| **NC-ACCESS-2** | `AuthorizationService.require_clinician`'s role check bypassed — the shape of DHEALTH-NATIVE-SEC-001's own NC-SEC-2, applied to the clinician gate | **ACCESS-1: expected 403, received 200.** A clinician whose `CLINICIAN` had just been removed kept reading the provider's orders. Unit: `test_removing_clinician_refuses_the_provider_action_on_the_next_request` (1 failed, 43 passed) |
+| **NC-ACCESS-3** | `StaffAccessService._open`'s target-organization ownership check removed | **ACCESS-5: expected 404, received 200.** Clinique Démo's administrator genuinely deactivated Laboratoire Démo's technician. Unit: `test_a_membership_of_another_organization_is_reported_as_not_found_not_as_elsewhere`, `test_a_fabricated_membership_uuid_answers_exactly_like_a_real_foreign_one` (2 failed, 42 passed) |
+| **NC-ACCESS-4** | `_guard_last_administrator`'s transition condition inverted, so it returns before evaluating anything | **ACCESS-6: expected 409, received 200.** The organization's only administrator removed their own `ORG_ADMIN` and the organization reached **zero active administrators**. Unit: **six** — `test_the_last_admin_cannot_remove_their_own_org_admin_role`, `test_the_last_admin_cannot_deactivate_their_own_membership`, `test_a_platform_admin_is_bound_by_the_same_protection`, `test_the_protection_is_a_transition_rule_not_a_floor`, `test_a_refused_mutation_writes_no_transactional_audit_row`, `test_audit_rolls_back_with_the_mutation_when_the_invariant_refuses` (6 failed, 38 passed) |
+| **NC-ACCESS-5** | `ALLOWED_ROLES_BY_ORG_TYPE` widened so a `PROVIDER` may hold `LAB_TECH` | **ACCESS-10: expected 422, received 200.** A clinic's administrator granted a laboratory role. Unit: `test_org_admin_cannot_grant_a_role_this_organization_type_may_not_hold` (1 failed, 43 passed) |
+
+**Two findings came out of *which* tests reddened, and would have been missed by only checking that
+something did.**
+
+**NC-ACCESS-3 left the parametrized cross-organization cases green.** Those name the other
+organization in the URL and are refused earlier, by `_require_org_admin`. The service's ownership
+check exists for the narrower attack — naming an organization you *do* administer while pointing at
+another organization's membership id — and that is precisely the test that failed. Checking only
+"did something go red" would have credited the wrong layer with the wrong protection.
+
+**NC-ACCESS-5 left ACCESS-10's `PLATFORM_ADMIN` and invented-role cases passing** under the same
+mutation, because they are refused a layer earlier: `PLATFORM_ADMIN` is not an `OrganizationRole`
+member, so `OrganizationRole(role_name)` raises before any allowed-set check is consulted. **That is
+§28's escape clause applying for real** — platform authority is structurally inexpressible through
+this endpoint, and making it succeed would require inventing an enum member, which is manufacturing a
+role rather than breaking a guard. So the control targeted the org-type matrix, which is the guard
+that actually decides which real roles a facility may hold. The layers behind it are recorded rather
+than assumed: `ck_exchange_org_role_assignments_role` and
+`ck_exchange_security_audit_events_role` both enumerate the four real organization roles, and `pg10`
+proves the database refuses `PLATFORM_ADMIN` directly.
+
+**NC-ACCESS-3 and NC-ACCESS-4 each left real withdrawn access behind** — a working technician locked
+out of the laboratory, and the demo administrator stripped of `ORG_ADMIN`. `scripts/demo/reset.sh`
+restored both (`inactive_memberships=0`, `org_admins=2`). That is this ticket's own `_grant_membership`
+fix earning its keep inside its own qualification: before it, those resets would have raised
+`MembershipInactive` and left the demo unusable with no supported way back.
+
+### A real defect NC-ACCESS-5 found in this ticket's own code, and a reset property worth knowing
+
+**The defect: a role that existed could not be withdrawn through the product.** `remove_role`
+validated `role_name` against the organization-type matrix *before* touching the membership. So after
+NC-ACCESS-5 widened the matrix, ACCESS-10 successfully granted `LAB_TECH` at a **provider** (that
+success is exactly why the control went red), and reverting the control left a real row that
+`DELETE .../roles/LAB_TECH` then answered **422** for — the matrix refused the value before the
+endpoint ever looked at what the membership held.
+
+That is the P1 this entire ticket exists to close, reintroduced in miniature: **authority that exists
+and cannot be taken away.** §11 asks for "removal of an existing organization role", not of a
+currently-allowed one.
+
+**Fixed:** removal now validates only that the value names one of the four real `OrganizationRole`
+members, via a new `_require_organization_role`. `PLATFORM_ADMIN`, a typo and an invented role are
+still 422 — none of them can name a row that exists — but any real role is removable whenever a
+membership actually holds it, whatever the organization's type currently permits. Removal only ever
+*reduces* authority, so refusing it protects nothing and strands the row. The matrix now governs what
+may be **granted**, which is where a matrix belongs. Pinned by
+`test_a_role_the_org_type_no_longer_permits_can_still_be_removed` and
+`test_removal_still_refuses_a_value_that_names_no_real_role`. The same state is reachable without a
+negative control — a migration that narrows the matrix, or a role retired from an organization type —
+so this is not an artefact of the test harness.
+
+**The reset property: `scripts/demo/reset.sh` is convergent-additive, not subtractive.**
+`_grant_membership` assigns the declared baseline roles and deletes nothing, so an *extra* grant
+survives a reset. NC-ACCESS-5's `LAB_TECH`-at-a-provider row therefore persisted through the reset
+that followed it, and was still there when the next suite ran — which is how ACCESS-10 failed in the
+final regression's step 3 for a reason that had nothing to do with the code under test. **Recorded
+rather than changed:** making reset delete rows it did not create is a scope decision that edges
+against DH-DEMO-001's additive discipline and ADR-007's bed-seeding precedent, and it is not this
+ticket's to make.
+
+**One consequence worth stating for the next ticket:** the residue was cleared with a single SQL
+`DELETE`, not through the product. The fix above is proven at the HTTP layer by the two unit tests,
+but **it has not been demonstrated against the real stack**, because minting a token for a demo
+administrator outside a browser is impossible by design — direct-access grants are disabled on that
+client, which DHEALTH-NATIVE-SEC-001 verified. Demonstrating it live needs a browser run.
+
+**One process failure of the agent's own, recorded because it produced a false line in a log.**
+`PROJECT_STATE.md` and `STATUS.md` were edited *while* NC-ACCESS-4 was running. The driver's
+clean-tree assertion is global rather than scoped to the mutated file, so it reported
+`REVERT INCOMPLETE` on those documentation edits even though `staff_access.py` had reverted
+correctly — verified by diff and by marker count, with the baseline then restored by hand. No
+repository file was edited during the remaining control.
 
 ### What this ticket may NOT claim
 
