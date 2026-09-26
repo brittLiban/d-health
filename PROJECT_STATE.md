@@ -21182,6 +21182,50 @@ clean-tree assertion is global rather than scoped to the mutated file, so it rep
 correctly — verified by diff and by marker count, with the baseline then restored by hand. No
 repository file was edited during the remaining control.
 
+### Final regression — one invocation, 2026-09-26, at `568b8f6`
+
+One invocation deliberately, following DHEALTH-NATIVE-SEC-001's own lesson: that ticket lost a
+compose override between two separate commands, every later `demo_seed reset` silently did nothing,
+and stale residue looked like a product defect. A skipped step cannot hide between two steps of the
+same script. It refuses to start unless the tree is clean, and it rebuilds adapter and UI first so
+the runtime is the committed code rather than whatever a negative control last left in the image.
+
+```text
+ 0. clean tree + HEAD                      -> 568b8f6
+ 1. rebuild adapter + UI, wait healthy     -> adapter caddy daher-ui dhealth-db keycloak all healthy
+ 2. reset baseline                          -> reconciled, workflow state cleared
+ 3. staff access lifecycle (this ticket)    -> 16 passed
+ 4. reset baseline                          -> reconciled
+ 5. native security qualification           -> 31 passed
+ 6. reset baseline                          -> reconciled
+ 7. native golden journey                   -> 12 passed (incl. the no-console-error/no-failed-request check)
+ 8. residue    patients=1 memberships_inactive=0 roles=5 org_admins=2 orgs=2
+ 9. audit types really written              -> membership_deactivated / membership_reactivated / role_removed all present
+10. native topology names no OpenMRS/OpenELIS/MariaDB service -> test_native_deployment_topology.py 11 passed
+11. running containers                      -> exactly the native five, nothing else
+12. alembic head                            -> 0033_staff_access_lifecycle (head)
+    tree                                    -> clean
+```
+
+**`roles=5`, not the `roles=3` DHEALTH-NATIVE-SEC-001's own residue line recorded** — this ticket's
+two `ORG_ADMIN` grants. Nothing in the repository asserted the old number (checked), so no pin needed
+updating; it is called out here so the next reader does not treat the change as drift.
+
+**Step 10 was corrected after this run rather than accepted.** The script originally counted
+`grep -ciE 'openmrs|openelis|mariadb'` over `docker-compose.native.yml` and reported **4**, which
+reads as a violated invariant. All four are **comments explaining the absence**; no service, image or
+hostname names any of them. `docker-compose.native.yml`'s own header points at
+`tests/test_native_deployment_topology.py` as the honest check, so the step now runs that (11 passed).
+A line-counting grep over a file whose comments discuss the thing it forbids was a bad check, and it
+produced a scary number for no reason.
+
+**Two order-dependence bugs in this ticket's own browser suite were found and fixed**, both the same
+shape and both found by running the suite twice rather than once: ACCESS-6 asserted an absolute
+audit-row count (audit rows deliberately survive `reset.sh`, so the second run reddened), and
+ACCESS-10 asserted the administrator's role set equalled exactly `['ORG_ADMIN']` (a stray grant
+survives `reset.sh`, so NC-ACCESS-5's residue reddened it). Both are now before/after deltas, which
+is what each assertion actually meant.
+
 ### What this ticket may NOT claim
 
 Not a penetration test, not an independent audit, not a compliance statement of any kind. No

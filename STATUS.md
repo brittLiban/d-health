@@ -30,6 +30,13 @@ administrators** and a clinic administrator deactivating a laboratory's technici
 `PROJECT_STATE.md`'s DHEALTH-NATIVE-ACCESS-001 entry, disposition in
 `docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
 
+**Regressions, in one invocation at `568b8f6`:** the staff access suite **16 passed**, the
+DHEALTH-NATIVE-SEC-001 security suite **31 passed**, and the native golden journey **12 passed**
+(including its no-console-error/no-failed-request check). Alembic head `0033_staff_access_lifecycle`,
+exactly the native five containers running, `test_native_deployment_topology.py` 11 passed, and the
+demo baseline back to `patients=1 memberships_inactive=0 roles=5 org_admins=2` — `roles` is 5 rather
+than the 3 recorded previously because of this ticket's two `ORG_ADMIN` grants.
+
 **What it does not claim.** Not penetration tested, not audited, not certified. No production
 deployment, no public CA, no real domain, no real patient data. **No pilot gate is created or
 cleared.** Withdrawing organization access is emphatically **not** disabling a Keycloak account: a
