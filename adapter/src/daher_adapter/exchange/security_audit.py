@@ -173,6 +173,28 @@ SecurityEventType = Literal[
     # across a table whose retention and access are designed for security events, not contact data.
     "patient_notification_requested",
     "patient_notification_retry_requested",
+    # DHEALTH-NATIVE-ACCESS-001: the staff access lifecycle, closing DHEALTH-NATIVE-SEC-001's F1.
+    # These are `membership_created`/`role_assigned`'s missing counterparts -- their absence is
+    # exactly what made that P1 possible, since `set_inactive`/`remove` had no caller and therefore
+    # nothing to audit.
+    #
+    # `membership_deactivated` is deliberately not "membership_revoked" or "membership_deleted".
+    # The row survives and only its status changes: every review, release, amendment and order that
+    # names this membership stays attributable, and the `RESTRICT` foreign keys pointing at
+    # `exchange_organization_memberships` make deletion impossible anyway. `membership_reactivated`
+    # is its own type rather than a second `membership_created` with `outcome='updated'`, because
+    # "let back in" and "added" are different security facts and neither should have to be inferred
+    # from an outcome column.
+    #
+    # **Absent on purpose:** any refused access mutation. A cross-organization attempt, a
+    # last-administrator lockout and a forbidden-role attempt are all authorization *refusals*, not
+    # state mutations, and this table's contract is that a row commits in the same transaction as a
+    # real change (see this module's docstring). Refusal telemetry stays in `exchange/audit.py`'s
+    # best-effort file writer, where a failed write can never turn a refusal into an allow. This is
+    # the same boundary `_audit_refused` already draws for every other 403 in `exchange/api.py`.
+    "membership_deactivated",
+    "membership_reactivated",
+    "role_removed",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[

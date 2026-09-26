@@ -56,6 +56,52 @@ describe('availableSections', () => {
     expect(idsFor(lab(['LAB_TECH', 'LAB_RESULT_RELEASER']))).not.toContain('patients')
   })
 
+  // ── DHEALTH-NATIVE-ACCESS-001: Équipe et accès ─────────────────────────────
+
+  it('offers an ORG_ADMIN-only membership the team section and nothing else', () => {
+    // Not `['today', 'team']`. `Aujourd'hui` is the clinical/laboratory work relay
+    // and would render empty for somebody who holds no clinical role -- the dead
+    // navigation entry this module's own rule forbids, reached from the other side.
+    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team'])
+    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team'])
+  })
+
+  it('lands an administrator with no clinical role directly on the team section', () => {
+    const sections = availableSections(
+      provider(['ORG_ADMIN']),
+      capabilitiesFor(provider(['ORG_ADMIN'])),
+    )
+    expect(resolveSection(null, sections)).toBe('team')
+  })
+
+  it('puts the team section last for an administrator who also works clinically', () => {
+    // Administration is not what they open the application for.
+    expect(idsFor(provider(['CLINICIAN', 'ORG_ADMIN']))).toEqual([
+      'today',
+      'patients',
+      'orders',
+      'results',
+      'team',
+    ])
+    expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual(['today', 'orders', 'team'])
+  })
+
+  it('never offers the team section to somebody who is not an ORG_ADMIN', () => {
+    expect(idsFor(provider(['CLINICIAN']))).not.toContain('team')
+    expect(idsFor(lab(['LAB_TECH', 'LAB_RESULT_RELEASER']))).not.toContain('team')
+  })
+
+  it('drops the team section when ORG_ADMIN is removed, so a stale id cannot survive', () => {
+    // The same mechanism that stops a Patients page rendering against a laboratory:
+    // an administrator whose ORG_ADMIN was just revoked, standing in `team`, must be
+    // moved off it rather than left on a screen the server now refuses.
+    const afterRevocation = availableSections(
+      provider(['CLINICIAN']),
+      capabilitiesFor(provider(['CLINICIAN'])),
+    )
+    expect(resolveSection('team', afterRevocation)).toBe('today')
+  })
+
   it('offers nothing at all when there is no active organization', () => {
     expect(availableSections(null, NO_CAPABILITIES)).toEqual([])
   })

@@ -1706,7 +1706,17 @@ class ExchangeSecurityAuditEvent(Base):
             # the delivery receipt -- is deliberately absent, for the same reason `connector_
             # heartbeat` is: telemetry in a security table buries the rows that matter. That
             # history lives in `patient_notifications`/`patient_notification_attempts`.
-            "'patient_notification_requested', 'patient_notification_retry_requested'"
+            "'patient_notification_requested', 'patient_notification_retry_requested', "
+            # DHEALTH-NATIVE-ACCESS-001: the staff access lifecycle -- `role_assigned`'s and
+            # `membership_created`'s missing counterparts, which is precisely why
+            # DHEALTH-NATIVE-SEC-001's F1 could exist (authority grantable through the product and
+            # withdrawable only by direct SQL). `membership_deactivated` deliberately does not say
+            # "revoked" or "deleted": the row survives, its status changes, and every historical
+            # clinical attribution hanging off it stays attributable. No *refusal* event is added --
+            # a cross-organization attempt or a last-administrator lockout is an authorization
+            # refusal, not a mutation, and belongs in `exchange/audit.py`'s best-effort file writer
+            # for the reason this class's own docstring gives.
+            "'membership_deactivated', 'membership_reactivated', 'role_removed'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -260,6 +260,26 @@ class OrganizationMembershipRepository:
             )
             return None if membership is None else _to_membership_record(membership)
 
+    def find_active_in_session(
+        self, session: Session, *, organization_id: uuid.UUID, identity_id: uuid.UUID
+    ) -> MembershipRecord | None:
+        """``find_active``'s session-participating sibling.
+
+        DHEALTH-NATIVE-ACCESS-001 needs the caller's *own* membership re-read inside the mutating
+        transaction, behind the organization lock, rather than in a separate earlier session:
+        between the HTTP layer's authorization check and the mutation, another administrator may
+        have deactivated this actor. ``find_active`` opens its own session and therefore cannot see
+        the
+        locked, in-flight state."""
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.identity_id == identity_id,
+                OrganizationMembership.status == OrganizationMembershipStatus.ACTIVE.value,
+            )
+        )
+        return None if membership is None else _to_membership_record(membership)
+
     def list_for_organization(self, organization_id: uuid.UUID) -> list[MembershipRecord]:
         with self._sessions() as session:
             memberships = session.scalars(
@@ -278,7 +298,31 @@ class OrganizationMembershipRepository:
             ).all()
             return [_to_membership_record(membership) for membership in memberships]
 
+    def get_in_session(self, session: Session, membership_id: uuid.UUID) -> MembershipRecord:
+        """DHEALTH-NATIVE-ACCESS-001: read one membership by its own id, whatever its status,
+        **inside the caller's transaction**.
+
+        Deliberately status-agnostic, unlike ``find_active``: the staff access lifecycle must be
+        able to see an INACTIVE membership in order to reactivate it. And deliberately
+        session-taking with no own-session sibling: a version that opened its own session would
+        report pre-lock committed state, which for a *status* is exactly the stale read this
+        lifecycle must not make. No
+        caller needs the unlocked form, so it does not exist."""
+        membership = session.get(OrganizationMembership, membership_id)
+        if membership is None:
+            raise MembershipNotFound(str(membership_id))
+        return _to_membership_record(membership)
+
     def set_inactive(self, membership_id: uuid.UUID) -> MembershipRecord:
+        """Owns its own transaction. Retained for the callers that already have it -- the demo
+        seed's test support and `FacilityReadinessEvaluator`'s fixtures -- while the product's
+        supported revocation path goes through ``set_status_in_session`` below, because that one
+        must commit in the same transaction as its audit row and its last-administrator check.
+
+        Note what this method deliberately does **not** do: it does not check the membership's
+        organization, and it does not check whether the organization is about to lose its last
+        administrator. It is an unguarded primitive, which is exactly why it must not be reachable
+        from an HTTP handler."""
         with self._sessions.begin() as session:
             membership = session.scalar(
                 select(OrganizationMembership)
@@ -290,6 +334,73 @@ class OrganizationMembershipRepository:
             membership.status = OrganizationMembershipStatus.INACTIVE.value
             session.flush()
             return _to_membership_record(membership)
+
+    def set_status_in_session(
+        self,
+        session: Session,
+        *,
+        membership_id: uuid.UUID,
+        status: OrganizationMembershipStatus,
+    ) -> tuple[MembershipRecord, bool]:
+        """DHEALTH-NATIVE-ACCESS-001: the transition the product's supported revocation/restoration
+        path uses. Returns ``(record, changed)`` -- ``changed`` is False when the membership already
+        held the requested status, so the caller can answer "already inactive"/"already active"
+        without a second read that could race.
+
+        The caller owns the transaction, for the reason DH-EX-002R established for every other
+        security mutation in this package: the status change and its authoritative audit row must
+        commit or roll back together. It also lets the caller take the organization-level lock
+        *first* (see ``exchange/staff_access.py``), which is what makes the last-administrator
+        invariant hold under concurrency rather than merely under a single-threaded test.
+
+        ``with_for_update()`` on the row itself is belt-and-braces behind that organization lock:
+        the organization lock serializes the four lifecycle operations against each other, and this
+        one additionally serializes against any other writer of this membership row."""
+        membership = session.scalar(
+            select(OrganizationMembership)
+            .where(OrganizationMembership.id == membership_id)
+            .with_for_update()
+        )
+        if membership is None:
+            raise MembershipNotFound(str(membership_id))
+        if membership.status == status.value:
+            return _to_membership_record(membership), False
+        membership.status = status.value
+        session.flush()
+        return _to_membership_record(membership), True
+
+    def count_active_with_role_in_session(
+        self,
+        session: Session,
+        *,
+        organization_id: uuid.UUID,
+        role: OrganizationRole,
+    ) -> int:
+        """How many ACTIVE memberships of this organization currently hold ``role``.
+
+        DHEALTH-NATIVE-ACCESS-001 uses this with ``role=ORG_ADMIN`` to enforce the
+        last-active-administrator invariant. It is counted *inside* the mutation's own transaction,
+        **after** the mutation has been flushed, so the number is what the database would actually
+        commit -- not what it looked like before the change, which is the version of this check that
+        two concurrent administrators could both pass.
+
+        Counted twice per mutation -- once before, once after -- because the invariant is a
+        *transition* rule: an organization that already had zero active administrators must not be
+        frozen by it (see ``_guard_last_administrator``)."""
+        statement = (
+            select(func.count())
+            .select_from(OrganizationMembership)
+            .join(
+                OrganizationRoleAssignment,
+                OrganizationRoleAssignment.membership_id == OrganizationMembership.id,
+            )
+            .where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.status == OrganizationMembershipStatus.ACTIVE.value,
+                OrganizationRoleAssignment.role == role.value,
+            )
+        )
+        return int(session.scalar(statement) or 0)
 
 
 class OrganizationRoleAssignmentRepository:
@@ -367,7 +478,25 @@ class OrganizationRoleAssignmentRepository:
             ).all()
             return frozenset(roles)
 
+    def list_for_membership_in_session(
+        self, session: Session, membership_id: uuid.UUID
+    ) -> frozenset[str]:
+        """``list_for_membership``'s session-participating sibling. The staff access lifecycle needs
+        the role set as it will actually be committed -- read inside the mutating transaction, after
+        the flush -- so that what an administrator is told they changed is what the database holds,
+        not a pre-mutation snapshot."""
+        roles = session.scalars(
+            select(OrganizationRoleAssignment.role).where(
+                OrganizationRoleAssignment.membership_id == membership_id
+            )
+        ).all()
+        return frozenset(roles)
+
     def remove(self, *, membership_id: uuid.UUID, role: OrganizationRole) -> None:
+        """Owns its own transaction, and is deliberately silent about whether anything was there to
+        remove. Retained unchanged for its existing test callers; the product's supported revocation
+        path uses ``remove_in_session`` below, which reports that fact, because "this role was
+        removed" and "this role was never held" are different answers an administrator is owed."""
         with self._sessions.begin() as session:
             assignment = session.scalar(
                 select(OrganizationRoleAssignment).where(
@@ -377,6 +506,34 @@ class OrganizationRoleAssignmentRepository:
             )
             if assignment is not None:
                 session.delete(assignment)
+
+    def remove_in_session(
+        self, session: Session, *, membership_id: uuid.UUID, role: OrganizationRole
+    ) -> bool:
+        """DHEALTH-NATIVE-ACCESS-001: returns True if a row was actually deleted, False if the
+        membership did not hold this role. The caller owns the transaction so the deletion and its
+        authoritative audit row commit or roll back together (DH-EX-002R), and so the
+        last-administrator check can run behind the same lock before anything is committed.
+
+        Deliberately does **not** require the membership to be ACTIVE, unlike ``assign``. Removing a
+        role only ever *reduces* authority, so refusing it on an inactive membership would protect
+        nothing and would leave an administrator unable to trim a departed colleague's roles before
+        restoring their access -- which matters here, because reactivation restores exactly the
+        roles
+        still attached to the membership (see ``exchange/staff_access.py``'s reactivation note)."""
+        assignment = session.scalar(
+            select(OrganizationRoleAssignment)
+            .where(
+                OrganizationRoleAssignment.membership_id == membership_id,
+                OrganizationRoleAssignment.role == role.value,
+            )
+            .with_for_update()
+        )
+        if assignment is None:
+            return False
+        session.delete(assignment)
+        session.flush()
+        return True
 
 
 def _to_identity_record(identity: ExchangeIdentity) -> ExchangeIdentityRecord:

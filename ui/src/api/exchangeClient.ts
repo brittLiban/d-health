@@ -1805,6 +1805,78 @@ export class ExchangeClient {
   }
 
   /**
+   * DHEALTH-NATIVE-ACCESS-001 — the four staff access lifecycle calls.
+   *
+   * Each one returns the membership as the server committed it, so the caller
+   * renders the new state rather than the state it assumed. None of them takes a
+   * body: the operation is the URL, which is what keeps a security-sensitive row
+   * from being mutated field-by-field by whatever a caller chooses to send.
+   *
+   * `deactivateMembership` withdraws access to *this organization only*. It does
+   * not disable the person's DHealth sign-in and does not touch their access to
+   * any other establishment — the copy on the screen has to say the same, and
+   * `TeamAccess.tsx` is where that wording lives.
+   */
+  async deactivateMembership(
+    organizationId: string,
+    membershipId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/` +
+        `${encodeURIComponent(membershipId)}/deactivate`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * Restores access on the same membership. The response's `roles` are the roles
+   * the person actually gets back — they survived the deactivation — so a caller
+   * must show them rather than assume the membership comes back with none.
+   */
+  async reactivateMembership(
+    organizationId: string,
+    membershipId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/` +
+        `${encodeURIComponent(membershipId)}/reactivate`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  async addMembershipRole(
+    organizationId: string,
+    membershipId: string,
+    role: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/` +
+        `${encodeURIComponent(membershipId)}/roles/${encodeURIComponent(role)}`,
+      { method: 'PUT', signal: options.signal },
+      options.token,
+    )
+  }
+
+  async removeMembershipRole(
+    organizationId: string,
+    membershipId: string,
+    role: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/` +
+        `${encodeURIComponent(membershipId)}/roles/${encodeURIComponent(role)}`,
+      { method: 'DELETE', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
    * POST /exchange/v1/organizations/{organizationId}/memberships.
    *
    * Get-or-create on the membership, ensure/add on the roles. 201 means the

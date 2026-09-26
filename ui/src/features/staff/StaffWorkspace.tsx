@@ -12,6 +12,7 @@ import { LabProvider } from '../lab/LabContext'
 import { LabHomePage } from '../lab/pages/LabHomePage'
 import { LabOrdersPage } from '../lab/pages/LabOrdersPage'
 import { LabReleasePage } from '../lab/pages/LabReleasePage'
+import { TeamAccessPage } from '../team/TeamAccessPage'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import { StaffShell } from './StaffShell'
 import {
@@ -293,6 +294,29 @@ export function StaffWorkspace({
   }
 
   const isProvider = activeOrganization.organization_type === 'PROVIDER'
+
+  // DHEALTH-NATIVE-ACCESS-001: Équipe et accès sits *above* the provider/laboratory
+  // branch, deliberately. Staff access administration is the same act at both kinds
+  // of facility — the roles differ, and the screen reads them from the active
+  // membership's own organization type — so it is one component rather than a
+  // provider copy and a laboratory copy that would drift apart. It is also outside
+  // `ClinicProvider`/`LabProvider`: those load clinical context this surface must not
+  // pull in (§18), and wrapping it in either would fetch patients and orders to
+  // administer a staff list.
+  if (activeSection === 'team') {
+    return (
+      <StaffShell
+        sections={sections}
+        activeSection={activeSection}
+        onSelectSection={(section) => setRequestedSection(section as StaffSectionId)}
+        onLogout={handleLogout}
+      >
+        <div key={activeOrganization.organization_id}>
+          <TeamAccessPage />
+        </div>
+      </StaffShell>
+    )
+  }
 
   let content
   if (isProvider) {

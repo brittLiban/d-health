@@ -1,0 +1,198 @@
+/* DHEALTH-NATIVE-ACCESS-001 — Équipe et accès, in the DHealth design language.
+ *
+ * Every value resolves through the token layer in src/index.css: bone ground,
+ * petrol for authority held, brass for something withdrawn, clay for a refusal,
+ * ink for recorded fact. No literal colour appears in this file, exactly as
+ * Platform.module.css established, and the semantic token names are the same ones
+ * that file uses so the two administration surfaces cannot drift apart.
+ *
+ * Registre density rather than dense: this is a screen somebody opens a handful of
+ * times a year to find one person, not a queue they work through. Rows are floored
+ * at the registre height and are comfortable to read.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  max-width: 62rem;
+}
+
+.pageTitle {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-2xl);
+  color: var(--color-text);
+}
+
+.lede {
+  margin: var(--space-2) 0 0;
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.status {
+  margin: 0;
+  color: var(--color-success-700);
+  font-size: var(--font-size-sm);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* ── The staff list ──────────────────────────────────────────────────────── */
+
+.memberList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.memberRow {
+  min-height: var(--row-height-registre);
+  display: grid;
+  /* Who, status, access, actions. Four columns because those are the four
+     questions this screen answers, in the order somebody scanning asks them. */
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 1.6fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+/* An inactive membership is visibly not a live one. Not hidden and not struck
+   through: the record still matters, the authority is what is gone. */
+.memberRowInactive {
+  background: var(--color-surface-alt);
+  border-style: dashed;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.name {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.active {
+  color: var(--color-success-700);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.inactive {
+  color: var(--color-waiting);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.roleList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.roleChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.noRoles {
+  color: var(--color-waiting);
+  font-size: var(--font-size-sm);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+/* ── Confirmation ────────────────────────────────────────────────────────── */
+
+.confirmPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
+}
+
+.confirmTitle {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.confirmBody {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--color-text);
+  font-size: var(--font-size-base);
+}
+
+.confirmDetail {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.confirmActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: flex-end;
+}
+
+.addPanel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .memberRow {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}

@@ -12,12 +12,23 @@
  * administrator also satisfies. Nothing here is a new authority model; this is
  * the screen for a capability the backend already had.
  *
- * Two things it deliberately is not. It does not remove anything: roles are
- * ensure/add on the server and no endpoint in this API revokes a role or a
- * membership, so there is no "Retirer" that would quietly do nothing. And it does
- * not reactivate: an inactive membership is shown, because losing the record
- * would be worse, but switching it back on is a separate action this product does
- * not yet have.
+ * Two things it deliberately is not — and one of the two reasons has since changed.
+ *
+ * It does not remove anything, and it does not reactivate. ~~no endpoint in this API
+ * revokes a role or a membership … switching it back on is a separate action this
+ * product does not yet have~~ — **corrected by DHEALTH-NATIVE-ACCESS-001: those four
+ * endpoints now exist** (`.../deactivate`, `.../reactivate`, `PUT`/`DELETE
+ * .../roles/{role}`), and a facility's own administrator reaches them on the
+ * facility-owned `Équipe et accès` screen (`features/team/TeamAccessPage.tsx`).
+ *
+ * This platform-scope section still does not offer them, and that is now a scope
+ * decision rather than a missing capability: staff access is a facility's to manage,
+ * and this screen exists for the narrower platform job of attaching somebody when the
+ * facility cannot yet do it itself — most often its very first administrator. A
+ * platform administrator who needs to withdraw access has the same four endpoints
+ * available to them (`require_org_admin` admits platform authority), so nothing is
+ * unreachable; it simply is not this screen's purpose. Recorded as an admin follow-up
+ * rather than widened here.
  */
 
 import { useCallback, useEffect, useState } from 'react'

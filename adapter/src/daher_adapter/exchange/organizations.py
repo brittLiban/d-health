@@ -69,6 +69,35 @@ class OrganizationRepository:
                 raise OrganizationNotFound(str(organization_id))
             return _to_record(organization)
 
+    def lock_in_session(self, session: Session, organization_id: uuid.UUID) -> OrganizationRecord:
+        """DHEALTH-NATIVE-ACCESS-001: take a row-level write lock on the organization, inside the
+        caller's transaction, and return it.
+
+        The organization row is used here as the **serialization point for that organization's whole
+        staff access lifecycle** -- deactivate, reactivate, add role, remove role. It is not
+        mutated; it is locked because every one of those four operations has to evaluate the
+        last-active-administrator invariant against a membership *set*, and a per-row lock on the
+        membership each operation happens to touch cannot serialize two operations touching two
+        different memberships. Two administrators removing each other's ORG_ADMIN simultaneously is
+        exactly that case, and it is the race that would otherwise leave an organization with zero
+        administrators and no way back in without platform intervention.
+
+        Coarse on purpose. The alternative -- a narrower lock plus a serializable isolation level
+        and retry loop -- would be more concurrent and would need its own retry semantics on a code
+        path an administrator uses a handful of times a year. Contention here is a screen with one
+        person on it.
+
+        ``with_for_update()`` is a no-op on SQLite (the dialect omits the clause), so the
+        invariant's *concurrency* claim is qualified against real PostgreSQL, never inferred from
+        the SQLite
+        unit suite -- see ``tests/integration/test_dhealthaccess001_postgres_qualification.py``."""
+        organization = session.scalar(
+            select(Organization).where(Organization.id == organization_id).with_for_update()
+        )
+        if organization is None:
+            raise OrganizationNotFound(str(organization_id))
+        return _to_record(organization)
+
     def require_type(self, organization_id: uuid.UUID, expected: OrganizationType) -> None:
         """Fails closed if ``organization_id`` does not reference an organization of the
         expected type (or does not exist / is not ACTIVE) -- the repository-level check standing

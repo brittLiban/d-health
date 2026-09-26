@@ -1,0 +1,521 @@
+"""DHEALTH-NATIVE-ACCESS-001: the organization staff access lifecycle.
+
+DHEALTH-NATIVE-SEC-001's P1 finding (F1) was not that DHealth failed to enforce a withdrawn
+membership or a removed role -- it enforces both, on the very next request, against a token that is
+still cryptographically valid. The finding was that **nothing in the product could produce that
+state**. ``OrganizationMembershipRepository.set_inactive`` and
+``OrganizationRoleAssignmentRepository.remove`` both existed and neither had a caller, so the
+security qualification had to reach into the database with ``psql`` to create the state it was
+testing. Authority could be granted through the product and withdrawn only by a database
+administrator.
+
+This module is the supported path. Four operations, and deliberately only four:
+
+- deactivate a membership
+- reactivate a membership
+- add one allowed organization role
+- remove one organization role
+
+Everything else an administration product would eventually want -- inviting people, creating or
+disabling Keycloak accounts, resetting passwords, editing an organization -- is absent on purpose.
+
+── Why a service module rather than more handler bodies in ``api.py`` ──
+
+Each of these four operations is a transaction with four steps that must not be reordered, and
+``api.py`` is already 8400 lines. Putting them here means the ordering is stated once, is unit
+testable without an HTTP client, and cannot silently diverge between the four endpoints -- exactly
+the reasoning ``exchange/authorization.py``'s own docstring gives for being the single place
+organization-scoped authorization decisions are made.
+
+── The transaction, in order, and why that order ──
+
+1. **Lock the organization row.** ``OrganizationRepository.lock_in_session`` takes a ``FOR UPDATE``
+   lock on the organization, which serializes that organization's whole staff access lifecycle
+   against itself. Locking the membership row each operation happens to touch would not be enough:
+   two administrators removing *each other's* ``ORG_ADMIN`` touch two different membership rows,
+   both pass a pre-flight "there are two admins" check, and the organization ends with zero.
+2. **Re-check the actor's own authority, inside the lock.** The HTTP layer already called
+   ``require_org_admin``, but that ran in its own earlier session. Between then and here, another
+   administrator may have deactivated this actor or removed their ``ORG_ADMIN``. Without this
+   re-read, an administrator who was removed a moment ago could still complete the request they had
+   already started -- an inactive admin administering, which §14 of this ticket forbids. This is the
+   one step that exists purely because of concurrency, and it is why the authorization decision is
+   made twice rather than once.
+3. **Resolve the target membership and prove it belongs to this organization.** The membership id
+   comes from the URL. A membership that exists but belongs to another organization is reported as
+   *not found*, never as "exists elsewhere" -- the same anti-enumeration rule
+   ``exchange/authorization.py`` applies to organizations, applied to memberships.
+4. **Mutate, flush, then evaluate the last-administrator invariant, then audit.** The invariant is
+   checked *after* the flush, against what the database would actually commit, because a check
+   against the pre-mutation state is precisely the check two concurrent callers can both pass. The
+   audit row is inserted in the same transaction as the mutation (DH-EX-002R), so a committed
+   authority change can never exist without its audit row, or the reverse.
+
+── The last-active-administrator invariant, and its exact shape ──
+
+    An access mutation may not take an organization from *one or more* active ``ORG_ADMIN``
+    memberships to *zero*.
+
+No policy for this existed anywhere in the repository (no ADR, no code, no test) before this ticket,
+so this is the narrow rule §12 prescribes in that case. Three deliberate properties:
+
+- **It is a transition rule, not a floor.** It refuses an operation that *causes* the count to reach
+  zero. An organization that already has zero active administrators -- which is a real, reachable
+  state today, since ``POST .../memberships`` will happily create a membership holding only
+  ``CLINICIAN`` -- is not frozen: removing an unrelated role there is still allowed, and a platform
+  administrator can still grant ``ORG_ADMIN`` to somebody. A naive "after the change there must be
+  at least one admin" check would refuse both and would brick exactly the organizations that most
+  need fixing.
+- **It binds a platform administrator too.** ``require_org_admin`` lets a platform admin through, so
+  they do reach these endpoints (``FacilityTeam.tsx`` already depends on that), and the rule applies
+  to them unchanged. That is stricter than §12's literal wording, which speaks of an "ORG_ADMIN
+  action", and it is a deliberate choice rather than an oversight: a platform administrator who
+  genuinely needs to replace an organization's only administrator adds the replacement first, which
+  is one extra step and leaves the organization reachable at every instant in between. Nothing is
+  lost, because granting ``ORG_ADMIN`` is never blocked by this rule -- the recovery direction stays
+  open by construction.
+- **It covers self-removal with no separate rule.** Removing your own ``ORG_ADMIN`` and deactivating
+  your own membership are refused when you are the last active administrator, for the same reason
+  and through the same code path as doing it to somebody else. There is deliberately no "you may
+  never modify yourself" rule: an administrator may drop their own ``CLINICIAN`` role, or hand over
+  and then step down, because those do not strand the organization.
+
+── Reactivation restores the roles that are still attached ──
+
+Deactivation changes ``status`` and nothing else; role assignment rows survive it untouched, and
+``assign`` refuses an inactive membership. So a reactivated membership comes back holding exactly
+the roles it still carries. This is the existing model, **observed rather than chosen here** -- §9
+of this ticket is explicit that it must not be silently redesigned. Two consequences are handled
+rather than hidden: the API's reactivation response states the roles being restored, and the UI's
+confirmation names them before the administrator commits, so "let them back in" is never a blind
+act. An administrator who wants somebody back with less authority removes the roles first -- which
+is why ``remove_in_session`` deliberately works on an inactive membership.
+
+── What this module does not touch ──
+
+**Keycloak.** Nothing here disables, deletes or modifies a Keycloak account. Organization membership
+and global identity are different things, and conflating them would break a real case this network
+is built for: a physician who works at two clinics must not lose their sign-in because one of them
+let them go. Global identity disablement, if it is ever wanted, is a separate platform capability
+with a separate authority model.
+
+**The role taxonomy.** ``ALLOWED_ROLES_BY_ORG_TYPE`` is used exactly as it stands. No role is
+invented, and ``PLATFORM_ADMIN`` is not an ``OrganizationRole`` at all -- it is a Keycloak realm
+role, so it cannot be granted through this module, and the database's own CHECK constraints refuse
+it as a second layer if this one is ever removed.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session, sessionmaker
+
+from daher_adapter.exchange.authorization import AuthenticatedPrincipal
+from daher_adapter.exchange.membership import (
+    ALLOWED_ROLES_BY_ORG_TYPE,
+    MembershipNotFound,
+    MembershipRecord,
+    OrganizationMembershipRepository,
+    OrganizationRoleAssignmentRepository,
+)
+from daher_adapter.exchange.models import (
+    OrganizationMembershipStatus,
+    OrganizationRole,
+    OrganizationStatus,
+    OrganizationType,
+)
+from daher_adapter.exchange.organizations import OrganizationNotFound, OrganizationRepository
+from daher_adapter.exchange.security_audit import (
+    ExchangeSecurityAuditRepository,
+    SecurityEventType,
+    SecurityOutcome,
+)
+
+
+class StaffAccessTargetNotFound(RuntimeError):
+    """The target membership does not exist, or exists but belongs to a different organization.
+
+    **One exception type for both cases, deliberately.** Telling a caller "this membership exists
+    but belongs to another organization" would confirm the existence of a row in a tenant they have
+    no claim on, which is the exact disclosure ``exchange/authorization.py``'s ``ResourceNotFound``
+    exists to prevent one level up. Maps to HTTP 404."""
+
+
+class StaffAccessAuthorityLost(RuntimeError):
+    """The actor's own administrative authority over this organization is gone as of *now*, inside
+    the locked transaction -- their membership was deactivated, their ``ORG_ADMIN`` was removed, or
+    the organization itself was deactivated, after the request's first authorization check passed.
+    Maps to HTTP 403."""
+
+
+class LastAdministratorProtected(RuntimeError):
+    """The operation would have taken this organization from one or more active ``ORG_ADMIN``
+    memberships to zero. Maps to HTTP 409 -- a conflict with the organization's current state, not a
+    permission problem: the same actor may well be allowed to do this once a second administrator
+    exists."""
+
+
+class StaffAccessStateUnchanged(RuntimeError):
+    """The membership already held the requested state, or did not hold the role being removed.
+    Maps to HTTP 409. Deliberately not a silent success: an administrator who clicked "deactivate"
+    on somebody a colleague deactivated a moment ago is owed the difference between "you did this"
+    and "this was already so"."""
+
+
+class ForbiddenRole(RuntimeError):
+    """The requested role is not an organization role this organization's type may hold -- including
+    the case where it is not an ``OrganizationRole`` value at all (``PLATFORM_ADMIN``, or a typo).
+    Maps to HTTP 422."""
+
+
+@dataclass(frozen=True, slots=True)
+class StaffAccessResult:
+    """What actually happened, as the transaction committed it.
+
+    ``roles`` is read inside the transaction after the flush, so it is the role set the database
+    holds -- never a pre-mutation snapshot, and never the set the caller hoped for."""
+
+    membership: MembershipRecord
+    identity_id: uuid.UUID
+    roles: frozenset[str]
+    #: False only where the operation is an idempotent replay that committed nothing new (a role
+    #: already held). Every other no-change case raises `StaffAccessStateUnchanged` instead.
+    changed: bool
+
+
+class StaffAccessService:
+    """The four supported staff access lifecycle operations, each one transaction."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session],
+        organizations: OrganizationRepository,
+        memberships: OrganizationMembershipRepository,
+        roles: OrganizationRoleAssignmentRepository,
+        security_audit: ExchangeSecurityAuditRepository,
+    ) -> None:
+        self._sessions = session_factory
+        self._organizations = organizations
+        self._memberships = memberships
+        self._roles = roles
+        self._audit = security_audit
+
+    # -- the four operations ----------------------------------------------------------------------
+
+    def deactivate_membership(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+    ) -> StaffAccessResult:
+        """ACTIVE -> INACTIVE. The membership row survives, so every clinical action this person
+        performed stays attributable to them; only their authority stops."""
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+            admins_before = self._count_active_admins(session, organization_id)
+
+            record, changed = self._memberships.set_status_in_session(
+                session,
+                membership_id=target.id,
+                status=OrganizationMembershipStatus.INACTIVE,
+            )
+            if not changed:
+                raise StaffAccessStateUnchanged("membership is already inactive")
+
+            self._guard_last_administrator(session, organization_id, admins_before=admins_before)
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            self._record(
+                session,
+                event_type="membership_deactivated",
+                principal=principal,
+                organization_id=organization_id,
+                target=record,
+                outcome="updated",
+            )
+            return StaffAccessResult(
+                membership=record, identity_id=record.identity_id, roles=roles, changed=True
+            )
+
+    def reactivate_membership(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+    ) -> StaffAccessResult:
+        """INACTIVE -> ACTIVE, on the *same* row -- never a second membership for the same person,
+        which would fork their audit history in two.
+
+        The returned ``roles`` are the roles this membership still carries and is therefore getting
+        back (see this module's docstring). No last-administrator check: reactivation can only ever
+        increase the number of active administrators."""
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+
+            record, changed = self._memberships.set_status_in_session(
+                session,
+                membership_id=target.id,
+                status=OrganizationMembershipStatus.ACTIVE,
+            )
+            if not changed:
+                raise StaffAccessStateUnchanged("membership is already active")
+
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            self._record(
+                session,
+                event_type="membership_reactivated",
+                principal=principal,
+                organization_id=organization_id,
+                target=record,
+                outcome="updated",
+            )
+            return StaffAccessResult(
+                membership=record, identity_id=record.identity_id, roles=roles, changed=True
+            )
+
+    def add_role(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role_name: str,
+    ) -> StaffAccessResult:
+        """Grant one existing organization role. Idempotent: re-granting a held role commits nothing
+        and reports ``changed=False``, matching ``assign``'s own insert-first-wins contract rather
+        than inventing a conflict for a request whose intent is already satisfied.
+
+        ``role_name`` is a plain ``str`` and is validated here, against this organization's own
+        type. That is deliberate and mirrors the reasoning ``OrganizationRepository.create`` already
+        records
+        for ``org_type``: if the parameter were a FastAPI enum, a forbidden value such as
+        ``PLATFORM_ADMIN`` would be rejected by request parsing before any DHealth code ran, and the
+        negative control that proves this check is load-bearing would have nothing to break."""
+        role = self._require_allowed_role(role_name, organization_id=organization_id)
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+            # `assign` re-checks the org-type matrix itself by joining through to the organization,
+            # and refuses an inactive membership with `MembershipInactive` -- neither is duplicated
+            # here. The repository stays the enforcement point; this call site adds the actor,
+            # organization-boundary and audit concerns it cannot know about.
+            _, created = self._roles.assign(membership_id=target.id, role=role, session=session)
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            self._record(
+                session,
+                event_type="role_assigned",
+                principal=principal,
+                organization_id=organization_id,
+                target=target,
+                role=role.value,
+                outcome="created" if created else "returned_existing",
+            )
+            return StaffAccessResult(
+                membership=target, identity_id=target.identity_id, roles=roles, changed=created
+            )
+
+    def remove_role(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role_name: str,
+    ) -> StaffAccessResult:
+        """Remove one organization role. This is the operation that closes DHEALTH-NATIVE-SEC-001's
+        P1 most directly: removing ``CLINICIAN`` or ``LAB_RESULT_RELEASER`` makes the next request
+        from an already-signed-in browser lose that authority, with no logout and no token refresh,
+        because every ``require_*`` reads the role set from the database on every request.
+
+        The role is validated against the organization-type matrix first, so a request naming a role
+        this organization could never hold is a 422 rather than a misleading "not held" 409."""
+        role = self._require_allowed_role(role_name, organization_id=organization_id)
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+            admins_before = self._count_active_admins(session, organization_id)
+
+            removed = self._roles.remove_in_session(session, membership_id=target.id, role=role)
+            if not removed:
+                raise StaffAccessStateUnchanged(f"membership does not hold role {role.value!r}")
+
+            self._guard_last_administrator(session, organization_id, admins_before=admins_before)
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            self._record(
+                session,
+                event_type="role_removed",
+                principal=principal,
+                organization_id=organization_id,
+                target=target,
+                role=role.value,
+                outcome="updated",
+            )
+            return StaffAccessResult(
+                membership=target, identity_id=target.identity_id, roles=roles, changed=True
+            )
+
+    # -- the shared transaction preamble ----------------------------------------------------------
+
+    def _open(
+        self,
+        session: Session,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+    ) -> MembershipRecord:
+        """Steps 1-3 of every one of the four operations: lock, re-authorize, resolve the target.
+
+        Shared rather than repeated so the ordering cannot drift between endpoints, and so a future
+        fifth operation cannot accidentally be written without one of them."""
+        try:
+            organization = self._organizations.lock_in_session(session, organization_id)
+        except OrganizationNotFound as error:
+            # Reachable only if the organization was deleted between the HTTP-layer authorization
+            # check and this lock. Reported as a missing target, same as any other unreachable
+            # organization, rather than as a server error.
+            raise StaffAccessTargetNotFound(str(organization_id)) from error
+
+        self._require_current_admin_authority(
+            session,
+            principal=principal,
+            organization_id=organization_id,
+            organization_status=organization.status,
+        )
+
+        try:
+            target = self._memberships.get_in_session(session, membership_id)
+        except MembershipNotFound as error:
+            raise StaffAccessTargetNotFound(str(membership_id)) from error
+        if target.organization_id != organization_id:
+            # A real membership in somebody else's organization. Indistinguishable from a
+            # nonexistent one, on purpose -- see `StaffAccessTargetNotFound`.
+            raise StaffAccessTargetNotFound(str(membership_id))
+        return target
+
+    def _require_current_admin_authority(
+        self,
+        session: Session,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        organization_status: str,
+    ) -> None:
+        """The second authorization check, and the reason it exists at all.
+
+        A platform administrator is exempt from the membership re-read because they have no
+        membership row to re-read -- their authority is a Keycloak realm role carried by the token,
+        and ``require_membership`` returns them a context with ``membership=None``. They are also
+        exempt from the organization-ACTIVE check, preserving DH-EX-002's recorded decision that a
+        platform admin may still manage a deactivated organization.
+
+        For everybody else this is a live re-read behind the organization lock. It is what makes §14
+        true under concurrency: an administrator deactivated a moment ago cannot finish
+        administering
+        with the request they had already begun."""
+        if principal.platform_admin:
+            return
+        if organization_status != OrganizationStatus.ACTIVE.value:
+            raise StaffAccessAuthorityLost("organization is inactive")
+        actor = self._memberships.find_active_in_session(
+            session, organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if actor is None:
+            raise StaffAccessAuthorityLost("actor has no active membership in this organization")
+        held = self._roles.list_for_membership_in_session(session, actor.id)
+        if OrganizationRole.ORG_ADMIN.value not in held:
+            raise StaffAccessAuthorityLost("actor no longer holds ORG_ADMIN in this organization")
+
+    # -- the invariant ----------------------------------------------------------------------------
+
+    def _count_active_admins(self, session: Session, organization_id: uuid.UUID) -> int:
+        return self._memberships.count_active_with_role_in_session(
+            session, organization_id=organization_id, role=OrganizationRole.ORG_ADMIN
+        )
+
+    def _guard_last_administrator(
+        self, session: Session, organization_id: uuid.UUID, *, admins_before: int
+    ) -> None:
+        """Refuse an operation that *took* this organization to zero active administrators.
+
+        Called after the mutation's flush, so the "after" count is what would actually commit.
+        ``admins_before > 0`` is the transition condition: an organization that already had none is
+        not made unfixable by this rule (see the module docstring)."""
+        if admins_before == 0:
+            return
+        if self._count_active_admins(session, organization_id) == 0:
+            raise LastAdministratorProtected(
+                "this would leave the organization with no active administrator"
+            )
+
+    # -- helpers ----------------------------------------------------------------------------------
+
+    def _require_allowed_role(
+        self, role_name: str, *, organization_id: uuid.UUID
+    ) -> OrganizationRole:
+        """The application-layer allowed-role gate.
+
+        Two refusals collapse into one ``ForbiddenRole``: a value that is not an
+        ``OrganizationRole`` at all (``PLATFORM_ADMIN``, a typo, an invented role) and a real
+        organization role this organization's *type* may not hold (``LAB_TECH`` at a provider). Both
+        are the same answer to the caller -- this role cannot be granted here -- and distinguishing
+        them would tell a
+        caller which non-organization role names exist."""
+        try:
+            role = OrganizationRole(role_name)
+        except ValueError as error:
+            raise ForbiddenRole(f"{role_name!r} is not an organization role") from error
+        try:
+            organization = self._organizations.get(organization_id)
+        except OrganizationNotFound as error:
+            raise StaffAccessTargetNotFound(str(organization_id)) from error
+        allowed = ALLOWED_ROLES_BY_ORG_TYPE[OrganizationType(organization.org_type)]
+        if role not in allowed:
+            raise ForbiddenRole(
+                f"role {role.value!r} is not valid for a {organization.org_type!r} organization"
+            )
+        return role
+
+    def _record(
+        self,
+        session: Session,
+        *,
+        event_type: SecurityEventType,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        target: MembershipRecord,
+        outcome: SecurityOutcome,
+        role: str | None = None,
+    ) -> None:
+        self._audit.record(
+            session,
+            event_type=event_type,
+            actor_identity_id=principal.identity_id,
+            organization_id=organization_id,
+            subject_identity_id=target.identity_id,
+            membership_id=target.id,
+            role=role,
+            outcome=outcome,
+        )

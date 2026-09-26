@@ -255,8 +255,14 @@ describe('the staff application at a provider organization', () => {
     // in the workspace its membership actually unlocks — the empty state would now
     // be the false answer.
     //
-    // The ORG_ADMIN-only provider membership is still correctly excluded: it
-    // carries no clinical authority the server would honour, so it is not offered.
+    // The second membership is excluded because it unlocks nothing this build
+    // renders. It used to be an ORG_ADMIN-only provider membership, which was
+    // excluded for that same reason -- until DHEALTH-NATIVE-ACCESS-001 gave ORG_ADMIN
+    // a screen (Équipe et accès), at which point such a membership became genuinely
+    // usable. The fixture therefore names a role with no surface behind it, so this
+    // test still exercises the exclusion rule rather than passing for a reason that
+    // has since stopped being true. The ORG_ADMIN case is asserted on its own, below.
+    //
     // The laboratory workspace reads the laboratory queue, which this provider-
     // shaped client had no reason to stub until now.
     vi.mocked(mockClient).listLabOrders = vi.fn().mockResolvedValue([])
@@ -277,7 +283,7 @@ describe('the staff application at a provider organization', () => {
           organization_type: 'PROVIDER',
           organization_status: 'ACTIVE',
           membership_status: 'ACTIVE',
-          roles: ['ORG_ADMIN'], // lacks CLINICIAN role
+          roles: [], // no role at all: nothing here for this person to do
         },
       ],
     })
@@ -291,6 +297,43 @@ describe('the staff application at a provider organization', () => {
     // The excluded provider membership is not offered anywhere, so it cannot be
     // selected and acted under.
     expect(screen.queryByText('Clinique B')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("Aucun établissement actif n'est rattaché à votre compte"),
+    ).not.toBeInTheDocument()
+  })
+
+  it('opens the workspace for an administrator who holds only ORG_ADMIN', async () => {
+    // DHEALTH-NATIVE-ACCESS-001. Before this ticket the same account reached
+    // "Aucun établissement actif n'est rattaché à votre compte" — which was the
+    // user-facing shape of DHEALTH-NATIVE-SEC-001's P1: a facility's administrator
+    // held real, server-honoured authority and could not reach a single screen with
+    // it, so withdrawing a colleague's access needed a database administrator.
+    //
+    // They land on Équipe et accès and get nothing clinical: no Aujourd'hui relay,
+    // no Patients, no Ordres, no Résultats. ORG_ADMIN is not clinical authority, and
+    // `require_clinician` would refuse it regardless of what was rendered.
+    vi.mocked(mockClient).listMemberships = vi.fn().mockResolvedValue([])
+    vi.mocked(mockClient.getMe).mockResolvedValueOnce({
+      ...sampleMe,
+      memberships: [
+        {
+          organization_id: 'clinic-org-1',
+          organization_name: 'Clinique A',
+          organization_type: 'PROVIDER',
+          organization_status: 'ACTIVE',
+          membership_status: 'ACTIVE',
+          roles: ['ORG_ADMIN'],
+        },
+      ],
+    })
+
+    render(<StaffApp client={mockClient} />)
+
+    const nav = within(await screen.findByRole('navigation', { name: 'Navigation principale' }))
+    expect(nav.getByRole('button', { name: 'Équipe et accès' })).toBeInTheDocument()
+    for (const absent of ["Aujourd'hui", 'Patients', 'Ordres', 'Résultats']) {
+      expect(nav.queryByRole('button', { name: absent })).toBeNull()
+    }
     expect(
       screen.queryByText("Aucun établissement actif n'est rattaché à votre compte"),
     ).not.toBeInTheDocument()

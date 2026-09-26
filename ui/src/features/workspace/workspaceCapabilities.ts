@@ -22,6 +22,7 @@
  *   canReviewResults   `_require_clinician`            CLINICIAN at the provider
  *   canWorkLabOrders   `_require_lab_tech`             LAB_TECH at the lab
  *   canReleaseResults  release endpoints' own gate     LAB_RESULT_RELEASER at the lab
+ *   canAdministerTeam  `_require_org_admin`            ORG_ADMIN at this organization
  *
  * The first three resolve from the same grant today, because CLINICIAN is the
  * single authority the backend checks for patient binding, order creation and
@@ -42,6 +43,15 @@ export interface WorkspaceCapabilities {
   canReviewResults: boolean
   canWorkLabOrders: boolean
   canReleaseResults: boolean
+  /**
+   * DHEALTH-NATIVE-ACCESS-001 — may operate the Équipe et accès surface here.
+   *
+   * Unlike the five above, this one is not clinical. It is listed beside them
+   * because it is derived the same way, from the same active membership, and
+   * because the server gate behind it (`_require_org_admin`) is checked on every
+   * request regardless of what this returns.
+   */
+  canAdministerTeam: boolean
 }
 
 export const NO_CAPABILITIES: WorkspaceCapabilities = {
@@ -50,6 +60,7 @@ export const NO_CAPABILITIES: WorkspaceCapabilities = {
   canReviewResults: false,
   canWorkLabOrders: false,
   canReleaseResults: false,
+  canAdministerTeam: false,
 }
 
 /**
@@ -57,13 +68,30 @@ export const NO_CAPABILITIES: WorkspaceCapabilities = {
  * itself is active, and it carries at least one role that unlocks a workflow
  * this application actually renders.
  *
- * An ORG_ADMIN who holds no clinical or laboratory role is deliberately not
- * eligible: administration is a later ticket's surface, and listing such an
- * organization here would present a workspace with nothing in it.
+ * ── ORG_ADMIN became usable in DHEALTH-NATIVE-ACCESS-001 ──
+ *
+ * It was deliberately excluded before, and the reason given was that
+ * "administration is a later ticket's surface, and listing such an organization
+ * here would present a workspace with nothing in it". Both halves were true and
+ * the second no longer is: Équipe et accès is a real screen, so an ORG_ADMIN who
+ * holds no clinical or laboratory role now has something to do here.
+ *
+ * This is not a widening of authority. An administrator held ORG_ADMIN before
+ * this change and the server honoured it before this change — what they could not
+ * do was reach any screen at all, which is why revoking access needed a database
+ * administrator. That was DHEALTH-NATIVE-SEC-001's P1 in its user-facing form.
  */
 export function isUsableMembership(membership: ExchangeMembershipSummary): boolean {
   if (membership.organization_status !== 'ACTIVE') return false
   if (membership.membership_status !== 'ACTIVE') return false
+
+  // Valid at either organization type, and checked first because it is the one
+  // role whose usefulness does not depend on which kind of facility this is.
+  if (membership.roles.includes('ORG_ADMIN')) {
+    return (
+      membership.organization_type === 'PROVIDER' || membership.organization_type === 'LAB'
+    )
+  }
 
   if (membership.organization_type === 'PROVIDER') {
     return membership.roles.includes('CLINICIAN')
@@ -106,5 +134,9 @@ export function capabilitiesFor(
     canReviewResults: clinician,
     canWorkLabOrders: isLab && membership.roles.includes('LAB_TECH'),
     canReleaseResults: isLab && membership.roles.includes('LAB_RESULT_RELEASER'),
+    // Not gated on organization type: ORG_ADMIN is valid at a provider and at a
+    // laboratory alike (`ALLOWED_ROLES_BY_ORG_TYPE` lists it for both), and the
+    // staff a facility administers are the same kind of record either way.
+    canAdministerTeam: membership.roles.includes('ORG_ADMIN'),
   }
 }

@@ -281,9 +281,16 @@ export function roleLabel(organizationType: string, role: string): string {
  *
  * `INACTIVE` and `REVOKED` rows are still listed, deliberately: an operator
  * looking for somebody who "used to have access" needs to find them and see why
- * they no longer do, rather than conclude the record was lost. Neither wording
- * suggests the row can be switched back on from this screen -- nothing in this
- * ticket reactivates a membership.
+ * they no longer do, rather than conclude the record was lost.
+ *
+ * ~~Neither wording suggests the row can be switched back on from this screen --
+ * nothing in this ticket reactivates a membership.~~ **Corrected by
+ * DHEALTH-NATIVE-ACCESS-001:** reactivation now exists, on the facility-owned
+ * `Équipe et accès` screen (`features/team/TeamAccessPage.tsx`). These labels are
+ * unchanged and remain presentation-only; what changed is that a membership in
+ * either state can now be restored through the product. The platform-scope
+ * `FacilityTeam` section still does not offer it -- a facility administers its own
+ * staff -- so that screen's own wording still holds there.
  */
 const MEMBERSHIP_STATUS: Record<string, string> = {
   ACTIVE: 'Actif',

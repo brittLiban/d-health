@@ -10,6 +10,15 @@ portal workflow, no self-service signup:
 - ``GET  /exchange/v1/organizations/{id}/memberships``       (org admin, own org only)
 - ``POST /exchange/v1/organizations/{id}/memberships``       (org admin, own org only)
 
+DHEALTH-NATIVE-ACCESS-001 added the four that make the above list's authority *withdrawable*
+through the product rather than only grantable -- see `exchange/staff_access.py` for the domain
+logic, the transaction ordering and the last-active-administrator invariant they share:
+
+- ``POST   .../memberships/{membership_id}/deactivate``      (org admin, own org only)
+- ``POST   .../memberships/{membership_id}/reactivate``      (org admin, own org only)
+- ``PUT    .../memberships/{membership_id}/roles/{role}``    (org admin, own org only)
+- ``DELETE .../memberships/{membership_id}/roles/{role}``    (org admin, own org only)
+
 **Membership attachment is lookup-only, by ``identity_id``.** ``POST .../memberships`` accepts
 an existing ``ExchangeIdentity`` UUID, never a raw ``(issuer, subject)`` pair -- that row is
 created in exactly one place (``get_principal`` below, from a validated token), never from
@@ -27,6 +36,7 @@ per the anti-enumeration policy documented on ``authorization.py``.
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -224,6 +234,15 @@ from daher_adapter.exchange.selection import (
     PatientAccessGrantLacksSelectionAuthority,
     ProviderLabRouteNotActive,
     StalePriceSelection,
+)
+from daher_adapter.exchange.staff_access import (
+    ForbiddenRole,
+    LastAdministratorProtected,
+    StaffAccessAuthorityLost,
+    StaffAccessResult,
+    StaffAccessService,
+    StaffAccessStateUnchanged,
+    StaffAccessTargetNotFound,
 )
 
 # DH-NOTIFY-001. A top-level import, unlike the connect boundary's deliberately lazy one: the
@@ -2675,6 +2694,17 @@ def build_exchange_router(
     )
     connectors = ConnectorInstallationRepository(session_factory, security_audit=security_audit)
     patient_notifications = PatientNotificationRepository()
+    # DHEALTH-NATIVE-ACCESS-001: the supported staff access lifecycle. Constructed here from the
+    # same repository instances every other handler uses -- it introduces no second data-access
+    # layer, only the transaction ordering and the last-administrator invariant that the four
+    # lifecycle endpoints share.
+    staff_access = StaffAccessService(
+        session_factory=session_factory,
+        organizations=organizations,
+        memberships=memberships,
+        roles=role_assignments,
+        security_audit=security_audit,
+    )
 
     router = APIRouter(prefix="/exchange/v1", tags=["exchange"])
 
@@ -3144,6 +3174,213 @@ def build_exchange_router(
             email=target_identity.email,
             status=membership.status,
             roles=held_roles,
+        )
+
+    # -- DHEALTH-NATIVE-ACCESS-001: the staff access lifecycle ------------------------------------
+    #
+    # The four operations that close DHEALTH-NATIVE-SEC-001's P1 (F1): the security engine already
+    # refused a withdrawn membership and a removed role on the next request with the same
+    # still-valid token, but no endpoint and no screen could produce that state, so a facility
+    # administrator could grant authority through DHealth and never withdraw it. The domain logic,
+    # the transaction ordering, the organization boundary and the last-active-administrator
+    # invariant all live in `exchange/staff_access.py`; these handlers are HTTP shape and status
+    # mapping only.
+    #
+    # Semantic operations rather than `PATCH /memberships/{id}` with a free-form body, deliberately:
+    # a generic patch endpoint over a security-sensitive row invites exactly the "which fields may
+    # this caller set?" question that a named operation never raises. Each one states what it does.
+    #
+    # `role` is a plain `str` path parameter, not `_ROLE_LITERAL`. With the Literal, FastAPI's own
+    # request parsing would 422 a forbidden value such as `PLATFORM_ADMIN` before any DHealth code
+    # ran -- which is safe, but means the allowed-role check could be deleted without a single test
+    # noticing. The check is DHealth's, in `_require_allowed_role`, and is therefore reachable and
+    # breakable by a negative control. Same reasoning `OrganizationRepository.create` records for
+    # its own `org_type: str`.
+
+    def _staff_access_membership_response(outcome: StaffAccessResult) -> MembershipResponse:
+        identity = identities.get(outcome.identity_id)
+        return MembershipResponse(
+            membership_id=outcome.membership.id,
+            identity_id=outcome.identity_id,
+            display_name=identity.display_name,
+            email=identity.email,
+            status=outcome.membership.status,
+            roles=sorted(outcome.roles),
+        )
+
+    def _run_staff_access(
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        operation: Callable[[], StaffAccessResult],
+    ) -> MembershipResponse:
+        """One place where every staff-access refusal becomes an HTTP status, so the four endpoints
+        cannot drift apart in what they disclose.
+
+        The mapping, and why each one:
+
+        - **404** for a membership that does not exist *or* belongs to another organization. One
+          status for both, so an administrator of Clinique A learns nothing about Laboratoire B's
+          rows even when they know a real membership UUID (§15). The body is the same sentence in
+          both cases.
+        - **403** when the actor's own administrative authority is gone as of the locked
+          transaction. Audited as a refusal through the same best-effort writer as every other
+          403 here.
+        - **409** for a state conflict: already inactive, already active, role not held, or the
+          last-administrator protection. Not 403 -- the actor is permitted to do this, the
+          organization's current state is what refuses it, and for the last-administrator case the
+          same request succeeds once a second administrator exists.
+        - **422** for a role this organization may not hold, including `PLATFORM_ADMIN`.
+        """
+        try:
+            return _staff_access_membership_response(operation())
+        except StaffAccessTargetNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="membership not found"
+            ) from error
+        except StaffAccessAuthorityLost as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+        except LastAdministratorProtected as error:
+            # Deliberately **not** `_audit_refused`. That writer's vocabulary is
+            # `authorization_refused`, and this actor *is* authorized -- what refused them is the
+            # organization's current state, not their permissions. Recording it as an authorization
+            # refusal would put a misleading row in the one log an operator reads to find out who
+            # was denied access to what. The 409's own body says what happened, and the state it
+            # protects is reconstructible from the `role_assigned`/`membership_*` rows that do
+            # exist.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except StaffAccessStateUnchanged as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except MembershipInactive as error:
+            # Only reachable from role *addition*: `assign` refuses an inactive membership, which is
+            # the existing model (an inactive membership grants nothing and receives nothing).
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="membership is inactive; reactivate it before granting a role",
+            ) from error
+        except (ForbiddenRole, InvalidRoleForOrganizationType) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+
+    @router.post(
+        "/organizations/{organization_id}/memberships/{membership_id}/deactivate",
+        response_model=MembershipResponse,
+    )
+    def deactivate_membership(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Withdraw a person's access to this organization, keeping the record and the history.
+
+        The membership row is **not deleted**. Every review, release, amendment and order that names
+        it stays attributable to the person who performed it -- revoking access must never rewrite
+        who did what. `ondelete="RESTRICT"` on every foreign key pointing at
+        `exchange_organization_memberships` makes deletion impossible in practice; this endpoint
+        states the intent rather than leaving it to be inferred from a constraint.
+
+        This does **not** touch the person's Keycloak account. They can still sign in, and they keep
+        whatever access their memberships in *other* organizations grant them -- a physician working
+        at two clinics does not lose their identity because one of them let them go."""
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.deactivate_membership(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            ),
+        )
+
+    @router.post(
+        "/organizations/{organization_id}/memberships/{membership_id}/reactivate",
+        response_model=MembershipResponse,
+    )
+    def reactivate_membership(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Restore access on the *same* membership, never a duplicate.
+
+        **The response's `roles` are the roles this person gets back**, and they are the roles the
+        membership still carried while inactive -- deactivation changes `status` and nothing else,
+        so role assignments survive it. That is the existing model, observed rather than chosen
+        here. An administrator who wants somebody back with less authority removes roles first; role
+        removal deliberately works on an inactive membership for exactly this reason."""
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.reactivate_membership(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            ),
+        )
+
+    @router.put(
+        "/organizations/{organization_id}/memberships/{membership_id}/roles/{role}",
+        response_model=MembershipResponse,
+    )
+    def add_membership_role(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role: str,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Grant one organization role. `PUT` because it is idempotent: granting a held role commits
+        nothing and answers 200 with the unchanged role set, rather than manufacturing a conflict
+        for a request whose intent is already satisfied.
+
+        Only roles this organization's *type* may hold are accepted (`ALLOWED_ROLES_BY_ORG_TYPE`).
+        `PLATFORM_ADMIN` is refused because it is not an organization role at all -- it is a
+        Keycloak
+        realm role, and no organization administrator can manufacture platform authority here."""
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.add_role(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+                role_name=role,
+            ),
+        )
+
+    @router.delete(
+        "/organizations/{organization_id}/memberships/{membership_id}/roles/{role}",
+        response_model=MembershipResponse,
+    )
+    def remove_membership_role(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role: str,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Remove one organization role. This is the operation DHEALTH-NATIVE-SEC-001's P1 was
+        missing most directly.
+
+        Effective on the next request, with no logout and no token refresh: every `require_*` in
+        `exchange/authorization.py` reads the role set from the database per request and trusts
+        nothing in the token but who the caller is. Removing `CLINICIAN` stops clinical ordering;
+        removing `LAB_RESULT_RELEASER` stops result release; the browser holding the previous token
+        does not need to know."""
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.remove_role(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+                role_name=role,
+            ),
         )
 
     # -- DH-EX-003: catalog -----------------------------------------------------------------------

@@ -12,10 +12,12 @@
  * and a queue of them trains people to skim past the navigation entirely. If a
  * membership does not unlock a section, that section is absent.
  *
- * This is why `Réglages` is not in this file. Facility setup and administration
- * are a later ticket's surface (DH-MVP-ADMIN-001); adding the item now would
- * mean shipping exactly the dead entry this rule forbids. It arrives when it
- * does something.
+ * `Réglages` is still not in this file, and deliberately still is not.
+ * DHEALTH-NATIVE-ACCESS-001 added `Équipe et accès` — one narrow, facility-owned
+ * screen that does one thing — rather than the `Réglages` application that item
+ * was standing in for. Facility setup, establishment details and everything else
+ * an eventual settings surface would hold still have nothing behind them, so they
+ * are still absent.
  *
  * ── Absence is not protection ──
  *
@@ -28,7 +30,7 @@
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 import type { WorkspaceCapabilities } from '../workspace/workspaceCapabilities'
 
-export type StaffSectionId = 'today' | 'patients' | 'orders' | 'results'
+export type StaffSectionId = 'today' | 'patients' | 'orders' | 'results' | 'team'
 
 export interface StaffSection {
   id: StaffSectionId
@@ -40,12 +42,18 @@ export interface StaffSection {
  * which is a working question, not a front door. "Ordres" rather than "Ordres de
  * laboratoire" because in a laboratory the qualifier is noise, and the one word
  * is true on both sides of the exchange.
+ *
+ * `Équipe et accès` reuses the exact wording the platform-scope facility page
+ * already uses for the same subject (`FacilityTeam.tsx`), so the same idea is not
+ * called two different things depending on who is looking at it. "Accès" is there
+ * on purpose: this screen is about authority, not a staff phone list.
  */
 const SECTION_LABELS: Record<StaffSectionId, string> = {
   today: "Aujourd'hui",
   patients: 'Patients',
   orders: 'Ordres',
   results: 'Résultats',
+  team: 'Équipe et accès',
 }
 
 export function sectionLabel(id: StaffSectionId): string {
@@ -61,6 +69,20 @@ export function sectionLabel(id: StaffSectionId): string {
  * a technician who cannot release simply has no `Résultats` section. There is no
  * laboratory `Patients` section: a laboratory works from orders, and the
  * patient-directory authority (`_require_clinician`) is a provider's.
+ *
+ * ── Why `today` is now conditional ──
+ *
+ * `Aujourd'hui` is the clinical and laboratory work relay: it answers "what needs
+ * me today" by listing patients, orders and results waiting on this person. For an
+ * administrator who holds only ORG_ADMIN there is nothing for it to answer, and it
+ * would render an empty relay — exactly the dead navigation entry this file's own
+ * rule forbids, arrived at from the other direction. So `today` requires at least
+ * one clinical or laboratory capability, and an administrator with none lands
+ * directly on `Équipe et accès`, which is the only thing they came here to do.
+ *
+ * An administrator who *also* holds a clinical role keeps `today` and every other
+ * section, and gets `Équipe et accès` last: administration is not the thing they
+ * open the application for.
  */
 export function availableSections(
   activeOrganization: ExchangeMembershipSummary | null,
@@ -68,11 +90,20 @@ export function availableSections(
 ): StaffSection[] {
   if (activeOrganization === null) return []
 
-  const ids: StaffSectionId[] = ['today']
+  const ids: StaffSectionId[] = []
 
+  const hasWorkflow =
+    capabilities.canViewPatients ||
+    capabilities.canCreateOrders ||
+    capabilities.canReviewResults ||
+    capabilities.canWorkLabOrders ||
+    capabilities.canReleaseResults
+
+  if (hasWorkflow) ids.push('today')
   if (capabilities.canViewPatients) ids.push('patients')
   if (capabilities.canCreateOrders || capabilities.canWorkLabOrders) ids.push('orders')
   if (capabilities.canReviewResults || capabilities.canReleaseResults) ids.push('results')
+  if (capabilities.canAdministerTeam) ids.push('team')
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))
 }

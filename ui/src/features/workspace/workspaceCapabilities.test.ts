@@ -45,17 +45,30 @@ describe('isUsableMembership', () => {
     ).toBe(true)
   })
 
-  it('rejects a provider membership that holds no clinical role', () => {
-    // An ORG_ADMIN who is not also a clinician carries no authority the server
-    // would honour for patients, orders or review. Listing the organization would
-    // offer a workspace with nothing in it.
-    expect(isUsableMembership(membership({ roles: ['ORG_ADMIN'] }))).toBe(false)
+  // DHEALTH-NATIVE-ACCESS-001 reversed these two. They previously asserted that an
+  // ORG_ADMIN-only membership was *not* usable, on the stated grounds that
+  // "administration is a later ticket's surface, and listing such an organization
+  // here would offer a workspace with nothing in it". The second half is no longer
+  // true: Équipe et accès is a real screen. Rewritten rather than deleted, because
+  // the boundary they guard still matters -- what makes an ORG_ADMIN usable is that
+  // there is now somewhere for them to go, not that administration became clinical
+  // authority.
+  it('accepts a provider membership holding only ORG_ADMIN, which now has a screen', () => {
+    expect(isUsableMembership(membership({ roles: ['ORG_ADMIN'] }))).toBe(true)
   })
 
-  it('rejects a laboratory membership that holds only ORG_ADMIN', () => {
+  it('accepts a laboratory membership holding only ORG_ADMIN', () => {
     expect(
       isUsableMembership(membership({ organization_type: 'LAB', roles: ['ORG_ADMIN'] })),
-    ).toBe(false)
+    ).toBe(true)
+  })
+
+  it('still rejects a membership whose only role unlocks nothing this build renders', () => {
+    // The rule is unchanged in substance: a role with no surface behind it does not
+    // make an organization usable. Pinned with a value the backend does not define,
+    // so the check cannot pass merely because every real role happens to be usable.
+    expect(isUsableMembership(membership({ roles: ['RECEPTION'] }))).toBe(false)
+    expect(isUsableMembership(membership({ roles: [] }))).toBe(false)
   })
 
   it('rejects a suspended organization and a non-active membership', () => {
@@ -81,13 +94,16 @@ describe('usableMemberships', () => {
     })
 
     const result = usableMemberships([
+      // Was the unusable case here before DHEALTH-NATIVE-ACCESS-001; now kept, and
+      // kept *first*, which also pins that server order is preserved rather than
+      // reordered by usability.
       membership({ organization_id: 'admin-only', roles: ['ORG_ADMIN'] }),
       kept1,
       membership({ organization_id: 'suspended', organization_status: 'SUSPENDED' }),
       kept2,
     ])
 
-    expect(result.map((m) => m.organization_id)).toEqual(['prov-1', 'lab-1'])
+    expect(result.map((m) => m.organization_id)).toEqual(['admin-only', 'prov-1', 'lab-1'])
   })
 })
 
@@ -99,6 +115,10 @@ describe('capabilitiesFor', () => {
       canReviewResults: true,
       canWorkLabOrders: false,
       canReleaseResults: false,
+      // DHEALTH-NATIVE-ACCESS-001: a clinician who is not also an ORG_ADMIN gets no
+      // administration surface. Pinned in the exhaustive shape on purpose -- this is
+      // the test that would catch a sixth capability being granted by default.
+      canAdministerTeam: false,
     })
   })
 
@@ -138,6 +158,52 @@ describe('capabilitiesFor', () => {
     })
     expect(capabilitiesFor(activeProvider).canWorkLabOrders).toBe(false)
     expect(capabilitiesFor(activeProvider).canReleaseResults).toBe(false)
+  })
+
+  // ── DHEALTH-NATIVE-ACCESS-001 ────────────────────────────────────────────────
+
+  it('grants canAdministerTeam to an ORG_ADMIN at either organization type', () => {
+    expect(capabilitiesFor(membership({ roles: ['ORG_ADMIN'] })).canAdministerTeam).toBe(true)
+    expect(
+      capabilitiesFor(membership({ organization_type: 'LAB', roles: ['ORG_ADMIN'] }))
+        .canAdministerTeam,
+    ).toBe(true)
+  })
+
+  it('keeps administration separate from every clinical authority', () => {
+    // Both directions. An administrator is not a clinician: ADR-044 and
+    // `require_clinician`/`require_lab_result_releaser` refuse an ORG_ADMIN who holds
+    // only that, and this derivation must not offer what the server refuses.
+    const admin = capabilitiesFor(membership({ roles: ['ORG_ADMIN'] }))
+    expect(admin.canViewPatients).toBe(false)
+    expect(admin.canCreateOrders).toBe(false)
+    expect(admin.canReviewResults).toBe(false)
+    expect(admin.canWorkLabOrders).toBe(false)
+    expect(admin.canReleaseResults).toBe(false)
+
+    const clinician = capabilitiesFor(membership({ roles: ['CLINICIAN'] }))
+    expect(clinician.canAdministerTeam).toBe(false)
+    const releaser = capabilitiesFor(
+      membership({ organization_type: 'LAB', roles: ['LAB_TECH', 'LAB_RESULT_RELEASER'] }),
+    )
+    expect(releaser.canAdministerTeam).toBe(false)
+  })
+
+  it('grants both when one person holds both, without merging them', () => {
+    const both = capabilitiesFor(membership({ roles: ['CLINICIAN', 'ORG_ADMIN'] }))
+    expect(both.canAdministerTeam).toBe(true)
+    expect(both.canCreateOrders).toBe(true)
+  })
+
+  it('grants no administration for a membership that is not usable in the first place', () => {
+    expect(
+      capabilitiesFor(membership({ roles: ['ORG_ADMIN'], membership_status: 'REVOKED' }))
+        .canAdministerTeam,
+    ).toBe(false)
+    expect(
+      capabilitiesFor(membership({ roles: ['ORG_ADMIN'], organization_status: 'SUSPENDED' }))
+        .canAdministerTeam,
+    ).toBe(false)
   })
 
   it('grants nothing when there is no active organization', () => {
