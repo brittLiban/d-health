@@ -24,8 +24,8 @@ platform administrator too and that no policy in this repository previously defi
 Qualified with **16 real-browser tests** against real Keycloak 26.7.1, real Caddy, real adapter and
 real PostgreSQL 16 (`scripts/demo/qualify-access.sh`), **ten real-PostgreSQL concurrency tests**
 including two administrators removing each other's `ORG_ADMIN` simultaneously, and **1708 adapter
-unit tests**. Full record: `PROJECT_STATE.md`'s DHEALTH-NATIVE-ACCESS-001 entry, disposition in
-`docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
+unit tests** and **920 UI tests across all 59 UI test files**. Full record: `PROJECT_STATE.md`'s
+DHEALTH-NATIVE-ACCESS-001 entry, disposition in `docs/NATIVE-SECURITY-QUALIFICATION.md` §5.1.
 
 **What it does not claim.** Not penetration tested, not audited, not certified. No production
 deployment, no public CA, no real domain, no real patient data. **No pilot gate is created or
@@ -913,8 +913,9 @@ evidence about any surface marked *no*. Detail: `docs/NATIVE-GOLDEN-JOURNEY.md`,
   required making an `ORG_ADMIN`-only membership *usable* — its previous exclusion was the same P1 in
   user-facing form. Migration `0033_staff_access_lifecycle` widens one CHECK constraint and creates no
   table (`membership_deactivated`, `membership_reactivated`, `role_removed`). Evidence: **1708
-  adapter unit tests**, **154 UI tests** across the directly affected areas (one measured vitest
-  invocation, not a per-directory sum), **ten real-PostgreSQL
+  adapter unit tests**, **920 UI tests across all 59 test files** (measured in reconciled batches:
+  one whole-suite invocation silently ran only 41 of the 59 and would have produced a false total),
+  **ten real-PostgreSQL
   concurrency tests** (`test_dhealthaccess001_postgres_qualification.py`, covering §25-A/B/C/D and
   the lockout races — `FOR UPDATE` is a no-op on SQLite, so this claim is PostgreSQL-only by
   necessity), and **16 real-Keycloak/real-Chromium tests** (`scripts/demo/qualify-access.sh`). A

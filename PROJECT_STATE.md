@@ -21065,12 +21065,19 @@ identifiers already correct.
   `test_dhealthaccess001_staff_access.py`, 1 new in `test_demo_seed.py`). `ruff check` and
   `ruff format --check` clean on every file this ticket touches; the 5 remaining repository-wide
   ruff findings are pre-existing in `tests/test_native_recovery_tooling.py` and untouched.
-- **UI: 154 tests pass across the 12 test files in the directly affected areas** (`features/staff`,
-  `features/workspace`, `features/team`, and the three `App.*` suites) — measured as one vitest
-  invocation rather than added up per directory, because `features/staff` already contains
-  `staffSections.test.ts` and a per-directory sum double-counts it. 27 of those are the new
-  `TeamAccessPage` tests.
-  `tsc --noEmit` clean.
+- **UI: 920 tests across all 59 test files, every file accounted for.** 154 of those are the 12
+  files in the directly affected areas (`features/staff`, `features/workspace`, `features/team` and
+  the three `App.*` suites), 27 of which are the new `TeamAccessPage` tests. `tsc --noEmit` clean;
+  `oxlint` 0 errors and **47 warnings both with and without** this ticket's UI changes (the one in
+  `TeamAccessPage` is the same on-mount-fetch pattern `FacilityTeam.tsx` already uses, and 10 of the
+  pre-existing 47 are in `features/platform`).
+
+  **Measured in batches of seven with per-batch file-count reconciliation, and that is not
+  ceremony.** A single `vitest run` over the whole suite reported `Test Files 41 passed (41)`.
+  `vite.config.ts` excludes only `e2e/**`, so **18 files were silently dropped by the worker pool** —
+  and "658 passed" would have gone into this document as a whole-suite claim that was false. A
+  dropped file is invisible in a pass/fail total, which is why the reconciliation compares against
+  the count on disk rather than trusting the summary line.
 - **Real PostgreSQL:** `tests/integration/test_dhealthaccess001_postgres_qualification.py` — ten
   tests covering §25-A/B/C/D, the two lockout races and the six-way variant, unique role assignment
   under concurrency, and transactional audit coupling.
