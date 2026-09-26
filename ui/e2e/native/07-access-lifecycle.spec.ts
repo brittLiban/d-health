@@ -861,6 +861,7 @@ test.describe('ACCESS-10: platform authority cannot be manufactured', () => {
     const clinic = orgOf(admin, 'PROVIDER')
     const staff = await listStaff(admin.token, clinic.organization_id)
     const self = rowFor(staff.body, admin.identityId)
+    const rolesBefore = [...self.roles].sort()
 
     for (const forbidden of [
       'PLATFORM_ADMIN',
@@ -875,8 +876,19 @@ test.describe('ACCESS-10: platform authority cannot be manufactured', () => {
     }
 
     // Nothing was written, and the /me view of this identity still carries no platform authority.
-    expect([...(await listStaff(admin.token, clinic.organization_id)).body
-      .find((r) => r.membership_id === self.membership_id)!.roles].sort()).toEqual(['ORG_ADMIN'])
+    //
+    // A DELTA against the roles held before the attempts, not `toEqual(['ORG_ADMIN'])`. The absolute
+    // form couples this assertion to a pristine baseline, and `scripts/demo/reset.sh` cannot
+    // guarantee one: it converges the declared roles and never removes an extra grant, so a stray
+    // role survives a reset. NC-ACCESS-5 left exactly such a row behind and this test then failed
+    // for a reason that had nothing to do with the code under test. Same fix, same reason, as
+    // ACCESS-6's audit-row count.
+    const rolesAfter = [
+      ...(await listStaff(admin.token, clinic.organization_id)).body.find(
+        (r) => r.membership_id === self.membership_id,
+      )!.roles,
+    ].sort()
+    expect(rolesAfter).toEqual(rolesBefore)
     const me = await api()
     try {
       const body = await (
