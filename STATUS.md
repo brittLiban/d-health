@@ -6,6 +6,37 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-26, DHEALTH-STATE-001, directly on `master`.** From `5dcdaa9`. **A documentation
+reconciliation, not a product change — no application code, no Compose file, no migration, no
+workflow file was touched.** Four Native tickets landed on 2026-09-25 (golden journey, its two owed
+negative controls, the canonical deployment, the destructive restore drill) and this file's §C–§I
+had not caught up with them. Statements that were true when written — *real Keycloak has never been
+exercised*, *no browser has completed a PKCE round trip*, *the Native frontends are jsdom-qualified
+only*, *DHealth Connect has no code of its own*, *Launch 1's wired-and-deployed frontend count is
+none* — had become false as **present state** while remaining accurate as **history**. They are now
+superseded by dated overlays rather than rewritten, per this repository's own convention.
+
+**Three pilot gates were re-evaluated from their exact wording and two of them cleared.** Gate 1
+(real-Keycloak token validation/authorization) and gate 2 (Native browser authentication +
+same-origin Exchange routing) are **CLEARED for the Native/Exchange track**, on the same evidence
+and with the same caveats gate 4 already carries: `BASE_DOMAIN=localhost`, Caddy's internal CA, one
+workstation, synthetic data. **Gate 3 did not clear and was not reinterpreted to make it** — it says
+*manual* live/browser demonstration, and what exists is an automated Chromium run. The truthful
+distinction now stated in §H is: **automated real-browser golden journey: QUALIFIED; manual live
+golden-path demonstration: still owed.** Gates 5 (WhatsApp real credentials) and 6 (clinical
+sign-off) are untouched and uncleared. **Three of six gates cleared is not pilot-readiness**, and no
+real-patient pilot exists on either track.
+
+**What did not change, and is worth stating because a reader could over-read the above.** No
+production deployment. No off-site backup durability. No real Meta endpoint contacted. No real
+vendor adapter for DHealth Connect, so no CONNECT facility can be production-routed. No human
+usability qualification — DH-USABILITY-001 stays `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`.
+The patient status *screen* has still never been rendered in a real browser (only its clinic-side
+handoff and an API-level grant replay). The correction/amendment lifecycle (DH-LAB-005) and the
+platform/facility-enrollment screens have never been browser-exercised either. The
+maternity/reference-connector track keeps its own separate recovery status. Two items are carried to
+Liban as **HUMAN DECISION REQUIRED** in §I rather than decided here.
+
 **2026-09-25, DHEALTH-NATIVE-RECOVERY-001, directly on `master`.** From `7e082a7`. **DHealth Native
 has been destroyed and brought back.** A populated synthetic deployment was backed up to one
 encrypted archive; **every durable volume was then deleted**; a clean deployment was rebuilt from
@@ -724,6 +755,38 @@ changes, weakens, or reinterprets any of the four.
 noted, real-PostgreSQL. This is not a claim of production deployment, and where a ticket's own
 formal closure is a separate reserved human decision, that is stated explicitly in its bullet.*
 
+**[Dated banner, 2026-09-26, DHEALTH-STATE-001 — read this before any per-bullet qualifier below.]**
+Many bullets in this section and in §I end with *"Not real-Keycloak-qualified, not
+runtime/browser-demonstrated"* or *"same evidence level as the rest of DHealth Clinic"*. Those
+sentences were accurate when written and are **now false for the parts of the product the native
+golden journey actually walked**. They are left in place as each ticket's own record rather than
+edited one by one; this banner is what overrides them. Precisely what a real Chromium, signed in
+through real Keycloak, has driven on the canonical Native topology (`docker-compose.native.yml`,
+`BASE_DOMAIN=localhost`, synthetic data — DHEALTH-NATIVE-MVP-1.0/1.0R, DHEALTH-NATIVE-DEPLOY-001,
+DHEALTH-NATIVE-RECOVERY-001):
+
+| Surface | Browser-exercised? |
+|---|---|
+| The one staff application shell — navigation derived from membership, establishment name, sign-out (ADR-054) | **yes** |
+| Patient directory list/open and the `PatientIdentity` projection (DH-IDENTITY-001 read path, DH-CLINIC-005) | **yes** |
+| Native patient *registration* form (DH-IDENTITY-001 write path) | no |
+| Order wizard: catalog selection, review, durable commit (DH-CLINIC-003C) | **yes** |
+| Routing step and order-scoped eligible-labs read (DH-CLINIC-006 / ADR-052) | **yes** |
+| Lab queue, accept, collection milestone, start-processing (DH-LAB-001/002) | **yes** |
+| Template-driven native result entry and gated completion (DH-LAB-003/004) | **yes** |
+| Entry-vs-release authority separation, incl. a releaser-only navigation (ADR-044) | **yes** |
+| Least-privilege release queue and fingerprint-gated release (DH-LAB-004) | **yes** |
+| Provider review queue, exact-version tab, review disposition (DH-CLINIC-007, DH-EX-014A) | **yes** |
+| Clinic-side patient-access handoff: issue, notification enrolment, active-grant confirmation (DH-PATIENT-001 clinic half, DH-NOTIFY-001 on the `fake` provider) | **yes** |
+| Patient status *screen* itself (`ui/src/features/patient/`) | **no** — the restored grant was replayed at the API only |
+| Correction and post-release amendment lifecycle (DH-LAB-005) | no |
+| Platform / facility-enrollment screens (DH-MVP-ONBOARD-001) | no |
+
+**What the table does not say.** It is runtime qualification on synthetic data with one operator —
+not usability qualification, not production deployment, not a public-certificate claim, and not
+evidence about any surface marked *no*. Detail: `docs/NATIVE-GOLDEN-JOURNEY.md`,
+`docs/NATIVE-RECOVERY.md`.
+
 - **Patient notification domain, transport and dispatcher, DH-NOTIFY-001** (2026-09-24,
   ADR-058): a durable patient-notification domain separate from `ResultDelivery` in every respect
   (`patient_notifications`, `patient_notification_enrollments`, `patient_notification_attempts`,
@@ -930,13 +993,22 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   26.7.1, `Exited (0)`, reconciler's own success log observed).** That same real run also found and
   fixed a genuine defect this ADR's config-level review had missed twice: two realm-JSON description
   fields exceeded Keycloak's `VARCHAR(255)` column limit and crashed the entire realm import against
-  a real database. **Still not observed: a real browser completing the redirect/login/PKCE round
-  trip.** The qualification run's full-stack boot stalled on the pre-existing, unmodified
+  a real database. ~~**Still not observed: a real browser completing the redirect/login/PKCE round
+  trip.**~~ The qualification run's full-stack boot stalled on the pre-existing, unmodified
   `openmrs-backend`/`openelis-webapp` services never reaching healthy within CI's wait window, which
   blocks Caddy and therefore every `app.${BASE_DOMAIN}` vhost the browser suite needs — consistent
   with this repo's own documented ~50-minute-plus full-stack cold boot (`.github/workflows/ci.yml`
-  header), not a defect in this ADR's own code. See `DECISIONS.md` ADR-050's 2026-09-17 overlay and
-  `PROJECT_STATE.md`'s DH-CLINIC-004B entry.
+  header), not a defect in this ADR's own code. **[Superseded 2026-09-25, observed;
+  re-stated here 2026-09-26, DHEALTH-STATE-001.]** The struck sentence was true until
+  DHEALTH-NATIVE-MVP-1.0. A real Chromium now completes the redirect / real-Keycloak login /
+  Authorization Code + PKCE round trip against the `dhealth-native-ui` client and arrives at an
+  authenticated workspace — repeatedly, at the start of every journey, authorization and recovery
+  phase. It happens on the **canonical Native topology**, which has no OpenMRS/OpenELIS service to
+  stall on; the CI capacity problem described above was never solved, it was routed around by a
+  deployment that does not need those services. **The auth layer's own status is therefore no longer
+  "CONFIG-QUALIFIED" in present tense — it is runtime- and browser-qualified on that topology**
+  (§C banner). See `DECISIONS.md` ADR-050's 2026-09-17 overlay, ADR-061, and `PROJECT_STATE.md`'s
+  DH-CLINIC-004B and DHEALTH-NATIVE-MVP-1.0 entries.
 - **Native demo reset-safety boundary and baseline/reset idempotency (DH-DEMO-001)**:
   `demo_seed.py`'s three-fact refusal (wrong database name; a process-own env var; an unreadable/
   missing marker table) and its `TRUNCATE ... CASCADE` reset (clears every workflow table,
@@ -965,6 +1037,17 @@ formal closure is a separate reserved human decision, that is stated explicitly 
 
 ## D. BUILT BUT NOT RUNTIME-PROVEN
 
+**[Dated banner, 2026-09-26, DHEALTH-STATE-001 — this section's title is now only partly true of
+its own contents, and that is stated rather than repaired by deletion.]** When these bullets were
+written, "not runtime-proven" meant *nothing here has ever run outside jsdom*. That is no longer the
+case: §C's dated banner lists, surface by surface, which of the screens described below a real
+browser has driven against real Keycloak, a real adapter and real PostgreSQL. The bullets are kept
+verbatim as each ticket's own record; **where one says no browser has rendered something, read §C's
+table first** — it is authoritative for present state, and it also names the surfaces here that
+genuinely remain jsdom-only (native patient registration, the correction/amendment lifecycle, the
+DHealth Patient status screen, and the platform/facility-enrollment screens). Nothing in this
+section is production-deployed, human-qualified, or evidence about real patients.
+
 - **DHealth Clinic native frontend** (`ui/src/features/clinic/`) **[no longer a separate
   application — updated 2026-09-20, DH-MVP-POLISH-001: these pages are now sections of the one staff
   application (bullet below, ADR-054). `ClinicApp`/`ClinicShell` are deleted and `ClinicProvider` no
@@ -976,10 +1059,19 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   order-intent recovery across reload/restart, order status, results/release-version history, and
   (as of DH-CLINIC-004A, §C) a complete, config-qualified authentication path. Built and
   component/UI-tested. **Still cannot be called deployed.** DH-CLINIC-004B has since observed a real
-  Keycloak import of the two-client file and real reconciliation against it (§C) — but no browser has
-  actually completed a redirect/login/PKCE round trip, and no live Caddy routing has been exercised
-  end to end, because the full stack (Caddy included) never finished booting in the one qualification
-  run attempted. That gap is DH-CLINIC-004B's own open item (§I), not closed by this entry.
+  Keycloak import of the two-client file and real reconciliation against it (§C) — ~~but no browser
+  has actually completed a redirect/login/PKCE round trip, and no live Caddy routing has been
+  exercised end to end, because the full stack (Caddy included) never finished booting in the one
+  qualification run attempted.~~ **[Superseded 2026-09-26, DHEALTH-STATE-001: the struck clause was
+  true of the maternity-coupled stack and is no longer true of the product.]** On the canonical
+  Native topology a real browser completes that round trip and every request the screens make
+  reaches the adapter **same-origin through Caddy** (`app.{$BASE_DOMAIN}` → `/exchange/v1/*` →
+  `adapter:8000`, `deploy/native/Caddyfile`). Patient search/open, the order wizard, routing, orders,
+  the review queue and the patient-access handoff have all been driven that way; the native patient
+  **registration** form has not (§C banner). **`docker-compose.native.yml` is still not a production
+  deployment** — `BASE_DOMAIN=localhost`, Caddy's internal CA, one workstation, synthetic data.
+  DH-CLINIC-004B's *purpose* is served by this; its own stated closure criteria are not, and it stays
+  open (§I).
 - **DHealth Lab native frontend** (`ui/src/features/lab/`) **[no longer a separate application —
   updated 2026-09-20, DH-MVP-POLISH-001: same as Clinic above. `LabApp`/`LabShell` are deleted and the
   `canWorkOrders`/`canReleaseResults` capability model described below is now derived once, from the
@@ -1011,9 +1103,16 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   inspection, fingerprint-gated release, with the exact distinct stale-fingerprint wording an
   amendment race requires) rather than a disconnected second page; a new `ReleaseVersionHistory`
   component exposes every release version (status always textual, never color-only) and one
-  version's exact, immutable content on demand. Built and component/UI-tested only — **same "built
+  version's exact, immutable content on demand. Built and component/UI-tested only — ~~**same "built
   but not runtime-proven" boundary as DHealth Clinic above**: no real-Keycloak or real-browser
-  qualification exists for it either. LIS/Connect integration remains explicitly **not** part of
+  qualification exists for it either.~~ **[Corrected 2026-09-26, DHEALTH-STATE-001 — and the
+  correction is deliberately partial.]** A real browser signed in as a real Keycloak lab technician
+  and drove the queue, acceptance, the collection milestone, start-processing, template-driven entry
+  and gated completion; a **separate** releaser identity drove the least-privilege release queue and
+  the fingerprint-gated release, and the technician was confirmed to have **no route to the release
+  surface at all**. **The DH-LAB-005 half of this bullet — correction, and the whole post-release
+  amendment lifecycle — has never run in a browser** and keeps the original boundary exactly as
+  written. LIS/Connect integration remains explicitly **not** part of
   this surface. See `DECISIONS.md` ADR-043's 2026-09-18 clarification, ADR-053 and its
   DH-LAB-004/DH-LAB-005 addenda, ADR-044's DH-LAB-004 addendum, ADR-045's DH-LAB-005 addendum,
   ADR-048's DH-LAB-005 addendum, and `PROJECT_STATE.md`'s DH-LAB-001/DH-LAB-002/DH-LAB-003/
@@ -1030,8 +1129,16 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   Keycloak. Paired with a Clinic-side `PatientAccessHandoff` that issues/revokes/rotates access and
   produces a locally-generated QR plus a printable sheet for patients with no smartphone. Built and
   component/UI-tested only — **same "built but not runtime-proven" boundary as DHealth Clinic and
-  DHealth Lab above**: no real browser has rendered this screen, no real phone has scanned one of
-  these QR codes, and no printer has produced one of these sheets. Responsive layout was written
+  DHealth Lab above**: **no real browser has rendered this screen**, no real phone has scanned one of
+  these QR codes, and no printer has produced one of these sheets. **[Narrowed 2026-09-26,
+  DHEALTH-STATE-001 — one half of this bullet moved and the other did not.]** The **clinic-side**
+  `PatientAccessHandoff` *has* now been driven in a real browser by a real Keycloak clinician:
+  issuing an order-scoped grant, enrolling a synthetic destination for notification, and the
+  product's own on-screen confirmation that an active grant exists
+  (`ui/e2e/native/03-recovery-source.spec.ts`). The **patient-facing screen itself remains
+  unrendered** — the restored grant was replayed against `/exchange/v1/patient/order` at the API
+  level (RECOVERY-5/RECOVERY-8), which proves the grant survived a destructive restore and stays
+  bound to exactly its own order, and proves nothing whatever about the page. Responsive layout was written
   mobile-first and reasoned about at 320/375/430px but **not measured** — jsdom cannot measure
   layout. No SMS/WhatsApp/email/voice transport was added; `ResultDelivery` is untouched and
   viewing a status page deliberately does **not** mark it `DELIVERED`. See `docs/ARCHITECTURE.md`
@@ -1066,9 +1173,18 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   enforces it, and the server refuses regardless of what the browser rendered. An organization switch
   discards the org-scoped subtree by `key`, so a late response from one organization cannot render
   under another. There is deliberately **no `Réglages` item**: see §I. Built and component/UI-tested
-  only — **same "built but not runtime-proven" boundary as every native surface above**: no real
-  browser has rendered this shell, no real person has used the establishment selector, no E2E has run,
-  and no font has been observed loading. See `DECISIONS.md` ADR-054, `docs/ARCHITECTURE.md` §20,
+  only — ~~**same "built but not runtime-proven" boundary as every native surface above**: no real
+  browser has rendered this shell, no real person has used the establishment selector, no E2E has
+  run, and no font has been observed loading.~~ **[Superseded 2026-09-26, DHEALTH-STATE-001, except
+  for one clause.]** A real browser has rendered this shell repeatedly: every journey, authorization
+  and recovery phase begins by signing in through real Keycloak and then navigating **by this
+  shell's own navigation landmark**, and the `Se déconnecter` control is the assertion that an
+  authenticated session exists. The claim the shell was built to make — *navigation derives from the
+  membership the token actually carries* — is now observed rather than reasoned: a technician
+  identity had no `Résultats` section at all while a releaser identity did. **Still true and
+  deliberately kept:** no real *person* has used the establishment selector (each e2e identity holds
+  one membership, so no live establishment switch has occurred), and no font has been observed
+  loading. `no E2E has run` is struck. See `DECISIONS.md` ADR-054, `docs/ARCHITECTURE.md` §20,
   `docs/UI-002-DESIGN-LANGUAGE.md`, and `PROJECT_STATE.md`'s DH-MVP-POLISH-001 entry.
 - **Native demo environment** (DH-DEMO-001, `docker-compose.native-demo.yml`,
   `scripts/demo/*.sh`, `adapter/src/daher_adapter/exchange/demo_seed.py`): a dedicated Compose
@@ -1081,13 +1197,28 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   called the CI job "its first attempt, not a confirmation"; that attempt has since succeeded.]**
   **Real native Compose boot: qualified in CI** (run `35390037354` at `a5992bd`, job `native demo —
   real boot (DH-DEMO-001)` green with all 10 jobs — verified against the GitHub API, not carried
-  forward from a report). **Real Keycloak interactive login: not yet qualified. Real browser golden
-  journey: not yet qualified.** This sandbox's Docker still cannot pull real image blobs from the
-  CDN, so that boot is CI's evidence, not a local observation. See `PROJECT_STATE.md`'s
+  forward from a report). ~~**Real Keycloak interactive login: not yet qualified. Real browser golden
+  journey: not yet qualified.**~~ This sandbox's Docker still cannot pull real image blobs from the
+  CDN, so that boot is CI's evidence, not a local observation. **[Superseded 2026-09-26,
+  DHEALTH-STATE-001 — both struck lines are now false, and the file this bullet is named after has
+  changed role.]** Real Keycloak interactive login and the real-browser golden journey are both
+  qualified (DHEALTH-NATIVE-MVP-1.0, §C banner). Since ADR-061, **`docker-compose.native-demo.yml`
+  is an overlay, not a topology**: the canonical Native deployment is `docker-compose.native.yml`
+  and the demo file adds only demo users, the demo database name and the seed authority — it no
+  longer renders on its own, which is the disclosed cause of CI's two native-demo jobs failing at
+  `config` (§A, DHEALTH-NATIVE-DEPLOY-001). Images are now fetched out-of-band and loaded locally,
+  because the blob CDN is still unreachable from this environment. See `PROJECT_STATE.md`'s
   DH-DEMO-001 entry for the full evidence matrix.
-- Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: no real-Keycloak
+- Everything in §C's Exchange-backend list beyond CI/PostgreSQL qualification: ~~no real-Keycloak
   qualification, no manual live/browser demonstration, no production deployment, for any Exchange
-  ticket.
+  ticket.~~ **[Split 2026-09-26, DHEALTH-STATE-001 — this line bundled four claims that no longer
+  share a verdict.]** Real-Keycloak qualification: **now exists** for the backend paths the journey
+  exercised, via real JWKS token validation and authorization on the canonical Native topology
+  (§C banner, §H gate 1). Automated real-browser demonstration: **now exists**, for those same
+  paths. **Manual live/browser demonstration: still does not exist** (§H gate 3). **Production
+  deployment: still does not exist**, for any Exchange ticket. Exchange surfaces the journey never
+  touched — amendment release, platform administration, the patient screen — keep the original
+  boundary in full.
 
 ## E. BLOCKED / OPEN
 
@@ -1144,21 +1275,42 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   not the ordering provider organization receiving a result, and what `DELIVERED` should mean there
   remains an open product decision (`docs/MVP-1.0.md` §10 item 6).
 - **Email and voice patient notification**: not built, and `§28` non-goals rather than gaps.
-- **Real Keycloak qualification of authorization boundaries**: still not run for token
+- ~~**Real Keycloak qualification of authorization boundaries**: still not run for token
   validation/audience/authorization decisions — every such boundary is proven only against a locally
   generated RSA keypair (`StaticKeySource`), never a live identity provider. (Narrower than before:
   DH-CLINIC-004B did runtime-qualify realm/client *reconciliation* against a real Keycloak — §C — but
-  that is a deployment-provisioning proof, not a token-validation one.)
-- **Real-browser qualification of native Clinic authentication**: the config-level pieces exist
+  that is a deployment-provisioning proof, not a token-validation one.)~~
+  **RESOLVED [2026-09-26, DHEALTH-STATE-001 — struck rather than deleted, because it was true for
+  every ticket that cited it].** The canonical Native deployment points the adapter at a **real
+  Keycloak JWKS endpoint** (`EXCHANGE_OIDC_ISSUER` / `EXCHANGE_OIDC_JWKS_URL` /
+  `EXCHANGE_OIDC_AUDIENCE`, `docker-compose.native.yml`), so `JWKSKeySource` — the production path,
+  not `StaticKeySource` — is what validated the tokens a real browser obtained from a real login.
+  Authorization was then exercised **negatively** with those same tokens: an unauthenticated browser,
+  an unauthenticated API call, a clinician reading the laboratory's queue, a technician acting as the
+  provider, and a fabricated organization id were each refused. The proof that the suite can see the
+  boundary break is NC-NATIVE-1 (a different expected audience fails the journey before any workflow
+  runs) and NC-NATIVE-3 (weakening `require_clinician`'s tenant check made the cross-tenant read
+  answer **200** and turned `NEG-3` red). `StaticKeySource` remains what the unit suite uses, which
+  is appropriate and is no longer the *only* evidence. **Pilot gate 1 clears on this** (§H).
+- ~~**Real-browser qualification of native Clinic authentication**: the config-level pieces exist
   (§C), and realm reconciliation is now real-Keycloak-qualified (§C), but a real OIDC round trip
   against a live browser/Caddy stack has never been observed — the one qualification run attempted
-  stalled before Caddy ever started (§D). This is DH-CLINIC-004B's open item (§I).
+  stalled before Caddy ever started (§D). This is DH-CLINIC-004B's open item (§I).~~
+  **RESOLVED [2026-09-26, DHEALTH-STATE-001].** Observed, on the canonical Native topology:
+  `https://app.<BASE_DOMAIN>` → real Keycloak login form → Authorization Code + PKCE → callback →
+  an authenticated workspace, with every subsequent Exchange call made **same-origin** and proxied
+  by Caddy from `/exchange/v1/*` to the adapter. **Pilot gate 2 clears on this** (§H). It does not
+  close DH-CLINIC-004B, whose own criteria were written against the maternity-coupled stack (§I).
 - **Full-stack (Caddy-included) boot on a shared GitHub-hosted CI runner**: `openmrs-backend` and
   `openelis-webapp` did not reach Docker `healthy` within a 3600s wait window in the one attempt made
   (DH-CLINIC-004B, run `35210377720`). Consistent with this repo's own documented ~50-minute-plus
   cold boot being a manual/fresh-VM procedure, not a shared-runner one — see `.github/workflows/ci.yml`'s
   header. Not a code defect found in this attempt; next step is a runner with more capacity
-  (self-hosted or a larger GitHub runner), not a different test design.
+  (self-hosted or a larger GitHub runner), not a different test design. **[Still true, and its blast
+  radius narrowed 2026-09-26, DHEALTH-STATE-001: this no longer blocks Native.]** The canonical
+  Native deployment has no OpenMRS/OpenELIS service to wait on, so Native browser qualification was
+  reached by removing the dependency rather than by finding a bigger runner. This item remains open
+  for the **maternity/reference-connector** stack, which still needs that capacity.
 - **Cross-provider or national patient lookup/matching by demographic**: does not exist and is
   explicitly out of Launch-1 scope (ADR-051 Decision 11) — this is a boundary, not a gap. **2026-09-17
   dated update (DH-IDENTITY-001):** provider-scoped native patient *registration* by name (display
@@ -1176,8 +1328,24 @@ formal closure is a separate reserved human decision, that is stated explicitly 
   remaining correction/amendment gap DH-LAB-004 deliberately left closed rather than building
   unsafely. Demo seed data now exists (§D, DH-DEMO-001), but LIS/Connect integration still does
   not.
-- **DHealth Connect** (EMR/LIS integration layer, beyond the OpenMRS/OpenELIS reference track
-  itself): no code of its own exists yet. **[Updated 2026-09-20, DH-PATIENT-001 — this bullet
+- ~~**DHealth Connect** (EMR/LIS integration layer, beyond the OpenMRS/OpenELIS reference track
+  itself): no code of its own exists yet.~~ **[Corrected 2026-09-26, DHEALTH-STATE-001 — this
+  sentence had been directly contradicted by §C for three days, and the contradiction is removed
+  here rather than left for a reader to arbitrate.]** DHealth Connect's **contract, runtime and
+  on-premises agent exist and are synthetically qualified**; **no real vendor adapter has been
+  implemented or qualified.** Built: the external integration contract (`docs/CONNECT-CONTRACT.md`,
+  ADR-056), connector identity and lifecycle, the durable qualification model with `DECLARED` vs
+  `EXERCISED` evidence strength, a durable delivery runtime (`connector_deliveries`, claim leases,
+  exponential retry, dead letters that are unresolved rather than deleted), the on-prem agent
+  (`daher_adapter.connect_agent`), organization-and-source-scoped correlation with no fuzzy
+  matching, durable provider-delivery obligations, and synthetic provider/lab qualification paths
+  that reach `connector_qualified = true` (ADR-057, `docs/CONNECT-AGENT.md`, `docs/CONNECT-QUALIFICATION.md`).
+  **Not built and not proven:** any named real vendor adapter, any real external EMR integration,
+  any real external LIS integration, any production-routable CONNECT facility, any live partner
+  facility. Nothing in this repository has ever contacted an external EMR or LIS. A CONNECT facility
+  therefore still cannot reach `READY_FOR_ROUTING`, pinned by
+  `test_RQ8_qualified_is_still_not_production_routable`. That is DH-CONNECT-ADAPTER-001's subject
+  (§I). **[Updated 2026-09-20, DH-PATIENT-001 — this bullet
   previously also named "DHealth Patient (assisted-digital patient layer)" as having no code of its
   own; a first DHealth Patient surface now exists, see §D.]** What remains not built on the patient
   side specifically **[updated 2026-09-24, DH-NOTIFY-001 — this bullet previously named push
@@ -1198,22 +1366,86 @@ Per `docs/MVP-1.0.md` §9's explicit out-of-scope list: no full inpatient HIS, n
 longitudinal national EHR, no pharmacy/radiology/PACS, no insurance claims or patient payments, no
 consumer price marketplace, no AI diagnosis/interpretation/decision support, no nationwide rollout.
 Launch 1 is the Exchange backend plus whichever native frontends are actually wired end-to-end and
-deployed — today that is **none**: the Exchange backend is unqualified against a live identity
+deployed. ~~Today that is **none**: the Exchange backend is unqualified against a live identity
 provider, and the one native frontend that exists (DHealth Clinic), while now config-complete for
-authentication (§C), has never been runtime/browser-qualified (§D).
+authentication (§C), has never been runtime/browser-qualified (§D).~~
+
+**[Current state, 2026-09-26, DHEALTH-STATE-001 — the struck sentence was true until 2026-09-25 and
+is replaced rather than edited, because both of its clauses are now false.]**
+
+> The native Clinic and Lab diagnostic workflow is **wired end to end and runtime/browser-qualified
+> with synthetic data on the canonical Native topology**; **no production deployment and no
+> real-patient pilot exists.**
+
+Four distinct facts, and collapsing any two of them would be a false claim:
+
+| | State |
+|---|---|
+| **Runtime/browser-qualified** | **yes**, for the surfaces §C's banner lists, on `docker-compose.native.yml` with real Keycloak, real PostgreSQL and a real Chromium — `BASE_DOMAIN=localhost`, Caddy's internal CA, synthetic data, one workstation |
+| **Production deployed** | **no.** Nothing runs on a real domain, with a public certificate, for any real facility |
+| **Human-qualified** | **no.** `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`; no clinician, front-desk or laboratory participant has used it (§E) |
+| **Real-patient pilot** | **no**, on either track, and three of six pilot gates remain uncleared (§H) |
+
+"The frontends are wired" is therefore an accurate statement about the **diagnostic workflow only**.
+There is still no `Réglages`/administration surface (§I), the patient status screen has not been
+rendered in a browser, and the correction/amendment lifecycle has not been browser-exercised (§D).
 
 ## H. Pilot gates
 
-Gates that must all clear before any real-patient pilot on the Exchange track. One (gate 4) cleared
-on 2026-09-25; the rest have not:
+Gates that must all clear before any real-patient pilot on the Exchange track. **Three of six are
+cleared** — gate 4 on 2026-09-25, gates 1 and 2 re-evaluated from their own wording and cleared on
+2026-09-26 (DHEALTH-STATE-001). **Gates 3, 5 and 6 are not cleared, and none of them was
+reinterpreted to make it so.** Three cleared gates is not pilot-readiness and is not authorization
+for anything; the same caveats travel with all three cleared gates — `BASE_DOMAIN=localhost`,
+Caddy's internal CA, one workstation, synthetic data, no production deployment.
 
-1. Real Keycloak qualification of token validation/authorization (currently: not run, §E). Realm/
-   client reconciliation is now real-Keycloak-qualified (§C) — narrower than this gate.
-2. DHealth Clinic native browser authentication + same-origin Exchange routing — config-qualified
+1. Real Keycloak qualification of token validation/authorization. ~~(currently: not run, §E). Realm/
+   client reconciliation is now real-Keycloak-qualified (§C) — narrower than this gate.~~
+   **CLEARED for the Native/Exchange track, 2026-09-26, DHEALTH-STATE-001**, on evidence produced by
+   DHEALTH-NATIVE-MVP-1.0/1.0R and re-exercised by DHEALTH-NATIVE-DEPLOY-001 and
+   DHEALTH-NATIVE-RECOVERY-001. **The load-bearing question was not "was Keycloak running" but
+   "did Exchange validate and authorize real Keycloak-issued credentials on its normal runtime
+   path", and it did**: `docker-compose.native.yml` configures `EXCHANGE_OIDC_ISSUER`,
+   `EXCHANGE_OIDC_JWKS_URL` and `EXCHANGE_OIDC_AUDIENCE` against the real `dhealth-exchange` realm,
+   so `JWKSKeySource` — not the unit suite's `StaticKeySource` — fetched real signing keys and
+   validated issuer, audience and signature on tokens a real browser obtained from a real login.
+   Authorization decisions were then made on those identities and **refused correctly in five
+   hostile cases**. There is no test bypass: no demo-conditional branch exists in any
+   authentication or request-handling code (grepped, DH-DEMO-001). Negative controls prove the suite
+   can see this break — NC-NATIVE-1 (wrong expected audience → the journey fails before any workflow
+   runs) and NC-NATIVE-3 (weakened tenant check → cross-tenant read answers 200, `NEG-3` red).
+   **Not cleared by this:** anything about a public certificate authority, a real domain, or a
+   Keycloak deployment other than this one.
+2. DHealth Clinic native browser authentication + same-origin Exchange routing. ~~— config-qualified
    as of DH-CLINIC-004A, reconciliation real-Keycloak-qualified as of DH-CLINIC-004B (§C), but a real
    browser round trip is still not observed (§D/§E — DH-CLINIC-004B, blocked on full-stack boot
-   capacity, §I).
-3. Manual live/browser demonstration of the golden path (currently: not run).
+   capacity, §I).~~ **CLEARED for the Native/Exchange track, 2026-09-26, DHEALTH-STATE-001.**
+   Observed, repeatedly and with both halves of the gate satisfied: a real Chromium at
+   `https://app.<BASE_DOMAIN>` is redirected to real Keycloak, completes **Authorization Code +
+   PKCE** against the public, secretless `dhealth-native-ui` client, returns through the callback to
+   an authenticated workspace, and then makes every Exchange call **same-origin** — `app.` serves
+   the UI and proxies `/exchange/v1/*` to `adapter:8000` in the same vhost
+   (`deploy/native/Caddyfile`), so no cross-origin path is involved at all. **Wording nuance,
+   recorded rather than resolved:** the gate names "DHealth Clinic", which ADR-054 has since made a
+   set of sections inside one staff application. The evidence is that application, reached at
+   `app.<BASE_DOMAIN>`, carrying the Clinic sections; if the gate was ever meant to require a
+   separately navigable DHealth Clinic product, that product no longer exists by decision. See §I's
+   `HUMAN DECISION REQUIRED` list.
+3. Manual live/browser demonstration of the golden path. **NOT CLEARED** — and it is worth being
+   exact about why, because the neighbouring evidence invites over-reading. **[2026-09-26,
+   DHEALTH-STATE-001: this gate was re-read from its own wording and deliberately left uncleared.]**
+
+   > **automated real-browser golden journey: QUALIFIED** (DHEALTH-NATIVE-MVP-1.0 —
+   > 12 Chromium tests against real Keycloak/adapter/PostgreSQL, `docs/NATIVE-GOLDEN-JOURNEY.md`)
+   > **manual live golden-path demonstration: STILL OWED**
+
+   This gate says *manual*. Playwright driving Chromium is not a human driving the product, and
+   automated execution is not evidence about a person — the same distinction DH-USABILITY-001 §40
+   already draws. What has changed since this gate was written is only that the sentence "the
+   product has never run in a real browser at all" is no longer true; the gate's own requirement is
+   untouched. Clearing it needs a human to walk the golden path on a live stack and that to be
+   recorded. It remains **separate from** human usability qualification (§E), which additionally
+   requires people who genuinely do these jobs and who have not been trained on DHealth.
 4. A performed backup **restore drill**, not merely a script that exists (pinned P0; see
    `PROJECT_STATE.md` for current backup status). **CLEARED for the Native/Exchange track,
    2026-09-25, DHEALTH-NATIVE-RECOVERY-001** — and cleared in the strong sense the gate was written
@@ -1248,8 +1480,63 @@ No real-patient pilot exists on either track as of this status.
 
 ## I. Next ticket
 
+**[Rewritten head, 2026-09-26, DHEALTH-STATE-001. The paragraphs below this block are preserved as
+each ticket's own brief; several of them are superseded and say so. Read this block for the current
+queue.]**
+
+### The current queue — three genuinely parallel tracks
+
+The repository no longer has one "next thing". It has three, and which runs first is Liban's call,
+not an agent's. **Nothing below is authorization to start implementing a feature** — the same rule
+DH-USABILITY-001 §43 and the 2026-09-24 product-definition brief already set stands unchanged.
+
+| Track | Next work | State |
+|---|---|---|
+| **Native product** | **Clinic + Lab switch-ready operating-product specification** — the 2026-09-24 brief, still owed and unstarted. A **product-definition** ticket, deliberately before any Calendar/Billing/Visits/Samples/Reception implementation | **unstarted; its ticket name was consumed — see below** |
+| **Native critical path** | **Native security qualification** (`DH-SEC-001` in the DH-DEMO-001 forward sequence — a name in a sequence list, **not a scoped ticket**; nothing in this repository defines its content). The valid next engineering step now that deployment and recovery are qualified | **not scoped** |
+| **Connect** | **`DH-CONNECT-ADAPTER-001` — first named real partner/vendor adapter.** Defined, unstarted, and **blocked on having an actual external EMR/LIS target to integrate against** — the blocker is a counterparty, not code | **blocked on a partner system** |
+
+**The Native product ticket has no free name, and that is a real problem rather than a formatting
+one.** `DHEALTH-NATIVE-MVP-1.0` was queued on 2026-09-24 as the product-definition ticket described
+immediately below. On 2026-09-25 a **different** piece of work — the real-browser golden-journey
+qualification — shipped under that same identifier (commit `eccb543`), and neither entry
+acknowledged the collision. **The specification work was never done and is still owed.** It is
+listed here by content rather than by a newly minted identifier, because inventing one is a naming
+decision with scope surface. See the `HUMAN DECISION REQUIRED` list at the end of this section.
+
+**What the Native product specification must not lose.** The future clinic/lab operating product
+stays **organization-scoped, role-scoped and least-privilege**, exactly as the backend already
+enforces it: organization boundaries are enforced server-side; roles and capabilities determine
+actions; **UI visibility follows authority but is never the security boundary**; a platform
+administrator does not thereby get clinical-record access and no organization is fabricated for
+one; `ORG_ADMIN` does not imply clinician; and `LAB_RESULT_RELEASER` stays a distinct capability
+from `LAB_TECH` (ADR-044) — the golden journey observed that separation in a real browser, and a
+specification must not flatten it. **No staff user sees every module**: navigation derives from the
+active membership and the roles held in it (ADR-054). None of this is a new role taxonomy, and this
+ticket did not invent one.
+
+### `HUMAN DECISION REQUIRED` — raised 2026-09-26 by DHEALTH-STATE-001, not decided here
+
+1. **The `DHEALTH-NATIVE-MVP-1.0` name collision.** One identifier now denotes two different pieces
+   of work: a product-definition ticket queued 2026-09-24 (never done) and the golden-journey
+   qualification shipped 2026-09-25 (done, `eccb543`). Which keeps the name, and what the other is
+   called, is a decision for Liban. Until then the specification work is referred to by description.
+2. **Pilot gate 2's wording.** It names "DHealth Clinic native browser authentication". ADR-054 made
+   Clinic a set of sections inside one staff application, so a separately navigable DHealth Clinic
+   no longer exists. The gate was cleared against the staff application at `app.<BASE_DOMAIN>`
+   (§H gate 2). If the gate was meant to require something else, it needs re-wording — **and a
+   docs-reconciliation ticket is the wrong place to re-word a pilot gate**, which is why it is
+   raised rather than rewritten.
+
+A third item, narrower, is raised in `docs/MVP-1.0.md` §8: whether that table's per-row
+qualification cells should now be upgraded to `RUNTIME-QUALIFIED` under the section's own
+definition. It is flagged there, not decided.
+
+---
+
 **NEXT: `DHEALTH-NATIVE-MVP-1.0` — Clinic + Lab Operating Product Specification.** Queued
-2026-09-24 after DH-USABILITY-001. It is a **product-definition** ticket: *"Do NOT implement the
+2026-09-24 after DH-USABILITY-001. **[Still owed — see the queue above; this identifier was
+subsequently reused by a different, completed ticket.]** It is a **product-definition** ticket: *"Do NOT implement the
 full native MVP yet unless explicitly instructed."* The hypothesis it carries in is four roles
 (Front Desk, Clinician, Lab Staff, Admin — with backend safety capabilities such as result release
 kept separate where needed, but never surfaced as a large role taxonomy), a clinic of
@@ -1369,6 +1656,18 @@ healthy within CI's wait window, blocking Caddy. Needed to close this ticket: a 
 capacity (self-hosted or a larger GitHub-hosted runner) — not a different test design — then a
 successful Case A run through the full Playwright suite, then Case B (upgrade path), then the
 idempotent-repeat check. See `PROJECT_STATE.md`'s DH-CLINIC-004B entry for full evidence.
+
+**[Dated note, 2026-09-26, DHEALTH-STATE-001 — its purpose is served; its criteria are not; it is
+not closed here.]** The *question* DH-CLINIC-004B existed to answer — does a real browser complete
+a real OIDC round trip against this product, and does same-origin Exchange routing work — is now
+answered affirmatively by the Native qualification, and pilot gates 1 and 2 clear on that evidence
+(§H). But that evidence comes from a **different suite on a different topology**: `ui/e2e/native/`
+against `docker-compose.native.yml`, not this ticket's own `ui/e2e/` suite against the
+maternity-coupled stack. DH-CLINIC-004B's own stated closure criteria — a successful Case A run
+through *its* Playwright suite, then Case B's upgrade path, then the idempotent-repeat check, all
+on a runner with enough capacity to boot OpenMRS/OpenELIS — remain exactly as written and
+**unmet**. Whether those criteria are still worth meeting now that Native does not need that stack
+is a scope decision, and therefore Liban's; this ticket does not make it. **Not closed.**
 
 **[Added 2026-09-20, DH-MVP-POLISH-001 — part of that suite is now written against controls that no
 longer exist, and this is stated rather than quietly left to fail.]** E2E-11 navigated directly to a
@@ -1517,9 +1816,15 @@ the demo environment.]** Precisely what is and is not qualified:
   `a5992bd37c40f1296955f15692a84560f7c7b3f0`, job `native demo — real boot (DH-DEMO-001)`, green
   along with all 10 jobs in that run — verified directly against the GitHub API during
   DH-PATIENT-001, not carried forward from a report.
-- **Real Keycloak interactive login: not yet qualified.** The stack boots with real Keycloak; no
-  human has completed an interactive browser login against it.
-- **Real browser golden journey: not yet qualified.** No manual or Playwright walkthrough exists.
+- ~~**Real Keycloak interactive login: not yet qualified.** The stack boots with real Keycloak; no
+  human has completed an interactive browser login against it.~~ **[Superseded 2026-09-26,
+  DHEALTH-STATE-001.]** A real browser now completes a real Keycloak Authorization Code + PKCE login
+  against this stack. The **"no human"** half of the struck sentence stays true and is the whole of
+  pilot gate 3: the logins are automated, and no human has driven the golden path end to end.
+- ~~**Real browser golden journey: not yet qualified.** No manual or Playwright walkthrough
+  exists.~~ **[Superseded 2026-09-26, DHEALTH-STATE-001.]** The **Playwright** walkthrough exists
+  and is green (DHEALTH-NATIVE-MVP-1.0, 12 tests; `docs/NATIVE-GOLDEN-JOURNEY.md`). The **manual**
+  walkthrough still does not — gate 3, uncleared.
 
 This sandbox's Docker still cannot pull real image blobs from the CDN, so the boot above is CI's
 evidence, not a local observation. This does not touch, does not runtime-qualify, and does not
@@ -1532,6 +1837,19 @@ DH-SEC-001, DH-OPS-001, DH-RECOVERY-001, DH-DEMO-E2E-001, DH-CONNECT-CONTRACT-00
 DH-PILOT-TOPOLOGY-001 — last, not first, since it answers only "which deployment model fits a
 specific real facility" once one exists, never "which product path DHealth permanently supports"
 (ADR-043's 2026-09-18 clarification). Full order: `PROJECT_STATE.md`'s DH-LAB-003 entry.
+
+**[Dated note, 2026-09-26, DHEALTH-STATE-001 — three items in that sequence are done under other
+names, so reading it as a to-do list would repeat finished work.]** Of the sequence above:
+**native runtime/browser golden-journey qualification** is **done** (DHEALTH-NATIVE-MVP-1.0/1.0R);
+**`DH-RECOVERY-001`** is **done** in substance, as DHEALTH-NATIVE-RECOVERY-001 (pilot gate 4,
+§H); **`DH-DEMO-E2E-001`** is **done** in substance, as the `ui/e2e/native/` suites — and
+DHEALTH-NATIVE-DEPLOY-001 additionally delivered the canonical deployment this sequence never
+anticipated. **`DH-CONNECT-CONTRACT-001`** is **done** (ADR-056, `docs/CONNECT-CONTRACT.md`) and was
+followed by DH-CONNECT-AGENT-001. What genuinely remains from that sequence is **`DH-SEC-001`** and
+**`DH-OPS-001`** — both of which are names in this list and nothing more; **neither is a scoped
+ticket anywhere in this repository** — and **`DH-PILOT-TOPOLOGY-001`**, still correctly last,
+because no real facility exists to fit a deployment model to. The current queue is the table at the
+top of this section.
 
 ## J. Documentation precedence
 

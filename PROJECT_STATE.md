@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-RECOVERY-001,
-> 2026-09-25 — this parenthetical has now gone stale five times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-STATE-001,
+> 2026-09-26 — this parenthetical has now gone stale six times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -19584,6 +19584,15 @@ not a defect fix.
 
 ## ▶ NEXT — DHEALTH-NATIVE-MVP-1.0 — Clinic + Lab Operating Product Specification · queued 2026-09-24
 
+> **[Dated note, 2026-09-26, DHEALTH-STATE-001 — the identifier in this heading was reused; the
+> brief below was not done.]** On 2026-09-25 a different piece of work shipped under the name
+> `DHEALTH-NATIVE-MVP-1.0`: the real-browser golden-journey qualification (commit `eccb543`, its own
+> entry near the end of this file). Neither entry noticed the collision at the time. **The
+> product-definition ticket described below was never started and is still owed** — it remains the
+> Native track's next product work. It has no unambiguous identifier until Liban assigns one, which
+> is raised as `HUMAN DECISION REQUIRED` in root `STATUS.md` §I rather than decided by an agent.
+> Everything below this note stands as written.
+
 **A product-definition ticket. Nothing below is built yet, and none of it may be built without an
 explicit instruction to do so** (Liban, 2026-09-24): *"Do NOT implement the full native MVP yet
 unless explicitly instructed."* In particular **do not start Calendar, Billing, Visits, Samples or
@@ -20625,3 +20634,119 @@ S3-compatible target, and then restores **from the off-site copy** would close i
 belongs in the same ticket. Deliberately not begun here.
 
 ### Human Decision Required: No
+
+---
+
+## DHEALTH-STATE-001 — making the repository say what is actually true · 2026-09-26
+
+**Start `5dcdaa9` → this commit.** HEAD was exactly the expected commit (`5dcdaa9`,
+`feat(DHEALTH-NATIVE-RECOVERY-001)`), identical to `origin/master`, tree clean, no local commits
+beyond the remote and nothing newer to preserve. Ancestry verified with
+`git merge-base --is-ancestor`, not assumed from the handoff. Every commit the ticket named was
+present: `eccb543`, `f5ad78f`, `85cd58e`, `7e082a7`, `5dcdaa9`.
+
+**This ticket added no product functionality.** No application code, no migration, no Compose file,
+no Caddyfile, no Keycloak configuration, no backup code, no test, and no GitHub Actions file was
+touched. Documentation only.
+
+### Why it was needed
+
+Four Native tickets landed on 2026-09-25 — the golden journey, its two owed negative controls, the
+canonical deployment, and the destructive restore drill. `STATUS.md` §A recorded each of them
+accurately as it happened. §C through §I did not move, so the canonical status document was
+simultaneously asserting, in the present tense, that real Keycloak had never been exercised, that no
+browser had completed a PKCE round trip, that the Native frontends were jsdom-qualified only, that
+DHealth Connect had no code of its own, and that the number of native frontends wired end to end
+was **none** — while the same file's §A described a destroyed and recovered deployment in which a
+real staff identity signed in through real Keycloak and found its own pre-backup clinical records
+through the product.
+
+Those statements were **true when written**. They are preserved as history with dated overlays, per
+this repository's convention, and are no longer present-tense claims.
+
+### What was checked, and how
+
+Nothing was corrected because the ticket prompt said it was stale. Each claim was traced:
+
+| Claim | Primary evidence actually inspected |
+|---|---|
+| Exchange validates real Keycloak tokens on its normal path | `docker-compose.native.yml` sets `EXCHANGE_OIDC_ISSUER` / `EXCHANGE_OIDC_JWKS_URL` / `EXCHANGE_OIDC_AUDIENCE` against the real `dhealth-exchange` realm → `JWKSKeySource`, not `StaticKeySource` (`adapter/src/daher_adapter/exchange/identity_auth.py`) |
+| Real browser, real login, real PKCE | `ui/e2e/native/*.spec.ts` — every phase begins at the real Keycloak form via `loginViaRealKeycloak`; `ui/e2e/native-journey.config.ts` refuses to run without a real `E2E_BASE_URL` |
+| Same-origin routing through Caddy | `deploy/native/Caddyfile` — `app.{$BASE_DOMAIN}` serves the UI and proxies `/exchange/v1/*` to `adapter:8000` in the same vhost |
+| Authorization exercised negatively with real tokens | `ui/e2e/native/02-authorization.spec.ts` NEG-1…NEG-5; NC-NATIVE-1/3 recorded in the DHEALTH-NATIVE-MVP-1.0/1.0R entries above |
+| Which surfaces the browser actually drove | read the spec **bodies**, not the test names — see the table now in `STATUS.md` §C |
+| Connect's real state | ADR-056/ADR-057, `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-AGENT.md`, `test_RQ8_qualified_is_still_not_production_routable` |
+
+**The spec bodies mattered.** Reading them is what kept four claims honest rather than generous:
+`PHASE A` opens an **already-seeded** patient, so the native registration *form* is still
+unqualified; there is no amendment phase anywhere, so DH-LAB-005's correction/amendment lifecycle is
+still unqualified; `RECOVERY-5`/`RECOVERY-8` take no `page` fixture at all — the restored patient
+grant was replayed against the **API**, so the DHealth Patient screen has still never been rendered
+in a browser; and `03-recovery-source.spec.ts` **does** drive the clinic-side patient-access handoff
+in a real browser, so that half of DH-PATIENT-001 moved while the other half did not.
+
+### Pilot gates, each re-read from its own wording
+
+**No target number of cleared gates was carried in.** Gates 1 and 2 cleared because the evidence
+plainly satisfies what they ask. Gate 3 did not, and was not reinterpreted so that it could.
+
+| Gate | Previous documented status | Evidence inspected | New status | Reason |
+|---|---|---|---|---|
+| 1 — real Keycloak token validation / authorization | `not run`; only `StaticKeySource` | Native OIDC env → real JWKS; five negative authorization cases with browser-obtained tokens; NC-NATIVE-1 (audience) and NC-NATIVE-3 (tenant check → 200) | **CLEARED** — Native/Exchange track | Exchange validated and authorized real Keycloak-issued credentials through its **production** runtime path, not a test bypass. No demo-conditional branch exists in auth code |
+| 2 — Native browser auth + same-origin Exchange routing | `config-qualified`, round trip `not observed` | `app.<BASE_DOMAIN>` → Keycloak → PKCE → callback → authenticated workspace; `/exchange/v1/*` proxied in the same vhost | **CLEARED** — Native/Exchange track | Both halves observed. **Wording nuance recorded:** the gate says "DHealth Clinic", which ADR-054 has since made sections of one staff application — raised as `HUMAN DECISION REQUIRED`, not rewritten |
+| 3 — **manual** live/browser demonstration of the golden path | `not run` | the journey is automated Playwright/Chromium | **NOT CLEARED** | The gate says *manual*. Automated execution is not a human driving the product. Recorded as the explicit pair: automated real-browser journey **QUALIFIED**, manual live demonstration **still owed** |
+| 4 — performed restore drill | `CLEARED` for Native/Exchange (2026-09-25) | re-read `docs/NATIVE-RECOVERY.md` and the RECOVERY-001 entry | **CLEARED, scope unchanged** | Scope deliberately **not** widened: off-site durability still unexercised, and the maternity/reference-connector track keeps its own 2026-08-13 partially-verified drill and still owes a re-run |
+| 5 — WhatsApp against real credentials | `not cleared` | no credential, no Meta endpoint contacted, qualification workflow never run | **NOT CLEARED** | Unchanged. The recovered notification state was created on the `fake` provider, which has no network code |
+| 6 — clinical lead sign-off | `not cleared` | `docs/CLINICAL-SIGNOFF.md` | **NOT CLEARED** | Unchanged, and kept scoped to the maternity/reference-connector track's own wording |
+
+**Three of six cleared is not pilot-readiness**, and `STATUS.md` §H still ends by saying no
+real-patient pilot exists on either track.
+
+### Files changed
+
+- `STATUS.md` — new §A entry; dated evidence banner at the head of §C with a surface-by-surface
+  browser-exercised table; the ADR-050 "still not observed" sentence superseded; §D banner plus five
+  bullets narrowed individually (Clinic, Lab, Patient, staff application, native demo) and the
+  catch-all Exchange bullet split into its four separate verdicts; §E's two Keycloak/browser bullets
+  struck-and-resolved and the CI-capacity bullet's blast radius narrowed to the maternity stack;
+  §F's "DHealth Connect has no code of its own" corrected into the built/not-built split; §G's
+  Launch-1 present state replaced with the four-fact table; §H gates 1–3; §I rewritten head with the
+  three-track queue, the name-collision disclosure, the role/org-scope invariants, the
+  `HUMAN DECISION REQUIRED` list, a dated note on DH-CLINIC-004B, and a correction of the forward
+  sequence that still listed three finished tickets as not started.
+- `docs/MVP-1.0.md` — §8's headline corrected clause by clause (three now false, one still true) and
+  the RECOVERY-001 paragraph's gate-1 line superseded; §10 item 14 struck and resolved in the same
+  style as items 11/15/16.
+- `PROJECT_STATE.md` — header pointer bumped; the `▶ NEXT` block annotated with the identifier
+  collision; this entry.
+- `AGENTS.md` — two narrow dated corrections only, because every agent reads it first and it carried
+  two present-tense statements that are now false.
+
+`CURRENT_STATE.md` needed **no** change: its two 2026-09-25 entries already supersede their own
+predecessors correctly. `README.md` was left alone — its operational description of the Native
+deployment (§"Deploying DHealth Native") is current, and its stale content is maternity-track prose
+that this ticket's evidence says nothing about.
+
+### What was deliberately NOT done
+
+- **No gate was reinterpreted to earn a green state.** Gate 3 is the test of that and it stayed red.
+- **No historical entry was rewritten.** Superseded claims are struck or overlaid with a date, never
+  edited into something that was false when written.
+- **DH-CLINIC-004B was not closed.** Its purpose is served by Native evidence; its own stated
+  criteria (Case A/B on the maternity-coupled stack, the idempotent-repeat check) are not met, and
+  deciding they no longer matter is a scope call.
+- **No new ADR.** This was reconciliation, not decision-making.
+- **No new ticket identifier was minted** for the owed Native product specification.
+- **No implementation** of anything in the product-direction prose, and no new role taxonomy.
+
+### Human Decision Required: Yes — three items, none of them urgent
+
+1. **The `DHEALTH-NATIVE-MVP-1.0` identifier denotes two different pieces of work.** The
+   product-definition ticket queued 2026-09-24 (never done) and the golden-journey qualification
+   shipped 2026-09-25 (done). Which keeps the name; what the other is called.
+2. **Pilot gate 2's wording names "DHealth Clinic"**, which ADR-054 dissolved into one staff
+   application. Cleared against that application; the gate may want re-wording, and a
+   docs-reconciliation ticket is the wrong place to re-word a pilot gate.
+3. **`docs/MVP-1.0.md` §8's per-row cells.** The evidence supports stamping several rows
+   `RUNTIME-QUALIFIED` under that section's own definition; the 2026-09-25 DEPLOY-001 note took the
+   more conservative view that no row moves. Both readings are now recorded; the rows are unchanged.

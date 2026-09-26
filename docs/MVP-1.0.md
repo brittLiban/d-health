@@ -478,14 +478,19 @@ here, not copied.]**
 | Clinician reviews result | WRITTEN, TESTED, CI-QUALIFIED, REAL-POSTGRESQL-QUALIFIED — **2026-09-18 DH-CLINIC-007 dated update: the review workflow is now operational in the Clinic UI itself, not merely a backend contract** | The version-specific and legacy review routes (`POST .../release-versions/{v}/review/...` / `POST .../review/...`) predate this ticket, from DH-EX-014A/014B. **New (DH-CLINIC-007/ADR-048):** a provider-scoped review queue, `GET .../organizations/{provider_id}/result-reviews` — one entry per outstanding review obligation, never one per order — plus a rewritten `ClinicResultsPage.tsx` that loads a version's exact immutable content before offering any disposition control, always targets the exact displayed version (never "latest"), discloses truthfully that `FOLLOW_UP_REQUIRED` records only a workflow decision (no scheduling/contact/task engine), and re-reads authoritative state after any ambiguous or conflicting mutation rather than blindly retrying. Real-PostgreSQL-qualified for the identical-disposition race scenario (PG-R2) the pre-existing DH-EX-014A/014B suites did not isolate, alongside reconfirmation of the opposite-disposition and version-isolation races (PG-R1/PG-R3) those suites already covered. No new `DoctorReview` status, clinical interpretation, or urgency ranking was added. |
 | Patient receives status/follow-up communication | **PARTIAL** — was **NOT BUILT**; **2026-09-20 DH-PATIENT-001 dated update: patient *access* now exists; patient *notification* still does not** | **New (DH-PATIENT-001):** the first DHealth Patient frontend (`ui/src/features/patient/`) — a single-screen mobile-web status view authorized solely by DH-EX-005's pre-existing order-scoped opaque grant, reached through a QR code or link whose credential travels in the **URL fragment** and is scrubbed from the address bar on ingestion, never persisted in any browser storage, and never sent to Keycloak (the patient route returns before any `ExchangeAuthProvider` exists). A clinician-side `PatientAccessHandoff` issues/revokes/rotates that access and produces a printable sheet, so a patient with no smartphone still has a physical artifact to present — Law 4 (§6), not a convenience. Backend additions: a provider-authorized metadata read (`GET .../orders/{order_id}/patient-access`, `{active, expires_at, access_mode}`, never the raw token or its digest) and a server-owned `PatientOrderResponse.result_status` projection (`NOT_READY` / `AWAITING_CLINICIAN_REVIEW` / `NO_FOLLOW_UP_REQUIRED` / `FOLLOW_UP_REQUIRED`) resolved from the order's *latest released version* and that version's own review obligation — so an amendment release correctly reverts the patient's view to awaiting-review rather than showing a disposition about superseded content. `WRITTEN, TESTED` (18 adapter + 92 frontend tests, 18 negative controls executed); no migration (head stays `0025_native_result_binding`). **Why this is PARTIAL, not done:** this is *pull* access — the patient must be handed a link or QR. ~~**Still NOT BUILT:** any *push* notification (WhatsApp/SMS/email/voice transport), and detailed result delivery to patients (deliberately excluded — patients see status only, never result values).~~ **[2026-09-24 DH-NOTIFY-001/ADR-058 dated update]** *Push* notification for **SMS and WhatsApp** is now `WRITTEN, TESTED, REAL-POSTGRESQL-QUALIFIED`: a release or amendment creates a durable obligation **inside the release transaction**, a dispatcher drains it, and a signed provider receipt is the only writer of `DELIVERED`. **It is not `REAL-PROVIDER-QUALIFIED`, and this row therefore stays PARTIAL** — no real provider has been contacted, no credential exists, no message has ever reached a handset, and ADR-003's gate remains `BLOCKED` (pilot gate 5 uncleared). **Email and voice remain `NOT BUILT`** (`§28` non-goals). Detailed result delivery to patients remains excluded **by policy, not by absence**: the notification carries no clinical content at all, enforced by templates that have no substitution slot for any. One consequence recorded in ADR-058: because the raw access credential is unrecoverable after issuance, the release/amendment message carries **no link** — it points at the link the patient already holds, or at their facility. `ResultDelivery` remains untouched and still never advances past `PENDING`: re-confirmed by grep as of 2026-09-20, and DH-PATIENT-001 deliberately did **not** make viewing a status page mean `DELIVERED` — that semantic remains a separate undecided product question (§10). `ResultDeliveryRepository.mark_delivered`/`mark_failed` still exist and are still never called. |
 
-**RUNTIME-QUALIFIED, for any of the above: none.** Every qualification on record for DH-EX-001
+> **[Read this first — 2026-09-26, DHEALTH-STATE-001.]** Three of the four claims in the paragraph
+> immediately below are **no longer true as present state**. They were true when written and are
+> kept rather than rewritten. The corrections are at the end of this section, under the 2026-09-26
+> dated update.
+
+~~**RUNTIME-QUALIFIED, for any of the above: none.**~~ Every qualification on record for DH-EX-001
 through DH-EX-014B is CI/unit/integration-test-level against SQLite and/or a disposable PostgreSQL
 instance (re-confirmed **[DH-STATE-001, 2026-09-17]** — was "through DH-EX-012A", before that
 "through DH-EX-007"; this line was previously out of step with §8's own citation range above, which
-had already been updated). **Real Keycloak qualification: NOT RUN
-for any Exchange ticket** (DH-EX-008 wired the deployment but could not qualify live, per §10 item
-14 below). **Manual live/browser demonstration: NOT RUN.** No production deployment exists. No pilot
-has begun.
+had already been updated). ~~**Real Keycloak qualification: NOT RUN
+for any Exchange ticket**~~ (DH-EX-008 wired the deployment but could not qualify live, per §10 item
+14 below). **Manual live/browser demonstration: NOT RUN** — *still true, see gate 3*. **No
+production deployment exists** — *still true*. **No pilot has begun** — *still true*.
 
 **2026-09-18 dated update (DH-DEMO-001):** none of the above changes. What is new is a way to
 *observe* this golden journey end to end without a real hospital's EMR/LIS: a dedicated Compose
@@ -548,6 +553,42 @@ manual live demonstration (gate 3), real-provider messaging (gate 5), clinical s
 human usability (DH-USABILITY-001 remains `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`), and any
 production deployment. The maternity/reference-connector track keeps its own recovery status: its
 2026-08-13 drill stays partially verified and still owes a re-run. Detail: `docs/NATIVE-RECOVERY.md`.
+
+**2026-09-26 dated update (DHEALTH-STATE-001):** a documentation reconciliation, correcting this
+section's own headline rather than adding capability. **Three sentences above the table are now
+false as present state and one is not.** The headline block still reads *"**RUNTIME-QUALIFIED, for
+any of the above: none**"*, *"**Real Keycloak qualification: NOT RUN for any Exchange ticket**"* and
+*"**Manual live/browser demonstration: NOT RUN**"*. Corrected, in order:
+
+- **"RUNTIME-QUALIFIED: none" — no longer true.** This section defines `RUNTIME-QUALIFIED` as
+  *demonstrated against a real running system, e.g. real PostgreSQL or a real browser*. Several
+  rows now meet that definition on both counts.
+- **"Real Keycloak qualification: NOT RUN for any Exchange ticket" — no longer true.** See §10
+  item 14, now struck and resolved.
+- **"Manual live/browser demonstration: NOT RUN" — still true**, and the distinction is
+  load-bearing: the golden journey ran in **automated** Chromium. Pilot gate 3 says *manual* and is
+  **not cleared** (root `STATUS.md` §H).
+- **"No production deployment exists. No pilot has begun." — still true**, both of them.
+
+Also superseded by this: the 2026-09-25 RECOVERY-001 paragraph immediately above lists *"real
+Keycloak token-validation qualification (gate 1)"* among what is not cleared. **Gate 1 cleared on
+2026-09-26**; gates 3, 5 and 6 in that same sentence remain uncleared exactly as written, and so
+does everything else it names. Gate 2 (Native browser authentication + same-origin routing) also
+cleared on 2026-09-26.
+
+Which golden-journey steps meet `RUNTIME-QUALIFIED` under this section's own definition — patient
+identification (read path only), order creation, lab assignment/routing, lab receipt, acceptance,
+the collection milestone, processing, result entry, release, provider receipt of the result, and
+clinician review — is set out surface by surface in root `STATUS.md` §C's 2026-09-26 banner, which
+also names the surfaces that remain jsdom-only: native patient **registration**, the
+correction/amendment lifecycle, the DHealth Patient status screen, and platform administration.
+
+**`HUMAN DECISION REQUIRED` — not decided here.** Whether the per-row `Status` cells in the table
+above should now be re-stamped `RUNTIME-QUALIFIED` is left open. The evidence supports it under this
+section's own rubric, and the 2026-09-25 DEPLOY-001 note deliberately took the more conservative
+position that *"no row moves to a higher qualification level"*. Rather than silently overrule a
+previous ticket's judgment inside a reconciliation pass, both readings are recorded and the choice
+is Liban's. **The rows themselves are unchanged by this ticket.**
 
 ## 9. Explicit out-of-scope list
 
@@ -633,11 +674,22 @@ legible; item numbers are kept stable since §15 and other documents point at th
     by this pass; carried forward unchanged.
 13. **DHealth Exchange has no connector wiring to OpenMRS/OpenELIS.** Unchanged. The two systems
     exist as separate, working stacks; nothing routes an Exchange order through them or vice versa.
-14. **No real Keycloak qualification anywhere in the Exchange.** Unchanged in substance — DH-EX-008
+14. ~~**No real Keycloak qualification anywhere in the Exchange.** Unchanged in substance — DH-EX-008
     wired the deployment configuration (env contract, realm import, routing) but could not qualify
     against a live Keycloak in its own sandbox (registry image unreachable); every authorization
     boundary (`require_clinician`, `require_lab_tech`, etc.) remains proven only against a locally
-    generated RSA keypair (`StaticKeySource`), never a real identity provider.
+    generated RSA keypair (`StaticKeySource`), never a real identity provider.~~
+    **RESOLVED [re-audited 2026-09-26, DHEALTH-STATE-001].** The canonical Native deployment
+    (`docker-compose.native.yml`, ADR-061) points the adapter at the real `dhealth-exchange` realm's
+    issuer and JWKS endpoint, so `JWKSKeySource` — the production path, not `StaticKeySource` —
+    validated tokens a real Chromium obtained from a real Keycloak Authorization Code + PKCE login,
+    and the authorization boundaries then made real decisions on those identities, refusing five
+    hostile cases (`ui/e2e/native/02-authorization.spec.ts`). Negative controls NC-NATIVE-1 and
+    NC-NATIVE-3 confirm the suite can see those boundaries break. Root `STATUS.md` §H gate 1 clears
+    on this. **Scope, kept narrow:** synthetic data on one workstation at `BASE_DOMAIN=localhost`
+    with Caddy's internal CA; the *unit* suite still uses `StaticKeySource`, appropriately; and
+    Exchange surfaces the journey never exercised (post-release amendment, platform administration)
+    have no real-Keycloak evidence of their own.
 15. ~~**New [DH-FIELD-001, 2026-09-13]. No result correction (pre-release) or amendment
     (post-release) path exists.** `LabResult` is insert-only, package-wide, with no entering-actor
     column and no revision metadata (confirmed by DH-EX-012A's audit). ADR-045 records the decision

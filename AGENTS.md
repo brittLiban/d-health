@@ -4,7 +4,11 @@
 
 DHealth is an interoperable diagnostic network connecting doctors/clinics, independent
 laboratories, and patients — reachable through DHealth's own native applications (DHealth Clinic,
-DHealth Lab, DHealth Patient — not yet built) or through an existing EMR/LIS via DHealth Connect.
+DHealth Lab, DHealth Patient — ~~not yet built~~ **[corrected 2026-09-26, DHEALTH-STATE-001: built,
+and since ADR-054 they are sections of one staff application rather than three products. The Clinic
+and Lab diagnostic workflow is runtime/browser-qualified with synthetic data on the canonical Native
+topology; the DHealth Patient screen is not. Nothing is production-deployed, human-qualified, or
+running on real patients]**) or through an existing EMR/LIS via DHealth Connect.
 The authoritative, current product definition is `DECISIONS.md`'s **ADR-043** and
 **`docs/MVP-1.0.md`**, including four non-negotiable product laws (no forced marketplace, no
 double entry, faster than what it replaces, no digital-literacy requirement for care). Read one of
@@ -219,10 +223,17 @@ ticket's completion would put real patient data through the system, **stop and f
 word "pilot-ready" in documentation, never "launched" or "in production". (ADR-012)
 
 **The Exchange track has no equivalent "pilot-ready" declaration yet.** `docs/MVP-1.0.md` §11
-records a *proposed*, not secured, pilot shape; §8 states plainly that no manual/browser
+records a *proposed*, not secured, pilot shape; ~~§8 states plainly that no manual/browser
 demonstration, real Keycloak qualification, production deployment, or real-patient pilot exists for
-the Exchange. Treat "CI-qualified" and "pilot-ready" as different claims — a green CI run is not a
-pilot-readiness declaration on either track.
+the Exchange.~~ **[Corrected 2026-09-26, DHEALTH-STATE-001 — two of those four moved and two did
+not; the sentence bundled them, so it is replaced rather than trimmed.]** As of 2026-09-26:
+**real Keycloak qualification exists** and an **automated real-browser golden journey exists** on
+the canonical Native topology (pilot gates 1 and 2, `STATUS.md` §H); a **manual** live/browser
+demonstration does **not** (gate 3, still owed), and **no production deployment and no real-patient
+pilot exist** on either track. The Exchange track still has no "pilot-ready" declaration — three of
+six pilot gates are uncleared. Treat "CI-qualified", "runtime/browser-qualified", "human-qualified"
+and "pilot-ready" as four different claims — a green CI run, and equally a green Playwright run, is
+not a pilot-readiness declaration on either track.
 
 <!-- BEGIN CODEX DHEALTH ORCHESTRATION -->
 ## Codex DHealth orchestration
