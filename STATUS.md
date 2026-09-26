@@ -6,6 +6,63 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-26, DHEALTH-NATIVE-SEC-001, directly on `master`.** From `3d058c6`. **DHealth Native's
+security boundaries have been exercised against the real runtime, and the load-bearing guards were
+deliberately broken to prove the qualification can see them fail.** Real Chromium, real Caddy, real
+Keycloak 26.7.1, real adapter, real PostgreSQL 16: **31 security tests** covering authentication
+(real PKCE, wrong audience, genuine token expiry, refresh failure, a disabled account),
+authorization under change (a withdrawn membership and a removed release role, each refused on the
+next request **with the same still-valid token**), tenant isolation, patient-grant scope and
+revocation, the public edge, logout, response caching and log leakage. **Six negative controls executed and reverted**, each naming what reddened — including a cross-tenant read that **answered
+200** and a revoked patient grant that **opened another patient's order**. The golden journey is
+green afterwards (12/12), and the production Native topology still names no OpenMRS/OpenELIS
+service. Runbook and full findings: `docs/NATIVE-SECURITY-QUALIFICATION.md`.
+
+**The claim, stated at exactly its real size.** *Key Native security boundaries have been exercised
+against the real runtime, including deliberate negative controls.* **Not** penetration tested, not
+independently audited, not certified against any regime, not production secure.
+`BASE_DOMAIN=localhost`, Caddy's internal CA, one workstation, synthetic data.
+
+**One P1 finding, and it is a gap in the product rather than in a guard.** **Authority can be
+granted and never withdrawn.** `OrganizationMembershipRepository.set_inactive` and
+`OrganizationRoleAssignmentRepository.remove` both exist and **neither has a caller** anywhere in
+`api.py` or the UI. `POST .../memberships` grants access; nothing revokes it. The backend is
+correct — every `require_*` re-reads membership and roles from the database on every request, so a
+withdrawn membership fails closed immediately, which SEC-6 and SEC-7 prove. What they do **not**
+prove is that an administrator can reach that state, and the suite has to produce it with direct
+SQL for that exact reason. This is the same absence DH-MVP-ONBOARD-001 already recorded on the
+onboarding side ("grants access and never removes it"); it is now a measured security finding
+rather than a UI limitation.
+
+**Two P2 findings, both pinned by tests rather than quietly carried.** Staff clinical API responses
+(orders, results, release versions, review queue, patient directory) carry **no cache directive at
+all** — `no-store` is set on exactly eight handlers, every one of them patient-facing. And
+`app.<domain>`'s SPA catch-all answers **200 text/html** to API-shaped paths like `/health/ready`
+and `/notifications/v1/*`: no data is disclosed, but a misconfigured callback or monitor looks
+healthy, which is the defect class DH-NOTIFY-META-001R already found once. The `exchange.` vhost is
+correctly a bare 404 on everything it does not publish.
+
+**What was confirmed working, against the real runtime rather than by reading the code.** PKCE S256
+is enforced and direct-access grants are disabled on both production clients; `JWKSKeySource` — not
+the unit suite's `StaticKeySource` — validated the real browser tokens; every authentication failure
+collapses to one generic 401 with no stack trace, SQL or tenant detail; anti-enumeration holds
+(404 for no relationship, 403 for a member lacking the permission); a **real platform-admin token** (realm role held, zero memberships) is refused **403** on provider
+orders, the lab work queue and the release queue — network administration is not clinical
+authority, and that is now runtime-verified rather than read off the code; the edge publishes three
+vhosts plus exactly one Meta callback path and 404s every health, docs, metrics, Connect and
+notification-namespace probe with a zero-byte body; the host publishes only 80 and 443; and **no
+JWT, bearer header, password, clinical value or patient name appears in the Caddy, adapter or
+Keycloak logs.**
+
+**No pilot gate is created or cleared.** This strengthens the evidence behind gates 1 and 2, which
+DHEALTH-STATE-001 cleared on 2026-09-26; re-testing them is not a new gate. Gate 3 still requires a
+**manual** demonstration, gate 5 still requires real Meta credentials, and DH-USABILITY-001 remains
+`INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED` — security automation says nothing about a person.
+**Two items go to Liban as `HUMAN DECISION REQUIRED`**: whether successful sensitive *reads* should
+be audited (nothing audits them today, and no ADR decides it), and what the clinic's real session
+and idle timeouts should be (the current 5-minute token / 30-minute idle / 4-hour maximum are
+Keycloak-shaped defaults, not a clinical choice). §I carries both.
+
 **2026-09-26, DHEALTH-STATE-001, directly on `master`.** From `5dcdaa9`. **A documentation
 reconciliation, not a product change — no application code, no Compose file, no migration, no
 workflow file was touched.** Four Native tickets landed on 2026-09-25 (golden journey, its two owed
@@ -1538,6 +1595,31 @@ ticket did not invent one.
 A third item, narrower, is raised in `docs/MVP-1.0.md` §8: whether that table's per-row
 qualification cells should now be upgraded to `RUNTIME-QUALIFIED` under the section's own
 definition. It is flagged there, not decided.
+
+### `HUMAN DECISION REQUIRED` — raised 2026-09-26 by DHEALTH-NATIVE-SEC-001, not decided here
+
+4. **Should successful sensitive *reads* be audited?** Mutations are audited transactionally
+   (`exchange/security_audit.py`) and authorization refusals best-effort
+   (`exchange/audit.py`), but a clinician opening a patient record, viewing a released result, or
+   an admin reading a facility configuration is recorded **nowhere** — `SecurityEventType` has no
+   read event at all, and no ADR says whether that is policy or omission. Implementing it would
+   change retention, storage volume and privacy posture, and the line that matters — a meaningful
+   record access versus a queue polling every thirty seconds — is not drawn anywhere in this
+   repository. Raised deliberately rather than smuggled into a qualification ticket.
+5. **What should the clinic's session and idle timeouts be?** The realm currently carries a 300s
+   access token, a 1800s idle timeout and a 14400s maximum session. Those are Keycloak-shaped
+   defaults inherited from DH-EX-008, not a decision about how long a shared workstation in a busy
+   clinic should stay signed in. DHEALTH-NATIVE-SEC-001 qualified the *behaviour* (expiry, refresh
+   failure, logout) and deliberately did not choose the *policy*. Related and also undecided: the
+   realm has **no password policy** configured and no MFA; brute-force protection is on and is the
+   current compensating control.
+
+Two P2 findings from the same ticket are **not** decisions — they are recorded gaps with tests
+pinning current behaviour, and either could be closed by an ordinary follow-up ticket: staff
+clinical API responses carry no cache directive (G2), and `app.<domain>`'s SPA catch-all answers
+200 HTML to API-shaped paths (G1). One P1 — **authority can be granted and never withdrawn through
+the product** — is a missing capability rather than a broken guard, and is described in §A and
+`docs/NATIVE-SECURITY-QUALIFICATION.md` §5.
 
 ---
 

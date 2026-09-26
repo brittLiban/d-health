@@ -55,3 +55,7 @@ native-journey-results.json
 # separate storage anyway (docs/NATIVE-RECOVERY.md §3).
 backup/native-archives/
 native-recovery-results.json
+
+# DHEALTH-NATIVE-SEC-001: the security qualification report, written at the repository root by
+# scripts/demo/qualify-security.sh. Evidence of a run, not part of the source.
+native-security-results.json

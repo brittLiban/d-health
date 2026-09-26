@@ -3,9 +3,9 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-STATE-001,
-> 2026-09-26 — this parenthetical has now gone stale six times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-SEC-001,
+> 2026-09-26 — this parenthetical has now gone stale seven times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -20751,3 +20751,174 @@ that this ticket's evidence says nothing about.
 3. **`docs/MVP-1.0.md` §8's per-row cells.** The evidence supports stamping several rows
    `RUNTIME-QUALIFIED` under that section's own definition; the 2026-09-25 DEPLOY-001 note took the
    more conservative view that no row moves. Both readings are now recorded; the rows are unchanged.
+
+---
+
+## DHEALTH-NATIVE-SEC-001 — the security boundaries, broken on purpose and put back · 2026-09-26
+
+**Start `3d058c6` → this commit.** HEAD was exactly the expected commit (`3d058c6`,
+`docs(DHEALTH-STATE-001)`), tree clean, and DHEALTH-STATE-001's two commits were present and
+unpushed as reported. Nothing was reset, rebased or squashed; `eccb543`, `f5ad78f`, `85cd58e`,
+`7e082a7`, `5dcdaa9`, `fea784a` and `3d058c6` are all still ancestors.
+
+### What ran, and against what
+
+```text
+Chromium 153 (Playwright)          real Authorization Code + PKCE, every phase
+        │  https://app.localhost / id.localhost / exchange.localhost
+        ▼
+Caddy 2.11.4                       deploy/native/Caddyfile, internal CA
+        ├──► Keycloak 26.7.1        realm dhealth-exchange
+        ├──► DHealth UI             the real production bundle behind nginx
+        └──► adapter (FastAPI)      /exchange/v1/*, same-origin through app.
+                    │
+                    ▼
+            PostgreSQL 16.15        alembic head 0032_patient_notifications
+```
+
+`docker-compose.native.yml` + the demo overlay. **31 security tests, all green on restored code**;
+the **golden journey re-run afterwards is 12/12**, including PHASE B3 (*entered is not released*)
+and all five authorization refusals. The production Native topology still renders **zero**
+OpenMRS/OpenELIS/MariaDB mentions, and only `dhealth-native-demo-*` containers were running.
+
+### The six negative controls
+
+Each broke one real guard in product code, was observed red, and was reverted.
+
+| Control | Mutation | Observed |
+|---|---|---|
+| NC-SEC-1 | `find_active` stopped filtering by `organization_id` — the one function every `require_*` calls | SEC-8/SEC-10 red: cross-tenant orders read **answered 200** |
+| NC-SEC-2 | `require_lab_result_releaser`'s role check bypassed | SEC-7 red: release queue **answered 200** for a revoked role |
+| NC-SEC-3 | `validate_token`'s `token_hash` binding removed | SEC-11/12 red: a **revoked** grant answered 200 — one patient's credential opened another's grant |
+| NC-SEC-4 | `/health/ready` published on the `exchange.` vhost | SEC-14 red: expected 404, **received 200** |
+| NC-SEC-5 | `no-store` removed from the patient order response | SEC-11 red: expected `no-store`, received `undefined` |
+| NC-SEC-7 | `X-Frame-Options` removed from the edge header block | SEC-EDGE-5 red: expected `SAMEORIGIN`, received `undefined` |
+
+**NC-SEC-3's first attempt is the one worth keeping.** It mutated a `select(PatientAccessGrant)`
+inside `_issue_in_session`'s collision-retry path instead of the one in `validate_token`, and
+**nothing went red** — correctly, because the guard under test was untouched. Mutating the wrong
+function is precisely how a negative control quietly proves nothing, and this is the second time
+this repository has caught itself doing it (DHEALTH-NATIVE-MVP-1.0R's first NC-3 attempt was the
+first). Re-targeted at `validate_token`, it reddened immediately.
+
+**NC-SEC-6 (logout) was not run** and is recorded as owed: the narrowest meaningful mutation is a
+frontend change to `ExchangeAuthProvider.logout` requiring a UI image rebuild, and the five backend
+and edge controls already cover the boundaries carrying clinical consequence.
+
+### Findings
+
+- **F1 · P1 · authority can be granted and never withdrawn.** `set_inactive` and the role
+  `remove` both exist in `membership.py` with **zero callers** in `api.py` or the UI, confirmed by
+  grep at `3d058c6`. The backend is right — SEC-6 and SEC-7 show a withdrawn membership and a
+  removed `LAB_RESULT_RELEASER` each refused on the **next request with the same unexpired token**,
+  because every `require_*` re-reads the database rather than trusting token claims. But no
+  administrator can produce that state through the product, so the suite produces it with direct
+  SQL and says so in `securityAdmin.ts`'s own header. Reported as two separate facts on purpose.
+- **G1 · P2 · SPA fallback path confusion** (pinned, not fixed). `app.` answers 200 text/html for
+  `/health/ready`, `/health/live`, `/notifications/v1/*`, `/api/*`, `/admin/*` — byte-identical to
+  `/`. Nothing is disclosed; a misconfigured callback or monitor looks healthy. The Caddyfile's own
+  comments already predict this.
+- **G2 · P2 · no cache directive on staff clinical responses** (pinned, not fixed). `no-store` is
+  on exactly eight handlers, all patient-facing.
+- **G3 · P3** Keycloak admin console reachable at `id.<domain>/admin/`. Restricting it is a
+  supportability call, raised not applied.
+- **G4 · P3** no CSP / Permissions-Policy on the app origin. Keycloak sets its own and the edge does
+  not override it.
+- **G5 · P3** no realm password policy, no MFA. Brute-force protection is on (factor 10, 60s→900s).
+- **H1 · harness** `adminApi.ts`'s `createSetupClient` omits the `dhealth-exchange-api` audience
+  mapper, so its tokens would 401 for a reason unrelated to any test's actual claim. It survived
+  because DH-CLINIC-004B never executed. `securityAdmin.ts`'s own client adds the mapper.
+
+**One near-miss worth recording.** The first draft of SEC-6 asserted that a withdrawn membership
+must disappear from `/me` entirely. It does not — `/me` reports it with `membership_status`, and
+`isUsableMembership` refuses any non-ACTIVE membership, so the model is coherent. Asserting the
+stronger property would have manufactured a defect rather than found one; the test now asserts what
+the contract actually is.
+
+### No code changed
+
+No adapter source, UI source, migration, Dockerfile, Compose file, Caddyfile, Keycloak
+configuration or GitHub Actions file differs from `3d058c6`. The adapter image **was** rebuilt six
+times from unmodified sources to apply and revert the backend negative controls, and the final image
+is built from the restored tree. New files only: two specs, two support modules, a Playwright
+config, a runner script, this entry, `docs/NATIVE-SECURITY-QUALIFICATION.md`, a STATUS entry and one
+`.gitignore` line.
+
+### Environment notes for whoever runs this next
+
+- **`app.`/`id.`/`exchange.localhost` must resolve to 127.0.0.1.** Chromium special-cases the
+  `.localhost` TLD; **Node's resolver does not**, so the suite's API contexts fail `ENOTFOUND` while
+  the browser works. WSL regenerates `/etc/hosts` every boot unless `generateHosts = false` is set
+  in `/etc/wsl.conf`. One misdiagnosed run was lost to this.
+- **The runner exports Caddy's internal root CA into `NODE_EXTRA_CA_CERTS`** rather than setting
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`, which would have voided every TLS assertion in the suite.
+- **The Docker daemon in this sandbox restarted roughly every 15-20 minutes**, bouncing all five
+  containers with `RestartCount` still 0. Caddy answers 502 for ~35s afterwards, and a 502 satisfies
+  a `[401,403,404]` assertion as readily as a real refusal — which is why every `describe` block
+  gates on a **401 plus a 200 discovery document** before asserting anything.
+- **The security suite must not create patients.** `demo_seed.py`'s `_WORKFLOW_TABLES` treats
+  `exchange_patients` as baseline, so a runtime-registered patient survives `reset.sh`. An earlier
+  draft created three per run, left twelve behind, and broke the golden journey's own PHASE A. The
+  suite now creates only orders (which reset does clear) against the one baseline patient — which is
+  also the stronger test, since the two grants then differ by nothing except the order they bind to.
+- Compose flags must be spelled literally; holding them in a shell variable made compose fall back
+  to `docker-compose.yml` and fail on the maternity stack's interpolation.
+
+### Human Decision Required: Yes — two items
+
+1. **Should successful sensitive reads be audited?** Mutations are audited transactionally and
+   refusals are audited best-effort, but a successful read of a patient record, a released result or
+   a facility configuration is recorded nowhere, and `SecurityEventType` has no read event. No ADR
+   decides this. It changes retention, storage volume and privacy posture, and the useful line —
+   opening one record versus a queue polling every thirty seconds — is not drawn anywhere in this
+   repository. Raised, deliberately not implemented.
+2. **What should the clinic's session and idle timeouts be?** The realm currently carries a 300s
+   access token, a 1800s idle timeout and a 14400s maximum. Those are Keycloak-shaped defaults
+   inherited from DH-EX-008, not a decision about how long a shared workstation in a busy clinic
+   should stay signed in. This ticket qualified the *behaviour* and deliberately did not choose the
+   *policy*.
+
+### Addendum — the last three findings, added after the first full pass
+
+**SEC-17b now exists and passes, so §12 is runtime-evidence rather than code-reading.** A real
+service-account token carrying the `dhealth-platform-admin` realm role and **zero** organization
+memberships is refused **403** on a provider's orders, on the laboratory work queue and on the
+release queue. The 403 (not 404) is itself the right shape: a platform admin already has visibility
+that the organization exists, so anti-enumeration would be an inconsistent lie there.
+
+Getting that test to pass produced the session's second self-inflicted false positive, and it is
+worth recording next to the first. A `perl` substitution mangled the test's template literals, so
+`${API}/organizations/${providerId}/orders` became the relative path `/organizations//orders`. That
+resolved against the app origin, landed in the **SPA catch-all**, and returned **200 text/html** —
+which read exactly like a platform admin bypassing `require_clinician`. It was finding G1
+demonstrating itself inside the suite meant to find it. The lesson is the repository's own: a
+surprising *pass* and a surprising *failure* both deserve the same "what did I actually measure"
+treatment before anything is written down.
+
+**SEC-20 found a real distinction in the refusal audit.** `_audit_refused` fires on
+`NotAuthorized` and **not** on `ResourceNotFound`, so a **403** is audited and the anti-enumeration
+**404** is not. The first draft of SEC-20 used a fabricated organization id, saw the audit line
+count stay flat, and would have gone green for entirely the wrong reason had it asserted anything
+weaker. Retargeted at a genuine 403 — a lab technician asking a provider surface of their own
+organization — it passes, and the 403/404 asymmetry is now documented rather than discovered again.
+
+**One process failure worth inheriting.** `sec001-local-images.yml` (the uncommitted harness
+override that remaps digest-pinned images onto locally loaded tags) was deleted before the final
+verification run. Every `demo_seed reset` after that point silently did nothing — the compose
+wrapper failed on the missing `-f` file, the shell reported success, and the golden journey then
+failed at PHASE B3 against residue from the previous run. The failure looked like a product defect
+for several minutes. `set -euo pipefail` would not have caught it either; only reading the command's
+own output did. The final run therefore executes reset → security → reset → journey → residue check
+in **one** invocation, so a silently-skipped step cannot hide between two of them.
+
+### Final restored run — one invocation, 2026-09-26
+
+```text
+1. reset baseline          -> baseline reconciled, workflow state cleared
+2. security qualification  -> 31 passed
+3. reset baseline again    -> baseline reconciled, workflow state cleared
+4. golden journey          -> 12 passed (incl. PHASE B3, entered != released)
+5. residue                 -> patients=1  memberships_inactive=0  roles=3
+6. native production topology OpenMRS/OpenELIS/MariaDB mentions -> 0
+7. running containers      -> adapter, caddy, daher-ui, dhealth-db, keycloak (nothing else)
+```

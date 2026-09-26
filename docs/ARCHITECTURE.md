@@ -2396,3 +2396,84 @@ is the safety property.
   own uid, and `cap_drop: [ALL]` takes away root's ability to read them — observed, not assumed),
   and `DAC_OVERRIDE, CHOWN, FOWNER` for the restore, which must put those files back under that uid.
   The alternative was loosening audit file permissions, which is the wrong trade.
+
+---
+
+## 27. Native security boundaries, as qualified (DHEALTH-NATIVE-SEC-001) — added 2026-09-26
+
+This section describes **how authority is decided**, not how secure the product is. The evidence,
+the negative controls and the findings live in `docs/NATIVE-SECURITY-QUALIFICATION.md`; this is the
+architectural shape that qualification confirmed.
+
+### Authority is a product of three things, evaluated server-side on every request
+
+```text
+organization scope  +  role/capability scope  +  resource relationship  =  authority
+```
+
+None of it is carried in the token beyond *who the caller is*. `exchange/identity_auth.py`
+establishes identity; `exchange/authorization.py` decides authority, and every `require_*` in it
+performs a **live database read** of the caller's membership and roles. The consequence is the one
+worth designing for: **withdrawing a membership or a role takes effect on the very next request,
+with the same unexpired token** — there is no window in which a stale claim still opens a door, and
+no need to wait for a token to expire or force a re-login.
+
+The same property makes the model symmetric: a role *added* mid-session is honoured immediately by
+the server. The browser's own navigation can lag, because `StaffApp` loads `/me` once per
+application load (ADR-054) — that is a rendering fact, not an authority fact, and
+`workspaceCapabilities.isUsableMembership` refuses any membership whose status or organization
+status is not `ACTIVE`, so the UI degrades safely rather than optimistically.
+
+### Two refusal shapes, and why they differ
+
+- **404** — the identity has no relationship to the organization at all. Deliberately
+  indistinguishable from the organization not existing, so an authenticated caller cannot
+  enumerate tenants by trying identifiers.
+- **403** — the identity legitimately belongs, and lacks the specific permission.
+
+Authentication failures are a third, flatter case: *every* token problem — missing header, bad
+signature, wrong issuer, wrong audience, expired, malformed — collapses to one
+`TokenValidationError` and one identical 401 body, so the response cannot be used as an oracle for
+which check failed.
+
+### Administrative authority is never clinical authority
+
+`require_clinician`, `require_lab_tech` and `require_lab_result_releaser` each refuse a platform
+admin who lacks the role in that specific organization, and each refuse an `ORG_ADMIN` who holds
+only that. ADR-044's separation of result **entry** from result **release** is enforced by the same
+mechanism, and is observed in a real browser: a technician identity has no route to the release
+surface at all, while a separate releaser identity does.
+
+### The edge is a deny-list-free allow-list
+
+`deploy/native/Caddyfile` publishes three vhosts and exactly one extra path. `exchange.<domain>`
+ends in a bare `respond 404`, so a route added to the adapter later does **not** become public by
+omission — the adapter's own health endpoints, its OpenAPI surface, the Connect runtime namespace
+and every notification route except the Meta callback are unreachable from outside, and the 404
+comes from Caddy with a zero-byte body rather than from the application.
+
+`app.<domain>` is the exception and is shaped differently on purpose: it serves the SPA *and*
+proxies `/exchange/v1/*` to the adapter in the same vhost. That is what makes Native **same-origin**
+— and therefore what makes CORS unnecessary rather than merely disabled. It also means the vhost
+ends in a catch-all that serves the application shell, so an API-shaped path that is not under
+`/exchange/v1/*` answers 200 HTML rather than 404. That trade is recorded as finding G1.
+
+### Patient access is a capability, not an account
+
+A patient never holds an identity, a membership or a role. Possession of one 256-bit opaque secret,
+bound to exactly one `LabOrder` and stored only as a SHA-256 digest, is the entire mechanism. It
+authorizes the patient surface and **nothing** on the staff API. The credential travels in the URL
+**fragment**, which browsers never send to a server, and is scrubbed from the address bar on
+ingestion — so it appears in no request line, no access log and no `Referer`, the last of which is
+independently constrained by `Referrer-Policy: same-origin` at the edge.
+
+### Audit has two mechanisms, deliberately
+
+Security **mutations** are recorded transactionally, in the same database transaction as the change
+they describe, so the row and the change commit or roll back together. Authorization **refusals**
+are recorded best-effort through a file-backed writer, wrapped so that a failed audit write can
+never turn a refusal into an allow — access denial must not depend on a successful write.
+
+Successful sensitive **reads** are recorded by neither, and `SecurityEventType` has no read event.
+Whether they should be is an open decision, not an implementation gap to be filled quietly — see
+`STATUS.md` §I.
