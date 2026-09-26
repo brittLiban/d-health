@@ -34,8 +34,10 @@ usability qualification — DH-USABILITY-001 stays `INTERNAL WORKFLOW REVIEW —
 The patient status *screen* has still never been rendered in a real browser (only its clinic-side
 handoff and an API-level grant replay). The correction/amendment lifecycle (DH-LAB-005) and the
 platform/facility-enrollment screens have never been browser-exercised either. The
-maternity/reference-connector track keeps its own separate recovery status. Two items are carried to
-Liban as **HUMAN DECISION REQUIRED** in §I rather than decided here.
+maternity/reference-connector track keeps its own separate recovery status. **Three** items are
+carried to Liban as **HUMAN DECISION REQUIRED** rather than decided here — two in §I (the
+`DHEALTH-NATIVE-MVP-1.0` name collision, and gate 2's "DHealth Clinic" wording) and one in
+`docs/MVP-1.0.md` §8 (whether its per-row cells should now be re-stamped).
 
 **2026-09-25, DHEALTH-NATIVE-RECOVERY-001, directly on `master`.** From `7e082a7`. **DHealth Native
 has been destroyed and brought back.** A populated synthetic deployment was backed up to one
@@ -1066,7 +1068,8 @@ section is production-deployed, human-qualified, or evidence about real patients
   true of the maternity-coupled stack and is no longer true of the product.]** On the canonical
   Native topology a real browser completes that round trip and every request the screens make
   reaches the adapter **same-origin through Caddy** (`app.{$BASE_DOMAIN}` → `/exchange/v1/*` →
-  `adapter:8000`, `deploy/native/Caddyfile`). Patient search/open, the order wizard, routing, orders,
+  `adapter:8000`, `deploy/native/Caddyfile`). Patient **list/open** (the seeded patient is found in
+  the directory list and opened — **no search string was ever typed**), the order wizard, routing, orders,
   the review queue and the patient-access handoff have all been driven that way; the native patient
   **registration** form has not (§C banner). **`docker-compose.native.yml` is still not a production
   deployment** — `BASE_DOMAIN=localhost`, Caddy's internal CA, one workstation, synthetic data.
@@ -1411,7 +1414,11 @@ Caddy's internal CA, one workstation, synthetic data, no production deployment.
    validated issuer, audience and signature on tokens a real browser obtained from a real login.
    Authorization decisions were then made on those identities and **refused correctly in five
    hostile cases**. There is no test bypass: no demo-conditional branch exists in any
-   authentication or request-handling code (grepped, DH-DEMO-001). Negative controls prove the suite
+   authentication or request-handling code — **re-grepped 2026-09-26 rather than carried forward
+   from DH-DEMO-001's own claim**, since this is the clause the gate turns on. `identity_auth.py`
+   and `api.py` contain no `demo` branch at all (the only case-insensitive matches are the words
+   *demographic* and *demonstrably* in prose), and `ADAPTER_DEMO_ENVIRONMENT` appears in exactly one
+   file, `demo_seed.py`, where it guards seeding — never authentication. Negative controls prove the suite
    can see this break — NC-NATIVE-1 (wrong expected audience → the journey fails before any workflow
    runs) and NC-NATIVE-3 (weakened tenant check → cross-tenant read answers 200, `NEG-3` red).
    **Not cleared by this:** anything about a public certificate authority, a real domain, or a

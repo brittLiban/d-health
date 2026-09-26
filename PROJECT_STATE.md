@@ -20676,6 +20676,7 @@ Nothing was corrected because the ticket prompt said it was stale. Each claim wa
 | Authorization exercised negatively with real tokens | `ui/e2e/native/02-authorization.spec.ts` NEG-1…NEG-5; NC-NATIVE-1/3 recorded in the DHEALTH-NATIVE-MVP-1.0/1.0R entries above |
 | Which surfaces the browser actually drove | read the spec **bodies**, not the test names — see the table now in `STATUS.md` §C |
 | Connect's real state | ADR-056/ADR-057, `docs/CONNECT-CONTRACT.md`, `docs/CONNECT-AGENT.md`, `test_RQ8_qualified_is_still_not_production_routable` |
+| **No demo/test bypass in the auth path** | **re-grepped 2026-09-26**, not carried forward from DH-DEMO-001's own claim, because pilot gate 1 turns on it: `grep -rni demo adapter/src/daher_adapter/exchange/identity_auth.py adapter/src/daher_adapter/exchange/api.py` returns **no branch** — four prose matches only (*demographic* ×3, *demonstrably* ×1) — and `grep -rn ADAPTER_DEMO_ENVIRONMENT adapter/src --include=*.py` returns **two lines, both in `demo_seed.py`**, guarding seeding and never authentication |
 
 **The spec bodies mattered.** Reading them is what kept four claims honest rather than generous:
 `PHASE A` opens an **already-seeded** patient, so the native registration *form* is still
