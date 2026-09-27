@@ -1651,17 +1651,46 @@ DH-USABILITY-001 §43 and the 2026-09-24 product-definition brief already set st
 
 | Track | Next work | State |
 |---|---|---|
-| **Native product** | **Clinic + Lab switch-ready operating-product specification** — the 2026-09-24 brief, still owed and unstarted. A **product-definition** ticket, deliberately before any Calendar/Billing/Visits/Samples/Reception implementation | **unstarted; its ticket name was consumed — see below** |
+| **Native product** | ~~**Clinic + Lab switch-ready operating-product specification**~~ — **DONE 2026-09-27 as `DHEALTH-NATIVE-OPERATING-PRODUCT-001`** (`docs/NATIVE-OPERATING-PRODUCT.md`). The next Native product work is its **first implementation ticket, `DHEALTH-CLINIC-VISIT-001`** (Visits/Encounters, clinician-only) — specified, ready to build, and **not yet authorized to start** | **specification done; implementation unstarted** |
 | **Native critical path** | **Native security qualification** (`DH-SEC-001` in the DH-DEMO-001 forward sequence — a name in a sequence list, **not a scoped ticket**; nothing in this repository defines its content). The valid next engineering step now that deployment and recovery are qualified | **not scoped** |
 | **Connect** | **`DH-CONNECT-ADAPTER-001` — first named real partner/vendor adapter.** Defined, unstarted, and **blocked on having an actual external EMR/LIS target to integrate against** — the blocker is a counterparty, not code | **blocked on a partner system** |
 
-**The Native product ticket has no free name, and that is a real problem rather than a formatting
-one.** `DHEALTH-NATIVE-MVP-1.0` was queued on 2026-09-24 as the product-definition ticket described
-immediately below. On 2026-09-25 a **different** piece of work — the real-browser golden-journey
-qualification — shipped under that same identifier (commit `eccb543`), and neither entry
-acknowledged the collision. **The specification work was never done and is still owed.** It is
-listed here by content rather than by a newly minted identifier, because inventing one is a naming
-decision with scope surface. See the `HUMAN DECISION REQUIRED` list at the end of this section.
+~~**The Native product ticket has no free name, and that is a real problem rather than a formatting
+one.**~~ **[Resolved 2026-09-27.]** `DHEALTH-NATIVE-MVP-1.0` was queued on 2026-09-24 as the
+product-definition ticket described immediately below. On 2026-09-25 a **different** piece of work —
+the real-browser golden-journey qualification — shipped under that same identifier (commit
+`eccb543`), and neither entry acknowledged the collision. **The completed qualification keeps that
+name; the specification is `DHEALTH-NATIVE-OPERATING-PRODUCT-001` and is now done.**
+
+**What that specification found, in one line each** (`docs/NATIVE-OPERATING-PRODUCT.md`):
+
+- **Switch-ready** = every routine act of a working day has a supported path in DHealth, so the
+  facility can stop depending on its previous software. Four necessity tests; explicitly not
+  "deployed", "clinically approved", "usability qualified" or "certified".
+- **Six P0 switch blockers**, each tied to a concrete operating failure: Visits/encounters; arrival +
+  waiting list; invoice/payment/receipt; an honest `BLOCKED` state on an accepted lab order;
+  patient-directory import; facility-owned services and prices.
+- **The hardest constraint is not a feature.** `require_clinician` guards the patient directory
+  itself, so **Front Desk, Lab Reception and Cashier have no backend authority and cannot be UI
+  personas** — one `BACKEND AUTHORITY DECISION REQUIRED` (D-1). The first implementation ticket is
+  deliberately clinician-only so it is not blocked by it.
+- **`ResultDelivery` is evaluated:** two different things in this repository are called "delivery";
+  the Exchange one has **no production caller** and stays `PENDING` forever for Native orders. Two
+  concrete options, `HUMAN DECISION REQUIRED` (D-7), to be settled **before** a real Connect adapter
+  builds against it.
+- **Seven follow-up tickets**, first is `DHEALTH-CLINIC-VISIT-001`.
+
+**What the Native product specification must not lose.** The future clinic/lab operating product
+stays **organization-scoped, role-scoped and least-privilege**, exactly as the backend already
+enforces it: organization boundaries are enforced server-side; roles and capabilities determine
+actions; **UI visibility follows authority but is never the security boundary**; a platform
+administrator does not thereby get clinical-record access and no organization is fabricated for
+one; `ORG_ADMIN` does not imply clinician; and `LAB_RESULT_RELEASER` stays a distinct capability
+from `LAB_TECH` (ADR-044) — the golden journey observed that separation in a real browser, and a
+specification must not flatten it. **No staff user sees every module**: navigation derives from the
+active membership and the roles held in it (ADR-054). None of this is a new role taxonomy, and this
+ticket did not invent one. **The specification preserved every one of these** — §7, §26 and §37 of
+`docs/NATIVE-OPERATING-PRODUCT.md`.
 
 **What the Native product specification must not lose.** The future clinic/lab operating product
 stays **organization-scoped, role-scoped and least-privilege**, exactly as the backend already
@@ -1676,10 +1705,16 @@ ticket did not invent one.
 
 ### `HUMAN DECISION REQUIRED` — raised 2026-09-26 by DHEALTH-STATE-001, not decided here
 
-1. **The `DHEALTH-NATIVE-MVP-1.0` name collision.** One identifier now denotes two different pieces
+1. ~~**The `DHEALTH-NATIVE-MVP-1.0` name collision.** One identifier now denotes two different pieces
    of work: a product-definition ticket queued 2026-09-24 (never done) and the golden-journey
    qualification shipped 2026-09-25 (done, `eccb543`). Which keeps the name, and what the other is
-   called, is a decision for Liban. Until then the specification work is referred to by description.
+   called, is a decision for Liban. Until then the specification work is referred to by
+   description.~~
+   **RESOLVED 2026-09-27 by DHEALTH-NATIVE-OPERATING-PRODUCT-001.** The completed golden-journey
+   qualification **keeps** `DHEALTH-NATIVE-MVP-1.0`; the product-definition work is
+   **`DHEALTH-NATIVE-OPERATING-PRODUCT-001`** and is now done — `docs/NATIVE-OPERATING-PRODUCT.md`.
+   No history was rewritten: the queued brief in `PROJECT_STATE.md` keeps its original heading and
+   carries a dated note assigning the new identifier.
 2. **Pilot gate 2's wording.** It names "DHealth Clinic native browser authentication". ADR-054 made
    Clinic a set of sections inside one staff application, so a separately navigable DHealth Clinic
    no longer exists. The gate was cleared against the staff application at `app.<BASE_DOMAIN>`

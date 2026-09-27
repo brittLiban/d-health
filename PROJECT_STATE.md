@@ -3,9 +3,10 @@
 > **Read this first.** DHealth's current product direction is `DECISIONS.md`'s **ADR-043** and
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
-> describes. **The newest ticket entries are at the end of this file** (currently DHEALTH-NATIVE-ACCESS-001,
-> 2026-09-26 — this parenthetical has now gone stale eight times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> describes. **The newest ticket entries are at the end of this file** (currently
+> DHEALTH-NATIVE-OPERATING-PRODUCT-001, 2026-09-27 — this parenthetical has now gone stale nine times,
+> first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -19592,6 +19593,17 @@ not a defect fix.
 > Native track's next product work. It has no unambiguous identifier until Liban assigns one, which
 > is raised as `HUMAN DECISION REQUIRED` in root `STATUS.md` §I rather than decided by an agent.
 > Everything below this note stands as written.
+>
+> **[Second dated note, 2026-09-27 — the identifier is assigned and the work is DONE.]** The
+> specification described below was carried out as **`DHEALTH-NATIVE-OPERATING-PRODUCT-001`**; the
+> completed golden-journey qualification keeps `DHEALTH-NATIVE-MVP-1.0`. `STATUS.md` §I's
+> `HUMAN DECISION REQUIRED` item 1 is resolved. **This heading is deliberately not rewritten** — it
+> is the record of what was queued and when. The output is
+> **`docs/NATIVE-OPERATING-PRODUCT.md`**, and that document supersedes the hypothesis below wherever
+> the two differ. Where it *confirms* the hypothesis it says so, and where it **contradicts** it, it
+> is explicit: the four-role model survives as a human model but **three of the four roles have no
+> backend authority** and cannot be UI personas, which the hypothesis did not anticipate. See that
+> ticket's own entry at the end of this file.
 
 **A product-definition ticket. Nothing below is built yet, and none of it may be built without an
 explicit instruction to do so** (Liban, 2026-09-24): *"Do NOT implement the full native MVP yet
@@ -21300,3 +21312,216 @@ facility in Djibouti.
    a security hole — an inactive membership grants nothing, and roles surviving deactivation is the
    documented model — but it is why the claim is "the four new endpoints serialize per organization",
    never "all lifecycle operations serialize". Qualified as `pg6`.
+
+---
+
+## DHEALTH-NATIVE-OPERATING-PRODUCT-001 — Switch-Ready Clinic + Lab Operating Product Specification (2026-09-27) — DONE
+
+**Start:** `19a22ee`. The ticket's brief expected `151c325` and reported six commits; local HEAD was
+**one commit ahead** at `19a22ee` — ADR-063, the recorded form of the very decision the ticket's own
+preamble cites (`PLATFORM_ADMIN` does not bypass the last-active-`ORG_ADMIN` invariant). Consistent
+with the ticket's premise rather than a conflict, so nothing was reset. Tree clean before and after.
+
+**A product-definition ticket. No application code was written.** One new document, four reconciled,
+zero migrations, zero endpoints, zero React pages, zero new roles, zero test suites. Alembic head
+unchanged at `0033_staff_access_lifecycle`.
+
+### The identifier question is settled
+
+The specification was queued on 2026-09-24 under `DHEALTH-NATIVE-MVP-1.0`, a name a *different*,
+completed piece of work also took on 2026-09-25 (the real-browser golden journey, `eccb543`).
+`STATUS.md` §I carried it as `HUMAN DECISION REQUIRED`. **Resolved:** the completed qualification keeps
+`DHEALTH-NATIVE-MVP-1.0`; this specification is `DHEALTH-NATIVE-OPERATING-PRODUCT-001`. The queued
+heading in this file was **not** rewritten — it carries a second dated note instead, because it is the
+record of what was queued and when.
+
+### Output
+
+**`docs/NATIVE-OPERATING-PRODUCT.md`** — 37 sections, front-loaded with a two-page summary so a clinic
+stakeholder never has to read section 20. Contains the required screen inventory, role visibility
+matrix, ten ASCII workflow maps, gap severity classification, dependency graph, seven ticket briefs,
+and a full implementation-ready brief for the first.
+
+### Switch-ready, defined
+
+> Every routine operational act an outpatient clinic or diagnostic laboratory performs in a normal
+> working day has a supported path inside DHealth, so the facility can stop depending on its previous
+> operating software for daily work.
+
+Four necessity tests a candidate must pass: **daily**, **unavoidable**, **no honest workaround**
+(or the workaround is double entry, which Law 2 forbids as normal operation), and **ownership exists**
+(some role performs it, some role receives it). Kept explicitly separate from *deployed*, *clinically
+approved*, *usability qualified* and *certified* — four different claims, none of which this document
+advances. **No pilot gate moved.**
+
+### What the inventory found
+
+**DHealth Native already does the hard part.** The diagnostic loop is built and real-browser-qualified,
+and is stronger than most of what it would replace: version-pinned result templates, immutable
+corrections, entry and release as separate authorities (ADR-044), immutable release versions,
+version-scoped review, `entered ≠ released` enforced structurally.
+
+**What is missing is the working day around it.** A clinic on DHealth today can order a test and read a
+result but cannot record *why the patient came*, see *who is waiting*, or *take payment*. Verified by
+reading: **no `Visit`, `Encounter`, `Appointment`, `Invoice`, `Payment`, `Receipt`, `Charge` or
+`Service` model exists.**
+
+### Six P0 switch blockers, each tied to a concrete operating failure
+
+| # | Blocker | The failure |
+|---|---|---|
+| P0-1 | Visits / encounters | A returning patient's record is lab orders with no clinical thread |
+| P0-2 | Arrival + waiting list | Nobody knows who is waiting; a paper register runs alongside DHealth (Law 2) |
+| P0-3 | Invoice, payment, receipt | A facility that cannot issue a receipt cannot take money |
+| P0-4 | Honest `BLOCKED` state on an accepted lab order | A haemolysed tube has nowhere to be recorded; the queue entry claims progress that is not happening |
+| P0-5 | Patient-directory import | A clinic with 4,000 existing patients cannot begin |
+| P0-6 | Facility-owned services and prices | Billing needs something to charge for (ships with P0-3) |
+
+**Deliberately not P0:** calendar (walk-in-first market — P1), specimen labels (P1, handwriting is
+current practice), first-class specimen entity (P1), reports (P2), offline/PWA (P2), historical
+clinical migration (P3 — keep the legacy system read-only).
+
+### The finding that matters most, and it is not a feature
+
+**`require_clinician` guards the patient directory itself** — verified at `api.py`: `search_patients`,
+`get_patient` and `create_patient` all call it. So a front-desk worker who must find a patient by name
+has two options and both are wrong:
+
+```
+   give them CLINICIAN  -> also grants order creation, released-result read, clinician review
+                           (over-grants clinical authority to a non-clinical job — breaks law 9)
+   give them nothing    -> they cannot find the patient, so cannot do their job
+```
+
+The same shape holds on the laboratory side against `LAB_TECH` (verified: `list_lab_workflow_orders`,
+`record_lab_order_collection`).
+
+**So the four-role hypothesis cannot be satisfied with UI personas.** Front Desk, Lab Reception and
+Cashier have **no backend authority**, and introducing one means changing what guards
+patient-directory reads — a change to a shipped security surface. Raised as **one**
+`BACKEND AUTHORITY DECISION REQUIRED` (D-1), not three, and **no role was added.**
+
+**This contradicts the 2026-09-24 hypothesis**, which treated the four roles as a human model whose
+backend mapping was assumed to exist. It shaped the sequence: the first implementation ticket is
+deliberately **clinician-only** so it is not blocked by D-1, with a state model designed so a Front
+Desk role can be added later **without a schema change**. The Front Desk ticket carries the decision.
+
+### `ResultDelivery` — evaluated, two options, HUMAN DECISION REQUIRED (D-7)
+
+**Two different things in this repository are called "delivery", and one is dead.**
+
+| | Callers |
+|---|---|
+| `connect/delivery.py` `DeliveryRepository` | **Live** — `mark_delivered`/`mark_failed` called from `connect/inbound.py` and `connect/runtime_api.py`. Outbound connector message delivery. |
+| `exchange_result_deliveries` / `ResultDeliveryRepository` | **No production caller.** A row is created `PENDING` per order; `mark_delivered`/`mark_failed` are reached only from one unit test; `audit.py`'s `result_delivered` event type is never emitted. |
+
+So for a Native order `ResultDelivery` is created `PENDING` and **stays `PENDING` forever**, which is
+the misleading part — a reader concludes results are undelivered. Of the seven distinct facts that
+could be meant, six already have a home (`LabResultReleaseVersion`, derived availability, Connect's own
+delivery, `DoctorReview`, `PatientNotification`, its provider receipt); only "viewed by a human" is
+unmodelled, and `ResultDelivery` is not that.
+
+**Recommendation:** (a) retire it from the Exchange schema, or (b) rename it `ProviderSystemDelivery`,
+Connect-only, never created for Native orders. **Preferred (b)** if a real adapter needs an
+Exchange-level record of external delivery, **(a)** if Connect's own table suffices — which depends on
+the first adapter's design, and that does not exist yet. **Must be settled before
+`DH-CONNECT-ADAPTER-001` builds against it**, or the first real adapter resolves the ambiguity by
+accident. Recorded as `docs/MVP-1.0.md` gap 6 since 2026-09-12; sharpened here with the two-concepts
+finding, **not decided, and no code changed.**
+
+### The specimen decision, split deliberately
+
+The temptation was a LIMS specimen graph. The honest answer splits it:
+
+- **P0-4** — an accepted order that cannot proceed needs an order-level `BLOCKED` state with a reason
+  and a named next owner. Small. Without it the software lies: `LabSampleCollection` is one row per
+  order recording only `recorded_at`, and rejecting the whole order is the wrong tool for one bad tube.
+- **P1** — a first-class specimen entity, needed for multi-specimen orders (one collection row per
+  order cannot express "blood taken, urine pending"), accession identifiers, per-specimen
+  received/rejected timestamps and recollection linkage. **D-3**: whether Launch-1 needs it is a
+  laboratory-workflow question for a real laboratory participant.
+- **Not required:** container types, volumes, storage rules, aliquots, stability windows,
+  chain-of-custody, analyser interfacing.
+
+### Billing — narrow, and two things it must not do
+
+Invoice, line, payment, receipt, derived balance, void-with-reason. **Explicitly excluded:** insurance
+claims, eligibility, general ledger, payroll, inventory, tax, instalments.
+
+Two traps avoided:
+
+1. **`LabOrderItem.selected_price_amount` is not an invoice line.** It is DH-EX-005's *marketplace
+   price-consent* fact, written only by the patient-selection path; `assign_by_provider` deliberately
+   leaves it `NULL`, meaning "price was not part of this transaction" — explicitly **not** "costs
+   zero". Verified in `selection.py`. Conflating them would make a consent record look like an invoice.
+2. **One generic `Service` object was rejected.** A laboratory test has a catalogue entry, an offering,
+   a result template, a specimen and a release authority; a consultation has none of those. Billing
+   references a billable **source** polymorphically (`LAB_OFFERING` | `CLINIC_SERVICE`) instead. Cost
+   stated: two source types to handle, and revenue-by-service reports must union them — smaller than
+   distorting a qualified clinical domain.
+
+**And the hard rule:** payment state must not block release of a medically necessary result. If anyone
+proposes `unpaid → no release`, that is **D-2b**, `HUMAN DECISION REQUIRED / CLINICAL POLICY`. Default
+until decided: billing observes clinical state and never gates it.
+
+### Ten open decisions, none invented to lengthen a list
+
+**D-1** Front Desk backend authority (`BACKEND AUTHORITY DECISION REQUIRED`) · **D-2a** who pays whom
+in a routed order · **D-2b** incomplete payment (`HUMAN DECISION REQUIRED / CLINICAL POLICY`) ·
+**D-3** first-class specimen for Launch-1 · **D-4** which patient attributes a receiving laboratory
+needs to confirm identity (`docs/MVP-1.0.md` gap 10 — deliberately not invented) · **D-5** diagnosis
+coding · **D-6** may a laboratory hold its own patient records (walk-in lab patient) · **D-7**
+`ResultDelivery` · **D-8** successful-read audit (pre-existing, now weightier) · **D-9** session/idle
+timeout (pre-existing) · **D-10** staff localisation (recommendation: French-only for Launch-1).
+
+**D-8 and D-9 are unchanged and still unanswered.** This specification did not settle them and notes
+that Visits, Billing and Front Desk all *increase* sensitive reading, so D-8 gets more consequential.
+
+### Seven follow-up tickets
+
+1. **`DHEALTH-CLINIC-VISIT-001`** — Visits/Encounters, clinician-only. Blocked by nothing.
+2. **`DHEALTH-LAB-BLOCKED-001`** — the honest cannot-proceed state. Depends on nothing; small; a good
+   early win.
+3. **`DHEALTH-CLINIC-FRONTDESK-001`** — arrival, waiting list, the Front Desk role. Blocked by D-1.
+4. **`DHEALTH-BILLING-001`** — services, invoice, payment, receipt. Blocked by D-2a/D-2b.
+5. **`DHEALTH-MIGRATE-PATIENTS-001`** — CSV/XLSX directory import, no fuzzy matching (ADR-051).
+6. **`DHEALTH-LAB-RECEPTION-001`** — lab reception. Blocked by D-1, D-3, D-4.
+7. **`DHEALTH-CLINIC-CALENDAR-001`** — minimal appointments.
+
+**`DH-CONNECT-ADAPTER-001` is NOT cancelled.** Connect and Native are parallel tracks; which runs
+first is Liban's call. Nothing here decides it.
+
+### One layout question settled rather than patched
+
+DH-USABILITY-001's **O-1b** — the clinic orders table's trailing columns and `Parcours` control fall
+outside the card at **768px, a supported staff width** — was handed to this specification explicitly.
+Settled: the orders list becomes **responsive rows rather than a fixed six-column table**, using the
+same `repeat(auto-fit, minmax(min(100%, 22rem), 1fr))` rule DH-USABILITY-001 already used for P1-2
+elsewhere — a rule, not a breakpoint. Implemented by whichever ticket next touches that screen; it is a
+layout correction, not a feature, and does not earn a ticket of its own.
+
+### Two lists that must never merge
+
+The P0–P3 severities are **specification judgment** from workflow reasoning and repository evidence.
+DH-USABILITY-001's **participant** product-gap list stays **empty** until real sessions run (§B.5), and
+this document says so in its own §32. Presenting the severities as user findings would be exactly the
+failure §36 of the ticket brief forbids. The usability plan is written in two parts — ten tasks
+testable **now** against screens that exist, six testable **only once built**.
+
+### Preserved, verified by reading rather than assumed
+
+Organization-scoped and role-scoped by default; authority evaluated server-side per request from a live
+database read; revocation effective on the next request; 404/403 anti-enumeration shapes; the browser
+never the boundary; `ORG_ADMIN` ≠ clinician; `LAB_RESULT_RELEASER` ≠ `LAB_TECH` (ADR-044);
+`PLATFORM_ADMIN` ≠ universal clinical user; **ADR-063's last-admin invariant and its
+no-platform-bypass, with break-glass named but not designed**; ADR-051's no-fuzzy-matching identity
+boundary; ADR-060's 1280/768 staff widths and mobile-first patient surface; Law 4's assisted-digital
+path; and the maternity/reference-connector track untouched and not discarded.
+
+### What this ticket may NOT claim
+
+Not user research. Not a usability qualification. Nothing is built, nothing is deployed, no facility
+could switch today, and **no pilot gate moved**. The severities are specification judgment, not
+participant findings. No AI feature of any kind was introduced, and no diagnosis, triage, treatment
+recommendation or result interpretation appears anywhere in the specification — `AGENTS.md`'s global
+rule is not negotiable by a product document.

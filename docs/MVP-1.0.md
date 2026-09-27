@@ -624,7 +624,17 @@ legible; item numbers are kept stable since §15 and other documents point at th
 3. **DH-EX-005's price-consent contract vs. Law 1.** Unchanged, still an explicit, unresolved
    conflict recorded in ADR-043 — DH-EX-010's provider-assignment path is one of the two acceptable
    launch options ADR-043 itself named for this conflict, not a resolution of the conflict itself.
-4. **No specimen/sample management.** Unchanged. DH-EX-011 added an order-level collection
+4. **No specimen/sample management.** Unchanged as a *gap*; **split by severity 2026-09-27
+   (DHEALTH-NATIVE-OPERATING-PRODUCT-001, `docs/NATIVE-OPERATING-PRODUCT.md` §16).** Two different
+   things were bundled here. (a) **An accepted order that cannot proceed has no honest state** — a
+   haemolysed tube leaves the order in a queue state claiming progress that is not happening, and
+   rejecting the whole order is the wrong tool for one bad tube. That is small, order-level, and a
+   **P0 switch blocker**. (b) **A first-class specimen entity** — multi-specimen orders, accession
+   identifiers, per-specimen received/rejected timestamps, recollection linkage — is **P1**, and
+   whether Launch-1 needs it is `D-3`, a laboratory-workflow question for a real laboratory
+   participant. Container types, volumes, storage rules, aliquots, stability windows,
+   chain-of-custody and analyser interfacing remain out of scope. Original text follows.
+   DH-EX-011 added an order-level collection
    *milestone* only (`LabSampleCollection`) — no specimen type, container, volume, site, handling,
    storage, or adequacy entity/state exists in the Exchange schema.
 5. ~~No result validation/release step, distinct from result entry.~~ **RESOLVED [re-audited
@@ -634,7 +644,19 @@ legible; item numbers are kept stable since §15 and other documents point at th
    amendment path exists either before or after this new release step (ADR-045), and the underlying
    result-per-item data model this release step operates on is itself confirmed not final for real
    panel-based workflows (ADR-046).
-6. **`ResultDelivery.status` semantics undecided.** Unchanged. `DELIVERED` could mean
+6. **`ResultDelivery.status` semantics undecided.** Still undecided, and **sharpened 2026-09-27
+   (DHEALTH-NATIVE-OPERATING-PRODUCT-001, `docs/NATIVE-OPERATING-PRODUCT.md` §23)** with a finding
+   this entry did not have: **two different things in this repository are now called "delivery", and
+   the Exchange one is dead.** `connect/delivery.py`'s `DeliveryRepository` is live (called from
+   `connect/inbound.py` and `connect/runtime_api.py`); the Exchange's `ResultDeliveryRepository` has
+   **no production caller**, its `result_delivered` audit event type is never emitted, and for a
+   Native order the row is created `PENDING` and **stays `PENDING` forever** — so a reader concludes
+   results are undelivered. Of the seven facts that could be meant, six already have a home; only
+   "viewed by a human" is unmodelled, and this is not that. **Two options:** retire it from the
+   Exchange schema, or rename it `ProviderSystemDelivery` and create it only for Connect-bound orders.
+   **`D-7`, `HUMAN DECISION REQUIRED`, and it must be settled before `DH-CONNECT-ADAPTER-001` builds
+   against it** — otherwise the first real adapter resolves the ambiguity by accident. Original text
+   follows. `DELIVERED` could mean
    available-to-provider, sent-to-connector, received-by-connector, presented-to-user, or
    acknowledged-by-user. Not chosen. See ADR-043.
 7. ~~**No patient communication transport.** Unchanged. No SMS/WhatsApp/email code exists for the
@@ -897,7 +919,12 @@ absence.~~ **[Corrected 2026-09-26, DHEALTH-NATIVE-ACCESS-001: one narrow facili
 administration surface now exists — `Équipe et accès`, gated on `ORG_ADMIN`. There is still no
 `Réglages` item and no facility-setup surface; that remains DH-MVP-ADMIN-001's, and the
 "navigation-entry-leading-to-Bientôt" rule is why the new section arrived only once it did something.
-See §10's admin gap entry for what a facility still cannot do.]** And nothing here changes §6's laws
+See §10's admin gap entry for what a facility still cannot do.]**
+**[Further corrected 2026-09-27, DHEALTH-NATIVE-OPERATING-PRODUCT-001: the full switch-ready
+administration scope is now specified — organization profile, facility-owned services and prices,
+result templates, offerings, routing visibility — in `docs/NATIVE-OPERATING-PRODUCT.md` §19, together
+with what must never reach facility staff (database hosts, OIDC internals, connector queues, compose
+settings). Specified, not built.]** And nothing here changes §6's laws
 or §13's boundaries: colour in this product carries
 workflow responsibility (a step is complete, something is owed, this stopped) and never clinical
 interpretation, no result value is coloured by its magnitude, and no clinical value — typed, drafted,

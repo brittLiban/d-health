@@ -2576,3 +2576,64 @@ never turn a refusal into an allow — access denial must not depend on a succes
 Successful sensitive **reads** are recorded by neither, and `SecurityEventType` has no read event.
 Whether they should be is an open decision, not an implementation gap to be filled quietly — see
 `STATUS.md` §I.
+
+---
+
+## 28. Where the operating product is going (DHEALTH-NATIVE-OPERATING-PRODUCT-001) — added 2026-09-27
+
+This file describes what DHealth Native **is**. The switch-ready operating product it is becoming —
+what an outpatient clinic or a diagnostic laboratory would need in order to stop relying on its
+previous daily software — is specified in **`docs/NATIVE-OPERATING-PRODUCT.md`**. None of it is built.
+
+That document is the product contract; this section records only the parts that constrain
+*architecture*, so a future implementer does not have to infer them.
+
+**Three domains do not exist and are the first work.** Verified by reading, 2026-09-27: there is no
+`Visit`, `Encounter` or `Appointment` model, and no `Invoice`, `Payment`, `Receipt`, `Charge` or
+`Service` model. The diagnostic loop is complete; the working day around it is not.
+
+**Visits attach to `Patient`, and order linkage must be explicit.** The chain today is
+`LabOrder → PatientReference → Patient`, with a composite foreign key
+`(patient_id, source_organization_id)` keeping a reference inside its own tenant. One `Patient` may
+hold **many** `PatientReference` rows, so "this patient's orders" is not "this visit's orders" — a
+visit's orders cannot be inferred and need an explicit, **nullable** `visit_id` on `LabOrder`.
+Nullable permanently: existing orders have no visit and must keep working.
+
+**The authorization model is the binding constraint on the whole product, not a detail.**
+`require_clinician` guards the patient directory itself (`search_patients`, `get_patient`,
+`create_patient`), and `require_lab_tech` guards the laboratory queue and collection. So a
+**front-desk, reception or cashier role has no backend authority today**, and cannot be added as a UI
+persona: granting `CLINICIAN` to a non-clinical job also grants order creation and result review,
+which law 9 forbids. Introducing such a role means **changing which authority guards
+patient-directory reads** — a change to a shipped security surface, carried as
+`BACKEND AUTHORITY DECISION REQUIRED` (`D-1`) and deliberately **not** made by the specification.
+
+Consequence for sequencing, and it is architectural rather than cosmetic: the first implementation
+ticket (`DHEALTH-CLINIC-VISIT-001`) is **clinician-only**, and its state model is designed so that
+adding a front-desk role later changes *who may call a transition* and **not** the schema.
+
+**Billing references a billable source polymorphically, not one generic `Service`.** A laboratory test
+carries a catalogue entry, an offering, a result template, a specimen and a release authority; a
+consultation carries none of them. `invoice_line → (source_type, source_id)` over
+`LAB_OFFERING | CLINIC_SERVICE` keeps the qualified clinical domain undistorted, at the stated cost of
+two source types and a union in any revenue-by-service report.
+
+`LabOrderItem.selected_price_amount` is **not** an invoice line and must not be reused as one. It is
+DH-EX-005's marketplace *price-consent* fact, written only by the patient-selection path;
+`assign_by_provider` leaves it `NULL`, meaning "price was not part of this transaction" — never "costs
+zero".
+
+**Payment state must never gate clinical release.** Until an explicit human decision says otherwise
+(`D-2b`), billing observes clinical state and does not control it.
+
+**`ResultDelivery` is ambiguous and must be resolved before the first Connect adapter.** Two different
+things here are called "delivery": `connect/delivery.py`'s `DeliveryRepository` is live, while the
+Exchange's `ResultDeliveryRepository` has no production caller and leaves every Native order's row
+`PENDING` forever. Either retire it from the Exchange schema or rename it `ProviderSystemDelivery` and
+create it only for Connect-bound orders — `D-7`, `HUMAN DECISION REQUIRED`, and see §23 of the product
+specification for why the other six delivery-adjacent facts already have homes.
+
+**Nothing in the specification weakens what §27 qualified.** Organization and role scoping stay
+server-side and per-request; revocation stays effective on the next request; 404/403 anti-enumeration
+shapes stay; the browser is never the boundary; ADR-044's entry-versus-release separation and ADR-063's
+last-administrator invariant both stand, break-glass included as named-but-unbuilt.
