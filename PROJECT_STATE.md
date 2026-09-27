@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-NATIVE-OPERATING-PRODUCT-001, 2026-09-27 — this parenthetical has now gone stale nine times,
+> DHEALTH-RESULT-DELIVERY-001, 2026-09-27 — this parenthetical has now gone stale ten times,
 > first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -21525,3 +21525,229 @@ could switch today, and **no pilot gate moved**. The severities are specificatio
 participant findings. No AI feature of any kind was introduced, and no diagnosis, triage, treatment
 recommendation or result interpretation appears anywhere in the specification — `AGENTS.md`'s global
 rule is not negotiable by a product document.
+
+---
+
+## DHEALTH-RESULT-DELIVERY-001 — Resolve ResultDelivery Semantics (2026-09-27) — DONE
+
+**Start:** `b4093ae`, HEAD matched exactly, tree clean, Alembic head `0033_staff_access_lifecycle`.
+**Ending Alembic head: `0033_staff_access_lifecycle` — unchanged. No migration was required, and that
+is a result rather than an omission.**
+
+Closes `docs/NATIVE-OPERATING-PRODUCT.md` **D-7** and `docs/MVP-1.0.md` §10 item 6, open since
+2026-09-12. **ADR-064.**
+
+### The semantics matrix, built before anything was edited
+
+| Concept | Created by | Advanced by | Recipient | Success means | Ack required | Version-scoped | Channel-specific | Authoritative | Read by |
+|---|---|---|---|---|---|---|---|---|---|
+| `LabResultReleaseVersion` | an authorized releaser releasing | never — immutable | — (a fact, not a message) | a named authority released this exact content | no | **yes** | no | **yes** | provider reads, patient projection, review, Connect hook |
+| `DoctorReview` | order creation (`PENDING`), and a new one per released version | clinician recording a disposition | the clinician | a human clinician looked and decided follow-up | n/a | **yes** (ADR-048) | no | **yes** | review queue, patient status projection |
+| **`ResultDelivery`** | **order creation (`PENDING`)** | **nothing in production** | "the ordering provider organization" | **undefined — five candidate meanings, none chosen** | unknown | **no — one row per order** | no | **no** | **nothing in production** |
+| `ConnectorDeliveryObligation` | the release transaction, for a CONNECT provider's order | reconciler / runtime creating the delivery | the provider's external system | DHealth durably owes this provider system this version, recorded even if undeliverable | n/a | **yes** — unique per `release_version_id` | no | **yes** | Connect runtime, reconciler |
+| `ConnectorDelivery` | enqueue from an obligation or inbound submission | `mark_delivered` / `mark_failed` from `connect/runtime_api.py` and `connect/inbound.py` | the provider's external system | the partner runtime acknowledged the message | **yes** | per message (which is per version) | no | **yes** | runtime claim/queue-depth reads |
+| `PatientNotification` | release / amendment hook, inside the release transaction | dispatcher (`SENDING`/`SENT`/`FAILED`), signed provider receipt (`DELIVERED`) | the patient | a content-free message was handed to a provider, and separately confirmed | **yes**, receipt-only for `DELIVERED` | keyed on the release version | **yes** (SMS / WhatsApp) | **yes** | operator notification reads, retry |
+| `PatientNotificationAttempt` | each dispatch attempt | terminal on creation | the patient | one hand-over attempt happened | no | via its notification | yes | **yes** (history) | operator reads |
+
+**The matrix is the answer.** `ResultDelivery` is the only row with no advancing event, no reader, no
+scope matching its own fact, and no authority. Every other row owns something.
+
+### Exhaustive caller inventory (searched all file types, whole repository)
+
+**Creates it — one place:**
+- `exchange/orders.py:254` — `PENDING`, inside the order-creation aggregate.
+
+**Reads it in production — nothing.** `ResultDeliveryRepository.get_for_order` exists and is never
+called.
+
+**Advances it in production — nothing.** `mark_delivered` / `mark_failed` are reached only from
+`tests/test_exchange_results.py:1126`.
+
+**Reachable from the application at all — no.** `ResultDeliveryRepository` is *constructed* exactly
+once in the repository, in a test fixture. `exchange/api.py`'s router factory builds
+`LabResultReleaseRepository`, `DoctorReviewRepository`, `LabResultAmendmentRepository` and every other
+repository, and deliberately not this one — so no endpoint can read or write it. **This is stronger
+than "never called" and it is the finding the previous ticket's summary missed.**
+
+**API / UI exposure — none.** No response model, no field, no UI reference. The `delivered_at` at
+`api.py:1138` and `exchangeTypes.ts:877` belongs to `PatientNotification`, checked directly.
+
+**Audit — dead.** `audit.py`'s `result_delivered` event type is never emitted.
+
+**Reference-connector track — does not use it.** No OpenMRS/OpenELIS code references it in any form, so
+nothing needed splitting and nothing on that track changes.
+
+**Tests that touch it — six files, all *protective*:** three assert exactly one row per order (the
+idempotency/concurrency proofs), one patches the class as a rollback injection point, two assert that
+release and patient notification never mutate it. **None was relaxed or rewritten.**
+
+### Historical intended semantics, reconstructed
+
+`0004_exchange_core` created it as the *only* delivery concept DHealth had. DH-EX-001 forbade inferring
+delivery from `LabResult` completion, and its own design review explicitly considered lazy creation and
+rejected it — "create it when a result becomes deliverable" requires inferring that trigger from
+something adjacent to result completion, exactly what was forbidden. So an eager `PENDING` row was the
+deliberate alternative: *delivery has not happened* as an explicit fact rather than an inferred absence.
+
+**That reasoning was sound for the system that existed then.** Three more precise owners and ADR-048's
+versioned releases arrived afterwards.
+
+### The decision, and why it is structural rather than tidying
+
+**`ResultDelivery` is DEPRECATED / COMPATIBILITY-ONLY. It owns nothing.**
+
+Redundancy alone would justify deprecation. The decisive argument is stronger:
+
+```
+   ResultDelivery.lab_order_id         UNIQUE  ->  exactly one status per ORDER
+   ConnectorDeliveryObligation         UNIQUE on release_version_id
+                                               ->  one per RELEASE VERSION
+```
+
+Since ADR-048 a result is released as an immutable *version* and an amendment produces another, so "the
+ordering provider's system received the result" is **necessarily version-scoped**: version 1 can be
+delivered while version 2 is owed. `ResultDelivery` permits exactly one row per order, so it **cannot
+represent that state at all** — not "does not today", but *cannot*. **It is the wrong shape for its own
+stated meaning.**
+
+`ConnectorDeliveryObligation` also supplies what ADR-043 never specified: an obligation recorded
+*whether or not* delivery succeeded, so a release can never commit with nothing recording that a
+provider is waiting.
+
+### Canonical ownership — exactly one owner per fact
+
+| Fact | Owner |
+|---|---|
+| A released clinical result exists | `LabResultReleaseVersion` |
+| Available to a **Native** provider | **derived** from the release version + authorization — **no stored state, by decision** |
+| A clinician reviewed one exact version | `DoctorReview` (version-scoped) |
+| The provider's **external** system received/acknowledged it | `ConnectorDeliveryObligation` → `ConnectorDelivery` |
+| The patient was sent a message | `PatientNotification` |
+| The patient's message was confirmed delivered | `PatientNotification.state`, signed-receipt-only |
+| A patient read or understood anything | **deliberately not modelled** |
+| `ResultDelivery` | **nothing** |
+
+### ADR-043's deadline had already been missed
+
+ADR-043 recorded the semantics as undecided and instructed that *"a future ticket must decide before any
+delivery mechanism is implemented."* A delivery mechanism **was** implemented — Connect's durable
+delivery runtime, ADR-057 and migration `0031` — and the decision was never made. The next thing to
+touch this model would have been the first real vendor adapter, settling a domain question by accident.
+That is precisely the risk this ticket was created to remove, and it was already live rather than
+hypothetical.
+
+### Why creation is KEPT rather than stopped
+
+A staged retirement, and the stages are deliberately not combined:
+
+| Phase | What | Status |
+|---|---|---|
+| **A** | Deprecated but preserved: no new logic, no advancement, no readers, docstrings and docs mark it superseded, guard tests pin it | **DONE** |
+| **B** | Stop creating new rows | **NOT DONE** — needs the three atomicity tests re-pointed first |
+| **C** | Drop the table | **NOT DONE** — only after B, with evidence no deployment needs the history |
+
+Stopping creation now would mean rewriting `test_exchange_orders.py`'s rollback test, which **patches
+`ResultDelivery` itself as its failure-injection point**, plus two idempotency proofs that count its
+rows. That is churn against qualified tests — and weakening a real atomicity guarantee — for a row
+nothing reads. `AGENTS.md`'s "do not relax existing tests" applies.
+
+### What changed in code
+
+Three deprecation markers and one new test file. **No behaviour changed.**
+
+- `exchange/models.py` — `ResultDelivery`'s docstring now leads with the deprecation, preserves the
+  original intent verbatim, states the structural reason for supersession, and names every canonical
+  owner including the package each lives in.
+- `exchange/results.py` — `ResultDeliveryRepository`'s docstring strikes its own "the semantic is a
+  future product decision" line, records that the decision was made, and states that a future Connect
+  adapter must not call it.
+- `exchange/audit.py` — the dead `result_delivered` event type is annotated as never-emitted and kept
+  for backward compatibility, the same treatment `organization_created` already had.
+- `tests/test_dhealthresultdelivery001_ownership.py` — **new, 9 tests.**
+
+### Tests
+
+**9 new**, structural in the spirit of `test_native_deployment_topology.py`:
+
+| Test | Pins |
+|---|---|
+| `test_rd6_no_production_module_reaches_the_exchange_delivery_repository` | the repository stays unreachable from the application |
+| `test_rd6b_the_defining_module_is_the_only_place_the_repository_lives` | the exclusion above cannot become a loophole if the class moves or is deleted |
+| `test_rd6c_only_order_creation_writes_the_table` | no second production writer appears |
+| `test_rd5_the_superseding_model_is_version_scoped_and_this_one_is_not` | nobody rescues the model by making it version-scoped instead of using the one that already is |
+| `test_rd_status_enum_is_untouched_so_historical_rows_stay_readable` | phase A really is non-destructive |
+| `test_rd_each_canonical_owner_still_exists` ×4 | ADR-064's ownership table fails loudly if a named model is renamed or removed |
+
+Existing separation tests were left exactly as they are and still pass — notably
+`test_a7_and_a8_notification_never_mutates_result_delivery_or_doctor_review` (RD-3, from DH-NOTIFY-001)
+and `test_exchange_results_api.py`'s assertion that release never touches it (RD-1). **RD-2 and RD-4
+are already covered by existing suites**, so no duplicate was written; RD-6 is the new guard above.
+
+**Two of my own test bugs, found by running them:** the writer-detection matcher counted
+`class ResultDelivery(Base)` as a write, and the canonical-owner test looked for all four models in
+`exchange.models` when they live in three packages — which is the separation announcing itself, and is
+now recorded in the test's own docstring rather than silently fixed.
+
+### Negative controls — three, executed and reverted
+
+| Control | Mutation (one line each) | What reddened |
+|---|---|---|
+| **NC-RD-1** | `result_deliveries = ResultDeliveryRepository(session_factory)` added to `exchange/api.py`'s router factory | `test_rd6_no_production_module_reaches_the_exchange_delivery_repository` |
+| **NC-RD-2** | a second `ResultDelivery(...)` construction added in `exchange/results.py` | `test_rd6c_only_order_creation_writes_the_table` |
+| **NC-RD-3** | `unique=True` removed from `ResultDelivery.lab_order_id` (the "rescue it by making it version-scoped" move) | `test_rd5_the_superseding_model_is_version_scoped_and_this_one_is_not` |
+
+Each reverted with `git checkout --`; tree clean between controls and after.
+
+**One control was redone because the first attempt was too broad.** NC-RD-3's first `sed` matched four
+models' `unique=True`, not just `ResultDelivery`'s. It reddened the right test, but a four-line mutation
+does not isolate a guard — so it was reverted and reapplied to the single line inside `ResultDelivery`,
+verified by a one-line diff before running.
+
+### The guardrail for `DH-CONNECT-ADAPTER-001`
+
+It **must** record external delivery only through the Connect delivery contract and its
+acknowledgement states. It **must not** write, advance or read `ResultDelivery`; **must not** write
+`DoctorReview` (clinician review is a human clinical act — an HTTP 200 from a partner is not a
+clinician); **must not** infer patient notification from provider delivery or the reverse; **must not**
+treat a transport acknowledgement as availability or review. **Its responsibility ends at the Connect
+delivery contract's defined acknowledgement.**
+
+The state this prevents: `Connect says ACKNOWLEDGED` while `ResultDelivery says PENDING` — two rows
+claiming one fact and disagreeing.
+
+### Terminology rule, now binding
+
+Never write bare "delivered" without naming who received what. Prefer `released`, `available to the
+provider`, `reviewed` (naming the version), `provider-system delivery acknowledged`, `patient
+notification sent`, `patient notification delivered`. Binds code, docstrings, API fields, UI copy,
+ADRs and tickets.
+
+### Compatibility and data
+
+**Nothing was migrated, backfilled, deleted or rewritten.** Table, enum, CHECK constraint and every
+historical row preserved. A historical `PENDING` row keeps meaning what it always meant — *DHealth
+never recorded a delivery for this order* — which was true then and is true now. Released results,
+`DoctorReview`, patient notifications, Connect obligations, the Connect runtime and the
+OpenMRS/OpenELIS reference track are all untouched. No API field changed, so no consumer breaks.
+
+### What this ticket may NOT claim
+
+It did not build a Connect adapter, contact any external system, change any clinical workflow, or
+remove anything. It does not make `DH-CONNECT-ADAPTER-001` startable — that remains blocked on having a
+real partner system, which is a counterparty and not code. No pilot gate moved.
+
+### HUMAN DECISION REQUIRED
+
+**None raised, and none outstanding for this subject.** D-7 is closed. Unrelated open items are
+unchanged: D-1 (Front Desk backend authority), D-2a/D-2b (billing), D-3 (specimen), D-4 (lab identity
+attributes), D-5 (diagnosis coding), D-6 (walk-in lab patient), D-8 (successful-read audit), D-9
+(session timeout), D-10 (staff localisation).
+
+### Known limitations
+
+Phase A only — the inert row is still created, so a reader inspecting the database will still find
+`PENDING` rows and must consult ADR-064 or the model docstring to learn they mean nothing. The guard
+tests are structural text assertions: they catch a production module *naming* the repository, and would
+not catch an exotic dynamic reference (`getattr`, a string-built import). That is an accepted trade —
+the realistic failure mode is an adapter author calling `mark_delivered` because it looked relevant,
+which is exactly what the guards catch.

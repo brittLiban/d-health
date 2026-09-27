@@ -48,7 +48,7 @@ patient notification  ≠  ResultDelivery  ≠  ConnectorDelivery  ≠  DoctorRe
 | | means |
 |---|---|
 | `PatientNotification` | a **patient** was sent a content-free message telling them to go and look |
-| `ResultDelivery` | the **ordering provider organization** received the result. Semantics still an open product decision (`MVP-1.0.md` §10 item 6) — untouched by this ticket |
+| ~~`ResultDelivery`~~ | ~~the **ordering provider organization** received the result. Semantics still an open product decision (`MVP-1.0.md` §10 item 6)~~ — **DEPRECATED 2026-09-27, ADR-064: owns nothing.** External provider-system delivery is `ConnectorDeliveryObligation`/`ConnectorDelivery`. Still untouched by this ticket, and now by every future one |
 | `ConnectorDelivery` | a **partner EMR/LIS** was handed a canonical Connect message |
 | `DoctorReview` | a **clinician** recorded a follow-up disposition |
 

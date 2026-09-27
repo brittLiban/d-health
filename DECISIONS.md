@@ -8593,3 +8593,209 @@ a stranded facility is the order that cannot be undone.
   `tests/integration/test_dhealthaccess001_postgres_qualification.py`. **NC-ACCESS-4** bypassed the
   guard on purpose and observed an organization reach zero active administrators, with six unit tests
   and ACCESS-6 going red — so the rule is load-bearing rather than incidentally true.
+
+---
+
+## ADR-064 — ACCEPTED / IMPLEMENTED (2026-09-27, DHEALTH-RESULT-DELIVERY-001): `ResultDelivery` is
+## deprecated and compatibility-only; each delivery-shaped fact has exactly one authoritative owner
+
+**Date:** 2026-09-27 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (deprecation
+markers + guard tests; **no migration, no schema change, no data touched**) · **Decided by:** Liban
+(DHEALTH-RESULT-DELIVERY-001 ticket) · **Resolves:** `docs/MVP-1.0.md` §10 item 6, open since
+2026-09-12; `docs/NATIVE-OPERATING-PRODUCT.md` **D-7**
+
+**Relationship to prior decisions.** This **resolves** what ADR-043 explicitly left open and
+**supersedes nothing**. ADR-043 recorded `ResultDelivery.status`'s meaning as undecided, named five
+candidate meanings, and instructed that *"a future ticket must decide before any delivery mechanism is
+implemented."* ADR-058 decision 4 then named four distinct facts — `ResultDelivery`,
+`ConnectorDelivery`, `DoctorReview`, `PatientNotification` — and deliberately did not touch this one.
+ADR-048's versioned releases and ADR-057/migration `0031`'s Connect delivery obligations are both
+preserved unchanged; this ADR only decides which of them owns what.
+
+**ADR-043's deadline was already missed, and that is why this ticket exists.** A delivery mechanism
+*was* implemented — Connect's durable delivery runtime — and the decision was never made. The next
+thing to touch this model would have been the first real vendor adapter, which would have settled a
+domain question by implementation accident.
+
+### 1. What `ResultDelivery` currently represents
+
+Reconstructed from `0004_exchange_core`, DH-EX-001's own design review, and every caller in the
+repository (searched exhaustively, all file types):
+
+| | |
+|---|---|
+| Table | `exchange_result_deliveries`, created by `0004_exchange_core` — the original Exchange core |
+| Shape | One row per `LabOrder` (`lab_order_id` **unique**), `PENDING`/`DELIVERED`/`FAILED`, `delivered_at` |
+| Documented meaning | "the ordering **provider organization** received the result" |
+| **Created by** | `exchange/orders.py:254`, `PENDING`, inside the order-creation aggregate. **One production writer.** |
+| **Read by** | **Nothing in production.** `ResultDeliveryRepository.get_for_order` exists and is never called. |
+| **Advanced by** | **Nothing in production.** `mark_delivered`/`mark_failed` are reached only from `tests/test_exchange_results.py`. |
+| **Reachable from the API?** | **No.** The repository is never *constructed* outside a test fixture — `exchange/api.py`'s router factory builds every other repository and not this one. |
+| API/UI exposure | **None.** No response model, no field, no UI reference. (`delivered_at` in `api.py` and `exchangeTypes.ts` belongs to `PatientNotification`.) |
+| Audit | `audit.py`'s `result_delivered` event type exists and is **never emitted**. |
+| Demo reset | In `demo_seed`'s `_WORKFLOW_TABLES`, so `reset.sh` clears it. |
+
+**Why it was created eagerly, which matters for judging it fairly.** DH-EX-001 forbade inferring
+delivery from `LabResult` completion. Its own design review considered lazy creation and rejected it,
+because "create it when a result becomes deliverable" requires inferring that trigger from something
+adjacent to result completion — exactly what was forbidden. So an eager `PENDING` row was the
+deliberate alternative: "delivery has not happened" as an explicit fact rather than an inferred
+absence. **That reasoning was sound for the system that existed then**, when this was the only
+delivery concept DHealth had.
+
+### 2. Why it is ambiguous
+
+`DELIVERED` could mean any of six different real-world facts, and five of them are now owned
+elsewhere:
+
+| Interpretation | Already owned by | Verdict |
+|---|---|---|
+| **A** The ordering clinician can now see the released result in DHealth | derived from `LabResultReleaseVersion` existing plus authorization — no stored state | **Duplicate.** And §7 below: Native availability must not become a stored flag. |
+| **B** The ordering clinician personally opened/reviewed it | `DoctorReview`, **version-scoped** | **Duplicate**, and a weaker version — an order-level flag cannot say *which version* was reviewed. |
+| **C** The provider's external EMR/LIS durably received it | `ConnectorDeliveryObligation` / `ConnectorDelivery`, with retry, dead-letter, acknowledgement | **Duplicate**, and structurally inferior — see §3. |
+| **D** A patient received a notification | `PatientNotification` + attempts + provider receipt | **Duplicate**, and a different recipient entirely. |
+| **E** A patient opened/read something | nothing, deliberately | Not clinical acknowledgement; ADR-058 already refuses to conflate them. `ResultDelivery` is not this. |
+| **F** Some generic result-delivery obligation completed | — | Not a real-world fact. "Delivered" with no named recipient is the ambiguity itself. |
+
+### 3. The structural argument, which is what makes this a domain decision
+
+Redundancy alone would justify deprecation. This is stronger:
+
+```
+   ResultDelivery.lab_order_id            UNIQUE   -> exactly one status per ORDER
+   ConnectorDeliveryObligation            UNIQUE on release_version_id
+                                                   -> one per RELEASE VERSION
+```
+
+Since **ADR-048** a result is released as an immutable *version*, and an amendment produces another.
+So "the provider's system received the result" is **necessarily version-scoped**: version 1 can be
+delivered while version 2 is owed. `ResultDelivery` holds one row per order with one status, so it
+**cannot represent that state at all** — not "does not today", but *cannot*, because the schema
+permits one row.
+
+**It is the wrong shape for its own stated meaning.** `ConnectorDeliveryObligation` models the same
+fact at the granularity the fact actually has, and adds what ADR-043 never specified: an obligation
+recorded *whether or not* delivery succeeded, so a release can never commit with nothing anywhere
+recording that a provider is waiting.
+
+### 4. The decision — canonical ownership
+
+**Exactly one authoritative owner per real-world fact. No exceptions, no second source of truth.**
+
+| Real-world fact | Authoritative owner | Scope |
+|---|---|---|
+| A released clinical result exists | **`LabResultReleaseVersion`** | per version, immutable |
+| The result is available to a Native provider | **derived** from the release version + authorization. **No stored state, by decision** | — |
+| A clinician reviewed one exact released version | **`DoctorReview`** | per version (ADR-048) |
+| The ordering provider's own external system received/acknowledged it | **`ConnectorDeliveryObligation`** → **`ConnectorDelivery`** (`connect/runtime_models.py`) | per release version |
+| The patient was sent a content-restricted message | **`PatientNotification`** (+ attempts) | per notification |
+| The patient's message was confirmed delivered by the provider | **`PatientNotification.state`**, written only by a signed provider receipt | per notification |
+| A patient read or understood anything | **deliberately not modelled** | — |
+| ~~`ResultDelivery`~~ | **owns nothing** | — |
+
+### 5. `ResultDelivery`'s status: DEPRECATED / COMPATIBILITY-ONLY
+
+Answering the ticket's own questions precisely:
+
+- **Active?** No.
+- **May new code write it?** **No.** Not application code, not a hook, not a migration backfill.
+- **May a Connect adapter write it?** **No** — see §8.
+- **May anything read it as authority?** **No.** It is not evidence of any fact.
+- **Is it removed?** **No.** Phase A only: the table, the enum, the CHECK constraint and every
+  historical row are preserved, and `exchange/orders.py` keeps creating the inert `PENDING` row.
+
+**Why creation is kept rather than stopped**, which is a deliberate refusal to do the tidier thing:
+three qualified tests use that insert as their proof that order creation commits as **one** aggregate
+— `test_exchange_idempotency_concurrency.py`'s "the losing attempt created no second row",
+`integration/test_dhex001r_postgres_qualification.py`'s nine-loser concurrency proof, and
+`test_exchange_orders.py`'s rollback test, which patches `ResultDelivery` itself as its
+failure-injection point. Stopping creation would mean rewriting an atomicity proof to remove its
+injection site — churn against qualified tests, weakening a real guarantee, for a row nothing reads.
+
+**Staged retirement, and the stages are not to be combined:**
+
+| Phase | What | Status |
+|---|---|---|
+| **A** | Deprecated but preserved: no new logic, no advancement, no readers, docs and docstrings mark it superseded, guard tests pin it | **DONE, this ADR** |
+| **B** | Stop creating new rows | **NOT DONE.** Needs the three atomicity tests re-pointed at another element of the aggregate first. A future ticket with its own evidence. |
+| **C** | Drop the table | **NOT DONE.** Only after B, and only with evidence that no deployment needs the history. |
+
+### 6. Historical rows
+
+**Untouched.** No migration, no backfill, no deletion, no rewrite. A historical `PENDING` row keeps
+meaning what it meant when written: *DHealth never recorded a delivery for this order* — which was
+always true and remains true. A historical `DELIVERED` row, if any deployment has one, means only
+that something called `mark_delivered` at some point; since no production path ever did, none should
+exist outside a test database.
+
+**The reference-connector track does not use it.** Searched: no OpenMRS/OpenELIS code references
+`ResultDelivery` in any form. Nothing on that track changes, and nothing needed splitting.
+
+### 7. Native availability must not become a stored "delivered" state
+
+For a Native provider:
+
+```
+   release  ->  an authorized provider can read the released version   (availability)
+            ->  clinician reviews that version                         (DoctorReview)
+```
+
+**No `DELIVERED` state belongs between those two.** A Native provider reads results from DHealth
+itself; there is no transport, no handover and nothing to acknowledge, so a stored delivery flag would
+either duplicate "a release version exists" or silently mean "somebody looked", which is interpretation
+E and is deliberately unmodelled. Availability is **derived**, permanently.
+
+### 8. The guardrail for `DH-CONNECT-ADAPTER-001`
+
+A future real vendor adapter:
+
+- **must** record external delivery progress **only** through the Connect delivery contract —
+  `ConnectorDeliveryObligation` / `ConnectorDelivery` and the runtime's own acknowledgement states;
+- **must not** write, advance or read `ResultDelivery`;
+- **must not** write `DoctorReview` — clinician review is a human clinical act, never a transport
+  event, and an HTTP 200 from a partner system is not a clinician;
+- **must not** infer patient notification from provider delivery, or the reverse;
+- **must not** treat a transport acknowledgement as availability, review, or anything a clinician did.
+
+**Its responsibility ends at the Connect delivery contract's defined acknowledgement.** Anything
+beyond that boundary belongs to a different owner in §4's table.
+
+The state this prevents, stated so it is unmistakable:
+
+```
+   Connect says ACKNOWLEDGED   and   ResultDelivery says PENDING
+   -- two rows claiming the same fact and disagreeing
+```
+
+### 9. Terminology — a product rule for all future work
+
+**Never write bare "delivered" without naming who received what.** Preferred vocabulary:
+
+| Say | Not |
+|---|---|
+| `released` | delivered |
+| `available to the provider` | delivered |
+| `reviewed` (and *which version*) | delivered, seen, acknowledged |
+| `provider-system delivery acknowledged` | delivered |
+| `patient notification sent` | notified, delivered |
+| `patient notification delivered` (provider receipt) | read, seen, received |
+
+This applies to code, docstrings, API fields, UI copy, ADRs and tickets.
+
+### 10. What was implemented, and what was not
+
+**Implemented:** deprecation docstrings on `ResultDelivery` and `ResultDeliveryRepository` naming the
+canonical owners; a comment on `audit.py`'s dead `result_delivered` event type; and
+`tests/test_dhealthresultdelivery001_ownership.py` — nine structural tests pinning that no production
+module reaches the repository, that `exchange/orders.py` stays the only writer, and that nobody
+"rescues" this model by making it version-scoped instead of using the one that already is.
+
+**Not implemented, deliberately:** no migration, no schema change, no API change, no data migration,
+no change to Connect, notification, review or release behaviour, and **creation of the row is
+unchanged**. Alembic head stays `0033_staff_access_lifecycle`.
+
+**Negative controls executed and reverted:** wiring the repository into `exchange/api.py`'s factory
+(the unreachability test reddened); adding a second production writer in `exchange/results.py` (the
+single-writer test reddened); removing `unique=True` from `ResultDelivery.lab_order_id` to make it
+version-scoped (the supersession test reddened). Each was one line, each reddened exactly one test,
+each was reverted to a clean tree.

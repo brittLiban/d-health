@@ -1685,9 +1685,13 @@ metadata instead of retrying: a blind second issuance would either hit the one-l
 database constraint or silently invalidate a QR already in a patient's hands.
 
 **`ResultDelivery` is untouched.** A patient opening a status page does **not** mean
-`ResultDelivery = DELIVERED`; that semantic remains an open product decision (`docs/MVP-1.0.md`
-§10), and this surface deliberately does not decide it. No SMS/WhatsApp/email/voice transport was
-added — a later transport can carry this same access path.
+`ResultDelivery = DELIVERED`; ~~that semantic remains an open product decision (`docs/MVP-1.0.md`
+§10), and this surface deliberately does not decide it.~~ **[Corrected 2026-09-27: the semantic is
+settled — ADR-064, §29 below. `ResultDelivery` is deprecated and owns nothing, so a patient opening a
+status page means nothing about it for a stronger reason than this paragraph gave: there is no fact
+for it to mean. A patient reading anything is deliberately not modelled at all.]** No
+SMS/WhatsApp/email/voice transport was added by that ticket — a later transport can carry this same
+access path.
 
 **Read-access audit gap, documented rather than papered over.** Issuance and revocation are audited
 (`patient_access_issued`/`patient_access_revoked`, real `ExchangeIdentity` actors). A patient *read*
@@ -2626,14 +2630,111 @@ zero".
 **Payment state must never gate clinical release.** Until an explicit human decision says otherwise
 (`D-2b`), billing observes clinical state and does not control it.
 
-**`ResultDelivery` is ambiguous and must be resolved before the first Connect adapter.** Two different
-things here are called "delivery": `connect/delivery.py`'s `DeliveryRepository` is live, while the
-Exchange's `ResultDeliveryRepository` has no production caller and leaves every Native order's row
-`PENDING` forever. Either retire it from the Exchange schema or rename it `ProviderSystemDelivery` and
-create it only for Connect-bound orders — `D-7`, `HUMAN DECISION REQUIRED`, and see §23 of the product
-specification for why the other six delivery-adjacent facts already have homes.
+~~**`ResultDelivery` is ambiguous and must be resolved before the first Connect adapter.**~~
+**RESOLVED 2026-09-27 by ADR-064 — see §29 below for the ownership table and the adapter guardrail.**
+`ResultDelivery` is **deprecated / compatibility-only** and owns nothing; no migration was required.
 
 **Nothing in the specification weakens what §27 qualified.** Organization and role scoping stay
 server-side and per-request; revocation stays effective on the next request; 404/403 anti-enumeration
 shapes stay; the browser is never the boundary; ADR-044's entry-versus-release separation and ADR-063's
 last-administrator invariant both stand, break-glass included as named-but-unbuilt.
+
+---
+
+## 29. One owner per delivery-shaped fact (DHEALTH-RESULT-DELIVERY-001 / ADR-064) — added 2026-09-27
+
+Four facts in this system get collapsed into the word "delivered" by anyone reading quickly. Each has
+**exactly one** authoritative owner, and this section exists so a future implementer — especially the
+first real Connect adapter — does not have to infer which.
+
+| Real-world fact | Authoritative owner | Scope |
+|---|---|---|
+| A released clinical result exists | `LabResultReleaseVersion` | per version, immutable |
+| Available to a **Native** provider | **derived** from the release version + authorization. **No stored state, by decision** | — |
+| A clinician reviewed one exact released version | `DoctorReview` | per version (ADR-048) |
+| The ordering provider's **external** system received/acknowledged it | `ConnectorDeliveryObligation` → `ConnectorDelivery` (`connect/runtime_models.py`) | per release version |
+| The patient was sent a content-restricted message | `PatientNotification` (+ attempts) | per notification |
+| The patient's message was confirmed delivered | `PatientNotification.state`, written only by a signed provider receipt | per notification |
+| A patient read or understood anything | **deliberately not modelled** | — |
+| `ResultDelivery` | **owns nothing — DEPRECATED / COMPATIBILITY-ONLY** | — |
+
+Note the three different packages: `exchange`, `connect`, `notify`. That separation is deliberate —
+patient messaging and external-system transport are not the Exchange's clinical concern, and keeping
+them apart is what stops the vocabulary collapsing back into one word.
+
+### Why `ResultDelivery` is superseded, structurally
+
+It was created by `0004_exchange_core` when it was the **only** delivery concept DHealth had, and
+DH-EX-001's own design review chose eager `PENDING` creation deliberately, because lazy creation would
+have required inferring a trigger from result completion — which that ticket forbade. Sound reasoning
+for the system that existed then.
+
+What changed is the *shape of the fact*:
+
+```
+   ResultDelivery.lab_order_id           UNIQUE  ->  one status per ORDER
+   ConnectorDeliveryObligation           UNIQUE on release_version_id
+                                                 ->  one per RELEASE VERSION
+```
+
+Since ADR-048 a result is released as an immutable version and an amendment produces another, so "the
+provider's system received the result" is necessarily version-scoped: version 1 can be delivered while
+version 2 is owed. `ResultDelivery` permits exactly one row per order, so it **cannot express that
+state at all**. It is the wrong shape for its own stated meaning, not merely a duplicate of it.
+
+`ConnectorDeliveryObligation` also adds what ADR-043 never specified: an obligation recorded *whether
+or not* delivery succeeded, so a release can never commit with nothing anywhere recording that a
+provider is waiting.
+
+### Native availability is derived, permanently
+
+```
+   release  ->  an authorized provider can read the released version   (availability)
+            ->  clinician reviews that version                         (DoctorReview)
+```
+
+**No stored `DELIVERED` state belongs between those two.** A Native provider reads results from
+DHealth itself — no transport, no handover, nothing to acknowledge. A stored flag would either
+duplicate "a release version exists" or silently come to mean "somebody looked", which is a fact this
+architecture deliberately does not model.
+
+### The guardrail for the first real adapter
+
+`DH-CONNECT-ADAPTER-001` and every adapter after it:
+
+- records external delivery progress **only** through the Connect delivery contract and its
+  acknowledgement states;
+- **never** writes, advances or reads `ResultDelivery`;
+- **never** writes `DoctorReview` — clinician review is a human clinical act, and an HTTP 200 from a
+  partner system is not a clinician;
+- **never** infers patient notification from provider delivery, or the reverse;
+- **never** treats a transport acknowledgement as availability or review.
+
+Its responsibility **ends** at the Connect delivery contract's defined acknowledgement.
+
+The state this prevents:
+
+```
+   Connect says ACKNOWLEDGED   and   ResultDelivery says PENDING
+   -- two rows claiming one fact, disagreeing
+```
+
+Enforced, not merely documented: `adapter/tests/test_dhealthresultdelivery001_ownership.py` fails if a
+production module reaches `ResultDeliveryRepository`, if a second production writer of the table
+appears, or if someone tries to rescue the model by making it version-scoped instead of using the one
+that already is.
+
+### Terminology rule
+
+**Never write bare "delivered" without naming who received what.** Use `released`, `available to the
+provider`, `reviewed` (naming the version), `provider-system delivery acknowledged`, `patient
+notification sent`, `patient notification delivered`. This binds code, docstrings, API fields, UI copy
+and future ADRs.
+
+### What was not done
+
+No migration, no schema change, no API change, no data touched; `exchange/orders.py` still creates the
+inert `PENDING` row, because three qualified atomicity/idempotency tests use that insert as their
+proof that order creation commits as one aggregate. Alembic head unchanged at
+`0033_staff_access_lifecycle`. Stopping creation (phase B) and dropping the table (phase C) are named
+in ADR-064 and left to future tickets with their own evidence.

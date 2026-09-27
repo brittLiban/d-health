@@ -277,7 +277,7 @@ Verified by reading code during this ticket. Evidence levels:
 | Anti-enumeration refusal shapes (404 vs 403) | BUILT + RUNTIME-QUALIFIED |
 | Canonical Native deployment, destructive restore drill | BUILT + RUNTIME-QUALIFIED (pilot gate 4 cleared) |
 | Connector contract, qualification evidence, runtime agent | BUILT, **no real vendor adapter exists** |
-| `ResultDelivery` | **BACKEND ONLY, NO PRODUCTION CALLER** — see §23 |
+| `ResultDelivery` | **DEPRECATED / COMPATIBILITY-ONLY** (ADR-064) — owns nothing; see §23 |
 
 ---
 
@@ -722,7 +722,8 @@ not a specimen entity.
 **Processing, entry, correction, release, amendment?** All built (§15).
 
 **How does the provider receive the released result?** They read it in DHealth (Native) or it is
-delivered through Connect. The ambiguity is `ResultDelivery` — §23.
+delivered through Connect, whose delivery obligation is the authoritative record of that (ADR-064).
+The `ResultDelivery` ambiguity is resolved — §23.
 
 **Lab billing?** Not built. §18.
 
@@ -1019,7 +1020,43 @@ visits and billing and Connect for the diagnostic leg — the screens do not cha
 
 ---
 
-## 23. ResultDelivery — evaluated, recommendation, HUMAN DECISION REQUIRED
+## 23. ResultDelivery — RESOLVED 2026-09-27 by ADR-064
+
+> **D-7 is closed.** `ResultDelivery` is **DEPRECATED / COMPATIBILITY-ONLY**. It owns nothing, no new
+> code may write or read it, and a Connect adapter must never touch it. The table, its enum and every
+> historical row are preserved; **no migration was required** and Alembic head stays
+> `0033_staff_access_lifecycle`. Full reasoning, the ownership table and the adapter guardrail:
+> **ADR-064** (`DECISIONS.md`), implemented by `DHEALTH-RESULT-DELIVERY-001`.
+>
+> **Canonical ownership, one authoritative owner per fact:**
+>
+> | Fact | Owner |
+> |---|---|
+> | A released clinical result exists | `LabResultReleaseVersion` |
+> | Available to a Native provider | **derived** — no stored state, by decision |
+> | A clinician reviewed one exact version | `DoctorReview` (version-scoped) |
+> | The provider's external system received it | `ConnectorDeliveryObligation` → `ConnectorDelivery` |
+> | The patient was messaged / message delivered | `PatientNotification` (+ signed provider receipt) |
+> | A patient read or understood anything | deliberately not modelled |
+>
+> **The decisive argument was structural, not redundancy.** `ResultDelivery.lab_order_id` is unique —
+> one status per *order* — but since ADR-048 a result is released as a *version* and an amendment
+> produces another, so the fact is version-scoped: v1 delivered while v2 is owed.
+> `ConnectorDeliveryObligation` is unique per `release_version_id`. `ResultDelivery` is therefore the
+> wrong *shape* for its own stated meaning, not merely a duplicate of it.
+>
+> **`DH-CONNECT-ADAPTER-001` is no longer blocked by this ambiguity**, and now carries an explicit
+> rule: its responsibility ends at the Connect delivery contract's acknowledgement; it never writes
+> `ResultDelivery`, never writes `DoctorReview`, and never infers patient notification from provider
+> delivery.
+>
+> **Terminology rule for all future work:** never write bare "delivered" without naming who received
+> what — prefer `released`, `available to the provider`, `reviewed`, `provider-system delivery
+> acknowledged`, `patient notification sent`, `patient notification delivered`.
+
+The evaluation that produced that decision is kept below, unedited, because it is the evidence.
+
+### 23.1 The original evaluation (2026-09-27, before the decision)
 
 ### What was found
 
@@ -1217,7 +1254,7 @@ Only where different answers materially change architecture or workflow.
 | **D-4** | **Which patient attributes must a receiving laboratory see to confirm the presenting patient?** (`docs/MVP-1.0.md` gap 10.) | Product + clinical safety | Blocks Lab Reception. Must not be invented. |
 | **D-5** | **Diagnosis coding** — free text only, or a code system, and which? Clinician-recorded either way; system-generated never. | Clinical lead | Blocks any structured diagnosis. Free-text note is unaffected. |
 | **D-6** | **May a laboratory hold its own patient records** so a walk-in laboratory patient is representable? | Product + privacy | Blocks walk-in lab workflow. P0 only if the pilot is a laboratory. |
-| **D-7** | **What `ResultDelivery` means** — retire it, or rename it Connect-only. | **HUMAN DECISION REQUIRED** | Must be resolved before the first real Connect adapter builds against it. §23. |
+| ~~**D-7**~~ | ~~**What `ResultDelivery` means**~~ — **RESOLVED 2026-09-27, ADR-064.** Deprecated / compatibility-only; owns nothing; no migration needed. §23. | ~~HUMAN DECISION REQUIRED~~ **CLOSED** | ~~Blocks the first Connect adapter~~ — **no longer blocking**, and the adapter now has an explicit guardrail. |
 | **D-8** | **Should successful sensitive reads be audited?** Pre-existing; Visits/Billing/Front Desk make it weightier. | **HUMAN DECISION REQUIRED** (unchanged) | Does not block, but changes retention and storage posture. |
 | **D-9** | **Staff session and idle timeout.** Pre-existing; current values are Keycloak defaults, not a clinical decision. | **HUMAN DECISION REQUIRED** (unchanged) | Does not block. |
 | **D-10** | **Do staff interfaces need Arabic, Somali or English at Launch-1?** | Product | See §29. |

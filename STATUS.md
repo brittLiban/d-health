@@ -6,6 +6,52 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-27, DHEALTH-RESULT-DELIVERY-001, directly on `master`.** From `b4093ae`. **"Delivered" is
+no longer ambiguous in DHealth, and the first real Connect adapter can no longer define it by
+accident.** ADR-064 assigns exactly one authoritative owner to each delivery-shaped fact and retires
+`ResultDelivery` as **DEPRECATED / COMPATIBILITY-ONLY**: it owns nothing, no new code writes or reads
+it, and an adapter must never touch it.
+
+| Fact | Owner |
+|---|---|
+| A released clinical result exists | `LabResultReleaseVersion` |
+| Available to a Native provider | **derived** — no stored state, by decision |
+| A clinician reviewed one exact version | `DoctorReview` (version-scoped) |
+| The provider's external system received it | `ConnectorDeliveryObligation` → `ConnectorDelivery` |
+| The patient was messaged / confirmed delivered | `PatientNotification` (+ signed provider receipt) |
+| A patient read or understood anything | deliberately not modelled |
+
+**The decisive argument was structural, not redundancy.** `ResultDelivery` is unique per *order*, but
+since ADR-048 a result is released as a *version* and an amendment produces another — so the fact is
+version-scoped (v1 delivered while v2 is owed) and a single order-level status **cannot express it at
+all**. It is the wrong shape for its own stated meaning. `ConnectorDeliveryObligation` is unique per
+`release_version_id`.
+
+**This closed a decision that was already overdue.** ADR-043 left it open on 2026-09-12 instructing
+that a future ticket must decide *before any delivery mechanism is implemented*; Connect's delivery
+runtime then shipped first, so that deadline had already passed unnoticed.
+
+**No migration, no schema change, no API change, no data touched.** Alembic head stays
+`0033_staff_access_lifecycle`. The inert `PENDING` row is still created, deliberately: three qualified
+atomicity/idempotency tests use that insert as their proof that order creation commits as one
+aggregate, one of them patching the class as its failure-injection point. Staged retirement — phase B
+(stop creating) and phase C (drop the table) are named in ADR-064 and left to future tickets with their
+own evidence.
+
+**Enforced rather than merely documented:** nine structural tests
+(`adapter/tests/test_dhealthresultdelivery001_ownership.py`) fail if a production module reaches the
+repository, if a second writer appears, or if someone "rescues" the model by making it version-scoped.
+**Three negative controls executed and reverted**, each one line, each reddening exactly one test.
+
+**Terminology is now a product rule:** never write bare "delivered" without naming who received what.
+Prefer `released`, `available to the provider`, `reviewed`, `provider-system delivery acknowledged`,
+`patient notification sent`, `patient notification delivered`.
+
+**`DH-CONNECT-ADAPTER-001` is no longer blocked by this ambiguity** and now carries an explicit rule:
+its responsibility ends at the Connect delivery contract's acknowledgement.
+
+---
+
 **2026-09-26, DHEALTH-NATIVE-ACCESS-001, directly on `master`.** From `191dd5b`. **A facility
 administrator can now actually revoke staff authority through DHealth, and the same still-valid
 browser token loses that authority on its very next request.** This closes DHEALTH-NATIVE-SEC-001's
@@ -1423,7 +1469,9 @@ section is production-deployed, human-qualified, or evidence about real patients
   secondary sources, not verified against Meta's own text; every value that could drift is
   configuration with no default. Confirming them against the live API is the first qualification
   task.
-- **`ResultDelivery` semantics**: created `PENDING` at order creation and no code path advances it
+- ~~**`ResultDelivery` semantics**~~: **RESOLVED 2026-09-27, ADR-064 — deprecated /
+  compatibility-only, owns nothing, no migration.** Original text follows: created `PENDING` at order
+  creation and no code path advances it
   past `PENDING`. Unchanged by DH-NOTIFY-001, deliberately: a patient's handset accepting an SMS is
   not the ordering provider organization receiving a result, and what `DELIVERED` should mean there
   remains an open product decision (`docs/MVP-1.0.md` §10 item 6).
@@ -1653,7 +1701,7 @@ DH-USABILITY-001 §43 and the 2026-09-24 product-definition brief already set st
 |---|---|---|
 | **Native product** | ~~**Clinic + Lab switch-ready operating-product specification**~~ — **DONE 2026-09-27 as `DHEALTH-NATIVE-OPERATING-PRODUCT-001`** (`docs/NATIVE-OPERATING-PRODUCT.md`). The next Native product work is its **first implementation ticket, `DHEALTH-CLINIC-VISIT-001`** (Visits/Encounters, clinician-only) — specified, ready to build, and **not yet authorized to start** | **specification done; implementation unstarted** |
 | **Native critical path** | **Native security qualification** (`DH-SEC-001` in the DH-DEMO-001 forward sequence — a name in a sequence list, **not a scoped ticket**; nothing in this repository defines its content). The valid next engineering step now that deployment and recovery are qualified | **not scoped** |
-| **Connect** | **`DH-CONNECT-ADAPTER-001` — first named real partner/vendor adapter.** Defined, unstarted, and **blocked on having an actual external EMR/LIS target to integrate against** — the blocker is a counterparty, not code | **blocked on a partner system** |
+| **Connect** | **`DH-CONNECT-ADAPTER-001` — first named real partner/vendor adapter.** Defined, unstarted, and **blocked on having an actual external EMR/LIS target to integrate against** — the blocker is a counterparty, not code. **One design prerequisite was cleared 2026-09-27: ADR-064 fixes what "delivered" means and gives the adapter an explicit rule** (its responsibility ends at the Connect delivery contract's acknowledgement; it never writes `ResultDelivery` or `DoctorReview`) | **blocked on a partner system; no longer blocked on delivery semantics** |
 
 ~~**The Native product ticket has no free name, and that is a real problem rather than a formatting
 one.**~~ **[Resolved 2026-09-27.]** `DHEALTH-NATIVE-MVP-1.0` was queued on 2026-09-24 as the

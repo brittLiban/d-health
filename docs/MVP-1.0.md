@@ -644,7 +644,21 @@ legible; item numbers are kept stable since §15 and other documents point at th
    amendment path exists either before or after this new release step (ADR-045), and the underlying
    result-per-item data model this release step operates on is itself confirmed not final for real
    panel-based workflows (ADR-046).
-6. **`ResultDelivery.status` semantics undecided.** Still undecided, and **sharpened 2026-09-27
+6. ~~**`ResultDelivery.status` semantics undecided.**~~ **RESOLVED 2026-09-27 by ADR-064
+   (DHEALTH-RESULT-DELIVERY-001) — open since 2026-09-12, and ADR-043's own deadline ("a future
+   ticket must decide before any delivery mechanism is implemented") had already been missed, because
+   Connect's delivery runtime shipped first.** The answer: **`ResultDelivery` is DEPRECATED /
+   COMPATIBILITY-ONLY and owns nothing.** No new code writes or reads it; a Connect adapter must never
+   touch it; the table, enum and every historical row are preserved; **no migration was required.**
+   Canonical owners — released result → `LabResultReleaseVersion`; Native availability → **derived,
+   no stored state**; clinician review → `DoctorReview` (version-scoped); external provider-system
+   delivery → `ConnectorDeliveryObligation`/`ConnectorDelivery`; patient messaging →
+   `PatientNotification`. The decisive argument was **structural**: `ResultDelivery` is unique per
+   *order*, but since ADR-048 the fact is per *release version* (v1 delivered while v2 is owed), so it
+   is the wrong shape for its own stated meaning rather than merely a duplicate. Original text and the
+   2026-09-27 sharpening both follow, unedited.
+
+   Still undecided, and **sharpened 2026-09-27
    (DHEALTH-NATIVE-OPERATING-PRODUCT-001, `docs/NATIVE-OPERATING-PRODUCT.md` §23)** with a finding
    this entry did not have: **two different things in this repository are now called "delivery", and
    the Exchange one is dead.** `connect/delivery.py`'s `DeliveryRepository` is live (called from
@@ -841,7 +855,8 @@ made.
    just mutations? — not verified by this document). Unchanged.
 6. Identity-first-seen audit consistency (whether `PatientReference`/`PractitionerReference`
    creation is itself audited as consistently as order/result mutations). Unchanged.
-7. `ResultDelivery` semantics decision (§10, item 6). Unchanged.
+7. ~~`ResultDelivery` semantics decision (§10, item 6). Unchanged.~~ **RESOLVED 2026-09-27, ADR-064:
+   deprecated / compatibility-only, owns nothing, no migration. See §10 item 6.**
 8. The current pytest collection warning present across every DH-EX-* CI run on record (never
    identified or fixed; carried forward unresolved). Not re-verified by this pass.
 9. Exchange API modularization (`api.py` has grown to over 2,800 lines across twelve-plus tickets

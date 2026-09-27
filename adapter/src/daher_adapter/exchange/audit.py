@@ -45,6 +45,12 @@ class ExchangeAuditEvent(BaseModel):
         "lab_order_transitioned",
         "lab_selected",
         "lab_result_recorded",
+        # DEPRECATED, never emitted, kept for backward compatibility with this Literal's own
+        # DH-EX-001 meaning (ADR-064, 2026-09-27). `ResultDelivery` is superseded, so nothing will
+        # ever write this event: external provider-system delivery is Connect's, and it has its own
+        # records. Removing the value would be a breaking change to a schema that still accepts
+        # historical lines, so it stays unused rather than deleted -- the same treatment
+        # "organization_created" already has below.
         "result_delivered",
         "doctor_reviewed",
         # DH-EX-002 organization/identity/authorization events. NOTE (DH-EX-002R): as of the

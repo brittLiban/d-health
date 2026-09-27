@@ -3381,10 +3381,26 @@ class LabResultAmendmentRepository:
 
 
 class ResultDeliveryRepository:
-    """Unchanged by DH-EX-007/DH-EX-012C -- no code anywhere in this package calls
-    ``mark_delivered``/``mark_failed`` as a side effect of a result being recorded, an order
-    completing, or a provider reading results. The exact semantic of ``DELIVERED`` is an explicit
-    future product decision (see PROJECT_STATE.md's DH-EX-007 entry), not inferred here."""
+    """**DEPRECATED — COMPATIBILITY-ONLY as of ADR-064 (DHEALTH-RESULT-DELIVERY-001, 2026-09-27).**
+
+    ~~The exact semantic of ``DELIVERED`` is an explicit future product decision, not inferred
+    here.~~ **That decision has now been made, and the answer is that this repository owns
+    nothing.**
+    ``ResultDelivery`` is superseded -- see the model's own docstring in ``exchange/models.py`` for
+    which canonical model owns each delivery-shaped fact, and why the supersession is structural
+    (this table is order-scoped; the fact is version-scoped since ADR-048).
+
+    **This class is deliberately not constructed anywhere in the application.**
+    ``exchange/api.py``'s router factory builds every other repository and not this one, so no
+    endpoint can read or advance it. ``mark_delivered``/``mark_failed`` are reachable only from
+    ``tests/test_exchange_results.py``, which exercises them as repository mechanics rather than as
+    product behaviour. It is kept rather than deleted so historical rows stay readable through the
+    same layer that wrote them (ADR-064 phase A); removal is phase C.
+
+    **A future Connect adapter must not call these.** External provider-system delivery is
+    ``ConnectorDeliveryObligation``/``ConnectorDelivery`` in ``connect/runtime_models.py``, and the
+    adapter's responsibility ends at that contract's acknowledgement. Pinned by
+    ``tests/test_dhealthresultdelivery001_ownership.py``."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory

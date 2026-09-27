@@ -65,8 +65,13 @@ versions, retry/backoff constants, variable naming — inert technical choices.
   binds the Exchange identically (ADR-043 §13/`docs/MVP-1.0.md` §13)
 - Anything changing what patient data leaves the system — WhatsApp message content, a new
   integration, or logging that might capture clinical values — **GLOBAL**; on the Exchange this
-  currently includes `ResultDelivery`'s undecided semantics and any per-channel (SMS/WhatsApp/
-  voice) sensitive-content policy, both explicitly left open by ADR-043
+  currently includes ~~`ResultDelivery`'s undecided semantics and~~ any per-channel (SMS/WhatsApp/
+  voice) sensitive-content policy, ~~both~~ explicitly left open by ADR-043.
+  **[Corrected 2026-09-27: `ResultDelivery`'s semantics are no longer open — ADR-064 settled them
+  (deprecated / compatibility-only, owns nothing). Do not stop and ask about it; the rule that now
+  applies is the opposite one — no new code may write or read it, and `docs/ARCHITECTURE.md` §29
+  names the authoritative owner of each delivery-shaped fact. The per-channel sensitive-content
+  policy remains genuinely open.]**
 - Any change to the bed-seeding delete behaviour (ADR-007) — **maternity / reference-connector
   track**
 - Any scope decision that would cut a pinned P0 item (below, maternity-track) or that would violate

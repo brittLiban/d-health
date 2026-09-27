@@ -1308,11 +1308,48 @@ class LabResultAmendment(Base):
 
 
 class ResultDelivery(Base):
-    """Delivery to the ordering provider organization is its own state, independent from
-    ``LabResult`` existing -- DH-EX-001 forbids inferring delivery from result completion. Starts
-    ``PENDING`` and only an explicit repository call may move it to ``DELIVERED``/``FAILED``; one
-    row per order (unique FK), not per item, matching V1's "doctor receives the order's result(s)
-    as one unit" framing."""
+    """**DEPRECATED — COMPATIBILITY-ONLY as of ADR-064 (DHEALTH-RESULT-DELIVERY-001, 2026-09-27).
+    Do not read this as authority, do not advance it, and do not write it from new code.**
+
+    Original intent, preserved: *delivery to the ordering provider organization is its own state,
+    independent from ``LabResult`` existing -- DH-EX-001 forbids inferring delivery from result
+    completion. Starts ``PENDING`` and only an explicit repository call may move it to
+    ``DELIVERED``/``FAILED``; one row per order (unique FK), not per item, matching V1's "doctor
+    receives the order's result(s) as one unit" framing.*
+
+    **Why it is superseded, and it is structural rather than a matter of taste.** This model was
+    created by ``0004_exchange_core`` when it was the *only* delivery concept DHealth had.
+    Three more precise owners have since appeared, and ADR-048 changed the shape of the
+    underlying fact: a result
+    is now released as an immutable **version**, and an amendment produces another. So "the ordering
+    provider's system received the result" is necessarily *version*-scoped -- version 1 can be
+    delivered while version 2 is still owed. ``lab_order_id`` here is ``unique``, so this
+    table holds exactly one status per order and **cannot express that state at all**. It is
+    not merely redundant;
+    it is the wrong shape for its own stated meaning.
+
+    Who owns each fact instead (ADR-064):
+
+    - a released clinical result exists ....... ``LabResultReleaseVersion``
+    - available to a Native provider ......... derived from the release version; no stored state
+    - a clinician reviewed one exact version .. ``DoctorReview`` (version-scoped, ADR-048)
+    - a provider's own system received it .... ``ConnectorDeliveryObligation`` /
+      ``ConnectorDelivery``
+      (``connect/runtime_models.py``, unique per ``release_version_id``)
+    - the patient was messaged ............... ``PatientNotification`` (``notify/models.py``)
+
+    **The row is still created** by ``exchange/orders.py`` at order creation, inert, and every
+    historical row is preserved -- ADR-064 phase A. That is deliberate: three qualified tests
+    use the insert as their proof that order creation commits as one aggregate, one of them
+    patching this very class as its failure-injection point. Stopping creation would rewrite
+    an atomicity proof to remove
+    its injection site, for a row nothing reads. Phases B (stop creating) and C (drop the table) are
+    named in ADR-064 and left to a future ticket with its own evidence.
+
+    Pinned by ``tests/test_dhealthresultdelivery001_ownership.py``, which fails if a
+    production module
+    reaches the repository, if a second writer appears, or if someone tries to rescue this model by
+    making it version-scoped instead of using the one that already is."""
 
     __tablename__ = "exchange_result_deliveries"
     __table_args__ = (
