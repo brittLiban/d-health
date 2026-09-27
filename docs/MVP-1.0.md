@@ -983,3 +983,39 @@ Law 2 (no double entry) remains binding: a missing connector is never to be solv
 enter results twice. No real patient data is required at any point in onboarding — discovery records
 whether a source system *has* a patient identifier namespace or a release event, never any patient's
 data.
+
+---
+
+## 16. The Native clinic gained a visit (DHEALTH-CLINIC-VISIT-001, 2026-09-27)
+
+Added rather than rewriting §4 or §8: the golden journey this document defines is the **exchange**
+journey (a provider orders, a laboratory completes, a patient reads), and that journey is unchanged.
+What changed is that the Native provider side now has a clinical thread to hang an order on.
+
+**What exists now.** A clinician can record that a patient arrived, why they came in the patient's own
+words, that they were taken into consultation, a free-text note that may be corrected (each correction
+an append-only revision, earlier ones retained and visible), which analyses were ordered *during that
+consultation*, and that the encounter is finished — and can see that history the next time the patient
+comes in. `Visites` is a staff section; `exchange_visits`/`exchange_visit_notes` are real tables; the
+lifecycle is `CHECKED_IN` → `IN_PROGRESS` → `COMPLETED`, plus `CANCELLED` from `CHECKED_IN` only.
+ADR-065 and `docs/NATIVE-OPERATING-PRODUCT.md` §38 carry the detail.
+
+**Where it touches this document's laws.**
+
+| Law | Effect |
+|---|---|
+| 1 — no forced marketplace | Unaffected. A visit routes nothing and prices nothing. |
+| 2 — no double entry | **Strengthened in one direction, and a new obligation in another.** A clinician ordering during a visit does not re-enter the patient: the ordering flow is handed the patient and the visit. But a facility that keeps consultations in an existing EMR must not be asked to write them into DHealth as well — so the Native visit is for facilities using DHealth *natively*, and a connector track facility's consultations stay where they are. Nothing in this ticket asks anyone to type a consultation twice. |
+| 3 — faster than what it replaces | **Still a validated target, not a current claim.** No clinician has used this surface and nothing has been timed against the paper register or the EMR it would replace. §32 of the operating-product spec is the plan; it has not been executed. |
+| 4 — no digital-literacy requirement for care | Unaffected. A visit is staff-facing; no patient interaction changed, and the assisted-digital paths of §7 are untouched. |
+
+**§10 gaps: none closed, one narrowed.** Item 6 (`ResultDelivery` semantics) was closed by ADR-064,
+not this ticket. This ticket closes nothing here and opens nothing new, but it does narrow the
+practical reach of the "no clinical thread" observation in §8: the gap was never listed as a numbered
+item, because §8 described the implementation as an exchange core, which it was.
+
+**What this does not make true.** A place to write a clinical note is not clinical sign-off. Every
+structured clinical field — vitals, examination templates, diagnosis coding (**D-5**) — still requires
+the clinical lead, and the order set still does. **Pilot-ready remains distinct from clinically live**,
+and nothing here is authorization to use DHealth on a real patient. No real patient data was used at
+any point; every fixture, seed and qualification record is synthetic.

@@ -20,15 +20,17 @@
  *   canViewPatients    `_require_clinician`            CLINICIAN at the provider
  *   canCreateOrders    `_require_clinician`            CLINICIAN at the provider
  *   canReviewResults   `_require_clinician`            CLINICIAN at the provider
+ *   canRunVisits       `_require_clinician`            CLINICIAN at the provider
  *   canWorkLabOrders   `_require_lab_tech`             LAB_TECH at the lab
  *   canReleaseResults  release endpoints' own gate     LAB_RESULT_RELEASER at the lab
  *   canAdministerTeam  `_require_org_admin`            ORG_ADMIN at this organization
  *
- * The first three resolve from the same grant today, because CLINICIAN is the
- * single authority the backend checks for patient binding, order creation and
- * doctor review alike. They are kept as three names rather than collapsed into
- * one so each call site states which authority it believes it needs, and so a
- * future split of that role is a change here rather than across the pages.
+ * The first four resolve from the same grant today, because CLINICIAN is the
+ * single authority the backend checks for patient binding, order creation,
+ * doctor review and the visit lifecycle alike. They are kept as four names
+ * rather than collapsed into one so each call site states which authority it
+ * believes it needs, and so a future split of that role is a change here rather
+ * than across the pages.
  *
  * ADR-044 is the reason entry and release are separate: a LAB_TECH who does not
  * also hold LAB_RESULT_RELEASER can record values and can never release them.
@@ -41,6 +43,18 @@ export interface WorkspaceCapabilities {
   canViewPatients: boolean
   canCreateOrders: boolean
   canReviewResults: boolean
+  /**
+   * DHEALTH-CLINIC-VISIT-001 — may run consultations here: register arrivals, take a waiting
+   * patient, write notes, finish or cancel a visit.
+   *
+   * Resolves from the same CLINICIAN grant as the three above, and is a fourth name rather than a
+   * reuse of `canViewPatients` for the reason this file already gives: each call site states which
+   * authority it believes it needs. It matters more here than elsewhere, because *who may register
+   * an arrival* is an open product question (D-1 in `docs/NATIVE-OPERATING-PRODUCT.md` §28) — when a
+   * front-desk role exists, this capability is where that answer lands, and nothing else has to
+   * move.
+   */
+  canRunVisits: boolean
   canWorkLabOrders: boolean
   canReleaseResults: boolean
   /**
@@ -58,6 +72,7 @@ export const NO_CAPABILITIES: WorkspaceCapabilities = {
   canViewPatients: false,
   canCreateOrders: false,
   canReviewResults: false,
+  canRunVisits: false,
   canWorkLabOrders: false,
   canReleaseResults: false,
   canAdministerTeam: false,
@@ -132,6 +147,7 @@ export function capabilitiesFor(
     canViewPatients: clinician,
     canCreateOrders: clinician,
     canReviewResults: clinician,
+    canRunVisits: clinician,
     canWorkLabOrders: isLab && membership.roles.includes('LAB_TECH'),
     canReleaseResults: isLab && membership.roles.includes('LAB_RESULT_RELEASER'),
     // Not gated on organization type: ORG_ADMIN is valid at a provider and at a

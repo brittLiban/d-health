@@ -30,6 +30,21 @@ export interface OpaquePendingOrderIdentity {
   created_at: number
   /** Set after the intent is created on backend; still no direct PHI, still non-clinical. */
   intent_id?: string
+  /**
+   * DHEALTH-CLINIC-VISIT-001: the clinic visit this order was being raised during, when it was.
+   *
+   * Persisted for a correctness reason, not for display. `visit_id` is part of the backend's
+   * intent-replay comparison, so a retry that presents the same idempotency key with *no* visit
+   * context is refused with a conflict rather than quietly creating an unlinked order. Without this
+   * field, a page reload between "intent POST sent" and "intent_id stored" would lose the visit and
+   * turn a recoverable attempt into a dead key.
+   *
+   * It is another opaque technical identifier of the same kind as the three above, and the same
+   * sensitivity note applies: no demographic content, but a linkable health-workflow identifier, so
+   * it is protected accordingly. Still zero clinical payload — a visit id is not a note, a reason,
+   * or a test.
+   */
+  visit_id?: string
   /** Set only after the order create POST has returned successfully; still no direct PHI. */
   confirmed_order_id?: string
 }
@@ -140,7 +155,17 @@ export function getStoredPendingOrder(
     }
   }
 
-  // 6. Optional confirmed_order_id must be valid string if present
+  // 6. Optional visit_id must be a valid string if present. Validated rather than trusted for the
+  //    same reason as the two ids around it: a corrupted value here would be sent to the backend as
+  //    part of an idempotency-replay comparison, where it would produce a conflict the clinician
+  //    cannot interpret. An absent visit_id is normal — most orders have no visit.
+  if ('visit_id' in obj && obj.visit_id !== undefined) {
+    if (typeof obj.visit_id !== 'string' || obj.visit_id.trim().length === 0) {
+      throw new PendingOrderStorageReadError('Corrupted pending order storage: invalid visit_id')
+    }
+  }
+
+  // 7. Optional confirmed_order_id must be valid string if present
   if ('confirmed_order_id' in obj && obj.confirmed_order_id !== undefined) {
     if (
       typeof obj.confirmed_order_id !== 'string' ||
@@ -159,6 +184,7 @@ export function getStoredPendingOrder(
     idempotency_key: obj.idempotency_key as string,
     created_at: obj.created_at as number,
     ...(typeof obj.intent_id === 'string' ? { intent_id: obj.intent_id } : {}),
+    ...(typeof obj.visit_id === 'string' ? { visit_id: obj.visit_id } : {}),
     ...(typeof obj.confirmed_order_id === 'string'
       ? { confirmed_order_id: obj.confirmed_order_id }
       : {}),
@@ -182,6 +208,7 @@ export function setStoredPendingOrder(
     patient_reference_id: patientReferenceId,
     idempotency_key: pending.idempotency_key,
     created_at: pending.created_at ?? Date.now(),
+    ...(typeof pending.visit_id === 'string' ? { visit_id: pending.visit_id } : {}),
     ...(typeof pending.intent_id === 'string'
       ? { intent_id: pending.intent_id }
       : {}),

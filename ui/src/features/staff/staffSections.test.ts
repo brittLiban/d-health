@@ -30,8 +30,25 @@ function idsFor(membership: ExchangeMembershipSummary) {
 }
 
 describe('availableSections', () => {
-  it('offers a provider clinician all four sections, in navigation order', () => {
-    expect(idsFor(provider())).toEqual(['today', 'patients', 'orders', 'results'])
+  it('offers a provider clinician every clinical section, in navigation order', () => {
+    // DHEALTH-CLINIC-VISIT-001 added `visits`, second: it is the clinic's live state (who is here,
+    // who is being seen), which a clinician arriving in the morning wants before the directory.
+    expect(idsFor(provider())).toEqual(['today', 'visits', 'patients', 'orders', 'results'])
+  })
+
+  it('never offers a laboratory a Visites section', () => {
+    // The visit lifecycle is gated on CLINICIAN, which `ALLOWED_ROLES_BY_ORG_TYPE` never grants at a
+    // laboratory. A laboratory has no outpatient consultation, and offering the section would be a
+    // promise the server refuses to keep -- the same reasoning as `patients` below.
+    expect(idsFor(lab(['LAB_TECH', 'LAB_RESULT_RELEASER']))).not.toContain('visits')
+    expect(idsFor(lab(['ORG_ADMIN']))).not.toContain('visits')
+  })
+
+  it('never offers Visites to an administrator who holds no clinical role', () => {
+    // Registering an arrival is clinical workflow authority today. *Whether it should stay that way*
+    // is D-1 in `docs/NATIVE-OPERATING-PRODUCT.md` §28 -- an open product question, not something
+    // this navigation may answer by widening what an ORG_ADMIN is offered.
+    expect(idsFor(provider(['ORG_ADMIN']))).not.toContain('visits')
   })
 
   it('offers a laboratory technician the queue but not release', () => {
@@ -78,6 +95,7 @@ describe('availableSections', () => {
     // Administration is not what they open the application for.
     expect(idsFor(provider(['CLINICIAN', 'ORG_ADMIN']))).toEqual([
       'today',
+      'visits',
       'patients',
       'orders',
       'results',
@@ -122,6 +140,9 @@ describe('availableSections', () => {
     expect(sectionLabel('orders')).toBe('Ordres')
     expect(sectionLabel('results')).toBe('Résultats')
     expect(sectionLabel('patients')).toBe('Patients')
+    // DHEALTH-CLINIC-VISIT-001: "Visites", deliberately not "Consultations" -- a visit exists from
+    // the moment somebody walks in, which is before any consultation has happened.
+    expect(sectionLabel('visits')).toBe('Visites')
   })
 })
 

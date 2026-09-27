@@ -122,6 +122,18 @@ _WORKFLOW_TABLES = (
     "exchange_lab_order_items",
     "exchange_lab_selections",
     "exchange_lab_orders",
+    # DHEALTH-CLINIC-VISIT-001. A visit is workflow state a clinician creates, not baseline: nothing
+    # seeds one, and a reset that left them behind would make this module's "restore the
+    # deterministic baseline" contract false for visits specifically. The seed *patient* stays
+    # baseline and is deliberately still absent from this list -- the patient is configuration a
+    # demo needs to exist; their visits are what a demo produces.
+    #
+    # Ordered after `exchange_lab_orders` because both orders and intents carry a `RESTRICT`
+    # foreign key to `exchange_visits`, and notes before visits for the same reason. TRUNCATE's own
+    # CASCADE would sort this out, but the explicit order is what makes a missing table fail loudly,
+    # which is this list's whole reason for existing.
+    "exchange_visit_notes",
+    "exchange_visits",
 )
 
 _MARKER_TABLE = "dhealth_demo_environment"

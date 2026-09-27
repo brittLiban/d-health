@@ -1836,3 +1836,80 @@ with the first ready to build.
 **May not claim:** that any of it is built; that a facility could switch today; that participants
 were consulted; that the severities are user findings; that the product is usable, deployed,
 clinically approved or certified; or that any pilot gate moved. None did.
+
+---
+
+## 38. `DHEALTH-CLINIC-VISIT-001` as delivered (2026-09-27)
+
+§36 above is the **brief**, left unedited as the instruction that was given. This section is what was
+actually built, including the three places it departs from §36 and the gaps it deliberately left open.
+ADR-065 carries the reasoning; this is the delta.
+
+### Delivered
+
+| | |
+|---|---|
+| Schema | `0034_clinic_visits`: `exchange_visits`, `exchange_visit_notes`, nullable `visit_id` on **both** `exchange_lab_orders` and `exchange_lab_order_intents`, six new audit event types, one new `resource_type`. Alembic head `0034_clinic_visits`. |
+| Service | `adapter/src/daher_adapter/exchange/visits.py` — six operations, three reads, every transition under a `FOR UPDATE` row lock with the status re-read inside it. |
+| API | Nine routes under `/organizations/{provider_id}/`: `POST visits`, `GET visits`, `GET patients/{id}/visits`, `GET visits/{id}`, `POST visits/{id}/take`, `POST .../complete`, `POST .../cancel`, `PUT .../reason`, `POST .../notes`. Every one gated by `_require_clinician` as its first statement. |
+| Frontend | `Visites` staff section (`ui/src/features/visits/`), the worklist, the arrival form, the visit workspace with note revisions, and the order hand-off into `Patients`. |
+| Qualification | 63 adapter tests; 11 real-PostgreSQL concurrency/constraint tests; 9 real-browser phases; 20 UI unit tests for the screen's refusals. |
+
+### Departures from §36, and why
+
+**1. Four states, not five — §36's own instruction, against the ticket's §6 wording.** The ticket that
+commissioned this work said "use the exact five-state lifecycle recorded by the operating-product
+specification". §36 (above) says `PLANNED` and `NO_SHOW` are omitted until a calendar exists, and the
+ticket's own §32 independently forbids no-show handling. Two explicit sources against one adjective,
+and no coherent five-state reading exists: keep `NO_SHOW` and §32 is violated; keep `PLANNED` and it
+is unreachable, which §12 itself calls decoration. **Four states were built.** The database CHECK
+constraint refuses `PLANNED` and `NO_SHOW`, so neither can be reintroduced by an application-layer
+edit alone.
+
+**2. `appointment_id` omitted.** §36 lists it as "nullable, unused until ticket 7". No appointment
+table exists for it to reference, nothing would read it, and an unreferenced speculative column is
+surface of exactly the kind DHEALTH-NATIVE-SEC-001's P1 was made of — a primitive with no caller. It
+is added by the appointments ticket, together with the table that gives it meaning.
+
+**3. `visit_id` is on the intent as well as the order.** §36 says "add a nullable `visit_id` to
+`LabOrder`". That alone would have been unsafe: the UI orders through `LabOrderIntent`, and capturing
+the visit at commit rather than at intent creation would let a lost-response retry move an order to a
+different visit. The visit is captured on the immutable intent, copied forward by `commit` without
+re-validation, and joined to the intent's replay comparison. ADR-065 §6 has the full argument.
+
+**4. The visit read does not inline released results.** §36 says "get one visit with its notes, orders
+and released results". Orders are returned; **result values are not**. Reaching them means opening the
+order, through the read paths that already apply ADR-044's entry-is-not-release filtering. Projecting
+results into a new response would have meant writing a second result-reading path whose release
+filtering nobody had qualified, and an entered-but-unreleased value reaching a clinician through a new
+screen is precisely what ADR-044 exists to prevent. The visit response has no field that could carry
+one, which is asserted structurally.
+
+**5. Cancellation takes no reason.** §36 says "cancel with a reason". `cancelled_at` is recorded and a
+free-text cancellation reason is not, because §12 restricts cancellation to a visit that has **not
+started** — nobody has seen the patient, and the honest content of such a reason is administrative
+("did not wait", "wrong day") rather than clinical. A free-text field on a pre-consultation record is
+a place for clinical content to be written where nothing reads it. If a real clinic asks for it, it is
+a small additive change.
+
+### Gaps this ticket deliberately left open, named rather than filled
+
+| Gap | Why it was not filled here |
+|---|---|
+| **Amending a completed visit's note.** | A real clinical need. This codebase already has an explicit, audited, versioned amendment workflow for the analogous case (ADR-048, lab results); inventing a second, weaker one inside a lifecycle ticket would be worse than leaving the gap named. The interface says the note is closed rather than offering a field the server refuses. |
+| **Reopening a completed or cancelled visit.** | Requires deciding what a reopened visit means for the record that said it was finished, and for the audit row that recorded the completion. Not a lifecycle question — a records question. |
+| **`PLANNED` / `NO_SHOW` / appointments.** | Ticket 7. See departure 1. |
+| **Who may register an arrival.** | **D-1**, unchanged and still not blocking. Today it needs `CLINICIAN` because that is the only clinical authority the backend has. `canRunVisits` in `workspaceCapabilities.ts` is the single place a front-desk answer will land, and the state model does not change when it does. |
+| **Any structured clinical field** — vitals, SOAP, examination template, problem list, diagnosis code. | Clinical content, requiring the clinical lead's sign-off (`AGENTS.md`). **D-5** for coding specifically. The free-text note is unaffected. |
+| **Waiting time, priority, triage order.** | Not a gap to be filled: a waiting time computed in a browser from two clocks is an operational signal DHealth must not produce, and triage is an explicit non-goal (§29). |
+
+### What this does not make true
+
+**Human usability is not claimed.** §32's usability qualification has not been run for this surface: no
+clinician has used it, no timing has been measured against what it replaces, and product law 3
+("faster than what it replaces") therefore remains a **validated target, not a current claim**. What is
+demonstrated is that the workflow completes end to end in a real browser against a real stack.
+
+**Pilot-ready is still not clinically live.** This adds a place to write a clinical note. It does not
+add clinical sign-off on the order set or on any structured field, and nothing here is authorization
+to use DHealth on a real patient.

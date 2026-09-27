@@ -51,6 +51,7 @@ function makeOrder(overrides: Partial<LabOrderSummary> = {}): LabOrderSummary {
     status: 'AWAITING_LAB_SELECTION',
     created_at: '2026-09-17T08:00:00Z',
     item_count: 2,
+    visit_id: null,
     lab_assignment: null,
     ...overrides,
   }
@@ -68,6 +69,7 @@ function makeFullOrder(overrides: Partial<LabOrder> = {}): LabOrder {
     items: [
       { catalog_entry_id: 'entry-1', catalog_code_snapshot: 'GLU', catalog_display_name_snapshot: 'Glycémie' },
     ],
+    visit_id: null,
     lab_assignment: null,
     ...overrides,
   }
@@ -163,6 +165,7 @@ describe('ClinicOrdersPage', () => {
       listOrders: vi.fn().mockResolvedValue([
         makeOrder({
           status: 'SELECTED',
+          visit_id: null,
           lab_assignment: {
             lab_organization_id: 'lab-1',
             lab_organization_name: 'Laboratoire Central',
@@ -204,6 +207,7 @@ describe('ClinicOrdersPage', () => {
       .mockResolvedValueOnce(
         makeFullOrder({
           status: 'SELECTED',
+          visit_id: null,
           lab_assignment: {
             lab_organization_id: 'lab-1',
             lab_organization_name: 'Laboratoire Central',

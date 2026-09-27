@@ -2738,3 +2738,83 @@ inert `PENDING` row, because three qualified atomicity/idempotency tests use tha
 proof that order creation commits as one aggregate. Alembic head unchanged at
 `0033_staff_access_lifecycle`. Stopping creation (phase B) and dropping the table (phase C) are named
 in ADR-064 and left to future tickets with their own evidence.
+
+---
+
+## 30. The clinic visit, and how an order inherits one (DHEALTH-CLINIC-VISIT-001 / ADR-065) — added 2026-09-27
+
+`exchange_visits` is the first table in this schema that records *care happening* rather than a
+transaction being exchanged. It is deliberately the narrowest such row: who, when, why in the
+patient's own words, one clinician's free-text note, and whatever diagnostic orders were raised. It is
+not an HL7/FHIR Encounter, not a chart, and not an EMR — `models.py` carries a dated note saying
+exactly which part of its own original "no free-text clinical notes here" claim stopped being literally
+true, and which part is still intact.
+
+### Where the boundaries are enforced, and by what
+
+| Boundary | Enforced by | Not by |
+|---|---|---|
+| A visit's patient belongs to the visit's provider | **composite** FK `(patient_id, provider_organization_id)` → `Patient`'s `uq_exchange_patients_id_provider` | an application-layer check every future call site must remember |
+| A visit's status history cannot contradict its status | four CHECK constraints pairing each status with its timestamp, plus "a taken visit has a clinician" | convention |
+| `PLANNED`/`NO_SHOW` cannot appear | the status CHECK constraint enumerates exactly four values | the enum alone |
+| Two clinicians cannot both take or both complete one visit | `SELECT … FOR UPDATE` on the visit row, status re-read **inside** the lock | a pre-read check, which is precisely what two callers both pass |
+| Two note revisions cannot claim one number | `uq_exchange_visit_notes_visit_revision` | the row lock alone |
+| A visit with any order, intent or note cannot be deleted | `RESTRICT` on all three foreign keys | the absence of a delete endpoint |
+| Only a provider's own ACTIVE CLINICIAN may act | `_require_clinician` → `authz.require_clinician`, first statement of every route | UI section visibility, which is usability only |
+
+The row-lock and foreign-key rows of that table are qualified against **real PostgreSQL**
+(`tests/integration/test_dhealthvisit001_postgres_qualification.py`), because SQLAlchemy's SQLite
+dialect omits `FOR UPDATE` entirely and this repository's SQLite test engine enables no foreign keys
+at all. Both would have been green for the wrong reason.
+
+### Visit context travels on the intent, not the order
+
+This is the architectural decision worth remembering, and the one a future connector ticket will meet
+first. `visit_id` is nullable on `exchange_lab_order_intents` **and** `exchange_lab_orders`:
+
+```
+    clinician orders inside a visit
+              │
+              ▼
+    POST …/order-intents   { patient_reference_id, catalog_entry_ids, visit_id }
+              │                                                      │
+              │   validated ONCE here: visit exists in this org,      │
+              │   is IN_PROGRESS, is about this patient               │
+              ▼                                                      ▼
+    exchange_lab_order_intents.visit_id  ── frozen, part of the replay comparison
+              │
+              │   commit() copies it forward, re-validating NOTHING
+              ▼
+    exchange_lab_orders.visit_id         ── the indexed read the visit aggregate uses
+```
+
+Three properties fall out of that placement, and no other placement gives all three:
+
+1. **A retry cannot move an order to a different visit.** The intent is immutable and the visit is
+   frozen on it before the order exists.
+2. **A retry that presents a *different* visit is a loud conflict**, not a silent return of the first
+   visit's intent — `visit_id` joined the existing patient/practitioner/test-set comparison that
+   already refuses "mismatched data".
+3. **A retry sent after the consultation ended still succeeds.** Commit does not re-validate, because
+   the fact being recorded is that the visit *was* in progress when the order was raised.
+
+Consequence worth knowing: because the backend compares `visit_id` on replay, the browser's
+pending-order record persists it (`pendingOrderStorage.ts`), so a reload between "intent POST sent" and
+"intent id stored" does not turn a recoverable attempt into a dead key.
+
+`NULL` is permanent on both columns, not transitional. Every order predating this ticket has no visit,
+and so does every standalone order — a walk-in, or a connector-submitted order from a foreign system
+that has no DHealth visit and never will.
+
+### What the visit surface deliberately cannot reach
+
+No result values. The visit read returns orders, and results are opened from the order through the
+paths that already apply ADR-044's entry-is-not-release filtering. Adding a result projection here
+would have been a second release-filtering implementation that nobody had qualified.
+
+No lab coupling in either direction: `exchange/visits.py` contains no reference to lab order status,
+so a visit never waits for a laboratory and a laboratory never completes a visit.
+
+No `visit_viewed` audit event. Reading is not a mutation, and `ExchangeSecurityAuditEvent` is not an
+access log — a worklist refresh must not write rows. No note body reaches any audit row, log line or
+error message.

@@ -122,6 +122,13 @@ class LabOrderRecord:
     intent_id: uuid.UUID | None = None
     """``None`` for a pre-DH-CLINIC-003C historical order that predates durable intent ownership --
     this is permanent, correct, unowned state, never backfilled."""
+    visit_id: uuid.UUID | None = None
+    """DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, when there was one.
+
+    ``None`` is permanent and correct for two populations, not a gap to be backfilled: every order
+    created before this ticket, and every standalone order raised without a clinic contact. This
+    value is only ever copied from the committing intent (``exchange/order_intents.py``) -- never
+    supplied to this repository directly, and never inferred from the patient or a timestamp."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +362,36 @@ class LabOrderRepository:
             ).all()
             return [_to_order_record(order) for order in orders]
 
+    def list_for_visit(
+        self,
+        provider_organization_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        *,
+        limit: int = 50,
+    ) -> list[LabOrderRecord]:
+        """DHEALTH-CLINIC-VISIT-001: the orders raised during one clinic visit.
+
+        Scoped by ``provider_organization_id`` as well as ``visit_id``, even though a visit already
+        belongs to exactly one organization: the same defence ``list_for_patient`` applies above, so
+        a visit id from another tenant returns an empty list rather than that tenant's orders.
+
+        This exists instead of a ``VisitOrder`` join table or a ``visit.orders`` relationship
+        because
+        the order aggregate is already the authoritative record of what was ordered -- a second
+        structure naming the same fact is the mistake ADR-064 was written about."""
+        with self._sessions() as session:
+            orders = session.scalars(
+                select(LabOrder)
+                .options(selectinload(LabOrder.items))
+                .where(
+                    LabOrder.provider_organization_id == provider_organization_id,
+                    LabOrder.visit_id == visit_id,
+                )
+                .order_by(LabOrder.created_at.desc(), LabOrder.id.desc())
+                .limit(limit)
+            ).all()
+            return [_to_order_record(order) for order in orders]
+
     def get_by_idempotency_key(
         self,
         provider_organization_id: uuid.UUID,
@@ -471,6 +508,7 @@ def _to_order_record(order: LabOrder) -> LabOrderRecord:
         status=order.status,
         created_at=order.created_at,
         intent_id=order.intent_id,
+        visit_id=order.visit_id,
         items=tuple(
             LabOrderItemRecord(
                 id=item.id,

@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-RESULT-DELIVERY-001, 2026-09-27 — this parenthetical has now gone stale ten times,
+> DHEALTH-CLINIC-VISIT-001, 2026-09-27 — this parenthetical has now gone stale eleven times,
 > first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -21751,3 +21751,200 @@ tests are structural text assertions: they catch a production module *naming* th
 not catch an exotic dynamic reference (`getattr`, a string-built import). That is an accepted trade —
 the realistic failure mode is an adapter author calling `mark_delivered` because it looked relevant,
 which is exactly what the guards catch.
+
+---
+
+## DHEALTH-CLINIC-VISIT-001 — The First Native Visit / Encounter (2026-09-27) — DONE
+
+**Start:** `7810b7c`, HEAD matched exactly, tree clean, Alembic head `0033_staff_access_lifecycle`.
+**Ending Alembic head: `0034_clinic_visits`.**
+
+Implements `docs/NATIVE-OPERATING-PRODUCT.md` §12/§13 and its §36 first-ticket brief. **ADR-065.**
+The delivered-vs-brief delta, including three recorded departures and six named gaps, is that
+specification's new **§38**.
+
+### Read this first: four states, not five
+
+The ticket's §6 said *"use the exact five-state lifecycle recorded by the operating-product
+specification"*. **Four were built**, and this is a deliberate, reported deviation rather than an
+omission.
+
+The specification's own first-ticket brief (§36) says `PLANNED` and `NO_SHOW` are omitted until a
+calendar exists, and the ticket's own §32 independently forbids no-show handling. No five-state
+reading is coherent: keep `NO_SHOW` and §32 is violated; keep `PLANNED` and nothing can reach it,
+which §12 itself calls decoration. Two explicit instructions against one adjective.
+
+This was **not** raised as `HUMAN DECISION REQUIRED`, and the reasoning is stated so it can be
+overruled cheaply: the STOP trigger the ticket defines is *"the specification does not define enough
+to implement the five-state model unambiguously"*. §12 defines all five precisely. The conflict is
+about this ticket's **scope**, not about definition, so the narrow reading was implemented and
+reported rather than blocking the ticket. **If Liban wants five states, the change is a migration that
+widens one CHECK constraint plus the two transitions — say so and it is a small ticket.**
+
+The database refuses `PLANNED` and `NO_SHOW` (`ck_exchange_visits_status`), so neither can be
+reintroduced by an application-layer edit alone.
+
+### What was built
+
+| | |
+|---|---|
+| Migration | `0034_clinic_visits` — `exchange_visits`, `exchange_visit_notes`, nullable `visit_id` on **both** `exchange_lab_orders` and `exchange_lab_order_intents`, +6 audit event types, +1 `resource_type` |
+| Service | `exchange/visits.py` (six operations, three reads, every transition under `FOR UPDATE` with the status re-read inside the lock) |
+| API | nine routes, every one calling `_require_clinician` as its first statement |
+| Frontend | `ui/src/features/visits/` — `Visites` section, worklist, arrival form, visit workspace, order hand-off |
+| Reuse | no `VisitOrder` table, no forked ordering wizard, no second result-reading path |
+
+### Qualification, as measured
+
+| Layer | Result |
+|---|---|
+| Adapter unit/HTTP (`test_dhealthvisit001_clinic_visits.py`) | **63 passed** |
+| Real PostgreSQL (`test_dhealthvisit001_postgres_qualification.py`) | **11 passed** against PostgreSQL 16 — two clinicians taking one visit, two completing it, concurrent note revisions, cancel racing take, the composite foreign key, the timestamp CHECKs, `RESTRICT`, audit/transaction coupling, and one idempotency key under a real race |
+| Migration drill | `0034` applied to a disposable database on top of `0033`. **Downgrade verified in both directions**: refused with a `CheckViolation` while visit audit rows exist (exactly as the migration's docstring claims), then succeeded once cleared, then re-upgraded and restored the schema |
+| Real browser (`ui/e2e/native/08-clinic-visit.spec.ts`) | **9 phases passed** against real Chromium, Caddy, Keycloak 26.7.1, adapter and PostgreSQL |
+| UI unit (`ClinicVisitsPage.test.tsx`) | **20 passed** |
+| Whole UI suite | **60 files, all passing.** Stated as measured rather than as one derived total: the batched run reported **940 tests across 59 files**, and the 60th file (`PatientWorkspace.test.tsx`, dropped by a worker-start timeout) reports **2** on its own re-run. 942 is that addition, not a number any single run printed. |
+| **Whole adapter suite** | **1783 passed, 181 skipped, 0 failed** in 12m36s — the full run, not a subset. Worth stating plainly: the two previous tickets each had this run killed for system memory and reported it as such; this one completed. |
+| Negative controls NC-VISIT-1..6 | **all 6 reddened the named test and reverted byte for byte** |
+
+### The nine browser phases
+
+`VISIT-A` the section is reachable for a clinician · `VISIT-B` an arrival creates a real `CHECKED_IN`
+visit with no clinician and no start time · `VISIT-C` taking it records this clinician and writes one
+`visit_started` audit row · `VISIT-D` a note and its correction are revisions 1 and 2, both on screen,
+neither overwritten · `VISIT-E` analyses ordered from inside the visit land on `exchange_lab_orders`
+**and** `exchange_lab_order_intents` with that `visit_id` · `VISIT-F` the visit completes with the
+order still `AWAITING_LAB_SELECTION`, and the order is untouched · `VISIT-G` a completed visit refuses
+take/complete/cancel with 409 and the interface offers none of them · `VISIT-G2` a lab technician gets
+404 at the provider and 403 at their own laboratory, and has no `Visites` section · `VISIT-H` a visit
+in consultation can never be cancelled — the control is gone from the interface *and* the endpoint
+answers 409.
+
+### The negative controls, and what each proved
+
+| | Broke | Named test that reddened |
+|---|---|---|
+| NC-VISIT-1 | added `IN_PROGRESS → CANCELLED` | `test_vis12`, `test_vis14` |
+| NC-VISIT-2 | re-validated the visit at commit | `test_vis37` (retry idempotency) |
+| NC-VISIT-3 | dropped `visit_id` from the intent replay comparison | `test_vis35` |
+| NC-VISIT-4 | allowed a note on a terminal visit | `test_vis19`, `test_vis18` |
+| NC-VISIT-5 | smuggled the note body into an audit column | `test_vis51` — **but read the note below: it reddened for a stronger reason than the test was written to check** |
+| NC-VISIT-6 | let an order attach to a `CHECKED_IN` visit | `test_vis32` |
+
+**NC-VISIT-5's result is better than "the test caught it", and worth stating precisely.** The control
+tried to write the note text into the audit row's `role` column, and the *insert itself* failed — the
+test reddened on an exception before it read any audit row. That is not a weaker result: it means
+**`exchange_security_audit_events` has no column a free-text note could occupy at all.** Every column
+is a UUID, a foreign key, a timestamp, or CHECK-constrained to a closed set of short values. So the
+guarantee is structural — the schema refuses the leak, not only the assertion — and a future author who
+tries this will be stopped by PostgreSQL whether or not the test still exists.
+
+### Two defects in this ticket's own work, caught in review before commit
+
+1. **`start()` answered 500 to a double-clicked check-in.** It pre-read by
+   `(provider, idempotency_key)` then inserted. Two simultaneous requests both pass the pre-read, and
+   the loser's `IntegrityError` escaped `session.begin()` straight to the caller. The *most ordinary*
+   client behaviour would have produced a 500. Worse, **the PostgreSQL qualification tolerated it** —
+   VISIT-PG-9 asserted `isinstance(failure, IntegrityError)`, so the test documented the defect instead
+   of catching it. Fixed by mirroring the pattern `order_intents._create_in_session` already had 20
+   lines away: insert inside a `begin_nested()` SAVEPOINT, catch the violation, re-read by key, and
+   replay through the same comparison the pre-read path uses. `raise` is preserved when the re-read
+   finds nothing, so a composite-foreign-key or CHECK violation still surfaces. VISIT-PG-9 now asserts
+   **both callers succeed**, one `created=True` and one `created=False` — re-run, 11/11 green.
+2. **`effectiveVisitId` contradicted its own comment.** `unresolvedStoredOrder?.visit_id ?? handOff`
+   falls through on a stored attempt that has *no* visit, so an ordinary directory order left in flight
+   would be retried carrying a visit its idempotency key had never been used with — and the backend's
+   replay comparison would refuse it. The comment said "a resumed attempt must present what it
+   originally sent"; the code did not. Now an explicit branch: a stored attempt wins outright,
+   including when its visit is absent. No wrong record was ever possible (the backend refuses it, which
+   is the whole point of putting `visit_id` in that comparison), but the recovery path would have
+   wedged.
+
+Also corrected in the same pass: the visit workspace rendered `order.status` raw, putting
+`AWAITING_LAB_SELECTION` on a French-first screen — `formatOrderStatus` was extracted from
+`ClinicPatientsPage` to `clinic/orderStatusVocabulary.ts` and shared, rather than a fourth copy being
+written. (`ClinicOrdersPage` and `LabOrdersPage` keep their own pre-existing label functions; that
+duplication predates this ticket and consolidating it would rewire two qualified pages.) And three
+strings said "clôturée" where `visitVocabulary.ts` had explicitly chosen "terminée" over it — the
+vocabulary module exists to prevent exactly that, and the copy now matches, using "terminée ou annulée"
+where the condition covers both terminal states.
+
+### Three defects in earlier work, and one false result of my own
+
+1. **My own `tsc --noEmit` is not the repository's typecheck.** `npx tsc --noEmit` passed while
+   `npm run typecheck` (`tsc -b --noEmit`, what CI runs) reported 21 errors: making `visit_id`
+   required on `LabOrder`/`LabOrderSummary`/`LabOrderIntent` broke every fixture that omitted it. Found
+   by the Docker build failing, not by me. The 21 fixtures now state the field, which is correct — the
+   server always sends it, and making it optional would invite call sites to forget it exists. **Use
+   `npm run typecheck`, never bare `tsc`.**
+2. **`reset.sh` would have left visits behind.** `demo_seed._WORKFLOW_TABLES` did not know about them,
+   so the module's own "restore the deterministic baseline" contract would have been false for visits
+   specifically. Added `exchange_visit_notes` and `exchange_visits`. The seed *patient* stays baseline
+   and is deliberately still absent from that list.
+3. **My own batch test runner reported a false negative.** It anchored `grep -E '^\s*Test Files'`
+   against vitest output where every line begins with an ANSI escape, matched nothing, and reported
+   "0 files, 0 tests" for all nine batches — while all nine had in fact run and passed. Caught by
+   reading a log rather than trusting the summary. The parser now strips escapes first.
+4. **Two of my own E2E assertions were wrong, not the product.** A lab technician asking their *own*
+   laboratory for a visit gets **403, not 404** — they are a member lacking the role, and 404 is for no
+   relationship at all. And registering an arrival auto-selects that visit, so the reason renders twice
+   (list row plus detail panel) and a strict locator matches two elements. Both corrected in the spec,
+   with the reasoning recorded there.
+
+### Scope discipline
+
+No GitHub Actions change. No push. No reset, rebase, squash or rewrite of previous work. No new role.
+No appointments, billing, front desk, vitals, SOAP, diagnosis coding, triage, alerting or decision
+support. No waiting-time or priority derivation anywhere in the interface. All data synthetic; **no real
+patient data used.**
+
+`appointment_id` was **omitted** from the `Visit` domain despite §36 listing it: no appointment table
+exists for it to reference, nothing would read it, and an unreferenced speculative column is surface of
+exactly the kind DHEALTH-NATIVE-SEC-001's P1 was made of.
+
+### HUMAN DECISION REQUIRED
+
+**None raised.** The four-state deviation above is reported for review rather than raised as a blocker,
+for the reason given there.
+
+Unrelated open items unchanged: **D-1** (Front Desk backend authority — still not blocking; this ticket
+was clinician-only by design, and `canRunVisits` is the single place a front-desk answer will land),
+D-2a/D-2b (billing), D-3 (specimen), D-4 (lab identity attributes), D-5 (diagnosis coding), D-6
+(walk-in lab patient), D-8 (successful-read audit), D-9 (session timeout), D-10 (staff localisation).
+
+### Known limitations
+
+**Human usability is not claimed.** §32's usability qualification has not been run for this surface. No
+clinician has used it, and nothing has been timed against the register or EMR it would replace, so
+**product law 3 remains a validated target rather than a current claim**. What is demonstrated is that
+the workflow completes end to end in a real browser against a real stack.
+
+**Post-completion note amendment is not built**, deliberately (ADR-065 §4): the codebase already has an
+explicit versioned amendment workflow for the analogous case, and inventing a second weaker one inside
+a lifecycle ticket would be worse than leaving the gap named. The interface says the note is closed
+rather than offering a field the server refuses.
+
+**The browser suite cannot clean up after itself.** Every foreign key pointing at a visit is `RESTRICT`
+and no delete endpoint exists, so it leaves real visits in the demo database; `scripts/demo/reset.sh`
+clears them. Reasons are made unique per run so a database carrying earlier runs still yields
+unambiguous selectors.
+
+**Two UI test files needed a re-run**, and both are environment flakes rather than regressions:
+`PatientWorkspace.test.tsx` was dropped by a vitest worker-start timeout (`Failed to start threads
+worker`), and `ExchangeAuthProvider.test.tsx`'s "retry() re-runs initialization from scratch" failed
+once. Both pass on re-run. This matches the catalogued flake pattern, and neither touches visit code.
+
+**Pre-existing, not mine, and CI-breaking — the adapter job fails on `master` today, in two separate
+steps.** Both were verified against files this ticket never modified (`git status` shows no
+modification for either), with the same pinned ruff 0.15.22 that CI installs:
+
+- `ruff check src tests migrations scripts` → **5 errors**, all E501 in
+  `adapter/tests/test_native_recovery_tooling.py` (introduced by `5dcdaa9`,
+  DHEALTH-NATIVE-RECOVERY-001).
+- `ruff format --check src tests migrations scripts` → **2 files would be reformatted**:
+  `test_native_recovery_tooling.py` and `test_patient_notification_transport.py`.
+
+Left untouched because both are outside this ticket, and reported here because a reviewer looking at a
+red pipeline after this commit would otherwise attribute it to this work. Everything this ticket
+touched or added passes both commands. The fix is five prose line-wraps plus one `ruff format` run, and
+it belongs in its own commit so the attribution stays clear.

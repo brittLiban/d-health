@@ -16,6 +16,19 @@ anywhere in this module. ``PatientReference`` keeps its exact, no-fuzzy-matching
 unchanged -- it is now explicitly the source-identity/provenance binding *for* a ``Patient``
 (``patient_id``, DH-IDENTITY-001), not an overloaded stand-in for one.
 
+**2026-09-27 dated note (DHEALTH-CLINIC-VISIT-001):** the first paragraph's "no free-text clinical
+notes" is, as of today, no longer literally true of this module, and is left unedited above as
+accurate history rather than quietly corrected. ``Visit``/``VisitNote`` now exist at the end of
+this file, and ``VisitNote.body`` is exactly what that sentence said did not exist here. What the
+sentence was protecting is nonetheless intact, so the boundary is restated rather than abandoned:
+still **no medication list, no diagnosis history, no problem list, no vitals, no structured
+examination, no coded clinical data, and no clinical interpretation anywhere in this module.** A
+visit records that a clinician saw a patient, the reason the patient gave, and what that clinician
+chose to write down; it is not a longitudinal medical record, and nothing in this codebase reads a
+note back for any purpose other than showing it to the clinician who is looking at that visit.
+Every structured clinical field remains out of scope pending the clinical lead's sign-off
+(``AGENTS.md``), and the note is never transmitted to any third-party AI/ML service.
+
 Shares ``Base`` with ``daher_adapter.models`` (imported, not redefined) so a single Alembic chain
 and a single ``Base.metadata.create_all()`` test fixture cover both the connector-specific tables
 and this Exchange core -- see this package's ``__init__.py`` for why that is safe (no import of
@@ -40,6 +53,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
     text,
@@ -88,6 +102,9 @@ __all__ = [
     "ResultDelivery",
     "ResultDeliveryStatus",
     "TestCatalogEntry",
+    "Visit",
+    "VisitNote",
+    "VisitStatus",
 ]
 
 
@@ -632,6 +649,17 @@ class LabOrder(Base):
     intent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_lab_order_intents.id", ondelete="RESTRICT"), nullable=True
     )
+    # DHEALTH-CLINIC-VISIT-001: the visit this order was raised during, when it was raised during
+    # one. **Nullable permanently, not transitionally.** Two distinct populations legitimately have
+    # no visit and must keep working forever: every order that predates this ticket, and every
+    # standalone diagnostic order a walk-in or a connector raises without a clinic contact. This
+    # column is only ever set from the committing `LabOrderIntent`'s own `visit_id` (never supplied
+    # directly to the order-commit call, never inferred from the patient or a timestamp) -- see
+    # `exchange/order_intents.py`'s `commit` for why the intent is the only safe place to capture
+    # it.
+    visit_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_visits.id", ondelete="RESTRICT"), nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default=LabOrderStatus.AWAITING_LAB_SELECTION.value
     )
@@ -720,6 +748,17 @@ class LabOrderIntent(Base):
     )
     committed_lab_order_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=True
+    )
+    # DHEALTH-CLINIC-VISIT-001: the visit context, captured **here** rather than at order commit,
+    # because this row is the immutable one. The intent is created once inside the visit and is
+    # frozen; commit copies this value onto the LabOrder and re-validates nothing. Capturing it at
+    # commit instead would mean a lost-response retry could present a different visit and silently
+    # move the order, which `docs/NATIVE-OPERATING-PRODUCT.md` §36's linkage rules forbid. It also
+    # joins this intent's replay comparison in `exchange/order_intents.py` (alongside patient,
+    # practitioner and the item set), so reusing one idempotency_key under a *different* visit is a
+    # loud `IdempotencyKeyConflict` rather than a silent return of the other visit's intent.
+    visit_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_visits.id", ondelete="RESTRICT"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
@@ -1753,7 +1792,17 @@ class ExchangeSecurityAuditEvent(Base):
             # a cross-organization attempt or a last-administrator lockout is an authorization
             # refusal, not a mutation, and belongs in `exchange/audit.py`'s best-effort file writer
             # for the reason this class's own docstring gives.
-            "'membership_deactivated', 'membership_reactivated', 'role_removed'"
+            "'membership_deactivated', 'membership_reactivated', 'role_removed', "
+            # DHEALTH-CLINIC-VISIT-001: the clinic visit lifecycle. Every one of these is a real
+            # state mutation performed by a named clinician, which is the only test this table
+            # applies. `visit_note_appended` records *that* a note revision was written and to which
+            # visit -- never the text, which is clinical free content and belongs nowhere near an
+            # audit row (see `VisitNote`'s own docstring). No `visit_viewed` event: reading is not a
+            # mutation, and this table's docstring is explicit that it is not an access log. No
+            # refusal events either -- an attempt to complete someone else's visit is an
+            # authorization refusal, recorded by `exchange/audit.py`'s best-effort file writer.
+            "'visit_created', 'visit_started', 'visit_completed', 'visit_cancelled', "
+            "'visit_note_appended', 'visit_reason_amended'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1778,7 +1827,12 @@ class ExchangeSecurityAuditEvent(Base):
             # delivery row: refusing it is precisely the decision not to create one.
             # DH-NOTIFY-001: attempts hang off a notification, so audit stays notification-centric
             # rather than per-attempt -- the same convention as the connector line above.
-            "'connector_installation', 'patient_notification')",
+            # DHEALTH-CLINIC-VISIT-001: note revisions hang off a visit, so audit stays
+            # visit-centric rather than per-note-revision -- the same convention as the connector
+            # and notification lines above. There is deliberately no 'patient' or 'visit_note'
+            # resource type added here: the patient is reachable from the visit, and naming the
+            # patient on every visit event would turn this table into a record of who was seen when.
+            "'connector_installation', 'patient_notification', 'visit')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
@@ -2190,3 +2244,194 @@ class FacilityEnrollmentBlocker(Base):
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- DHEALTH-CLINIC-VISIT-001: the native clinic visit / encounter ---------------------------
+
+
+class VisitStatus(StrEnum):
+    """The clinic visit lifecycle, exactly as ``docs/NATIVE-OPERATING-PRODUCT.md`` §12 records it,
+    minus the two states that specification's own first-ticket brief (§36) omits.
+
+    ``PLANNED`` and ``NO_SHOW`` are **deliberately absent, not forgotten.** Both exist only with a
+    calendar: ``PLANNED`` means "a booked appointment that has not arrived", and ``NO_SHOW`` exists
+    (§12's words) "for ``PLANNED`` to be honest". No appointment table exists in this codebase, so
+    nothing could ever put a visit into either -- and §12's own rejected-states list names "a state
+    reachable by nothing" as decoration. They are added by the appointments ticket, together with
+    the table that makes them reachable, or not at all.
+
+    **There is no ``IN_PROGRESS`` -> ``CANCELLED`` transition.** §12 is explicit: CANCELLED is
+    reachable "From ``PLANNED`` or ``CHECKED_IN``. Never from ``IN_PROGRESS`` -- that is a
+    completed-with-note." A clinician who has begun seeing a patient and then must stop completes
+    the visit and says why in the note; the fact that contact happened is not erasable by a status.
+
+    **Nothing here is ever entered by the system.** Every transition is an explicit clinician act
+    (``exchange/visits.py``). In particular ``COMPLETED`` is never reached by a lab order finishing,
+    a timer, or a date rolling over -- §12's "The clinician says so; nothing auto-completes."
+    """
+
+    CHECKED_IN = "CHECKED_IN"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class Visit(Base):
+    """DHEALTH-CLINIC-VISIT-001: one outpatient clinic contact between a provider organization's
+    clinician and one of that organization's own native ``Patient`` directory records.
+
+    This is the first row in this module that represents *care happening* rather than a transaction
+    being exchanged, and it is deliberately the narrowest possible such row: who, when, why in the
+    patient's own words, one clinician's free-text note, and whatever diagnostic orders were raised.
+    It is **not** an encounter in the HL7/FHIR sense, not a longitudinal chart, and not an EMR --
+    see this module's own 2026-09-27 dated docstring note for why that boundary still holds.
+
+    **Scoped to a native ``Patient``, never a ``PatientReference``.** A visit is a thing that
+    happens to a person the provider organization itself registered and can see in its own
+    directory; ``PatientReference`` is a *provenance binding* for one exchanged transaction
+    (possibly created by a connector on behalf of a foreign source system) and one human may hold
+    several. Hanging a visit off a reference would mean the same person's two visits could be
+    unrelatable, which is precisely the ambiguity ADR-051 forbids resolving by guesswork.
+
+    The composite ``ForeignKeyConstraint((patient_id, provider_organization_id))`` targeting
+    ``Patient``'s ``uq_exchange_patients_id_provider`` is the point of this table's tenant safety:
+    the **database itself** rejects a visit that names a patient belonging to a different provider
+    organization, rather than trusting every present and future call site to have checked. This is
+    the same mechanism, and the same reasoning, as ``PatientReference``'s composite link
+    (DH-IDENTITY-001 §8).
+
+    ``clinician_identity_id`` is nullable because ``CHECKED_IN`` truthfully has no clinician yet --
+    the waiting list is that state (§12), and who will see the patient is not known at check-in.
+    It is set, once, when a clinician takes the visit. A visit that was never taken and was
+    cancelled keeps a NULL clinician forever, which is the honest record.
+
+    ``idempotency_key`` follows the ``(provider_organization_id, idempotency_key)`` uniqueness shape
+    ``LabOrder``/``LabOrderIntent``/``PatientRegistrationRequest`` already established, for the
+    identical cross-tenant reason given in those docstrings: a bare global-unique key lets two
+    organizations' clients collide by accident and receive each other's row.
+
+    The timestamp CHECK constraints below make the state machine's *consequences* non-forgeable at
+    the database level rather than merely conventional: a ``COMPLETED`` row without a
+    ``completed_at`` (or the reverse) cannot exist, so no later code path can leave a visit in a
+    state whose history contradicts it.
+    """
+
+    __tablename__ = "exchange_visits"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_organization_id",
+            "idempotency_key",
+            name="uq_exchange_visits_provider_idempotency_key",
+        ),
+        ForeignKeyConstraint(
+            ["patient_id", "provider_organization_id"],
+            ["exchange_patients.id", "exchange_patients.provider_organization_id"],
+            name="fk_exchange_visits_patient_same_provider",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('CHECKED_IN', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')",
+            name="ck_exchange_visits_status",
+        ),
+        # A started visit has a start time; an unstarted one does not. `CANCELLED` is reachable only
+        # from `CHECKED_IN` (see `VisitStatus`), so it is on the unstarted side of this constraint.
+        CheckConstraint(
+            "(status IN ('IN_PROGRESS', 'COMPLETED')) = (started_at IS NOT NULL)",
+            name="ck_exchange_visits_started_at_matches_status",
+        ),
+        CheckConstraint(
+            "(status = 'COMPLETED') = (completed_at IS NOT NULL)",
+            name="ck_exchange_visits_completed_at_matches_status",
+        ),
+        CheckConstraint(
+            "(status = 'CANCELLED') = (cancelled_at IS NOT NULL)",
+            name="ck_exchange_visits_cancelled_at_matches_status",
+        ),
+        # A clinician is required exactly once the visit has been taken, and a taken visit can
+        # never lose one -- `COMPLETED` is reachable only through `IN_PROGRESS`.
+        CheckConstraint(
+            "status NOT IN ('IN_PROGRESS', 'COMPLETED') OR clinician_identity_id IS NOT NULL",
+            name="ck_exchange_visits_taken_visit_has_clinician",
+        ),
+        # The worklist query: this organization's visits in one state, newest first (§13).
+        Index("ix_exchange_visits_provider_status", "provider_organization_id", "status"),
+        # The patient-chart query: one patient's visit history.
+        Index("ix_exchange_visits_provider_patient", "provider_organization_id", "patient_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # NULL until a clinician takes the visit; never cleared afterwards.
+    clinician_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=VisitStatus.CHECKED_IN.value
+    )
+    # The patient's stated reason, as stated. Never a diagnosis, never interpreted, never coded --
+    # a code system is D-5 in `docs/NATIVE-OPERATING-PRODUCT.md` §28, not this ticket's decision.
+    reason_for_visit: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    notes: Mapped[list[VisitNote]] = relationship(back_populates="visit")
+
+
+class VisitNote(Base):
+    """One append-only revision of a visit's clinical note.
+
+    **Append-only, and that is the whole concurrency design.** A note is never updated in place and
+    never deleted; correcting or extending a note inserts a new revision, and the highest
+    ``revision_number`` is the current text. Two clinicians editing the same visit therefore cannot
+    silently overwrite each other -- the loser of the race violates
+    ``uq_exchange_visit_notes_visit_revision`` and is told, rather than having its text vanish. This
+    is the narrowest mechanism that gives that guarantee: no row versioning framework, no
+    fingerprint column, no optimistic-concurrency token, because the immutability of a row already
+    provides it. It is also the same discipline ADR-045/048 established for corrected and amended
+    lab results -- in this codebase a clinical statement's history is never rewritten, and a visit
+    note is a clinical statement.
+
+    ``revision_number`` exists rather than ordering by ``created_at`` alone because two appends
+    inside the same clock tick would otherwise have no defined order, and "which text is current"
+    must never be ambiguous.
+
+    ``author_identity_id`` is NOT NULL: an unattributed clinical note is not a record of anything.
+    It is the identity that wrote *this revision*, deliberately not the visit's clinician -- a
+    covering clinician may append to a visit, and the note must say who actually wrote it.
+
+    The body is free text and is never sent to an audit row, a log line, an error message, or any
+    third-party service (``AGENTS.md``'s absolute rule). ``exchange/visits.py`` audits that a note
+    was appended and to which visit -- never what it said.
+    """
+
+    __tablename__ = "exchange_visit_notes"
+    __table_args__ = (
+        UniqueConstraint(
+            "visit_id", "revision_number", name="uq_exchange_visit_notes_visit_revision"
+        ),
+        CheckConstraint("revision_number >= 1", name="ck_exchange_visit_notes_revision_positive"),
+        Index("ix_exchange_visit_notes_visit_id", "visit_id", "revision_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    visit_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_visits.id", ondelete="RESTRICT"), nullable=False
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    author_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    visit: Mapped[Visit] = relationship(back_populates="notes")

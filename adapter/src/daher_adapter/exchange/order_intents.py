@@ -36,6 +36,7 @@ from daher_adapter.exchange.orders import (
     OrderItemInput,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
+from daher_adapter.exchange.visits import require_visit_can_receive_order
 
 
 class OrderIntentNotFound(RuntimeError):
@@ -61,6 +62,8 @@ class LabOrderIntentRecord:
     committed_lab_order_id: uuid.UUID | None
     created_at: datetime
     items: tuple[LabOrderIntentItemRecord, ...]
+    visit_id: uuid.UUID | None = None
+    """DHEALTH-CLINIC-VISIT-001: the clinic visit this intent was raised inside, if any."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +81,7 @@ def _to_intent_record(intent: LabOrderIntent) -> LabOrderIntentRecord:
         practitioner_reference_id=intent.practitioner_reference_id,
         committed_lab_order_id=intent.committed_lab_order_id,
         created_at=intent.created_at,
+        visit_id=intent.visit_id,
         items=tuple(
             LabOrderIntentItemRecord(
                 id=item.id,
@@ -111,6 +115,7 @@ class LabOrderIntentRepository:
         patient_reference_id: uuid.UUID,
         practitioner_reference_id: uuid.UUID,
         catalog_entry_ids: list[uuid.UUID],
+        visit_id: uuid.UUID | None = None,
         session: Session | None = None,
     ) -> CreateIntentResult:
         if not idempotency_key.strip():
@@ -129,6 +134,7 @@ class LabOrderIntentRepository:
                 patient_reference_id,
                 practitioner_reference_id,
                 catalog_entry_ids,
+                visit_id,
             )
             return self._create_in_session(
                 session,
@@ -138,6 +144,7 @@ class LabOrderIntentRepository:
                 practitioner_reference_id=practitioner_reference_id,
                 catalog_entry_ids=catalog_entry_ids,
                 snapshots=snapshots,
+                visit_id=visit_id,
             )
         with self._sessions() as owned_session:
             snapshots = self._validate_canonical_request(
@@ -146,6 +153,7 @@ class LabOrderIntentRepository:
                 patient_reference_id,
                 practitioner_reference_id,
                 catalog_entry_ids,
+                visit_id,
             )
             result = self._create_in_session(
                 owned_session,
@@ -155,6 +163,7 @@ class LabOrderIntentRepository:
                 practitioner_reference_id=practitioner_reference_id,
                 catalog_entry_ids=catalog_entry_ids,
                 snapshots=snapshots,
+                visit_id=visit_id,
             )
             owned_session.commit()
             return result
@@ -166,6 +175,7 @@ class LabOrderIntentRepository:
         patient_reference_id: uuid.UUID,
         practitioner_reference_id: uuid.UUID,
         catalog_entry_ids: list[uuid.UUID],
+        visit_id: uuid.UUID | None = None,
     ) -> list[tuple[uuid.UUID, object]]:
         """Single canonical request guard used before an immutable reservation exists.
 
@@ -179,6 +189,19 @@ class LabOrderIntentRepository:
             raise ValueError("patient reference does not belong to provider organization")
         if practitioner is None or practitioner.source_organization_id != provider_organization_id:
             raise ValueError("practitioner reference does not belong to provider organization")
+        # DHEALTH-CLINIC-VISIT-001: the visit is validated **here**, once, at the only moment the
+        # caller supplies it -- and deliberately not again at commit. `commit` re-validating would
+        # mean a lost-response retry sent after the clinician finished the consultation failed where
+        # the first attempt succeeded, which is exactly the idempotency guarantee this whole intent
+        # mechanism exists to provide. The visit was in progress when the order was raised; that is
+        # the fact being recorded, and a later state change does not make it untrue.
+        if visit_id is not None:
+            require_visit_can_receive_order(
+                session,
+                provider_organization_id=provider_organization_id,
+                visit_id=visit_id,
+                patient_id=patient.patient_id,
+            )
         snapshots: list[tuple[uuid.UUID, object]] = []
         for entry_id in sorted(catalog_entry_ids, key=str):
             entry = self._catalog.get_entry(entry_id)
@@ -199,12 +222,14 @@ class LabOrderIntentRepository:
         practitioner_reference_id: uuid.UUID,
         catalog_entry_ids: list[uuid.UUID],
         snapshots: list[tuple[uuid.UUID, object]],
+        visit_id: uuid.UUID | None = None,
     ) -> CreateIntentResult:
         intent = LabOrderIntent(
             idempotency_key=idempotency_key,
             provider_organization_id=provider_organization_id,
             patient_reference_id=patient_reference_id,
             practitioner_reference_id=practitioner_reference_id,
+            visit_id=visit_id,
         )
         intent.items = [
             LabOrderIntentItem(
@@ -234,15 +259,25 @@ class LabOrderIntentRepository:
             existing_record = _to_intent_record(existing)
             existing_item_ids = frozenset(item.catalog_entry_id for item in existing_record.items)
             requested_item_ids = frozenset(catalog_entry_ids)
+            # DHEALTH-CLINIC-VISIT-001 adds `visit_id` to this comparison, and that addition is
+            # load-bearing rather than tidiness. Without it, replaying one key under a *different*
+            # visit would silently return the intent belonging to the first visit while the caller
+            # believed it had attached the order to the second -- the order would end up on a visit
+            # the clinician was no longer looking at, with nothing anywhere saying so. Comparing it
+            # turns that into a loud conflict. Note this also means a retry that has *lost* its
+            # visit context (a page reload before `intent_id` was stored) is refused rather than
+            # quietly creating an unlinked order, which is why the UI persists `visit_id` alongside
+            # the key.
             if (
                 existing_record.patient_reference_id != patient_reference_id
                 or existing_record.practitioner_reference_id != practitioner_reference_id
+                or existing_record.visit_id != visit_id
                 or existing_item_ids != requested_item_ids
             ):
                 raise IdempotencyKeyConflict(
                     f"idempotency_key {idempotency_key!r} for provider organization "
                     f"{provider_organization_id} was already used for an intent with a "
-                    f"different patient, practitioner, or requested test set -- refusing to "
+                    f"different patient, practitioner, visit, or requested test set -- refusing to "
                     f"return mismatched data"
                 ) from None
             return CreateIntentResult(intent=existing_record, created=False)
@@ -358,6 +393,17 @@ class LabOrderIntentRepository:
                 "idempotency key is already associated with an order outside this durable intent"
             )
 
+        # DHEALTH-CLINIC-VISIT-001: the visit is *copied forward*, never re-supplied and never
+        # re-validated. It is written here rather than passed to `orders_repo.create` above because
+        # that method has its own idempotent-replay path which can return a pre-existing order, and
+        # writing a visit onto an order this intent did not create would attach a consultation to
+        # somebody else's row. By this line the order is provably this intent's own (the check
+        # directly above), so the assignment is safe and is identical on every replay.
+        created_order.visit_id = intent.visit_id
+
         intent.committed_lab_order_id = result.order.id
         session.flush()
-        return result
+        # Re-read so the returned record carries the visit linkage the caller is about to display,
+        # rather than the pre-assignment snapshot `orders_repo.create` built.
+        committed = orders_repo.get(result.order.id, session=session)
+        return CreateOrderResult(order=committed, created=result.created)

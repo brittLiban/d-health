@@ -109,6 +109,7 @@ function ShellScene({ response }: { response: ExchangeMeResponse }) {
 const RELAY_ORDER = {
   status: 'COMPLETED' as const,
   created_at: '2026-09-18T07:05:00Z',
+  visit_id: null,
   lab_assignment: {
     lab_organization_id: 'lab-1',
     lab_organization_name: 'Laboratoire Central',
@@ -946,6 +947,7 @@ const CLINIC_ORDERS: LabOrder[] = [
     status: 'COMPLETED',
     created_at: '2026-09-23T07:10:00Z',
     items: WORKFLOW_ITEMS,
+    visit_id: null,
     lab_assignment: {
       lab_organization_id: 'lab-1',
       lab_organization_name: 'Laboratoire Central',
@@ -967,6 +969,7 @@ const CLINIC_ORDERS: LabOrder[] = [
     status: 'IN_PROGRESS',
     created_at: '2026-09-23T08:40:00Z',
     items: [WORKFLOW_ITEMS[0]],
+    visit_id: null,
     lab_assignment: {
       lab_organization_id: 'lab-1',
       lab_organization_name: 'Laboratoire Central',
@@ -988,6 +991,7 @@ const CLINIC_ORDERS: LabOrder[] = [
     status: 'AWAITING_LAB_SELECTION',
     created_at: '2026-09-23T09:05:00Z',
     items: [WORKFLOW_ITEMS[1]],
+    visit_id: null,
     lab_assignment: null,
   },
 ]

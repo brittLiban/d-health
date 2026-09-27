@@ -27,8 +27,8 @@ import type {
   ConnectorRegistrationRequest,
   CreateMembershipOutcome,
   DoctorReviewResponse,
-  EntryCompletionResponse,
   EnrollmentBlockerCode,
+  EntryCompletionResponse,
   ExchangeErrorCode,
   ExchangeMeResponse,
   FacilityConnector,
@@ -38,10 +38,6 @@ import type {
   IdentityLookupResult,
   InterfaceType,
   InterfaceVerificationState,
-  OnboardingStatus,
-  OrganizationMembership,
-  OrganizationMembershipCreateRequest,
-  ParticipationMode,
   LabAssignmentResponse,
   LabCollectionResponse,
   LabObservation,
@@ -62,6 +58,10 @@ import type {
   LabWorkflowOrder,
   NativeCorrectionRequest,
   NativeResultValueBatchResponse,
+  OnboardingStatus,
+  OrganizationMembership,
+  OrganizationMembershipCreateRequest,
+  ParticipationMode,
   PatientAccessIssueOutcome,
   PatientAccessMetadata,
   PatientCreateOutcome,
@@ -82,6 +82,14 @@ import type {
   ResultEntryPlan,
   ResultEntryWorkspace,
   ReviewQueueStatusFilter,
+  Visit,
+  VisitCreateOutcome,
+  VisitCreateRequest,
+  VisitDetail,
+  VisitNote,
+  VisitNoteCreateRequest,
+  VisitReasonUpdateRequest,
+  VisitStatus,
 } from './exchangeTypes'
 
 export function mapExchangeErrorToCode(code: ExchangeErrorCode): ErrorCode {
@@ -1902,6 +1910,188 @@ export class ExchangeClient {
       options.token,
     )
     return { membership: data, created: status === 201 }
+  }
+
+  // -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ----------------------------------------
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/visits
+   *
+   * Registers a patient as present and waiting. The visit starts `CHECKED_IN` with no clinician:
+   * at check-in, who will see the patient is genuinely not known yet.
+   *
+   * Idempotent on the `Idempotency-Key` header, exactly like patient and order creation — a
+   * double-clicked check-in returns the existing visit with `created: false` rather than putting
+   * the same person in the waiting list twice.
+   */
+  async startVisitWithOutcome(
+    providerId: string,
+    idempotencyKey: string,
+    body: VisitCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<VisitCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<Visit>(
+      `/organizations/${encodeURIComponent(providerId)}/visits`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { visit: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/visits
+   *
+   * `statuses` is repeatable and constrained server-side to the four real states, so a typo is a
+   * clean 422 rather than an empty list that reads as "nobody is waiting".
+   */
+  async listVisits(
+    providerId: string,
+    options: {
+      statuses?: readonly VisitStatus[]
+      limit?: number
+      token?: string
+      signal?: AbortSignal
+    } = {},
+  ): Promise<Visit[]> {
+    const params = new URLSearchParams()
+    for (const status of options.statuses ?? []) {
+      params.append('status', status)
+    }
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit))
+    }
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return this.request<Visit[]>(
+      `/organizations/${encodeURIComponent(providerId)}/visits${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** GET /exchange/v1/organizations/{provider_id}/patients/{patient_id}/visits */
+  async listPatientVisits(
+    providerId: string,
+    patientId: string,
+    options: { limit?: number; token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit[]> {
+    const params = new URLSearchParams()
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit))
+    }
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return this.request<Visit[]>(
+      `/organizations/${encodeURIComponent(providerId)}/patients/${encodeURIComponent(patientId)}/visits${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** GET /exchange/v1/organizations/{provider_id}/visits/{visit_id} — the visit, its note history
+   * and the orders raised during it. */
+  async getVisit(
+    providerId: string,
+    visitId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<VisitDetail> {
+    return this.request<VisitDetail>(
+      `/organizations/${encodeURIComponent(providerId)}/visits/${encodeURIComponent(visitId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * The three lifecycle transitions, which are POSTs to named sub-resources rather than a generic
+   * status setter. A `PATCH .../visits/{id}` accepting `{status}` would be a second way to change
+   * state that bypasses the server's transition table entirely.
+   */
+  private async visitTransition(
+    providerId: string,
+    visitId: string,
+    action: 'take' | 'complete' | 'cancel',
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit> {
+    return this.request<Visit>(
+      `/organizations/${encodeURIComponent(providerId)}/visits/${encodeURIComponent(visitId)}/${action}`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** `CHECKED_IN` -> `IN_PROGRESS`, recording the caller as the clinician of record. A 409 means
+   * another clinician already holds it. */
+  async takeVisit(
+    providerId: string,
+    visitId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit> {
+    return this.visitTransition(providerId, visitId, 'take', options)
+  }
+
+  /** `IN_PROGRESS` -> `COMPLETED`. Never blocked by an outstanding lab order. */
+  async completeVisit(
+    providerId: string,
+    visitId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit> {
+    return this.visitTransition(providerId, visitId, 'complete', options)
+  }
+
+  /** `CHECKED_IN` -> `CANCELLED`, and from nowhere else: a visit already in progress is a
+   * completed-with-note (§12), so the server answers 409. */
+  async cancelVisit(
+    providerId: string,
+    visitId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit> {
+    return this.visitTransition(providerId, visitId, 'cancel', options)
+  }
+
+  /** POST /exchange/v1/organizations/{provider_id}/visits/{visit_id}/notes — always a new
+   * revision, never an update. */
+  async appendVisitNote(
+    providerId: string,
+    visitId: string,
+    body: VisitNoteCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<VisitNote> {
+    return this.request<VisitNote>(
+      `/organizations/${encodeURIComponent(providerId)}/visits/${encodeURIComponent(visitId)}/notes`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /** PUT /exchange/v1/organizations/{provider_id}/visits/{visit_id}/reason */
+  async updateVisitReason(
+    providerId: string,
+    visitId: string,
+    body: VisitReasonUpdateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Visit> {
+    return this.request<Visit>(
+      `/organizations/${encodeURIComponent(providerId)}/visits/${encodeURIComponent(visitId)}/reason`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
   }
 }
 

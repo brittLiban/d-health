@@ -89,6 +89,9 @@ export interface LabOrderSummary {
   status: LabOrderStatus
   created_at: string
   item_count: int_number
+  /** DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or `null` for a
+   * standalone order and for every order that predates visits. */
+  visit_id: string | null
   lab_assignment: LabAssignmentSummary | null
 }
 
@@ -104,6 +107,9 @@ export interface LabOrder {
   status: LabOrderStatus
   created_at: string
   items: LabOrderItem[]
+  /** DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or `null`. Set only
+   * by the backend, copied from the committing intent — never sent by this client. */
+  visit_id: string | null
   lab_assignment: LabAssignmentSummary | null
 }
 
@@ -147,6 +153,10 @@ export interface LabOrderIntent {
   committed_lab_order_id: string | null
   created_at: string
   items: LabOrderIntentItem[]
+  /** DHEALTH-CLINIC-VISIT-001: the visit this intent was raised inside, if any. Frozen on the
+   * intent at creation and copied to the order by commit, so a retry can never move the order to a
+   * different visit. */
+  visit_id: string | null
 }
 
 export type LabOrderIntentResponse = LabOrderIntent
@@ -155,6 +165,15 @@ export type LabOrderIntentItemResponse = LabOrderIntentItem
 export interface LabOrderIntentCreateRequest {
   patient_reference_id: string
   catalog_entry_ids: string[]
+  /**
+   * DHEALTH-CLINIC-VISIT-001: the clinic visit this order is being raised during.
+   *
+   * Explicit and optional. Omitting it means "a standalone order with no clinic contact", which is
+   * permanently supported. It is part of the backend's idempotency comparison, so a retry of the
+   * same key must present the *same* visit — which is why the stored pending-order record carries
+   * it across a page reload.
+   */
+  visit_id?: string | null
 }
 
 export interface LabOrderIntentCreateOutcome {
@@ -1301,4 +1320,77 @@ export interface ConnectorRegistrationRequest {
   configuration_fingerprint: string
   mapping_fingerprint: string
   contract_version?: string
+}
+
+// -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ------------------------------------------
+
+/**
+ * The four states a visit can actually be in.
+ *
+ * `PLANNED` and `NO_SHOW` are deliberately absent: both need a calendar to be reachable, no
+ * appointment surface exists, and a state nothing can enter is decoration
+ * (`docs/NATIVE-OPERATING-PRODUCT.md` §12). The backend's CHECK constraint enumerates the same
+ * four, so this is the whole set rather than the subset this build happens to render.
+ */
+export type VisitStatus = 'CHECKED_IN' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED'
+
+export interface Visit {
+  id: string
+  provider_organization_id: string
+  /** A native `Patient`, never a `PatientReference` — a visit is about a person in this
+   * organization's own directory. */
+  patient_id: string
+  patient_display_name: string | null
+  /** Optional, and never invented: nothing in DHealth substitutes a placeholder birthday
+   * (ADR-051). A worklist row must render without one. */
+  patient_date_of_birth: string | null
+  /** `null` while `CHECKED_IN` — at check-in, who will see the patient is not yet known. */
+  clinician_identity_id: string | null
+  status: VisitStatus
+  reason_for_visit: string
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  cancelled_at: string | null
+}
+
+/** One append-only revision of a visit's clinical note. The highest `revision_number` is current;
+ * earlier ones are kept and shown, because a corrected note's history is part of the record
+ * (ADR-045/048's principle). */
+export interface VisitNote {
+  id: string
+  revision_number: number
+  author_identity_id: string
+  body: string
+  created_at: string
+}
+
+/** One visit with its note history and the orders raised during it.
+ *
+ * `orders` carries no result values by design: results are opened from the order, through the read
+ * paths that already apply ADR-044's entry-is-not-release filtering. */
+export interface VisitDetail {
+  visit: Visit
+  notes: VisitNote[]
+  orders: LabOrderSummary[]
+}
+
+export interface VisitCreateRequest {
+  patient_id: string
+  reason_for_visit: string
+}
+
+export interface VisitCreateOutcome {
+  visit: Visit
+  /** `false` when an existing visit for this idempotency key was returned — the retry or
+   * double-click case, not an error. */
+  created: boolean
+}
+
+export interface VisitNoteCreateRequest {
+  body: string
+}
+
+export interface VisitReasonUpdateRequest {
+  reason_for_visit: string
 }

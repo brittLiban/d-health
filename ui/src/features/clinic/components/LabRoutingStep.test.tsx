@@ -69,6 +69,7 @@ function makeOrder(overrides: Partial<LabOrder> = {}): LabOrder {
     status: 'SELECTED',
     created_at: '2026-09-18T08:00:00Z',
     items: makeItems(),
+    visit_id: null,
     lab_assignment: {
       lab_organization_id: 'lab-1',
       lab_organization_name: 'Laboratoire Central',

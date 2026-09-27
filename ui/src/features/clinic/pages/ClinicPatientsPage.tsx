@@ -23,11 +23,11 @@ import {
   LoadingSkeleton,
   SearchInput,
   StatusBadge,
-  type StatusTone,
   TextInput,
 } from '../../../design-system'
 import { LabRoutingStep } from '../components/LabRoutingStep'
 import { PatientIdentity } from '../components/PatientIdentity'
+import { formatOrderStatus } from '../orderStatusVocabulary'
 import { useClinic } from '../ClinicContext'
 import type { PendingOrderMutation, PendingPatientCreation } from '../../staff/StaffWorkspace'
 import {
@@ -53,6 +53,19 @@ interface ClinicPatientsPageProps {
   onPendingCreationChange?: (scopeKey: string, pending: PendingPatientCreation | null) => void
   pendingOrders?: Record<string, PendingOrderMutation>
   onPendingOrderChange?: (scopeKey: string, pending: PendingOrderMutation | null) => void
+  /**
+   * DHEALTH-CLINIC-VISIT-001 — the clinician arrived here from an in-progress visit, to order for
+   * that visit's patient.
+   *
+   * This page is the one that owns the ordering flow (catalogue, durable intent, uncertain-write
+   * recovery, lab routing), so the visit screen hands off to it rather than forking any of that. The
+   * effect is narrow: preselect this patient, and attach `visit_id` to the intent that gets created.
+   * Everything else on this page behaves exactly as it does without a visit.
+   */
+  orderContext?: { patientId: string; visitId: string } | null
+  /** Called once the hand-off has been consumed, so returning to `Patients` later is an ordinary
+   * visit-free visit to the directory. */
+  onOrderContextConsumed?: () => void
 }
 
 /*
@@ -96,34 +109,13 @@ function stepForCommittedOrder(order: { status: string }): 'routing' | 'confirma
   return order.status === 'AWAITING_LAB_SELECTION' ? 'routing' : 'confirmation'
 }
 
-function formatOrderStatus(status: string): { label: string; tone: StatusTone } {
-  switch (status) {
-    case 'AWAITING_LAB_SELECTION':
-      return { label: 'En attente de choix labo', tone: 'neutral' }
-    case 'SELECTED':
-      // DH-CLINIC-006 §35: unified with ClinicOrdersPage.tsx's own label -- distinct from
-      // ACCEPTED's own meaning (the lab explicitly accepting), never implies acceptance/collection.
-      return { label: 'Laboratoire destinataire sélectionné', tone: 'neutral' }
-    case 'ACCEPTED':
-      return { label: 'Accepté', tone: 'neutral' }
-    case 'IN_PROGRESS':
-      return { label: "En cours d'analyse", tone: 'neutral' }
-    case 'COMPLETED':
-      return { label: 'Résultats disponibles', tone: 'success' }
-    case 'REJECTED':
-      return { label: 'Rejeté', tone: 'danger' }
-    case 'CANCELLED':
-      return { label: 'Annulé', tone: 'neutral' }
-    default:
-      return { label: status, tone: 'neutral' }
-  }
-}
-
 export function ClinicPatientsPage({
   pendingCreations = {},
   onPendingCreationChange = () => {},
   pendingOrders = {},
   onPendingOrderChange = () => {},
+  orderContext = null,
+  onOrderContextConsumed = () => {},
 }: ClinicPatientsPageProps) {
   const { activeProvider, user, client } = useClinic()
   const providerId = activeProvider?.organization_id ?? null
@@ -189,6 +181,35 @@ export function ClinicPatientsPage({
   const [hadPriorAmbiguousAttempt, setHadPriorAmbiguousAttempt] = useState(false)
   const [intentItemSnapshots, setIntentItemSnapshots] = useState<LabOrderIntentItem[] | null>(null)
 
+  // -- DHEALTH-CLINIC-VISIT-001: the visit hand-off, if the clinician came from one --
+  const [visitContext, setVisitContext] = useState<{ patientId: string; visitId: string } | null>(
+    orderContext,
+  )
+
+  /**
+   * The visit this order will be attached to, or `null` for an ordinary directory order.
+   *
+   * The *recovered* value wins over the hand-off. Once an idempotency key has been used with a
+   * visit, that key belongs to that visit for good — the backend compares them on replay — so a
+   * resumed attempt must present what it originally sent, not what the screen happens to hold now.
+   *
+   * The hand-off applies only while the selected patient is still the visit's patient. A clinician
+   * who lands here from a visit and then opens somebody else's chart is ordering for that other
+   * person, and silently attaching their order to the first patient's consultation would be the
+   * worst possible failure this linkage could have.
+   */
+  const effectiveVisitId = unresolvedStoredOrder
+    ? // A stored attempt wins **outright**, including when it has no visit. Written as an explicit
+      // branch rather than `unresolvedStoredOrder?.visit_id ?? handOff`, which was the first version
+      // and was wrong: `??` falls through on a stored attempt whose `visit_id` is absent, so an
+      // ordinary directory order left in flight would be retried carrying a visit its key had never
+      // been used with, and the backend's replay comparison would refuse it. The backend catching it
+      // is why this was a wedged recovery path rather than a wrong record, but the recovery path is
+      // the one thing this storage exists for.
+      (unresolvedStoredOrder.visit_id ?? null)
+    : selected && visitContext && selected.value.patient_id === visitContext.patientId
+      ? visitContext.visitId
+      : null
 
   useEffect(() => {
     mountedRef.current = true
@@ -196,6 +217,48 @@ export function ClinicPatientsPage({
       mountedRef.current = false
     }
   }, [])
+
+  /**
+   * DHEALTH-CLINIC-VISIT-001: consume the hand-off from an in-progress visit.
+   *
+   * `getPatient` rather than searching the directory listing: the listing is bounded at 50 rows and
+   * the patient being seen may not be in it, which would silently drop the hand-off and leave the
+   * clinician on a search box wondering why. A failure here is not fatal — the visit context is kept,
+   * so selecting the patient by hand still attaches the order correctly.
+   */
+  useEffect(() => {
+    if (!providerId || !orderContext) return
+    setVisitContext(orderContext)
+    let cancelled = false
+    void (async () => {
+      try {
+        const patient = await client.getPatient(providerId, orderContext.patientId)
+        if (cancelled || !mountedRef.current || currentProviderRef.current !== providerId) return
+        if (patient) {
+          setSelected({ providerId, value: patient })
+          setResults((curr) => ({
+            providerId,
+            values:
+              curr?.providerId === providerId
+                ? [patient, ...curr.values.filter((x) => x.patient_id !== patient.patient_id)]
+                : [patient],
+          }))
+          setLoadState('success')
+        }
+      } catch {
+        // Left unselected on purpose. The hand-off is a convenience; nothing about the order's
+        // correctness depends on this read succeeding.
+      } finally {
+        if (!cancelled) onOrderContextConsumed()
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // `onOrderContextConsumed` is deliberately excluded: it is a parent callback whose identity is
+    // not stable, and including it would re-run the hand-off on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerId, orderContext, client])
 
   const loadPatients = useCallback(async (targetProviderId: string, query = '') => {
     const generation = ++requestGenerationRef.current
@@ -666,6 +729,10 @@ export function ClinicPatientsPage({
         idempotency_key: key,
         created_at: unresolvedStoredOrder?.created_at ?? Date.now(),
         ...(unresolvedStoredOrder?.intent_id ? { intent_id: unresolvedStoredOrder.intent_id } : {}),
+        // DHEALTH-CLINIC-VISIT-001: persisted *before* the POST, with the key, because the backend
+        // compares `visit_id` when a key is replayed. A reload between this write and the intent
+        // response would otherwise retry the same key with no visit and be refused as a conflict.
+        ...(effectiveVisitId ? { visit_id: effectiveVisitId } : {}),
       })
       try {
         const readBack = getStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)
@@ -704,6 +771,10 @@ export function ClinicPatientsPage({
         const intentOutcome = await client.createOrderIntentWithOutcome(targetProviderId, key, {
           patient_reference_id: targetPatientRefId,
           catalog_entry_ids: selectedCatalogEntryIds,
+          // DHEALTH-CLINIC-VISIT-001. Omitted when there is no visit, which is the normal case for
+          // an order raised straight from the patient directory. The backend freezes it on the
+          // intent and copies it to the order at commit, so it is sent here and never again.
+          ...(effectiveVisitId ? { visit_id: effectiveVisitId } : {}),
         })
         intentId = intentOutcome.intent.id
 
@@ -725,6 +796,7 @@ export function ClinicPatientsPage({
               idempotency_key: key,
               intent_id: intentId,
               created_at: unresolvedStoredOrder?.created_at ?? Date.now(),
+              ...(effectiveVisitId ? { visit_id: effectiveVisitId } : {}),
             },
           )
           const readBack = getStoredPendingOrder(targetUserId, targetProviderId, targetPatientRefId)

@@ -2021,3 +2021,48 @@ USER-QUALIFIED`. ADR-003's WhatsApp gate remains `BLOCKED`: the notification sta
 recovered was created on the `fake` provider, which contains no network code at all. `BASE_DOMAIN=
 localhost` and Caddy's internal CA, on one workstation. CI executed nothing — the billing refusal
 already on record still stands.
+
+---
+
+## 2026-09-27 — the Native clinic can record a consultation, and an order knows which one it came from
+
+What this adds to the honest read: **DHealth could previously record that an order existed but not
+that a consultation happened.** A clinician's own day had no representation — no waiting list, no "who
+am I seeing now", nowhere to write down why the patient came. That gap is closed for the Native track
+(DHEALTH-CLINIC-VISIT-001, ADR-065, Alembic head now `0034_clinic_visits`).
+
+**Demonstrated, in a real browser against the real stack** (Chromium, Caddy, Keycloak 26.7.1, adapter,
+PostgreSQL 16 — nine phases, all passing): a clinician signs in, registers an arrival, takes the
+patient into consultation, writes a note and corrects it, orders analyses *from inside the visit*, and
+completes the visit while that order is still outstanding — with the order provably carrying the visit
+in `exchange_lab_orders` **and** `exchange_lab_order_intents` afterwards, read back from the database
+rather than believed from the screen.
+
+**Also demonstrated, and worth separating from the above:** the refusals. A visit already in
+consultation can never be cancelled (§12: contact with the patient happened, and a status must not
+erase it) — the control is gone from the interface *and* the endpoint answers 409. A completed visit
+refuses take, complete and cancel. A laboratory technician gets 404 at a provider and 403 at their own
+laboratory, and has no `Visites` section at all.
+
+**What is not true.** **Human usability is not claimed for this surface.** No clinician has used it, and
+nothing has been timed against the paper register or the EMR it would replace, so product law 3
+("faster than what it replaces") remains a validated target rather than a fact. The workflow completing
+end to end in a browser is a different and lesser claim than a clinician finding it faster.
+
+**Amending a completed visit's note is not built**, deliberately: the codebase already has an explicit,
+audited, versioned amendment workflow for the analogous case (ADR-048's lab-result amendments), and a
+second weaker one was not invented inside a lifecycle ticket. The interface says the note is closed
+rather than offering a field the server would refuse. Named as a gap in
+`docs/NATIVE-OPERATING-PRODUCT.md` §38, not silently absent.
+
+**Four states, not five**, against the commissioning ticket's own wording — `PLANNED` and `NO_SHOW` need
+a calendar to be reachable and no appointment table exists. Reported as a deviation for review rather
+than raised as a blocker; see `PROJECT_STATE.md`.
+
+**The maternity/reference-connector track is untouched by this.** Its own state, including the
+2026-08-13 recovery drill that remains partially verified and still owes a re-run, is unchanged. No
+OpenMRS or OpenELIS code, configuration or clinical content was read or written.
+
+**Still not production-deployed, clinically live, or Connect-integrated.** `BASE_DOMAIN=localhost` and
+Caddy's internal CA, on one workstation. CI executed nothing — no push was authorized. ADR-003's
+WhatsApp gate remains `BLOCKED`. All data synthetic; no real patient data used at any point.

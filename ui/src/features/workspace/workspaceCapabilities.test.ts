@@ -108,16 +108,18 @@ describe('usableMemberships', () => {
 })
 
 describe('capabilitiesFor', () => {
-  it('grants a provider clinician the three provider capabilities and no laboratory work', () => {
+  it('grants a provider clinician the four provider capabilities and no laboratory work', () => {
     expect(capabilitiesFor(membership())).toEqual({
       canViewPatients: true,
       canCreateOrders: true,
       canReviewResults: true,
+      // DHEALTH-CLINIC-VISIT-001: the visit lifecycle resolves from the same CLINICIAN grant.
+      canRunVisits: true,
       canWorkLabOrders: false,
       canReleaseResults: false,
       // DHEALTH-NATIVE-ACCESS-001: a clinician who is not also an ORG_ADMIN gets no
       // administration surface. Pinned in the exhaustive shape on purpose -- this is
-      // the test that would catch a sixth capability being granted by default.
+      // the test that would catch a seventh capability being granted by default.
       canAdministerTeam: false,
     })
   })
@@ -145,6 +147,7 @@ describe('capabilitiesFor', () => {
     expect(lab.canViewPatients).toBe(false)
     expect(lab.canCreateOrders).toBe(false)
     expect(lab.canReviewResults).toBe(false)
+    expect(lab.canRunVisits).toBe(false)
   })
 
   it('derives nothing from roles held at a different organization', () => {

@@ -157,6 +157,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
           patient_reference_id: body.patient_reference_id,
           practitioner_reference_id: 'prac-clinician',
           committed_lab_order_id: null,
+          visit_id: null,
           created_at: new Date().toISOString(),
           items: body.catalog_entry_ids.map((id: string) => {
             const entry = mockCatalogTests.find((c) => c.id === id)
@@ -253,6 +254,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
           patient_reference_id: body.patient_reference_id,
           practitioner_reference_id: 'prac-clinician',
           committed_lab_order_id: null,
+visit_id: null,
           created_at: new Date().toISOString(),
           items: body.catalog_entry_ids.map((catalog_entry_id: string) => {
             const entry = mockCatalogTests.find((value) => value.id === catalog_entry_id)
@@ -280,6 +282,7 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
           return {
             ...legacyOutcome.order,
             status: 'SELECTED' as const,
+            visit_id: null,
             lab_assignment: {
               lab_organization_id: 'lab-default-eligible',
               lab_organization_name: 'Laboratoire Test',
@@ -1133,6 +1136,7 @@ describe('Clinic native patient workflow', () => {
         catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
       },
     ],
+    visit_id: null,
     lab_assignment: null,
   }
 
@@ -1184,6 +1188,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Glycémie à jeun',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1202,6 +1207,7 @@ describe('Clinic native patient workflow', () => {
       getOrder: vi.fn().mockResolvedValue({
         ...createdOrder,
         status: 'SELECTED',
+        visit_id: null,
         lab_assignment: {
           lab_organization_id: 'lab-default-eligible',
           lab_organization_name: 'Laboratoire Test',
@@ -1303,6 +1309,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1353,6 +1360,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1543,6 +1551,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1682,6 +1691,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1810,6 +1820,7 @@ describe('Clinic native patient workflow', () => {
           catalog_display_name_snapshot: 'Numération Formule Sanguine (NFS)',
         },
       ],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -1828,6 +1839,7 @@ describe('Clinic native patient workflow', () => {
       getOrder: vi.fn().mockResolvedValue({
         ...existingOrder,
         status: 'SELECTED',
+        visit_id: null,
         lab_assignment: {
           lab_organization_id: 'lab-default-eligible',
           lab_organization_name: 'Laboratoire Test',
@@ -1875,6 +1887,7 @@ describe('Clinic native patient workflow', () => {
         status: 'AWAITING_LAB_SELECTION',
         created_at: '2026-09-16T07:00:00Z',
         items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
+        visit_id: null,
         lab_assignment: null,
       },
       {
@@ -1887,6 +1900,7 @@ describe('Clinic native patient workflow', () => {
         created_at: '2026-09-16T07:01:00Z',
         items: [{ catalog_entry_id: 'c2', catalog_code_snapshot: 'C2', catalog_display_name_snapshot: 'D2' }],
         // Never routed before cancellation -- truthfully has no destination.
+        visit_id: null,
         lab_assignment: null,
       },
       {
@@ -1899,6 +1913,7 @@ describe('Clinic native patient workflow', () => {
         created_at: '2026-09-16T07:02:00Z',
         items: [{ catalog_entry_id: 'c3', catalog_code_snapshot: 'C3', catalog_display_name_snapshot: 'D3' }],
         // §23: SELECTED -> REJECTED -- the lab that rejected it must still show, never hidden.
+        visit_id: null,
         lab_assignment: routedTo('Laboratoire Rejetant'),
       },
       {
@@ -1910,6 +1925,7 @@ describe('Clinic native patient workflow', () => {
         status: 'SELECTED',
         created_at: '2026-09-16T07:03:00Z',
         items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
+        visit_id: null,
         lab_assignment: routedTo('Laboratoire Sélectionné'),
       },
       {
@@ -1921,6 +1937,7 @@ describe('Clinic native patient workflow', () => {
         status: 'COMPLETED',
         created_at: '2026-09-16T07:04:00Z',
         items: [{ catalog_entry_id: 'c5', catalog_code_snapshot: 'C5', catalog_display_name_snapshot: 'D5' }],
+        visit_id: null,
         lab_assignment: routedTo('Laboratoire Terminé'),
       },
     ]
@@ -1964,6 +1981,7 @@ describe('Clinic native patient workflow', () => {
       status: 'AWAITING_LAB_SELECTION',
       created_at: '2026-09-16T08:00:00Z',
       items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
+      visit_id: null,
       lab_assignment: null,
     }
 
@@ -2234,6 +2252,7 @@ describe('Clinic native patient workflow', () => {
       patient_reference_id: patientWithName.patient_reference_id,
       practitioner_reference_id: 'prac-original-author',
       committed_lab_order_id: null,
+visit_id: null,
       created_at: '2026-09-16T08:00:00Z',
       items: [
         {
@@ -2824,6 +2843,7 @@ describe('Clinic native patient workflow', () => {
               patient_reference_id: body.patient_reference_id,
               practitioner_reference_id: 'prac-clinician',
               committed_lab_order_id: null,
+visit_id: null,
               created_at: new Date().toISOString(),
               items: body.catalog_entry_ids.map((id) => ({
                 catalog_entry_id: id,

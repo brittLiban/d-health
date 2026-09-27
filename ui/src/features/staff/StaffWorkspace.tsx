@@ -13,6 +13,7 @@ import { LabHomePage } from '../lab/pages/LabHomePage'
 import { LabOrdersPage } from '../lab/pages/LabOrdersPage'
 import { LabReleasePage } from '../lab/pages/LabReleasePage'
 import { TeamAccessPage } from '../team/TeamAccessPage'
+import { ClinicVisitsPage } from '../visits/ClinicVisitsPage'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import { StaffShell } from './StaffShell'
 import {
@@ -122,6 +123,20 @@ export function StaffWorkspace({
     Record<string, PendingOrderMutation>
   >({})
 
+  /**
+   * DHEALTH-CLINIC-VISIT-001: the visit a clinician is ordering for, while they are in `Patients`.
+   *
+   * Held at this level because it crosses two sections, and cleared by `ClinicPatientsPage` once it
+   * has been consumed so that returning to the directory later is an ordinary visit-free visit. It
+   * is *not* the durable record of the linkage — the backend freezes that on the order intent, and
+   * the browser's own pending-order storage carries it across a reload. This is only the navigation
+   * hand-off.
+   */
+  const [visitOrderContext, setVisitOrderContext] = useState<{
+    patientId: string
+    visitId: string
+  } | null>(null)
+
   // Platform navigation state, held here beside the staff equivalent rather than
   // inside the platform tree, so switching scope and back does not lose where the
   // operator was.
@@ -151,6 +166,7 @@ export function StaffWorkspace({
     // recovery lives in its own storage module, scoped to user and organization.
     setPendingPatientCreations({})
     setPendingOrderMutations({})
+    setVisitOrderContext(null)
     onLogout?.()
   }
 
@@ -328,6 +344,22 @@ export function StaffWorkspace({
             onPendingCreationChange={setPendingPatientCreation}
             pendingOrders={pendingOrderMutations}
             onPendingOrderChange={setPendingOrderMutation}
+            orderContext={visitOrderContext}
+            onOrderContextConsumed={() => setVisitOrderContext(null)}
+          />
+        )
+        break
+      case 'visits':
+        content = (
+          <ClinicVisitsPage
+            onOrderForVisit={(context) => {
+              // DHEALTH-CLINIC-VISIT-001: the hand-off lives here, in the one component that owns
+              // both sections, rather than inside either page. `Visites` does not know that
+              // `Patients` exists and `Patients` does not know it was opened from a visit — it is
+              // handed a patient and a visit and behaves normally.
+              setVisitOrderContext(context)
+              setRequestedSection('patients')
+            }}
           />
         )
         break

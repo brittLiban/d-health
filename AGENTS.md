@@ -63,6 +63,18 @@ versions, retry/backoff constants, variable naming — inert technical choices.
   reference-connector track**
 - Anything adding decision support, alerting, or clinical interpretation of any kind — **GLOBAL**;
   binds the Exchange identically (ADR-043 §13/`docs/MVP-1.0.md` §13)
+  **[Added 2026-09-27, DHEALTH-CLINIC-VISIT-001: a clinician-written clinical note now exists
+  (`VisitNote`), and it creates three new temptations this bullet already forbids but which are worth
+  naming because they will look helpful. (1) *Reading* a note for any purpose other than showing it to
+  the clinician looking at that visit — summarising it, extracting a problem list, flagging a word —
+  is clinical interpretation. (2) A note body must never reach an audit row, a log line, an error
+  message, an analytics event, or any third-party AI/ML service; nothing in this repository may send
+  one anywhere. (3) Adding a *structured* clinical field beside it — vitals with units or ranges, a
+  SOAP section, an examination template, a problem or medication list, a diagnosis code (**D-5**) — is
+  clinical content requiring the clinical lead's sign-off, not a schema decision. A free-text field a
+  clinician chose to fill is inside the boundary; anything that shapes, reads or transmits it is not.
+  Also forbidden without a decision: deriving a waiting time, priority, or triage order from visit
+  timestamps — a number a clinic would act on is a clinical signal even when arithmetic produced it.]**
 - Anything changing what patient data leaves the system — WhatsApp message content, a new
   integration, or logging that might capture clinical values — **GLOBAL**; on the Exchange this
   currently includes ~~`ResultDelivery`'s undecided semantics and~~ any per-channel (SMS/WhatsApp/

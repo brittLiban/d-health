@@ -6,6 +6,51 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-27, DHEALTH-CLINIC-VISIT-001, directly on `master`.** From `7810b7c`. **DHealth's Native
+clinic has a clinical thread.** A clinician can register that a patient arrived and why, take them into
+consultation, write a note and correct it (append-only revisions, earlier ones retained and visible),
+order analyses *during that consultation*, and finish — and see that history next time. `Visites` is a
+staff section; `exchange_visits`/`exchange_visit_notes` are real tables. **ADR-065.** Alembic head is
+now **`0034_clinic_visits`**.
+
+Qualified, as measured: **63** adapter tests, **11** real-PostgreSQL concurrency/constraint tests
+(two clinicians taking one visit, two completing it, concurrent note revisions, cancel racing take, the
+composite cross-tenant foreign key, the timestamp CHECKs, `RESTRICT`, audit/transaction coupling, one
+idempotency key under a real race), **9** real-browser phases end to end, **20** UI unit tests, and
+**6 negative controls** each reddening a named test and reverting byte for byte. Migration `0034` was
+applied and **downgraded** against real PostgreSQL: refused while visit audit rows exist, exactly as its
+docstring claims, then clean once cleared, then re-upgraded.
+
+**The lifecycle is four states, not the five the ticket's own wording implied**, and that is a recorded
+deviation rather than an omission: `CHECKED_IN` → `IN_PROGRESS` → `COMPLETED`, plus `CANCELLED` **from
+`CHECKED_IN` only**. `PLANNED` and `NO_SHOW` need a calendar to be reachable and no appointment table
+exists, so nothing could enter either; the database CHECK constraint refuses both. See `PROJECT_STATE.md`'s
+entry and `docs/NATIVE-OPERATING-PRODUCT.md` §38 — **if five states are wanted, it is a small ticket.**
+
+**The decision worth knowing: visit context travels on the order *intent*, not the order.** `visit_id`
+is nullable on `exchange_lab_order_intents` **and** `exchange_lab_orders`. It is validated once at
+intent creation (visit exists here, is `IN_PROGRESS`, is about this patient), frozen on the immutable
+intent, joined to that intent's replay comparison, and copied to the order by `commit` **without
+re-validation**. That placement is what makes all three of these true at once: a retry cannot move an
+order to a different visit; a retry naming a *different* visit is a loud conflict rather than a silent
+substitution; and a retry sent after the consultation ended still succeeds.
+
+**Nothing completes itself and nothing waits for a laboratory.** `exchange/visits.py` contains no
+reference to lab order status in either direction. A visit with an outstanding order completes normally
+— asserted at both layers, and the browser phase first proves the order really is unfinished at that
+moment so the assertion is not vacuous.
+
+**Human usability is still not claimed.** No clinician has used this surface and nothing has been timed
+against what it replaces, so product law 3 ("faster than what it replaces") remains a validated target.
+Post-completion note amendment is deliberately **not built** — the codebase already has an explicit
+versioned amendment workflow for the analogous case (ADR-048), and a second weaker one is not invented
+here. Still not production-deployed, pilot-ready-on-the-Exchange-track, clinically live, or
+Connect-integrated; all data synthetic, no real patient data used.
+
+<!-- The previous as-of block follows, preserved as history rather than deleted. -->
+
+### Previous as-of — 2026-09-27, DHEALTH-RESULT-DELIVERY-001
+
 **2026-09-27, DHEALTH-RESULT-DELIVERY-001, directly on `master`.** From `b4093ae`. **"Delivered" is
 no longer ambiguous in DHealth, and the first real Connect adapter can no longer define it by
 accident.** ADR-064 assigns exactly one authoritative owner to each delivery-shaped fact and retires
@@ -1699,7 +1744,7 @@ DH-USABILITY-001 §43 and the 2026-09-24 product-definition brief already set st
 
 | Track | Next work | State |
 |---|---|---|
-| **Native product** | ~~**Clinic + Lab switch-ready operating-product specification**~~ — **DONE 2026-09-27 as `DHEALTH-NATIVE-OPERATING-PRODUCT-001`** (`docs/NATIVE-OPERATING-PRODUCT.md`). The next Native product work is its **first implementation ticket, `DHEALTH-CLINIC-VISIT-001`** (Visits/Encounters, clinician-only) — specified, ready to build, and **not yet authorized to start** | **specification done; implementation unstarted** |
+| **Native product** | ~~**Clinic + Lab switch-ready operating-product specification**~~ — **DONE 2026-09-27 as `DHEALTH-NATIVE-OPERATING-PRODUCT-001`**. ~~Its first implementation ticket, `DHEALTH-CLINIC-VISIT-001`~~ — **DONE 2026-09-27** (ADR-065, migration `0034_clinic_visits`, `Visites`). The next Native product work is ticket 2 of that specification's §35 sequence, and **is not yet authorized to start** | **specification done; visit lifecycle built and qualified; human usability not claimed** |
 | **Native critical path** | **Native security qualification** (`DH-SEC-001` in the DH-DEMO-001 forward sequence — a name in a sequence list, **not a scoped ticket**; nothing in this repository defines its content). The valid next engineering step now that deployment and recovery are qualified | **not scoped** |
 | **Connect** | **`DH-CONNECT-ADAPTER-001` — first named real partner/vendor adapter.** Defined, unstarted, and **blocked on having an actual external EMR/LIS target to integrate against** — the blocker is a counterparty, not code. **One design prerequisite was cleared 2026-09-27: ADR-064 fixes what "delivered" means and gives the adapter an explicit rule** (its responsibility ends at the Connect delivery contract's acknowledgement; it never writes `ResultDelivery` or `DoctorReview`) | **blocked on a partner system; no longer blocked on delivery semantics** |
 
@@ -1726,7 +1771,7 @@ name; the specification is `DHEALTH-NATIVE-OPERATING-PRODUCT-001` and is now don
   the Exchange one has **no production caller** and stays `PENDING` forever for Native orders. Two
   concrete options, `HUMAN DECISION REQUIRED` (D-7), to be settled **before** a real Connect adapter
   builds against it.
-- **Seven follow-up tickets**, first is `DHEALTH-CLINIC-VISIT-001`.
+- **Seven follow-up tickets**, of which the first (`DHEALTH-CLINIC-VISIT-001`) is **DONE 2026-09-27**; six remain, none authorized to start.
 
 **What the Native product specification must not lose.** The future clinic/lab operating product
 stays **organization-scoped, role-scoped and least-privilege**, exactly as the backend already

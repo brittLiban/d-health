@@ -195,6 +195,29 @@ SecurityEventType = Literal[
     "membership_deactivated",
     "membership_reactivated",
     "role_removed",
+    # DHEALTH-CLINIC-VISIT-001: the clinic visit lifecycle. Each of these is a clinician-performed
+    # state mutation on one visit, which is the only test this table applies.
+    #
+    # `visit_started` rather than `visit_taken`: the audit question is when the visit entered
+    # IN_PROGRESS, and "taken" describes the clinician's gesture rather than the state change.
+    #
+    # `visit_note_appended` names the visit and the author. It never carries the note body, and no
+    # column here could hold it: a clinical free-text statement in a security audit table would be
+    # clinical data stored for a non-clinical purpose, which `AGENTS.md` forbids outright. "A note
+    # revision was written to this visit, by this identity, at this time" is the security fact.
+    #
+    # **Absent on purpose:** `visit_viewed`. Reading a visit is not a mutation, and this module's
+    # docstring is explicit that this table is not an access log -- adding it would make every
+    # worklist refresh write rows and bury the handful that matter. Also absent: every refusal. An
+    # attempt to complete another clinician's visit, or to touch a visit in another organization, is
+    # an authorization refusal recorded by `exchange/audit.py`'s best-effort file writer, for the
+    # same reason the staff-access block above gives.
+    "visit_created",
+    "visit_started",
+    "visit_completed",
+    "visit_cancelled",
+    "visit_note_appended",
+    "visit_reason_amended",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
@@ -217,6 +240,10 @@ SecurityResourceType = Literal[
     # DH-NOTIFY-001. Attempt rows hang off a notification, so audit stays notification-centric,
     # never per-attempt -- matching the connector convention directly above.
     "patient_notification",
+    # DHEALTH-CLINIC-VISIT-001. Note revisions hang off a visit, so audit stays visit-centric --
+    # the same convention again. Deliberately no "visit_note": a per-revision resource type would
+    # invite naming the revision's content next to it.
+    "visit",
 ]
 
 

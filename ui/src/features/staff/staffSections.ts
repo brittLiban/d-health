@@ -30,7 +30,7 @@
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 import type { WorkspaceCapabilities } from '../workspace/workspaceCapabilities'
 
-export type StaffSectionId = 'today' | 'patients' | 'orders' | 'results' | 'team'
+export type StaffSectionId = 'today' | 'visits' | 'patients' | 'orders' | 'results' | 'team'
 
 export interface StaffSection {
   id: StaffSectionId
@@ -47,9 +47,17 @@ export interface StaffSection {
  * already uses for the same subject (`FacilityTeam.tsx`), so the same idea is not
  * called two different things depending on who is looking at it. "Accès" is there
  * on purpose: this screen is about authority, not a staff phone list.
+ *
+ * `Visites` sits directly after `Aujourd'hui` because it is the clinic's live
+ * state — who is here, who is being seen — and a clinician arriving in the morning
+ * wants it before the patient directory. It is deliberately not called
+ * "Consultations": a visit exists from the moment somebody walks in, which is
+ * before any consultation has happened, and it may end as a cancellation where no
+ * consultation ever happens at all.
  */
 const SECTION_LABELS: Record<StaffSectionId, string> = {
   today: "Aujourd'hui",
+  visits: 'Visites',
   patients: 'Patients',
   orders: 'Ordres',
   results: 'Résultats',
@@ -63,7 +71,8 @@ export function sectionLabel(id: StaffSectionId): string {
 /**
  * The sections an active membership actually unlocks, in navigation order.
  *
- * A provider clinician gets all four. In a laboratory, `Ordres` is the work
+ * A provider clinician gets `Aujourd'hui`, `Visites`, `Patients`, `Ordres` and
+ * `Résultats`. In a laboratory, `Ordres` is the work
  * queue and needs LAB_TECH; `Résultats` is inspection and release and needs
  * LAB_RESULT_RELEASER — ADR-044 keeps entry and release separate authorities, so
  * a technician who cannot release simply has no `Résultats` section. There is no
@@ -94,12 +103,14 @@ export function availableSections(
 
   const hasWorkflow =
     capabilities.canViewPatients ||
+    capabilities.canRunVisits ||
     capabilities.canCreateOrders ||
     capabilities.canReviewResults ||
     capabilities.canWorkLabOrders ||
     capabilities.canReleaseResults
 
   if (hasWorkflow) ids.push('today')
+  if (capabilities.canRunVisits) ids.push('visits')
   if (capabilities.canViewPatients) ids.push('patients')
   if (capabilities.canCreateOrders || capabilities.canWorkLabOrders) ids.push('orders')
   if (capabilities.canReviewResults || capabilities.canReleaseResults) ids.push('results')

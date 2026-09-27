@@ -64,3 +64,8 @@ native-security-results.json
 # repository root by scripts/demo/qualify-access.sh. Evidence of a run, not part of the source --
 # same treatment as its three siblings above.
 native-access-results.json
+
+# DHEALTH-CLINIC-VISIT-001: the clinic visit qualification report, written at the repository root
+# by scripts/demo/qualify-visit.sh. Evidence of a run, not part of the source -- same treatment as
+# its four siblings above.
+native-visit-results.json

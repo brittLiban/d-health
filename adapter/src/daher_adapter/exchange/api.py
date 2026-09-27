@@ -244,6 +244,17 @@ from daher_adapter.exchange.staff_access import (
     StaffAccessStateUnchanged,
     StaffAccessTargetNotFound,
 )
+from daher_adapter.exchange.visits import (
+    VisitAlreadyTaken,
+    VisitCannotReceiveOrder,
+    VisitIdempotencyKeyConflict,
+    VisitNotFound,
+    VisitPatientNotFound,
+    VisitRecord,
+    VisitRepository,
+    VisitTransitionRefused,
+    VisitTransitionResult,
+)
 
 # DH-NOTIFY-001. A top-level import, unlike the connect boundary's deliberately lazy one: the
 # Exchange API *owns* the enrollment surface (it is where a clinician records consent), whereas the
@@ -887,6 +898,9 @@ class LabOrderResponse(BaseModel):
     status: str
     created_at: datetime
     items: list[LabOrderItemResponse]
+    visit_id: uuid.UUID | None = None
+    """DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or ``None``
+    for a standalone order and for every order that predates visits."""
     lab_assignment: LabAssignmentSummaryResponse | None = None
 
 
@@ -911,6 +925,9 @@ class LabOrderSummaryResponse(BaseModel):
     status: str
     created_at: datetime
     item_count: int
+    visit_id: uuid.UUID | None = None
+    """DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or ``None``
+    for a standalone order and for every order that predates visits."""
     lab_assignment: LabAssignmentSummaryResponse | None = None
 
 
@@ -922,6 +939,14 @@ class LabOrderIntentCreateRequest(BaseModel):
 
     patient_reference_id: uuid.UUID
     catalog_entry_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+    visit_id: uuid.UUID | None = None
+    """DHEALTH-CLINIC-VISIT-001: the clinic visit this order is being raised during.
+
+    **Explicit and optional, never inferred.** Omitting it means "a standalone order with no clinic
+    contact", which is a real and permanently supported case (a walk-in, or a connector-submitted
+    order from a foreign system). DHealth never guesses a visit from the patient plus the time of
+    day: two orders raised an hour apart for the same patient may or may not belong to the same
+    consultation, and only the caller knows."""
 
     @model_validator(mode="after")
     def _no_duplicate_entries(self) -> "LabOrderIntentCreateRequest":
@@ -949,6 +974,7 @@ class LabOrderIntentResponse(BaseModel):
     committed_lab_order_id: uuid.UUID | None
     created_at: datetime
     items: list[LabOrderIntentItemResponse]
+    visit_id: uuid.UUID | None = None
 
 
 def _to_intent_response(intent: LabOrderIntentRecord) -> LabOrderIntentResponse:
@@ -958,6 +984,7 @@ def _to_intent_response(intent: LabOrderIntentRecord) -> LabOrderIntentResponse:
         provider_organization_id=intent.provider_organization_id,
         patient_reference_id=intent.patient_reference_id,
         practitioner_reference_id=intent.practitioner_reference_id,
+        visit_id=intent.visit_id,
         committed_lab_order_id=intent.committed_lab_order_id,
         created_at=intent.created_at,
         items=[
@@ -2642,6 +2669,102 @@ class FacilityConnectorResponse(BaseModel):
     qualification_history: list[ConnectorQualificationResponse]
 
 
+# -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ---------------------------------------------
+
+
+class VisitCreateRequest(BaseModel):
+    """``patient_id`` is a native ``Patient``, deliberately not a ``PatientReference``.
+
+    A visit happens to a person in this organization's own directory. ``PatientReference`` is a
+    provenance binding for one exchanged transaction and one human may hold several, so accepting
+    one
+    here would let the same person's two visits be unrelatable -- see ``Visit``'s docstring."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    reason_for_visit: str = Field(min_length=1, max_length=500)
+
+
+class VisitNoteCreateRequest(BaseModel):
+    """One note revision. ``max_length`` bounds the request rather than the clinical content: the
+    column is unbounded ``Text``, and a limit exists only so an endpoint cannot be used to post
+    megabytes. It is deliberately generous enough that no clinician meets it while writing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(min_length=1, max_length=20_000)
+
+
+class VisitReasonUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason_for_visit: str = Field(min_length=1, max_length=500)
+
+
+class VisitNoteResponse(BaseModel):
+    """One revision, with its author and its place in the sequence.
+
+    The whole history is returned by the read endpoint rather than the current text alone: a
+    clinician looking at a corrected note is entitled to see that it was corrected (ADR-045/048's
+    principle, applied to visit documentation)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    revision_number: int
+    author_identity_id: uuid.UUID
+    body: str
+    created_at: datetime
+
+
+class VisitResponse(BaseModel):
+    """One visit.
+
+    ``patient_display_name``/``patient_date_of_birth`` are carried flat rather than as a nested
+    identity projection, because a worklist row needs exactly these two and nothing else: ADR-051
+    allows two patients with identical names to coexist, so a name alone can be genuinely ambiguous,
+    and a clinician resolving that ambiguity by guessing is what the pair prevents. No contact
+    details and no other demographics -- this is a worklist, not a patient record.
+
+    The three nullable timestamps are each paired with a status by database CHECK constraint
+    (``ck_exchange_visits_*_matches_status``), so a caller can trust that ``completed_at`` is
+    present exactly when ``status`` is ``COMPLETED``, not merely usually."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    provider_organization_id: uuid.UUID
+    patient_id: uuid.UUID
+    patient_display_name: str | None
+    patient_date_of_birth: date | None
+    clinician_identity_id: uuid.UUID | None
+    status: str
+    reason_for_visit: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    cancelled_at: datetime | None
+
+
+class VisitDetailResponse(BaseModel):
+    """One visit with its note history and the diagnostic orders raised during it.
+
+    ``orders`` reuses ``LabOrderSummaryResponse`` exactly -- the same shape the patient chart and
+    the order list already return. **No result values appear here, and that is deliberate.**
+    Results are reached by opening the order, through the read paths that already apply ADR-044's
+    entry-is-not-release rule; projecting them into this new response would mean writing a second
+    result-reading path whose release filtering nobody had qualified, and an entered-but-unreleased
+    value reaching a clinician through a new screen is precisely the failure ADR-044 exists to
+    prevent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    visit: VisitResponse
+    notes: list[VisitNoteResponse]
+    orders: list[LabOrderSummaryResponse]
+
+
 logger = logging.getLogger("daher_adapter.exchange.api")
 
 
@@ -2676,6 +2799,10 @@ def build_exchange_router(
     practitioners = PractitionerReferenceRepository(session_factory)
     orders = LabOrderRepository(session_factory, organizations, catalog)
     order_intents = LabOrderIntentRepository(session_factory, organizations, catalog)
+    # DHEALTH-CLINIC-VISIT-001. `order_intents` reaches the visit rules through a module-level
+    # function taking the caller's own session, deliberately not through this instance, so there is
+    # no construction-order dependency between the two to get wrong.
+    visits = VisitRepository(session_factory, organizations, security_audit)
     selections = LabSelectionRepository(session_factory, organizations)
     provider_lab_routes = ProviderLabRouteRepository(session_factory, organizations)
     patient_access = PatientAccessGrantRepository(
@@ -4447,8 +4574,18 @@ def build_exchange_router(
                     patient_reference_id=body.patient_reference_id,
                     practitioner_reference_id=practitioner.id,
                     catalog_entry_ids=body.catalog_entry_ids,
+                    visit_id=body.visit_id,
                     session=session,
                 )
+        # DHEALTH-CLINIC-VISIT-001: both visit refusals are `RuntimeError`, so neither is swallowed
+        # by the `ValueError` clause below -- they are listed first for readability, not because
+        # ordering is load-bearing here.
+        except VisitNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="visit not found"
+            ) from error
+        except VisitCannotReceiveOrder as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except (InvalidOrganizationType, ValueError, EmptyOrder) as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
@@ -4620,6 +4757,359 @@ def build_exchange_router(
             _to_order_response(order, patient_identity, lab_assignments_by_order[order.id])
             for order in page
         ]
+
+    # -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ----------------------------------------
+    #
+    # Nine routes: six mutations and three reads. Every one of them calls `_require_clinician` as
+    # its first statement, before any lookup, so a caller with no claim on this organization learns
+    # nothing about whether a visit or a patient id is real (the same ordering `list_patient_orders`
+    # documents above). `_require_clinician` delegates to `authz.require_clinician`, which
+    # deliberately does **not** admit a platform administrator: a platform realm role is for
+    # configuring the network, never for reading or writing clinical records, and ADR-063's
+    # reasoning about platform authority not silently widening applies here unchanged.
+    #
+    # There is deliberately no front-desk/reception path. `require_clinician` is the only gate that
+    # exists, D-1 in `docs/NATIVE-OPERATING-PRODUCT.md` §28 is the open question of whether a
+    # non-clinician may register arrivals, and inventing a role to answer it here is exactly what
+    # this ticket's §32 forbids. Until D-1 is decided the clinician performs every transition, which
+    # is what §12 already says.
+
+    def _to_visit_response(visit: VisitRecord) -> VisitResponse:
+        return VisitResponse(
+            id=visit.id,
+            provider_organization_id=visit.provider_organization_id,
+            patient_id=visit.patient_id,
+            patient_display_name=visit.patient_display_name,
+            patient_date_of_birth=visit.patient_date_of_birth,
+            clinician_identity_id=visit.clinician_identity_id,
+            status=visit.status,
+            reason_for_visit=visit.reason_for_visit,
+            created_at=visit.created_at,
+            started_at=visit.started_at,
+            completed_at=visit.completed_at,
+            cancelled_at=visit.cancelled_at,
+        )
+
+    def _run_visit_operation(
+        principal: AuthenticatedPrincipal,
+        provider_id: uuid.UUID,
+        operation: Callable[[], VisitTransitionResult],
+    ) -> VisitResponse:
+        """One place where every visit refusal becomes an HTTP status, so the six mutating routes
+        cannot drift apart in what they disclose.
+
+        - **404** for a visit that does not exist *or* belongs to another organization -- one status
+          for both, the anti-enumeration rule this module applies everywhere else.
+        - **409** for a state conflict: an illegal transition, a visit already taken by another
+          clinician, a write to a terminal visit. Not 403 -- the clinician is permitted to act on
+          this organization's visits, and it is the visit's own state that refuses them.
+        - **422** for a malformed value that reached the service layer (an empty reason after
+          stripping), which Pydantic's own validation already rejects for every real caller.
+
+        No refusal here is written to the transactional security audit. A 404 and a 409 are not
+        state mutations, and `ExchangeSecurityAuditEvent`'s contract is that a row there commits
+        with a
+        real change -- the same boundary `_run_staff_access` draws, for the same reason.
+        """
+        try:
+            return _to_visit_response(operation().visit)
+        except VisitNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="visit not found"
+            ) from error
+        except (VisitAlreadyTaken, VisitTransitionRefused) as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+
+    @router.post("/organizations/{provider_id}/visits", response_model=VisitResponse)
+    def start_visit(
+        provider_id: uuid.UUID,
+        body: VisitCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> VisitResponse:
+        """Register a patient as present and waiting. The visit starts ``CHECKED_IN``, with no
+        clinician recorded -- at check-in, who will see the patient is genuinely not known yet.
+
+        Idempotent on the ``Idempotency-Key`` header, the same contract order creation already has:
+        a retried or double-clicked check-in returns 200 with the existing visit rather than putting
+        the same patient in the waiting list twice. A key reused for a *different* patient or reason
+        is a 409, never a silent return of the other visit."""
+        _require_clinician(principal, provider_id)
+        try:
+            result = visits.start(
+                principal=principal,
+                provider_organization_id=provider_id,
+                patient_id=body.patient_id,
+                reason_for_visit=body.reason_for_visit,
+                idempotency_key=idempotency_key,
+            )
+        except VisitPatientNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient not found"
+            ) from error
+        except VisitIdempotencyKeyConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except (InvalidOrganizationType, OrganizationNotFound) as error:
+            # A lab organization has no outpatient consultation. 404 rather than 422: to a caller
+            # holding a lab's id, "this organization cannot have visits" and "no such organization"
+            # are the same fact about the same URL. Unreachable through a normal caller in any case
+            # -- `_require_clinician` above already refused anyone without a CLINICIAN membership,
+            # and `ALLOWED_ROLES_BY_ORG_TYPE` never grants CLINICIAN at a lab -- so this is the
+            # second layer, not the first.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except ValueError as error:
+            # Listed *after* `InvalidOrganizationType`, which is a `ValueError` subclass and must
+            # keep its own 404. What reaches here is a value Pydantic accepted and the service did
+            # not -- a reason that is non-empty but becomes empty once stripped, which `min_length`
+            # cannot express.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_visit_response(result.visit)
+
+    @router.get("/organizations/{provider_id}/visits", response_model=list[VisitResponse])
+    def list_visits(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        status_filter: Annotated[
+            list[Literal["CHECKED_IN", "IN_PROGRESS", "COMPLETED", "CANCELLED"]] | None,
+            Query(alias="status"),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[VisitResponse]:
+        """The organization's visits, newest first.
+
+        ``status`` is repeatable (``?status=CHECKED_IN&status=IN_PROGRESS``) and constrained to the
+        four real states, so an unknown value is a clean 422 rather than an empty list that looks
+        like "no patients are waiting". Omitting it returns every state -- the filter is the
+        caller's choice because §13's worklist wants the live states while a clinician reviewing the
+        day wants the finished ones."""
+        _require_clinician(principal, provider_id)
+        page = visits.list_for_organization(
+            provider_id,
+            statuses=frozenset(status_filter) if status_filter else None,
+            limit=limit,
+        )
+        return [_to_visit_response(visit) for visit in page]
+
+    @router.get(
+        "/organizations/{provider_id}/patients/{patient_id}/visits",
+        response_model=list[VisitResponse],
+    )
+    def list_patient_visits(
+        provider_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[VisitResponse]:
+        """One patient's visit history in this organization, newest first.
+
+        Scoped by organization as well as patient: this is one provider's record of its own contacts
+        with this person, never a cross-provider longitudinal history (ADR-051)."""
+        _require_clinician(principal, provider_id)
+        # `patient_directory`, not `patients`: this path takes a native `Patient` id, and `patients`
+        # is the `PatientReference` repository. Checked before listing so an id from another tenant
+        # gets the same 404 as one that does not exist, rather than an empty list that would confirm
+        # the id is real and simply has no visits here.
+        if patient_directory.get_for_organization(patient_id, provider_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="patient not found")
+        return [
+            _to_visit_response(visit)
+            for visit in visits.list_for_patient(provider_id, patient_id, limit=limit)
+        ]
+
+    @router.get(
+        "/organizations/{provider_id}/visits/{visit_id}", response_model=VisitDetailResponse
+    )
+    def get_visit(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitDetailResponse:
+        """One visit, its full note history, and the diagnostic orders raised during it.
+
+        ``orders`` is the existing order summary projection, resolved through the same helpers the
+        order list uses. No result values are inlined -- see ``VisitDetailResponse`` for why that is
+        a deliberate refusal rather than an omission."""
+        _require_clinician(principal, provider_id)
+        visit = visits.get_for_organization(provider_id, visit_id)
+        if visit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="visit not found")
+        visit_orders = orders.list_for_visit(provider_id, visit_id)
+        identities_by_reference = _require_patient_identities(
+            provider_id, [order.patient_reference_id for order in visit_orders]
+        )
+        lab_assignments_by_order = _lab_assignments_for_orders(visit_orders)
+        return VisitDetailResponse(
+            visit=_to_visit_response(visit),
+            notes=[
+                VisitNoteResponse(
+                    id=note.id,
+                    revision_number=note.revision_number,
+                    author_identity_id=note.author_identity_id,
+                    body=note.body,
+                    created_at=note.created_at,
+                )
+                for note in visits.list_notes(provider_id, visit_id)
+            ],
+            orders=[
+                _to_order_summary_response(
+                    order,
+                    identities_by_reference[order.patient_reference_id],
+                    lab_assignments_by_order[order.id],
+                )
+                for order in visit_orders
+            ],
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/visits/{visit_id}/take", response_model=VisitResponse
+    )
+    def take_visit(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitResponse:
+        """``CHECKED_IN`` -> ``IN_PROGRESS``, recording the acting clinician as the clinician of
+        record.
+
+        Taking a visit you already hold is an idempotent 200. Taking one another clinician already
+        holds is a 409 -- not because you lack authority over it (you may still write notes on it
+        and complete it), but because overwriting who saw the patient would make the record false.
+        See ``exchange/visits.py``'s docstring."""
+        _require_clinician(principal, provider_id)
+        return _run_visit_operation(
+            principal,
+            provider_id,
+            lambda: visits.take(
+                principal=principal, provider_organization_id=provider_id, visit_id=visit_id
+            ),
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/visits/{visit_id}/complete", response_model=VisitResponse
+    )
+    def complete_visit(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitResponse:
+        """``IN_PROGRESS`` -> ``COMPLETED``. Terminal, and reached only by a clinician saying so.
+
+        **Deliberately independent of every lab order raised during the visit.** A clinician who has
+        finished with the patient completes the visit now; results arriving days later are reached
+        from the order and from the patient chart. Blocking completion on a lab reply would make the
+        waiting list lie about who is still in the building."""
+        _require_clinician(principal, provider_id)
+        return _run_visit_operation(
+            principal,
+            provider_id,
+            lambda: visits.complete(
+                principal=principal, provider_organization_id=provider_id, visit_id=visit_id
+            ),
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/visits/{visit_id}/cancel", response_model=VisitResponse
+    )
+    def cancel_visit(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitResponse:
+        """``CHECKED_IN`` -> ``CANCELLED``, and from nowhere else.
+
+        A visit already in progress is a 409 here on purpose: §12 records that a started visit is
+        completed-with-a-note, never cancelled, because contact with the patient happened and no
+        status may say otherwise."""
+        _require_clinician(principal, provider_id)
+        return _run_visit_operation(
+            principal,
+            provider_id,
+            lambda: visits.cancel(
+                principal=principal, provider_organization_id=provider_id, visit_id=visit_id
+            ),
+        )
+
+    @router.put(
+        "/organizations/{provider_id}/visits/{visit_id}/reason", response_model=VisitResponse
+    )
+    def amend_visit_reason(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        body: VisitReasonUpdateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitResponse:
+        """Correct the stated reason while the visit is still open.
+
+        A named sub-resource rather than a generic ``PATCH`` on the visit: the visit's other fields
+        are reached by their own transitions, and a general partial-update endpoint would be a
+        second
+        way to change status that bypasses the state machine entirely."""
+        _require_clinician(principal, provider_id)
+        return _run_visit_operation(
+            principal,
+            provider_id,
+            lambda: visits.amend_reason(
+                principal=principal,
+                provider_organization_id=provider_id,
+                visit_id=visit_id,
+                reason_for_visit=body.reason_for_visit,
+            ),
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/visits/{visit_id}/notes",
+        response_model=VisitNoteResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def append_visit_note(
+        provider_id: uuid.UUID,
+        visit_id: uuid.UUID,
+        body: VisitNoteCreateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> VisitNoteResponse:
+        """Append one note revision, authored by the acting clinician.
+
+        Always a new revision, never an update: correcting a note appends, and every earlier
+        revision
+        stays readable. Allowed only while the visit is ``IN_PROGRESS`` -- amending a completed
+        visit's note is a real need that is deliberately **not** built here rather than given a
+        weaker second amendment mechanism than the one ADR-048 already defines for results. It is
+        recorded as a named gap, not filled by guesswork."""
+        _require_clinician(principal, provider_id)
+        try:
+            note = visits.append_note(
+                principal=principal,
+                provider_organization_id=provider_id,
+                visit_id=visit_id,
+                body=body.body,
+            )
+        except VisitNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="visit not found"
+            ) from error
+        except VisitTransitionRefused as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        return VisitNoteResponse(
+            id=note.id,
+            revision_number=note.revision_number,
+            author_identity_id=note.author_identity_id,
+            body=note.body,
+            created_at=note.created_at,
+        )
 
     # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
 
@@ -8644,6 +9134,7 @@ def _to_order_response(
             )
             for item in order.items
         ],
+        visit_id=order.visit_id,
         lab_assignment=lab_assignment,
     )
 
@@ -8662,5 +9153,6 @@ def _to_order_summary_response(
         status=order.status,
         created_at=order.created_at,
         item_count=len(order.items),
+        visit_id=order.visit_id,
         lab_assignment=lab_assignment,
     )

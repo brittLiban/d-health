@@ -8799,3 +8799,211 @@ unchanged**. Alembic head stays `0033_staff_access_lifecycle`.
 single-writer test reddened); removing `unique=True` from `ResultDelivery.lab_order_id` to make it
 version-scoped (the supersession test reddened). Each was one line, each reddened exactly one test,
 each was reverted to a clean tree.
+
+---
+
+## ADR-065 — ACCEPTED / IMPLEMENTED (2026-09-27, DHEALTH-CLINIC-VISIT-001): a clinic visit is
+## scoped to a native `Patient`, carries four states, and lends its identity to an order through the
+## **intent**, never through the order
+
+**Date:** 2026-09-27 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
+`0034_clinic_visits`, `exchange/visits.py`, nine endpoints, `Visites`) · **Decided by:** Liban
+(DHEALTH-CLINIC-VISIT-001 ticket) · **Implements:** `docs/NATIVE-OPERATING-PRODUCT.md` §12/§13 and
+its §36 first-ticket brief
+
+**Relationship to prior decisions.** Supersedes nothing. ADR-051 (patient identity, no fuzzy
+matching) is the reason a visit is scoped to a `Patient`; ADR-044 (entry is not release) is the
+reason the visit read shows no result values; ADR-045/048 (corrections and versioned amendment) is
+the discipline the append-only note follows; ADR-064 (one authoritative owner per delivery-shaped
+fact) is the reason there is no `VisitOrder` table. ADR-063's principle — platform authority does not
+silently widen — applies here unchanged: `require_clinician` does not admit a platform administrator,
+so the visit surface is closed to one.
+
+### 1. A visit belongs to a native `Patient`, not to a `PatientReference`
+
+`Patient` is the provider's own directory record of a human (ADR-051). `PatientReference` is a
+provenance binding for one exchanged transaction, and one human may hold several of them.
+
+A visit hung off a reference would mean the same person's two visits could be unrelatable — the
+product could hold two consultations and be unable to say they were with the same patient. That is
+precisely the identity ambiguity ADR-051 forbids resolving by guesswork, arrived at from a new
+direction.
+
+**Enforced by the database, not by convention.** `exchange_visits` carries a *composite* foreign key
+`(patient_id, provider_organization_id)` against `Patient`'s `uq_exchange_patients_id_provider`, so
+PostgreSQL itself rejects a visit naming another provider's patient. Same mechanism and same
+reasoning as `PatientReference`'s own composite link (DH-IDENTITY-001 §8). Qualified against real
+PostgreSQL, not asserted: `tests/integration/test_dhealthvisit001_postgres_qualification.py`'s
+VISIT-PG-5.
+
+### 2. Four states, not five — and `CANCELLED` is unreachable from `IN_PROGRESS`
+
+`CHECKED_IN` → `IN_PROGRESS` → `COMPLETED`, plus `CANCELLED` **from `CHECKED_IN` only**.
+
+`docs/NATIVE-OPERATING-PRODUCT.md` §12 defines five states plus `CANCELLED`. `PLANNED` and `NO_SHOW`
+are **deliberately not built**, because both are reachable only through a calendar: `PLANNED` means
+"a booked appointment that has not arrived" and `NO_SHOW` exists, in §12's own words, "for `PLANNED`
+to be honest". No appointment table exists, so nothing in the schema could put a visit into either,
+and §12's own rejected-states list names "a state reachable by nothing" as decoration. They arrive
+with the appointments ticket, together with the table that makes them reachable, or not at all. The
+CHECK constraint enumerates exactly the four a real caller can produce — this package's established
+discipline.
+
+**`IN_PROGRESS` → `CANCELLED` does not exist, and this is the single most load-bearing refusal in the
+lifecycle.** §12: "Never from `IN_PROGRESS` — that is a completed-with-note." A clinician who has
+begun seeing a patient and must stop completes the visit and says why in the note. Contact with the
+patient happened; a status must not be able to erase it. The interface stops offering the control the
+moment a visit is taken, and the endpoint answers 409 to a hand-typed request.
+
+**Consequences are non-forgeable at the database level.** Three CHECK constraints pair each status
+with its timestamp (`COMPLETED` ⟺ `completed_at`, `CANCELLED` ⟺ `cancelled_at`, started states ⟺
+`started_at`) and a fourth requires a clinician once the visit is taken. A row whose history
+contradicts its status cannot exist, so no future code path can produce one.
+
+### 3. Authority is organization-scoped and role-scoped — there is no per-row ownership
+
+Any ACTIVE `CLINICIAN` of the provider organization may act on that organization's visits: take,
+note, complete, cancel. This is **not** a new authority concept, and deliberately not a
+visit-belongs-to-its-clinician model. No such model exists anywhere in this codebase — any clinician
+may read any patient in their organization and order for them — and inventing one here would be the
+"obviously should" instinct `AGENTS.md` names as the failure mode. A real clinic has covering
+clinicians, and a product that locks a waiting patient to whoever first touched their visit fails
+product law 3 for a case that happens daily.
+
+**One thing is nonetheless refused: taking a visit another clinician already holds.** That is a
+*state* conflict (409), not an authorization decision. `clinician_identity_id` is the clinician of
+record, and silently overwriting it would rewrite who saw the patient — a false clinical record, not
+a permission problem. A covering clinician may still write notes and complete the visit; each note
+revision records its own author, so the record stays truthful without being exclusive.
+
+**Who may register an *arrival* remains open.** Today it requires `CLINICIAN`, because that is the
+only clinical authority the backend has. Whether a front-desk role should hold it is **D-1** in
+`docs/NATIVE-OPERATING-PRODUCT.md` §28 and is not decided here. `canRunVisits` in
+`workspaceCapabilities.ts` is the single place that answer will land.
+
+### 4. The note is append-only, and post-completion amendment is a named gap, not an oversight
+
+Every save writes a new `VisitNote` revision; nothing is updated in place and nothing is deleted. The
+highest `revision_number` is current and every earlier one stays readable and on screen. This is both
+the concurrency design and the record discipline:
+
+- **Concurrency.** `uq_exchange_visit_notes_visit_revision` makes a lost update impossible rather
+  than unlikely: two clinicians appending at once cannot both win, and the loser is told instead of
+  having their text vanish. The narrowest mechanism that gives the property — no versioning
+  framework, no fingerprint column, no optimistic-concurrency token, because the immutability of a
+  row already provides it. Qualified in VISIT-PG-3.
+- **Record.** The same discipline ADR-045/048 established for corrected and amended lab results,
+  applied to the other place in this product where a clinician makes a statement that may need
+  correcting.
+
+**Amending a completed visit's note is deliberately not built.** It is a real clinical need. It is
+also exactly the kind of need that already has an explicit, audited, versioned amendment workflow in
+this codebase (ADR-048), and inventing a second, weaker one inside a lifecycle ticket would be worse
+than leaving the gap open and named. The interface says the note is closed rather than offering a
+field the server refuses. Recorded as a gap in `docs/NATIVE-OPERATING-PRODUCT.md`.
+
+**No note body ever reaches an audit row, a log line or an error message**, and none ever leaves this
+system. `visit_note_appended` records that a revision was written, to which visit, by whom, and when.
+
+### 5. Nothing completes itself, and completion never waits for a laboratory
+
+`COMPLETED` is reached only by a clinician saying so (§12: "The clinician says so; nothing
+auto-completes"). `exchange/visits.py` contains no reference to lab order status in either direction.
+
+A visit with an outstanding diagnostic order completes normally. Holding it open until a laboratory
+replies would make the waiting list lie about who is still in the building; results are followed up
+from the order and the patient chart. Asserted rather than assumed, at both layers: the adapter suite
+(VIS-38) and the real-browser qualification (VISIT-F, which first proves the order genuinely is
+unfinished at the moment of completion, so the assertion is not vacuous).
+
+There is also **no requirement that a visit have a note before it can be completed**. A required note
+would be a clinical documentation policy, and this repository does not invent clinical policy.
+
+### 6. The decision this ADR exists for: visit context travels on the **intent**
+
+`visit_id` is nullable on **both** `exchange_lab_order_intents` and `exchange_lab_orders`. The pair is
+the point, not a redundancy:
+
+| | |
+|---|---|
+| **Captured on** | the **intent**, at creation, from the caller. The intent is the immutable row created once inside the visit. |
+| **Copied to the order by** | `order_intents.commit`, unconditionally, with **no re-validation**. |
+| **Validated** | once, at intent creation: the visit exists in this organization, is `IN_PROGRESS`, and is about the order's own patient. |
+| **Never** | supplied to `LabOrderRepository.create` directly, and never inferred from the patient plus a timestamp. |
+
+**Why capture at the intent rather than at commit.** A lost-response retry re-sends the intent
+creation with the same idempotency key. If the visit were named at commit, a replay could present a
+*different* visit and silently move the order. Capturing it on the frozen intent makes that
+impossible by construction.
+
+**Why `visit_id` joins the intent's replay comparison.** `order_intents.py` already refuses a reused
+key whose patient, practitioner or test set differs, "refusing to return mismatched data". Without
+`visit_id` in that comparison, replaying one key under a different visit would silently return the
+*first* visit's intent while the caller believed it had attached the order to the second — the order
+would end up on a visit the clinician was no longer looking at, with nothing saying so. With it, that
+is a loud `IdempotencyKeyConflict`. The consequence is that a retry which has *lost* its visit context
+is also refused, which is why the browser's pending-order record persists `visit_id` alongside the
+key (`pendingOrderStorage.ts`).
+
+**Why commit deliberately does not re-validate.** A retry sent after the clinician finished the
+consultation must not fail where the first attempt would have succeeded — that is the entire
+guarantee the durable-intent mechanism exists to provide. The visit *was* in progress when the order
+was raised; that is the fact being recorded, and a later state change does not make it untrue.
+Asserted by VIS-37.
+
+**Why the order carries a copy at all.** "Which orders belong to this visit" is then one indexed read
+on the aggregate clinicians actually look at, and an order predating durable intents could still be
+linked if that ever became necessary.
+
+**Why nullable permanently, not transitionally.** Two populations legitimately have no visit forever:
+every order created before this ticket, and every standalone order raised without a clinic contact (a
+walk-in, or a connector-submitted order from a foreign system that has no DHealth visit and never
+will). `AGENTS.md`'s backward-compatibility rule is the floor; the product reason outlives the
+migration.
+
+**Why `IN_PROGRESS` specifically, and not merely non-terminal.** An order raised during a visit is a
+statement that a clinician was with the patient. A `CHECKED_IN` visit has no clinician by
+construction, so an order attached to one would claim a consultation that had not started. The
+stronger bar also means a cancelled visit can never carry orders, because `CANCELLED` is reachable
+only from `CHECKED_IN`.
+
+**No `VisitOrder` table, and no `visit.orders` relationship.** The order aggregate is already the
+authoritative record of what was ordered; a second structure naming the same fact is the mistake
+ADR-064 was written about.
+
+### 7. What this ticket deliberately did not build
+
+No appointments or calendar; no `PLANNED`/`NO_SHOW`; no front-desk role or reception surface; no
+billing, cashier, invoice or price on a visit; no vitals, SOAP structure, examination template,
+problem list, medication list or diagnosis code; no clinical interpretation, alerting, scoring,
+triage or decision support; no waiting-time or priority derivation anywhere in the interface; no
+post-completion note amendment; no reopen; no visit delete; no `visit_viewed` audit event (reading is
+not a mutation, and the security audit table is not an access log).
+
+`appointment_id` — which §36's brief lists on the `Visit` domain — is **omitted**, and that is a
+recorded deviation. No appointment table exists for it to reference, nothing would read it, and a
+speculative nullable column is unreferenced surface of exactly the kind DHEALTH-NATIVE-SEC-001's P1
+was made of (a primitive with no caller). It is added by the appointments ticket, with the table.
+
+### 8. Consequences
+
+Migration `0034_clinic_visits` creates `exchange_visits` and `exchange_visit_notes`, adds the two
+nullable `visit_id` columns, and widens the audit `event_type`/`resource_type` constraints by six and
+one value. Alembic head becomes `0034_clinic_visits`. Nothing existing is narrowed, retyped or
+backfilled, and every pre-existing order keeps exactly the meaning it had.
+
+Downgrade narrows the audit constraints back without deleting the audit rows that would then violate
+them (0032/0033's established reasoning), and *does* drop the two visit tables, which destroys
+clinical notes — stated in the migration rather than discovered, because no reversal of a table
+creation can do otherwise. **Both halves were verified against real PostgreSQL**: a downgrade is
+refused with a CheckViolation while visit audit rows exist, and succeeds once they are cleared, after
+which a re-upgrade restores the schema.
+
+`demo_seed._WORKFLOW_TABLES` gains `exchange_visit_notes` and `exchange_visits`: a visit is workflow
+state a clinician creates, not baseline, so `reset.sh`'s "restore the deterministic baseline" claim
+would otherwise be false for visits. The seed *patient* stays baseline and is deliberately still
+absent from that list.
+
+**Pilot-ready is not clinically live.** This adds a place to write a clinical note; it does not add
+clinical sign-off. The order set and any structured clinical field still require the clinical lead
+(`AGENTS.md`), and nothing here is authorization to use DHealth on a real patient.
