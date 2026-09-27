@@ -18,8 +18,11 @@ add one allowed organization role, remove one — reached by a facility's own ad
 **`Équipe et accès`** screen. Each is one transaction that locks the organization row, re-checks the
 actor's own `ORG_ADMIN` *inside* that lock, proves the target membership belongs to the organization,
 and writes its audit row alongside the change. **Administrative lockout is prevented**: an operation
-may not take an organization from one-or-more active administrators to zero, a rule that binds a
-platform administrator too and that no policy in this repository previously defined.
+may not take an organization from one-or-more active administrators to zero, a rule that no policy in
+this repository previously defined. **ADR-063 (2026-09-27) decides that platform authority is subject
+to it too** — platform administrators do not silently bypass the invariant on the ordinary lifecycle
+operations, and emergency administrator recovery, if ever required, will be an explicit, separately
+audited break-glass capability rather than an implicit exemption. That capability is **not built**.
 
 Qualified with **16 real-browser tests** against real Keycloak 26.7.1, real Caddy, real adapter and
 real PostgreSQL 16 (`scripts/demo/qualify-access.sh`), **ten real-PostgreSQL concurrency tests**
@@ -49,7 +52,8 @@ DHealth has no invitation flow and no account creation at all. Out of scope by i
 as the next admin ticket's material.
 
 **The two `HUMAN DECISION REQUIRED` items below are unchanged and unanswered** — successful-read
-audit policy, and session/timeout policy. This ticket added mutation audit only.
+audit policy, and session/timeout policy. This ticket added mutation audit only. The **one** item it
+raised itself is answered: ADR-063, above.
 
 ---
 

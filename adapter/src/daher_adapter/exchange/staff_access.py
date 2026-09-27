@@ -66,14 +66,24 @@ so this is the narrow rule §12 prescribes in that case. Three deliberate proper
   administrator can still grant ``ORG_ADMIN`` to somebody. A naive "after the change there must be
   at least one admin" check would refuse both and would brick exactly the organizations that most
   need fixing.
-- **It binds a platform administrator too.** ``require_org_admin`` lets a platform admin through, so
-  they do reach these endpoints (``FacilityTeam.tsx`` already depends on that), and the rule applies
-  to them unchanged. That is stricter than §12's literal wording, which speaks of an "ORG_ADMIN
-  action", and it is a deliberate choice rather than an oversight: a platform administrator who
-  genuinely needs to replace an organization's only administrator adds the replacement first, which
-  is one extra step and leaves the organization reachable at every instant in between. Nothing is
-  lost, because granting ``ORG_ADMIN`` is never blocked by this rule -- the recovery direction stays
-  open by construction.
+- **It binds a platform administrator too — ADR-063, decided by Liban 2026-09-27.**
+  ``require_org_admin`` lets a platform admin through, so they do reach these endpoints
+  (``FacilityTeam.tsx`` already depends on that), and the rule applies to them unchanged. That is
+  stricter than the ticket's §12 wording, which speaks of an "ORG_ADMIN action"; the ticket raised
+  it as ``HUMAN DECISION REQUIRED`` rather than settling it, and the answer is that **platform
+  authority does not silently bypass this invariant.**
+
+  Why it is safe rather than merely strict: granting ``ORG_ADMIN`` is never blocked by this rule, so
+  the recovery direction stays open by construction. A platform administrator who must replace an
+  organization's only administrator adds the replacement first and then removes the outgoing one --
+  one extra step, and the organization is administrable at every instant in between, which a bypass
+  would not guarantee. A successful bypass would also be **invisible in the audit trail**: it would
+  write an ordinary ``role_removed`` row identical to any other, with nothing recording that a
+  lockout had just been permitted.
+
+  **Emergency administrator recovery, if ever required, is an explicit and separately audited
+  break-glass capability** (ADR-063 decision 4). It is not built, it is not designed here, and it is
+  deliberately **not** an implicit exemption threaded through these four operations.
 - **It covers self-removal with no separate rule.** Removing your own ``ORG_ADMIN`` and deactivating
   your own membership are refused when you are the last active administrator, for the same reason
   and through the same code path as doing it to somebody else. There is deliberately no "you may

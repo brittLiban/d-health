@@ -8484,3 +8484,112 @@ Passphrase rotation, or re-encrypting existing archives. PBKDF2 iteration count,
 openssl's default because changing it would be a format decision. Recovery time objectives — the
 drill's timings are measurements from one workstation with a tiny dataset and are deliberately not
 written as targets. Whether the maternity track's own backup should eventually adopt any of this.
+
+---
+
+## ADR-063 — ACCEPTED / IMPLEMENTED (2026-09-27, DHEALTH-NATIVE-ACCESS-001): platform authority does
+## not bypass the last-active-organization-administrator invariant; emergency recovery is an explicit
+## break-glass capability, not a silent exemption
+
+**Date:** 2026-09-27 · **Status:** ACCEPTED (product + security), IMPLEMENTED, TESTED,
+REAL-POSTGRESQL-QUALIFIED (concurrency), REAL-KEYCLOAK/REAL-BROWSER-QUALIFIED · **Decided by:** Liban
+(DHEALTH-NATIVE-ACCESS-001 ticket, in answer to the `HUMAN DECISION REQUIRED` item that ticket
+raised)
+
+**Why this needed a decision at all.** DHEALTH-NATIVE-ACCESS-001 built the first supported path for
+withdrawing staff authority and had to introduce a rule preventing administrative lockout, because
+**no such policy existed anywhere in this repository** — no ADR, no code, no test. The ticket's own
+instruction (§12) worded the rule as constraining "an ORG_ADMIN action". That left one question the
+ticket could not answer for itself: `require_org_admin` admits a **platform** administrator, so a
+platform administrator genuinely reaches these endpoints. Are they bound by the rule too?
+
+The agent implemented the stricter reading and flagged it rather than deciding it. This ADR records
+the answer as a decision.
+
+### The decision
+
+**1. The invariant binds every caller of the ordinary staff-access lifecycle operations, platform
+administrators included.**
+
+```
+    an access mutation may not take an organization from
+    one-or-more active ORG_ADMIN memberships to zero
+
+    -- and "who is asking" does not change that
+```
+
+`deactivate`, `reactivate`, `PUT .../roles/{role}` and `DELETE .../roles/{role}` are the ordinary
+operations. Platform authority does **not** silently bypass the invariant on any of them.
+
+**2. The rule is a transition rule, not a floor.** It refuses an operation that *causes* the count to
+reach zero. An organization that already has zero active administrators is **not** frozen — that state
+is reachable through the pre-existing `POST .../memberships`, which will create a membership holding
+only `CLINICIAN` — and a floor would refuse every repair in exactly the organizations that need one.
+
+**3. The recovery direction is never blocked, which is what makes (1) safe rather than merely
+strict.** Granting `ORG_ADMIN` is not an operation the invariant can refuse. A platform administrator
+who must replace an organization's only administrator adds the replacement first and then removes the
+outgoing one. That is one extra step, and it leaves the organization administrable at every instant in
+between — which a bypass would not.
+
+**4. Emergency administrator recovery, if it is ever required, will be designed as an explicit,
+separately audited break-glass capability.** It is **not** built, and this ADR does not design it.
+What it does decide is the shape: a distinct capability with its own authority and its own audit
+trail, never an implicit exemption threaded through the ordinary endpoints.
+
+### Why a silent bypass was the wrong answer
+
+**A bypass is indistinguishable from the bug.** The whole of DHEALTH-NATIVE-ACCESS-001 exists because
+DHEALTH-NATIVE-SEC-001 found that authority could be granted through the product and withdrawn only
+by a database administrator. An exemption that let one class of caller quietly drive an organization
+to zero administrators would reintroduce the same shape from the other direction: a facility locked
+out of its own access management, with no record of which decision did it and no supported way back.
+
+**"Platform admin can fix it afterwards" is the argument that makes it unfixable.** Once an
+organization has no active administrator, the facility cannot repair itself by definition — every
+repair needs platform intervention, which is precisely the dependency DHealth's product laws push
+against (`docs/MVP-1.0.md` §6). Preventing the state costs one ordering constraint; recovering from it
+costs a support interaction.
+
+**An exemption would have been invisible in the audit trail.** The invariant's refusal is a 409 and
+writes no audit row, because a refusal is not a mutation. A *successful* bypass would write an
+ordinary `role_removed` or `membership_deactivated` row identical to any other — nothing would record
+that a lockout had just been permitted, or by whom, or why. A break-glass capability is the opposite:
+its whole point is that using it is conspicuous.
+
+**Strictness here is cheap and reversible; a bypass is neither.** This direction can be relaxed later
+by a superseding ADR with a real recovery design behind it. Shipping the bypass first and discovering
+a stranded facility is the order that cannot be undone.
+
+### What this does NOT decide
+
+- **It does not design the break-glass capability** — not its authority model, not its audit event
+  type, not whether it is an API, a CLI, or an operator runbook, not whether it requires two people,
+  and not whether it is scoped to one organization or general. Decision 4 fixes only that it will be
+  explicit and separately audited.
+- **It does not change what `ORG_ADMIN` or platform authority mean elsewhere.** `require_org_admin`
+  still admits a platform administrator; `require_clinician`, `require_lab_tech` and
+  `require_lab_result_releaser` still refuse one (ADR-044's separation is untouched). This ADR is
+  about one invariant, not about the authority model.
+- **It does not make platform administrators equal to organization administrators.** They keep every
+  other capability they had, including `POST .../memberships` and the platform onboarding surface.
+- **It says nothing about session or token lifetime.** Revocation taking effect on the next request is
+  what makes this invariant meaningful, and that property is DHEALTH-NATIVE-SEC-001's; the session and
+  idle timeout policy remains an open `HUMAN DECISION REQUIRED` item.
+
+### Consequences, and where they are enforced
+
+- `exchange/staff_access.py`'s `_guard_last_administrator` evaluates the invariant **after** the
+  mutation has been flushed, inside a transaction that first takes a `FOR UPDATE` lock on the
+  organization row. The lock is what makes the rule hold when two administrators remove each other's
+  `ORG_ADMIN` simultaneously — two different membership rows, both of which would otherwise pass a
+  pre-flight check and leave zero.
+- Enforcement is in the **domain service**, not the UI. `TeamAccessPage` states that DHealth will
+  refuse the operation and deliberately does **not** disable the control, because a browser that
+  predicted the rule would eventually predict it wrongly.
+- Pinned by `test_a_platform_admin_is_bound_by_the_same_protection`, by
+  `test_the_protection_is_a_transition_rule_not_a_floor`, by ACCESS-6 in
+  `ui/e2e/native/07-access-lifecycle.spec.ts`, and under real concurrency by `pg1`/`pg2`/`pg3` in
+  `tests/integration/test_dhealthaccess001_postgres_qualification.py`. **NC-ACCESS-4** bypassed the
+  guard on purpose and observed an organization reach zero active administrators, with six unit tests
+  and ACCESS-6 going red — so the rule is load-bearing rather than incidentally true.

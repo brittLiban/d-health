@@ -686,9 +686,16 @@ def test_the_last_admin_cannot_deactivate_their_own_membership(client: TestClien
 
 
 def test_a_platform_admin_is_bound_by_the_same_protection(client: TestClient, world) -> None:
-    """A deliberate choice, stricter than §12's literal wording, recorded in
-    `staff_access.py`'s docstring: a platform administrator replacing an organization's only
-    administrator adds the replacement first. The recovery direction is never blocked."""
+    """**ADR-063**, decided by Liban 2026-09-27: platform authority does not silently bypass the
+    last-active-organization-administrator invariant on the ordinary lifecycle operations.
+
+    Stricter than the ticket's §12 wording ("an ORG_ADMIN action"), and safe because granting
+    `ORG_ADMIN` is never blocked -- a platform administrator replacing an organization's only
+    administrator adds the replacement first. Emergency recovery, if required, is a separate
+    explicitly audited break-glass capability, not an exemption threaded through these endpoints.
+
+    This test is the pin on that decision, so a future change that quietly exempts platform
+    authority fails here rather than in a facility."""
     response = _deactivate(
         client,
         world["platform_token"],

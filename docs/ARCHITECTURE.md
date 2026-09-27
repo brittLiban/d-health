@@ -1960,10 +1960,18 @@ operation that takes an organization from one-or-more active `ORG_ADMIN` members
 organization that *already* has none is not frozen — that state is reachable today, since
 `POST .../memberships` will create a membership holding only `CLINICIAN` — and a floor would refuse
 every repair in exactly the organizations needing one. No policy for this existed anywhere in the
-repository before this ticket. It binds a platform administrator too, which is stricter than the
-ticket's literal wording and is recorded as a choice: granting `ORG_ADMIN` is never blocked by the
-rule, so the recovery direction stays open and a replacement is simply added first. Self-removal
-needs no separate rule; it is the same code path.
+repository before this ticket. Self-removal needs no separate rule; it is the same code path.
+
+**It binds a platform administrator too — ADR-063.** `require_org_admin` admits platform authority, so
+a platform administrator genuinely reaches these endpoints, and the invariant applies to them
+unchanged. Safe rather than merely strict, because granting `ORG_ADMIN` is never blocked by the rule: a
+platform administrator replacing an organization's only administrator adds the replacement first, and
+the organization stays administrable at every instant in between. A bypass would also have been
+**invisible in the audit trail** — it would write an ordinary `role_removed` row like any other, with
+nothing recording that a lockout had just been permitted. **Emergency administrator recovery, if ever
+required, is an explicit and separately audited break-glass capability** (ADR-063 decision 4): not
+built, not designed by that ADR, and deliberately not an implicit exemption inside these four
+operations.
 
 **Reactivation restores the roles still attached.** Deactivation changes `status` and nothing else,
 so role rows survive it, and `assign` refuses an inactive membership. That is the pre-existing model,

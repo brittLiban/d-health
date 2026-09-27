@@ -20990,9 +20990,18 @@ that takes an organization from one-or-more active `ORG_ADMIN` to zero. An organ
 *already* has none is **not** frozen: that state is reachable today (`POST .../memberships` will
 create a CLINICIAN-only membership), and a floor would refuse every repair in exactly the
 organizations needing one. It binds a **platform administrator too** — stricter than §12's literal
-"ORG_ADMIN action" wording, chosen deliberately and safe because granting `ORG_ADMIN` is never
-blocked by the rule, so a replacement is simply added first. Self-removal needs no separate rule;
-it is the same code path.
+"ORG_ADMIN action" wording, and safe because granting `ORG_ADMIN` is never blocked by the rule, so a
+replacement is simply added first. Self-removal needs no separate rule; it is the same code path.
+
+**That platform-administrator question was raised by this ticket as `HUMAN DECISION REQUIRED` and is
+now decided: ADR-063, by Liban, 2026-09-27.** Platform authority does **not** silently bypass the
+invariant on the ordinary lifecycle operations. Emergency administrator recovery, if it is ever
+required, will be an **explicit, separately audited break-glass capability** — not an implicit
+exemption threaded through these four endpoints. It is not built and ADR-063 does not design it; what
+the ADR fixes is its shape. The implementation already matched the decision, so no code changed —
+only the docstrings that described it as an agent's judgment call now cite the ADR, and
+`test_a_platform_admin_is_bound_by_the_same_protection` is the pin so a future quiet exemption fails
+in the suite rather than in a facility.
 
 **3. The actor's authority is checked twice, and the second check is the one that matters.**
 `require_org_admin` runs in its own earlier session. Without re-reading inside the lock, an
@@ -21235,6 +21244,14 @@ gate is created or cleared.** It does not make the Exchange pilot-ready. "A faci
 can revoke staff authority" is a statement about this qualified local runtime, not about any
 facility in Djibouti.
 
+### Resolved by decision, 2026-09-27
+
+- **Platform-administrator scope of the last-active-administrator invariant** — the one
+  `HUMAN DECISION REQUIRED` item this ticket raised. **Decided: ADR-063.** Platform authority is
+  subject to the invariant on the ordinary staff-access lifecycle operations and does not silently
+  bypass it; emergency recovery will be an explicit, separately audited break-glass capability. The
+  implementation already matched, so this closed with documentation rather than code.
+
 ### Deliberately NOT resolved — still open, not quietly marked done
 
 - **Successful sensitive-read audit policy** — still `Human Decision Required: Yes`, unchanged (see
@@ -21261,6 +21278,13 @@ facility in Djibouti.
 2. **No self-service Keycloak account creation, password reset, or MFA enrollment** anywhere.
 3. **Global identity disablement does not exist**, and is deliberately a separate platform
    capability rather than anything an ORG_ADMIN can reach.
+3b. **Emergency administrator recovery (break-glass) is not built** — named by ADR-063 and
+   deliberately left undesigned there. An organization cannot currently reach zero active
+   administrators through any supported operation, so nothing is stranded today; the capability
+   exists on this list because ADR-063 fixed its *shape* (explicit, separately audited, never an
+   implicit exemption in the ordinary endpoints) and a future ticket owes the design: its authority
+   model, its audit event type, whether it needs two people, and whether it is an API, a CLI or an
+   operator runbook.
 4. **The platform-scope `FacilityTeam` section still does not revoke or reactivate.** A platform
    administrator does have the four endpoints available to them (`require_org_admin` admits platform
    authority), so nothing is unreachable — it simply is not that screen's purpose. Recorded as a
