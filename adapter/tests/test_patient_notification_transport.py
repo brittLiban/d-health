@@ -1174,7 +1174,7 @@ def _asgi_request(chunks: list[bytes]) -> tuple[Request, list[int]]:
 
 def test_the_bounded_reader_returns_the_exact_bytes_it_was_given() -> None:
     """A. Below the bound: every byte, in order, unmodified. These are the bytes Meta signed."""
-    chunks = [b'{"object":"whats', b'app_business_acc', b'ount","entry":[]}']
+    chunks = [b'{"object":"whats', b"app_business_acc", b'ount","entry":[]}']
     request, consumed = _asgi_request(chunks)
 
     raw = asyncio.run(_read_bounded_body(request, max_bytes=MAX_BODY))

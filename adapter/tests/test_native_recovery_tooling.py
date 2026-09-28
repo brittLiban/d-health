@@ -53,8 +53,9 @@ def _code(path: Path) -> str:
 
     These scripts explain at length what they must NOT do -- the restore payload's header describes
     the `DROP DATABASE; pg_restore --no-privileges` defect the 2026-08-13 maternity drill found, and
-    names `--no-owner` and `WITH (FORCE)` to say why neither is used. An assertion that those strings
-    are absent has to read the code, or the explanation of a rule fails the test enforcing it.
+    names `--no-owner` and `WITH (FORCE)` to say why neither is used. An assertion that those
+    strings are absent has to read the code, or the explanation of a rule fails the test enforcing
+    it.
     """
     return "\n".join(
         line
@@ -76,9 +77,9 @@ def _service_block(path: Path, service: str) -> str:
 # ---------------------------------------------------------------------------
 def test_no_compose_file_names_the_backup_passphrase() -> None:
     """Compose interpolates profile-gated services too, so a `${PASSPHRASE:?}` in the canonical file
-    would make `docker compose config` fail for every operator who has never taken a backup -- and it
-    would put the variable one `config` away from being printed. The wrappers pass it by name at run
-    time instead."""
+    would make `docker compose config` fail for every operator who has never taken a backup -- and
+    it would put the variable one `config` away from being printed. The wrappers pass it by name at
+    run time instead."""
     for path in (NATIVE, NATIVE_DEMO, REPO / "docker-compose.yml"):
         text = path.read_text(encoding="utf-8")
         if path.name == "docker-compose.yml":
@@ -86,9 +87,9 @@ def test_no_compose_file_names_the_backup_passphrase() -> None:
             # is written down.
             for line in text.splitlines():
                 if PASSPHRASE_VARIABLE in line and not line.strip().startswith("#"):
-                    assert re.search(
-                        rf"\$\{{{PASSPHRASE_VARIABLE}(:[-?][^}}]*)?\}}", line
-                    ), f"{path.name} appears to assign a passphrase value: {line.strip()}"
+                    assert re.search(rf"\$\{{{PASSPHRASE_VARIABLE}(:[-?][^}}]*)?\}}", line), (
+                        f"{path.name} appears to assign a passphrase value: {line.strip()}"
+                    )
             continue
         assert PASSPHRASE_VARIABLE not in _directives(path), (
             f"{path.name} names {PASSPHRASE_VARIABLE}; the Native recovery wrappers pass it by "
@@ -172,7 +173,7 @@ def test_the_backup_and_restore_agree_on_one_explicit_format_version() -> None:
     accepted = re.search(r"^FORMAT='([^']+)'", restore, flags=re.MULTILINE)
     assert written and accepted, "both sides must declare an archive format"
     assert written.group(1) == accepted.group(1)
-    assert 'unsupported backup format' in restore, (
+    assert "unsupported backup format" in restore, (
         "an archive from an unknown writer must be refused, not guessed at"
     )
 
@@ -201,7 +202,9 @@ def test_the_manifest_carries_no_secret() -> None:
     """The manifest is the one part of the archive a future tool may want to read before deciding
     anything, so nothing in it may be a credential."""
     backup = BACKUP_PAYLOAD.read_text(encoding="utf-8")
-    manifest = backup[backup.index('>"${WORK}/MANIFEST"') - 2000 : backup.index('>"${WORK}/MANIFEST"')]
+    manifest = backup[
+        backup.index('>"${WORK}/MANIFEST"') - 2000 : backup.index('>"${WORK}/MANIFEST"')
+    ]
     for forbidden in ("PASSWORD", "PASSPHRASE", "SECRET", "TOKEN"):
         assert forbidden not in manifest, f"the manifest block references {forbidden}"
 
@@ -223,8 +226,8 @@ def test_every_integrity_check_happens_before_anything_can_be_dropped() -> None:
     announced = branch.index("APPLYING --")
     applied = branch.index("restore_database ")
     assert staged < announced < applied, (
-        "the restore branch must verify, then announce, then apply. Any other order means a corrupt "
-        "or wrong-passphrase archive could reach a DROP DATABASE before being rejected."
+        "the restore branch must verify, then announce, then apply. Any other order means a "
+        "corrupt or wrong-passphrase archive could reach a DROP DATABASE before being rejected."
     )
 
     # And the only DROP in the whole script is inside that one function, so there is no second path
@@ -238,10 +241,10 @@ def test_every_integrity_check_happens_before_anything_can_be_dropped() -> None:
 def test_the_restore_refuses_an_ambiguous_target() -> None:
     restore = RESTORE_PAYLOAD.read_text(encoding="utf-8")
     assert "--confirm-destroy-database" in restore
-    assert 'Refusing an ambiguous target' in restore
+    assert "Refusing an ambiguous target" in restore
     # The archive's own idea of which databases it holds is checked against the deployment, so a
     # demo archive cannot be restored onto production or the reverse.
-    assert 'but this deployment is' in restore
+    assert "but this deployment is" in restore
 
 
 def test_the_restore_will_not_drop_a_database_that_still_has_sessions() -> None:
@@ -323,8 +326,8 @@ def test_the_staging_area_is_a_tmpfs_in_both_services() -> None:
 
 def test_every_operator_script_is_executable_in_the_index() -> None:
     """A script this repository's own documentation tells an operator to run as `./script.sh` has to
-    be committed executable. The exec bit not surviving a Windows checkout has bitten this repository
-    before."""
+    be committed executable. The exec bit not surviving a Windows checkout has bitten this
+    repository before."""
     for path in (*OPERATOR_SCRIPTS, BACKUP_PAYLOAD, RESTORE_PAYLOAD):
         assert path.exists(), f"{path} is missing"
         mode = path.stat().st_mode
