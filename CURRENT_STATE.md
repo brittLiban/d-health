@@ -2066,3 +2066,77 @@ OpenMRS or OpenELIS code, configuration or clinical content was read or written.
 **Still not production-deployed, clinically live, or Connect-integrated.** `BASE_DOMAIN=localhost` and
 Caddy's internal CA, on one workstation. CI executed nothing — no push was authorized. ADR-003's
 WhatsApp gate remains `BLOCKED`. All data synthetic; no real patient data used at any point.
+
+---
+
+## 2026-09-28 — a clinic and a laboratory can take money, and an unpaid bill stops nothing
+
+What this adds to the honest read: **DHealth could run a consultation, order a test, release a result
+and review it, and still had no answer to "what does this cost, what was paid, what is owed, and what
+receipt did we give them".** A facility reached for a paper ledger or a second application. That gap
+is closed for the Native track (DHEALTH-BILLING-001, ADR-066, Alembic head now
+`0035_facility_billing`).
+
+**Demonstrated, in a real browser against the real stack** (Chromium, Caddy, Keycloak 26.7.1,
+adapter, PostgreSQL 16 — six phases, all passing): a cashier signs in, searches for the patient and
+sees their date of birth beside the name, charges the consultation the clinic performed, takes a part
+payment, takes the remainder, and the invoice settles with two receipt references. An administrator
+then reprices that same service and the invoice already issued **does not move** — read back from the
+database, not believed from the screen. A laboratory cashier, who never sees a patient search at all,
+bills the test its own laboratory performed and takes it by mobile money.
+
+**Also demonstrated, and the one that matters most:** BILL-S drives a real order through collection,
+processing, result entry and **release** with a real unpaid invoice outstanding against it, on the
+running stack. The release returns 201 and the balance is still owed afterwards. Money does not gate
+care, and that is now a demonstrated fact rather than a design intention.
+
+**Also demonstrated:** the refusals, in both directions. A clinician holds every clinical authority
+and gets 403 from the till and from the billing patient lookup, with no `Facturation` section at all.
+A cashier gets 403 from the patient directory and from visits, 404 from the other facility entirely,
+and 422 for an empty lookup query — the till finds a person who is present, it does not browse a
+roster.
+
+**What real PostgreSQL proved that 48 SQLite tests could not.** SQLAlchemy's SQLite dialect omits
+`FOR UPDATE`, so both of this domain's locks are silently no-ops there and SQLite's writer
+serialization then makes the tests pass for an unrelated reason. Three real defects came out of the
+concurrency qualification: the invoice-number counter's insert-race branch raised
+`InvalidRequestError` (a rolled-back SAVEPOINT already detaches what was added inside it); a genuine
+concurrent double-submit of one invoice raised a raw unique-constraint violation at a clerk whose
+invoice *had* been issued; and the SAVEPOINT added to fix that did not cover the insert, because
+`begin_nested()` autoflushes before establishing the savepoint. All three fixed. **Billing is SQLite
+green and PostgreSQL qualified**, and only the second half of that sentence is evidence about money.
+
+**A negative control found a hole the whole suite had missed.** Deleting `record_payment`'s
+organization-ownership check left all 43 other tests green: a clerk at one facility could record a
+payment against another facility's invoice, moving its balance and its status. `test_billauth9`
+covers it now. This is what negative controls are for, and it is the second time in two tickets that
+one has paid for itself.
+
+**The browser suite also found two things wrong with the demo baseline, not with the product.** The
+seed patient had no date of birth, so the till could not demonstrate the identification the lookup
+exists to provide; and the laboratory had no price for its own offering, so `Facturation` correctly
+offered the performed test and correctly refused to charge for it — right behaviour against a wrong
+baseline. Both are seeded now, convergently, so an existing demo database picks them up on reset.
+
+**What is not true.** **Human usability is not claimed for this surface.** No cashier has used it and
+nothing has been timed against the paper ledger it replaces, so product law 3 ("faster than what it
+replaces") remains a validated target rather than a fact. Six green browser phases are a different
+and lesser claim than a cashier finding it faster.
+
+**Payment correction is not built**, deliberately: §26 left the policy undecided, so the interface
+says a mis-keyed payment cannot yet be corrected rather than offering a control that quietly rewrites
+financial history. No refunds, no credits, no discounts, no void. Overpayment is *refused* because
+there is no credit model to hold the difference — not because refusal is ideal.
+
+**No money moves.** DHealth records that a payment was taken by one of four means. It contacts no
+bank, calls no mobile-money API and authorises no card; there is no payment provider, no merchant
+account and no secret anywhere in this domain.
+
+**Two decisions were raised rather than guessed.** D-1's Billing portion is resolved — billing has its
+own authority and administration does not confer it — but **the Front Desk half is still open**. D-2a
+has an interim answer only, and every inter-facility commercial arrangement is deliberately unbuilt.
+**D-8 is still open**: the new patient lookup is not audited as a successful read, because a
+read-audit regime introduced for one endpoint inside a billing ticket would have pre-empted it.
+
+All patient, service and price data used anywhere in this work is synthetic. No real patient data is
+used.

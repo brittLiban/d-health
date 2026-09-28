@@ -78,6 +78,12 @@ services:
       DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD in demo.env}
       DEMO_LAB_ADMIN_USERNAME: ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}
       DEMO_LAB_ADMIN_PASSWORD: ${DEMO_LAB_ADMIN_PASSWORD:?set DEMO_LAB_ADMIN_PASSWORD in demo.env}
+      # DHEALTH-BILLING-001: one cashier per demo organization, holding BILLING_CLERK and nothing
+      # else. Also no realm role -- a cashier is not a platform administrator either.
+      DEMO_CLERK_USERNAME: ${DEMO_CLERK_USERNAME:-demo-clerk}
+      DEMO_CLERK_PASSWORD: ${DEMO_CLERK_PASSWORD:?set DEMO_CLERK_PASSWORD in demo.env}
+      DEMO_LAB_CLERK_USERNAME: ${DEMO_LAB_CLERK_USERNAME:-demo-lab-clerk}
+      DEMO_LAB_CLERK_PASSWORD: ${DEMO_LAB_CLERK_PASSWORD:?set DEMO_LAB_CLERK_PASSWORD in demo.env}
     volumes:
       - ./keycloak/reconcile-demo-users.sh:/opt/daher/reconcile-demo-users.sh:ro
     tmpfs:
@@ -109,6 +115,8 @@ services:
       # username to learn the `sub` a real login will carry; it never needs their passwords.
       DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo-admin}
       DEMO_LAB_ADMIN_USERNAME: ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}
+      DEMO_CLERK_USERNAME: ${DEMO_CLERK_USERNAME:-demo-clerk}
+      DEMO_LAB_CLERK_USERNAME: ${DEMO_LAB_CLERK_USERNAME:-demo-lab-clerk}
 
   caddy:
     volumes:

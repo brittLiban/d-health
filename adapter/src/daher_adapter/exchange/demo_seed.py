@@ -33,6 +33,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -51,16 +53,21 @@ from daher_adapter.exchange.membership import (
     OrganizationRoleAssignmentRepository,
 )
 from daher_adapter.exchange.models import (
+    ClinicService,
+    ClinicServicePrice,
     FacilityEnrollment,
+    LabPrice,
     OnboardingStatus,
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationType,
     ParticipationMode,
+    Patient,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.patients import PatientRepository
 from daher_adapter.exchange.provider_lab_routes import ProviderLabRouteRepository
+from daher_adapter.models import utc_now
 
 # -- fixed baseline identity (natural keys, never hardcoded UUIDs -- see module docstring) -------
 
@@ -70,6 +77,25 @@ CATALOG_CODE = "DEMO-TEST-A"
 CATALOG_DISPLAY_NAME = "Analyse de démonstration A"
 PATIENT_DISPLAY_NAME = "Patient Démo Alpha"
 PATIENT_IDEMPOTENCY_KEY = "dhealth-native-demo-patient-alpha"
+#: DHEALTH-BILLING-001: the demo patient needs a date of birth, and the reason is a product one.
+#:
+#: The billing patient lookup returns `display_name` **and** `date_of_birth` precisely because two
+#: people sharing a name is ordinary and a till that cannot tell them apart bills the wrong one
+#: (ADR-066). A baseline patient with no date of birth makes the demo show the degraded case as if
+#: it were the normal one, and the browser qualification's own identification assertion has nothing
+#: to find. Synthetic, like every other value in this file.
+PATIENT_DATE_OF_BIRTH = date(1990, 4, 17)
+#: DHEALTH-BILLING-001: what the demo clinic performs and charges for, in DJF. Ordinary consulting
+#: amounts for Djibouti, invented for the demo and carrying no clinical meaning whatsoever -- a
+#: price is what a facility charges, never a statement about care.
+CLINIC_SERVICES = (
+    ("Consultation générale", "3000.00"),
+    ("Consultation de suivi", "1500.00"),
+)
+#: DHEALTH-BILLING-001: what the demo laboratory charges for its one offering, in DJF. Synthetic on
+#: the same terms. Without it the laboratory till correctly offers the performed test and correctly
+#: refuses to charge for it -- which is right behaviour against a wrong baseline.
+LAB_PRICE_AMOUNT = "3500.00"
 SEED_IDENTITY_ISSUER = "dhealth-native-demo-seed"
 SEED_IDENTITY_SUBJECT = "demo-seed-script"
 
@@ -99,12 +125,15 @@ TEMPLATE_OBSERVATIONS = [
 # on TRUNCATE's own CASCADE discovery, so a table this list is missing fails loudly (a
 # foreign-key error) instead of silently leaving stale rows behind.
 #
-# `exchange_lab_prices` is included even though `seed_baseline` never creates a row there and the
-# ticket's own golden journey (`assign_by_provider`) never touches it: `CatalogRepository.set_price`
-# is a real, reachable write path (the marketplace `select()` path needs it), so a demo operator
-# who exercises that path leaves a row behind that a "restore the deterministic baseline" reset
-# must also clear. It is not baseline/configuration data -- nothing seeds it, so no reset would
-# ever need to *restore* a price -- only clear one that live use created.
+# `exchange_lab_prices` is included because `CatalogRepository.set_price` is a real, reachable write
+# path (the marketplace `select()` path needs it), so a demo operator who exercises it leaves a row
+# behind that a "restore the deterministic baseline" reset must clear.
+#
+# **DHEALTH-BILLING-001 changed what happens next.** `seed_baseline` now *does* create a row here
+# (`_ensure_lab_price`), because a laboratory with no price cannot bill the test it performed — the
+# till correctly offers it and correctly refuses to charge, which is right behaviour against a wrong
+# baseline. `run_reset` truncates and *then* re-seeds, so a price a demo operator changed is still
+# cleared and the canonical amount is restored. Same shape as `exchange_clinic_service_prices`.
 _WORKFLOW_TABLES = (
     "exchange_lab_prices",
     "exchange_lab_order_intent_items",
@@ -134,6 +163,28 @@ _WORKFLOW_TABLES = (
     # which is this list's whole reason for existing.
     "exchange_visit_notes",
     "exchange_visits",
+    # DHEALTH-BILLING-001. Financial artefacts a demo *produces*, cleared for the same reason
+    # visits are: nothing seeds an invoice, and a reset that left one behind would make this
+    # module's "restore the deterministic baseline" contract false for money specifically.
+    #
+    # Naming them explicitly is not optional here. `exchange_invoice_lines` references
+    # `exchange_lab_order_items`, so TRUNCATE's CASCADE would have emptied the lines while leaving
+    # the invoices standing -- every historical invoice silently reduced to a total of zero, with
+    # its payments still attached. Stale rows are the ordinary cost of a missing entry in this
+    # list; *contradictory* rows are what this one prevents.
+    #
+    # `exchange_invoice_number_sequences` goes with them so numbering restarts at `FAC-YYYY-000001`
+    # rather than resuming above invoices that no longer exist.
+    #
+    # `exchange_clinic_service_prices` is here and `exchange_clinic_services` is not, which is the
+    # same split `exchange_lab_prices` and `exchange_lab_offerings` already use: the service is
+    # configuration the demo needs to exist, its price is state a demo operator may change.
+    # `_ensure_clinic_service` re-establishes the canonical price on every reset.
+    "exchange_payments",
+    "exchange_invoice_lines",
+    "exchange_invoices",
+    "exchange_invoice_number_sequences",
+    "exchange_clinic_service_prices",
 )
 
 _MARKER_TABLE = "dhealth_demo_environment"
@@ -348,6 +399,13 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
     _ensure_enrollment(session_factory, provider.id)
     _ensure_enrollment(session_factory, lab.id)
 
+    # DHEALTH-BILLING-001: what the demo clinic charges for. Two services rather than one, so the
+    # price list is visibly a list and a clerk's first action is a real choice.
+    for service_name, service_amount in CLINIC_SERVICES:
+        _ensure_clinic_service(
+            session_factory, provider.id, name=service_name, amount=service_amount
+        )
+
     entry, _created = catalog.create_entry(code=CATALOG_CODE, display_name=CATALOG_DISPLAY_NAME)
     offering, _created = catalog.create_offering(
         lab_organization_id=lab.id, catalog_entry_id=entry.id
@@ -369,15 +427,37 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             expected_current_template_id=current_active_id,
         )
 
+    # DHEALTH-BILLING-001: the laboratory's own price for the test it performs.
+    #
+    # Nothing seeded this before, and the consequence was only visible once a laboratory clerk tried
+    # to use the till: `Facturation` correctly offered the performed test and correctly refused to
+    # charge for it — "Tarif non défini", control disabled — because `_lab_item_price` reads
+    # `LabPrice` through `LabOffering` and there was none. That is the right behaviour (a zero line
+    # would silently claim the test is free) and the wrong baseline: a demo laboratory that cannot
+    # bill its own work cannot show the workflow this ticket added.
+    #
+    # `exchange_lab_prices` stays in `_WORKFLOW_TABLES`. `run_reset` truncates and *then* calls this
+    # function, so a demo operator's own price change is still cleared and the canonical amount is
+    # re-established — the same shape as `exchange_clinic_service_prices`.
+    _ensure_lab_price(session_factory, catalog, offering.id, amount=LAB_PRICE_AMOUNT)
+
     patients.create(
         provider_organization_id=provider.id,
         idempotency_key=PATIENT_IDEMPOTENCY_KEY,
         display_name=PATIENT_DISPLAY_NAME,
+        # Deliberately `None` here, with the date set by `_ensure_patient_date_of_birth` below.
+        #
+        # `PatientRepository.create` is idempotent on its key *and* refuses a reuse whose content
+        # differs -- which is right, and which means passing the date here makes every re-seed of a
+        # database created before this ticket raise `PatientRegistrationConflict` and abort the
+        # whole reset. Found by running it. One convergent path, so a fresh database and an existing
+        # one end up identical.
         date_of_birth=None,
         contact_channel_type=None,
         contact_value=None,
         created_by_identity_id=seed_identity_id,
     )
+    _ensure_patient_date_of_birth(session_factory, provider.id)
 
     keycloak_base_url = os.environ.get("DEMO_KEYCLOAK_ADMIN_URL", "").strip()
     admin_user = os.environ.get("DEMO_KEYCLOAK_ADMIN_USER", "").strip()
@@ -493,6 +573,52 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             identity_id=lab_admin_identity,
             org_roles=[OrganizationRole.ORG_ADMIN],
         )
+
+        # DHEALTH-BILLING-001/ADR-066: one cashier per organization, and a cashier is nothing else.
+        #
+        # `BILLING_CLERK` only -- no clinical role, and deliberately *not* also ORG_ADMIN. ADR-066
+        # records that being an administrator, a clinician or a lab worker must not automatically
+        # make someone a cashier, and a baseline whose cashier were also the administrator could
+        # not demonstrate it. This shape is what makes both directions checkable in a real browser:
+        # the cashier opens `Facturation` and no clinical screen, and the clinician opens the
+        # clinical screens and no till.
+        #
+        # Two, one per organization, for the same reason there are two administrators: a single
+        # identity holding the role in both would legitimately succeed everywhere and would prove
+        # nothing about the tenant boundary.
+        clerk_identity = _demo_user_identity(
+            identities,
+            issuer=issuer,
+            keycloak_base_url=keycloak_base_url,
+            admin_user=admin_user,
+            admin_password=admin_password,
+            username=os.environ.get("DEMO_CLERK_USERNAME", "demo-clerk"),
+        )
+        _grant_membership(
+            session_factory,
+            memberships,
+            roles,
+            organization_id=provider.id,
+            identity_id=clerk_identity,
+            org_roles=[OrganizationRole.BILLING_CLERK],
+        )
+
+        lab_clerk_identity = _demo_user_identity(
+            identities,
+            issuer=issuer,
+            keycloak_base_url=keycloak_base_url,
+            admin_user=admin_user,
+            admin_password=admin_password,
+            username=os.environ.get("DEMO_LAB_CLERK_USERNAME", "demo-lab-clerk"),
+        )
+        _grant_membership(
+            session_factory,
+            memberships,
+            roles,
+            organization_id=lab.id,
+            identity_id=lab_clerk_identity,
+            org_roles=[OrganizationRole.BILLING_CLERK],
+        )
     else:
         print(  # noqa: T201 -- CLI tool, stdout is the intended channel
             "[demo_seed] skipping demo-user membership grants: Keycloak admin lookup not "
@@ -525,6 +651,96 @@ def _ensure_enrollment(session_factory, organization_id) -> None:
             return
         existing.participation_mode = ParticipationMode.NATIVE.value
         existing.onboarding_status = OnboardingStatus.READY_FOR_ROUTING.value
+
+
+def _ensure_lab_price(session_factory, catalog: CatalogRepository, offering_id, *, amount) -> None:
+    """The demo laboratory's current price for its own offering. Idempotent.
+
+    DHEALTH-BILLING-001. `CatalogRepository.set_price` is an optimistic-concurrency update: it wants
+    to be told which price row the caller believes is current, and returns `"unchanged"` when the
+    amount already matches. So the current row is read first and passed as the expectation, which
+    makes a second run a no-op rather than a `PriceConflict`.
+    """
+    with session_factory() as session:
+        current = session.scalar(
+            select(LabPrice).where(
+                LabPrice.lab_offering_id == offering_id, LabPrice.superseded_at.is_(None)
+            )
+        )
+        current_id = current.id if current is not None else None
+        already = current is not None and current.amount == Decimal(amount)
+    if already:
+        return
+    catalog.set_price(
+        offering_id=offering_id,
+        amount=Decimal(amount),
+        currency="DJF",
+        expected_current_price_id=current_id,
+    )
+
+
+def _ensure_patient_date_of_birth(session_factory, provider_organization_id) -> None:
+    """Fill the baseline patient's date of birth when it is missing. Idempotent.
+
+    DHEALTH-BILLING-001. `PatientRepository.create` is idempotent on its key, so a database seeded
+    before this ticket keeps the `NULL` it was created with and no amount of re-seeding changes it —
+    which would leave the demo's only patient unable to demonstrate the identification the billing
+    lookup exists to provide.
+
+    Deliberately **only when absent**: this converges a missing baseline fact and never overwrites a
+    date somebody entered. Nothing else about the patient is touched.
+    """
+    with session_factory() as session, session.begin():
+        patient = session.scalar(
+            select(Patient).where(
+                Patient.provider_organization_id == provider_organization_id,
+                Patient.display_name == PATIENT_DISPLAY_NAME,
+            )
+        )
+        if patient is not None and patient.date_of_birth is None:
+            patient.date_of_birth = PATIENT_DATE_OF_BIRTH
+
+
+def _ensure_clinic_service(session_factory, organization_id, *, name: str, amount: str) -> None:
+    """One priced service the demo clinic actually performs and charges for. Idempotent.
+
+    DHEALTH-BILLING-001. Written directly against the models rather than through
+    `BillingRepository.create_service`, which needs a principal and refuses a duplicate name by
+    design -- the seed has neither a principal nor any business raising `ServiceNameTaken` on its
+    second run.
+
+    The *service* is baseline configuration, exactly like `LabOffering`: without one the till has
+    nothing to sell and `Facturation` opens onto an empty catalogue. Its *price*, like `LabPrice`,
+    is workflow state a demo may change, so `_WORKFLOW_TABLES` truncates
+    `exchange_clinic_service_prices` and this function re-establishes the canonical amount --
+    which is why the price is reconciled below rather than only created.
+    """
+    with session_factory() as session, session.begin():
+        service = session.scalar(
+            select(ClinicService).where(
+                ClinicService.organization_id == organization_id, ClinicService.name == name
+            )
+        )
+        if service is None:
+            service = ClinicService(organization_id=organization_id, name=name, active=True)
+            session.add(service)
+            session.flush()
+        current = session.scalar(
+            select(ClinicServicePrice).where(
+                ClinicServicePrice.clinic_service_id == service.id,
+                ClinicServicePrice.superseded_at.is_(None),
+            )
+        )
+        if current is not None and current.amount == Decimal(amount):
+            return
+        if current is not None:
+            # Supersede rather than overwrite -- the same immutable-price discipline
+            # `BillingRepository.change_price` follows, so a demo reset leaves a truthful price
+            # history rather than a rewritten one.
+            current.superseded_at = utc_now()
+        session.add(
+            ClinicServicePrice(clinic_service_id=service.id, amount=Decimal(amount), currency="DJF")
+        )
 
 
 def _find_or_create_organization(

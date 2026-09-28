@@ -63,6 +63,11 @@ echo "  ${DEMO_RELEASER_USERNAME:-demo-releaser}    (result releaser)"
 # other's establishment, which is the boundary the access qualification exercises.
 echo "  ${DEMO_ADMIN_USERNAME:-demo-admin}      (clinic — Équipe et accès)"
 echo "  ${DEMO_LAB_ADMIN_USERNAME:-demo-lab-admin}  (lab — Équipe et accès)"
+# DHEALTH-BILLING-001: one cashier per organization, holding BILLING_CLERK and nothing else. Each
+# lands directly on Facturation and can open no clinical screen, which is ADR-066's separation made
+# visible rather than merely written down.
+echo "  ${DEMO_CLERK_USERNAME:-demo-clerk}      (clinic — Facturation)"
+echo "  ${DEMO_LAB_CLERK_USERNAME:-demo-lab-clerk}  (lab — Facturation)"
 echo
 echo "Run scripts/demo/status.sh for a health summary, scripts/demo/reset.sh to restore the"
 echo "baseline, or scripts/demo/down.sh to stop."

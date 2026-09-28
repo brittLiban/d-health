@@ -42,7 +42,18 @@ from daher_adapter.exchange.models import (
 # still re-checks it independently -- the repository stays the enforcement point, not just the
 # one caller that happens to pre-validate today.
 ALLOWED_ROLES_BY_ORG_TYPE: dict[OrganizationType, frozenset[OrganizationRole]] = {
-    OrganizationType.PROVIDER: frozenset({OrganizationRole.ORG_ADMIN, OrganizationRole.CLINICIAN}),
+    OrganizationType.PROVIDER: frozenset(
+        {
+            OrganizationRole.ORG_ADMIN,
+            OrganizationRole.CLINICIAN,
+            # DHEALTH-BILLING-001/ADR-066: valid at *both* organization types, unlike every other
+            # non-admin role in this matrix. A clinic charges for the consultation it performed and
+            # a laboratory charges for the tests it performed, so both need the same money
+            # authority over their own invoices. Additive and never implied: ORG_ADMIN and
+            # CLINICIAN do not confer it, and it confers neither of them.
+            OrganizationRole.BILLING_CLERK,
+        }
+    ),
     OrganizationType.LAB: frozenset(
         {
             OrganizationRole.ORG_ADMIN,
@@ -51,6 +62,7 @@ ALLOWED_ROLES_BY_ORG_TYPE: dict[OrganizationType, frozenset[OrganizationRole]] =
             # both roles simultaneously (the same human may enter and later release), exactly one
             # of them (entry-only or release-only), or neither. ORG_ADMIN does not imply this role.
             OrganizationRole.LAB_RESULT_RELEASER,
+            OrganizationRole.BILLING_CLERK,
         }
     ),
 }

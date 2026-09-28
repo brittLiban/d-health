@@ -30,7 +30,14 @@
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 import type { WorkspaceCapabilities } from '../workspace/workspaceCapabilities'
 
-export type StaffSectionId = 'today' | 'visits' | 'patients' | 'orders' | 'results' | 'team'
+export type StaffSectionId =
+  | 'today'
+  | 'visits'
+  | 'patients'
+  | 'orders'
+  | 'results'
+  | 'billing'
+  | 'team'
 
 export interface StaffSection {
   id: StaffSectionId
@@ -54,6 +61,12 @@ export interface StaffSection {
  * "Consultations": a visit exists from the moment somebody walks in, which is
  * before any consultation has happened, and it may end as a cancellation where no
  * consultation ever happens at all.
+ *
+ * `Facturation` rather than `Caisse` or `Paiements`: the section covers what the
+ * facility charges, what it has invoiced and what it has been paid, and only the
+ * first of those words is true of all three. It sits after the clinical sections
+ * and before `Équipe et accès` — money follows the work that produced it, and
+ * precedes administration, which is not what anyone opens the application for.
  */
 const SECTION_LABELS: Record<StaffSectionId, string> = {
   today: "Aujourd'hui",
@@ -61,6 +74,7 @@ const SECTION_LABELS: Record<StaffSectionId, string> = {
   patients: 'Patients',
   orders: 'Ordres',
   results: 'Résultats',
+  billing: 'Facturation',
   team: 'Équipe et accès',
 }
 
@@ -114,6 +128,13 @@ export function availableSections(
   if (capabilities.canViewPatients) ids.push('patients')
   if (capabilities.canCreateOrders || capabilities.canWorkLabOrders) ids.push('orders')
   if (capabilities.canReviewResults || capabilities.canReleaseResults) ids.push('results')
+  // DHEALTH-BILLING-001: either billing capability opens the section, and the
+  // section itself decides which of its two surfaces that person can use — the
+  // till needs BILLING_OPERATE, the price list needs BILLING_CONFIGURE_PRICES,
+  // and ADR-066 §2 keeps them in different hands on purpose. A cashier therefore
+  // sees invoices and no price editor; an administrator sees the price list and
+  // no till. Neither is shown a control they would be refused.
+  if (capabilities.canOperateBilling || capabilities.canConfigurePrices) ids.push('billing')
   if (capabilities.canAdministerTeam) ids.push('team')
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))

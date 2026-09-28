@@ -14,6 +14,7 @@ import { LabOrdersPage } from '../lab/pages/LabOrdersPage'
 import { LabReleasePage } from '../lab/pages/LabReleasePage'
 import { TeamAccessPage } from '../team/TeamAccessPage'
 import { ClinicVisitsPage } from '../visits/ClinicVisitsPage'
+import { BillingPage } from '../billing/BillingPage'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import { StaffShell } from './StaffShell'
 import {
@@ -329,6 +330,28 @@ export function StaffWorkspace({
       >
         <div key={activeOrganization.organization_id}>
           <TeamAccessPage />
+        </div>
+      </StaffShell>
+    )
+  }
+
+  // DHEALTH-BILLING-001: Facturation sits above the provider/laboratory branch for exactly the
+  // reasons Équipe et accès does. Billing is the same act at both kinds of facility once a patient
+  // is chosen — the two differ only in how they find one, which the page itself handles from the
+  // active membership's own organization type. And it is outside `ClinicProvider`/`LabProvider`
+  // deliberately: those load clinical context a cashier must not pull in, and wrapping the till in
+  // either would fetch patients, orders and results in order to take a payment. A clerk holds no
+  // clinical authority, so those fetches would also simply be refused.
+  if (activeSection === 'billing') {
+    return (
+      <StaffShell
+        sections={sections}
+        activeSection={activeSection}
+        onSelectSection={(section) => setRequestedSection(section as StaffSectionId)}
+        onLogout={handleLogout}
+      >
+        <div key={activeOrganization.organization_id}>
+          <BillingPage />
         </div>
       </StaffShell>
     )

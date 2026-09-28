@@ -9007,3 +9007,187 @@ absent from that list.
 **Pilot-ready is not clinically live.** This adds a place to write a clinical note; it does not add
 clinical sign-off. The order set and any structured clinical field still require the clinical lead
 (`AGENTS.md`), and nothing here is authorization to use DHealth on a real patient.
+
+---
+
+## ADR-066 — ACCEPTED / IMPLEMENTED (2026-09-28, DHEALTH-BILLING-001): billing is a **capability**,
+## an organization may invoice only what it **performed**, and money never gates clinical work
+
+**Date:** 2026-09-28 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
+`0035_facility_billing`, `exchange/billing.py`, `exchange/capabilities.py`, nine endpoints,
+`Facturation`) · **Decided by:** Liban (DHEALTH-BILLING-001 ticket, decisions D-1-billing and
+D-2a-interim) · **Implements:** `docs/NATIVE-OPERATING-PRODUCT.md` §18/§19 and its §35 ticket brief
+
+**Relationship to prior decisions.** Supersedes nothing. ADR-044 (entry is not release) is the
+discipline §3 below extends from clinical authority to financial authority. ADR-063 (platform
+authority does not silently widen) applies unchanged and is the reason no billing gate admits a
+platform administrator. ADR-051 (patient identity) is why an invoice is scoped to a native
+`Patient`. ADR-065's visit is one of the things a clinic bills for. **D-2a is explicitly
+not resolved by this ADR** — see §5.
+
+### 1. Billing authority is asked for as a capability, never as a role
+
+Every DHealth gate before this one asks *what somebody is*: `require_clinician` asks "are you a
+CLINICIAN". That was adequate while roles and permissions were one-to-one and it stops being
+adequate the moment somebody legitimately needs part of another job's authority — a front-desk
+employee who also takes payment, an administrator covering the till on a Saturday, a clinician at a
+one-person clinic who is inevitably also the cashier.
+
+So billing asks *what somebody may do*. `exchange/capabilities.py` defines two capabilities,
+`BILLING_OPERATE` (invoices, payments, balances, receipts) and `BILLING_CONFIGURE_PRICES` (what the
+facility charges), and one mapping, `CAPABILITY_ROLE_GRANTS`, from capability to the roles that
+currently carry it. Nothing else in the billing surface names a role.
+
+**`BILLING_CLERK` is a convenient bundle, not a gate.** It is the role a facility grants to somebody
+whose job is the till, and today it is the only role carrying `BILLING_OPERATE`. When a future
+ticket lets a facility grant that capability to a Front Desk role, to `ORG_ADMIN`, or to one named
+individual, only that mapping changes — no service, no endpoint, and no test of billing behaviour is
+rewritten. That claim is not a hope: `test_bill61` grants `BILLING_OPERATE` to `ORG_ADMIN` by
+patching `CAPABILITY_ROLE_GRANTS` and nothing else, and watches a 403 become a 200.
+
+**What this deliberately is not.** There is no grant table, no revocation, no per-user override, no
+effective-permission computation and no UI for any of it. Those are
+**`DHEALTH-ACCESS-CAPABILITIES-001` — Organization Roles, Permission Grants and Capability-Driven
+UI**, recorded as the follow-up, which will define role templates, granular grants and revocations,
+protected capabilities that may never be delegated, effective-permission calculation, and
+navigation/action visibility driven by the result. Building a second, worse version of it inside a
+billing ticket would have been the wrong trade.
+
+**The clinical gates are not migrated.** `require_clinician`, `require_lab_tech` and
+`require_lab_result_releaser` keep asking about roles. Each carries hard-won ADR history about who
+may do clinical work — ADR-044 most of all — and rewriting them in passing, inside a billing ticket,
+would put that history at risk for no benefit billing needs. That migration belongs to
+`DHEALTH-ACCESS-CAPABILITIES-001`, and `capabilities.py` is the shape it should follow.
+
+### 2. Being an administrator, a clinician or a lab worker does not make someone a cashier
+
+`BILLING_OPERATE` is granted to `BILLING_CLERK` and to nothing else. `ORG_ADMIN` does **not** inherit
+it. Administering a facility is not the same as handling its money, and an administrator who does
+cover the till is granted the role explicitly — one action in `Équipe et accès`, recorded in the
+audit trail, which "ORG_ADMIN implies everything" would not be.
+
+The separation runs in both directions and the test suite asserts both: a clerk reaches no clinical
+endpoint, and a clinician, an administrator and a releaser reach no billing endpoint.
+
+`BILLING_CONFIGURE_PRICES` is granted to `ORG_ADMIN` and not to `BILLING_CLERK`, which is a financial
+control rather than tidiness: a person who can quietly change a price *and* take the payment is the
+oldest problem in facility billing.
+
+Valid at PROVIDER and at LAB. `ORG_ADMIN` grants and revokes it through the existing Team & Access
+lifecycle, under the same organization boundaries and the same audit requirements as every other
+organization role.
+
+**This resolves only the Billing portion of D-1.** The broader Front Desk authority question —
+reception, arrivals, appointments — remains open and is not answered here.
+
+### 3. An organization may invoice only what it actually performed
+
+A provider may invoice its own consultation or Visit service and diagnostics performed inside that
+same organization. A laboratory may invoice the tests it actually performed. When Clinic A routes an
+order to Lab B, **Clinic A bills its consultation and Lab B bills the tests, and Clinic A may not
+create an invoice line for Lab B's work.**
+
+**Enforced server-side at the line, not by authorization.** Knowing an order id is not enough to
+bill for it. `_require_performed_here` joins `LabSelection` and refuses when the performing
+organization is not the invoicing organization. It also refuses on status: assignment is not
+performance, so only `ACCEPTED`, `IN_PROGRESS` and `COMPLETED` are billable — a laboratory cannot
+charge for work it has not yet taken, and `REJECTED`/`CANCELLED` are never billable. Validation of
+the source happens *before* any price is read, so a caller cannot learn another facility's prices by
+asking for a line they are not entitled to.
+
+### 4. Money never gates clinical work — P0
+
+**An unpaid invoice can never delay, block or condition sample collection, processing, result entry,
+result release, clinician review, or a visit.** This is the ticket's P0 invariant and it is
+structural, not behavioural: `exchange/billing.py` imports nothing from `results`, `lab_workflow`,
+`visits` or `selection`, and none of those imports billing or so much as names `invoice` or
+`balance`. A future author cannot reach for a balance in the release path without first adding an
+import that `test_billsafety2` then fails on.
+
+BILL-SAFETY-1 drives a complete order through collection, processing, entry, release and doctor
+review with a real outstanding balance on the patient the whole way. NC-BILL-4 — mandatory —
+introduces exactly the forbidden gate ("do not release until the bill is settled") and confirms both
+halves of the invariant go red.
+
+Financial status is informational to financial workflows only. D-2b (what happens when payment is
+incomplete) keeps its standing default: nothing.
+
+### 5. D-2a stays open
+
+The decision above is the interim answer for this ticket, not a permanent commercial model.
+Deliberately **not built**: clinic-to-lab settlement, commissions, referral fees, revenue sharing,
+pass-through billing, clinic markup of external laboratory services, and accounts payable or
+receivable between facilities. D-2a remains open for future commercial arrangements involving routed
+external laboratory work.
+
+### 6. Balance and status are derived, never stored
+
+There is no `balance` column and no `status` column, and `test_bill51` asserts their absence in the
+schema rather than trusting the model. A stored balance is a second source of truth for the same
+fact, and the first time it disagrees with the payments that produced it, nobody can say which is
+right. `Numeric(12, 2)` and `Decimal` throughout; no float touches money anywhere.
+
+An invoice line **freezes its own price**. Changing what a service costs today does not change what
+an invoice said yesterday, because the line carries its own `unit_amount` snapshot and the renderer
+never consults the current price list. NC-BILL-3 breaks exactly this and `test_bill10` catches it.
+
+Payments are append-only. There is no edit and no delete endpoint, and NC-BILL-6 confirms that
+adding one reddens the suite. Overpayment is refused rather than absorbed: there is no credit model
+in this release to hold the difference, so a facility must not be able to record more money than an
+invoice is worth.
+
+### 7. Invoice numbering is facility-scoped and honest about what it is not
+
+`FAC-YYYY-NNNNNN`, allocated from a per-organization, per-year counter row taken `FOR UPDATE` —
+never `count(*) + 1`, which double-issues under concurrency. A receipt reference derives from the
+invoice number and the payment's ordinal (`FAC-2026-000123-R2`), so every receipt has a stable
+human-readable identity without a second counter.
+
+**This is not a legal numbering scheme.** Gapless fiscal sequences, fiscal registration and mandated
+prefixes are a jurisdictional policy question nobody has answered for Djibouti, and inventing one
+would be worse than a stable facility-scoped reference that says plainly what it is. A number is
+consumed and not used when a concurrent double-submit resolves to an idempotent replay; that gap is
+accepted for the same reason.
+
+### 8. What real PostgreSQL proved that SQLite could not
+
+`tests/integration/test_dhealthbilling001_postgres_qualification.py` found **three real defects that
+the 44-test SQLite suite could not see**, because SQLAlchemy's SQLite dialect omits `FOR UPDATE`
+entirely and SQLite's writer serialization turns every one of these races into a sequential call:
+
+1. the invoice-number counter's insert-race branch raised `InvalidRequestError` — a rolled-back
+   SAVEPOINT already detaches what was added inside it, so the explicit `expunge` was invalid — and
+   the branch was reached exactly when two facilities issued their first invoice of a year at the
+   same instant;
+2. `create_invoice`'s idempotency was a read-then-insert, so a genuine concurrent double-submit
+   raised a raw unique-constraint violation at a clerk whose invoice *had* been issued — the natural
+   reaction to which is to issue a second one;
+3. the SAVEPOINT protecting that insert did not cover it, because `begin_nested()` autoflushes
+   pending objects *before* establishing the savepoint.
+
+This is the repository's written-versus-verified rule paying for itself. Billing is **SQLite green
+and PostgreSQL qualified**; only the second sentence is evidence about money.
+
+### 9. Consequences
+
+- One new organization role, `BILLING_CLERK`, valid at PROVIDER and LAB, in the existing role
+  matrix and the existing grant/revoke lifecycle.
+- Six new tables, one new migration, nine new endpoints, one new workspace section (`Facturation`).
+- Four new audit event types. **No amount ever reaches the audit table** — an audit row records that
+  a financial act happened and by whom, never how much, and `test_bill41` asserts it.
+- `_WORKFLOW_TABLES` gains the financial tables, because a reset that left an invoice behind would
+  make the demo's "restore the baseline" contract false for money. `exchange_invoice_lines` had to
+  be named explicitly: it references `exchange_lab_order_items`, so TRUNCATE's own CASCADE would
+  have emptied every line while leaving the invoices standing — historical invoices silently reduced
+  to a total of zero with their payments still attached.
+- The 0035 downgrade narrows its CHECK constraints **without deleting rows**, following 0032: a
+  deployment holding billing audit rows or a live `BILLING_CLERK` grant is told by a constraint
+  violation rather than having its history erased. Qualified against real PostgreSQL in both
+  directions — clean round trip on a database without billing history, atomic refusal on one with
+  it.
+
+**Pilot-ready is not clinically live.** This adds a till. It adds no clinical sign-off, no pricing
+policy advice and no interpretation of any kind, and nothing here is authorization to use DHealth on
+a real patient. DHealth **records** that money was taken; it moves no money, contacts no bank, calls
+no mobile-money API and authorises no card. There is no payment provider, no merchant account and no
+secret anywhere in this domain.

@@ -255,11 +255,17 @@ export const ROLE_CHOICES_BY_TYPE: Record<string, { role: string; label: string 
   PROVIDER: [
     { role: 'ORG_ADMIN', label: 'Administration' },
     { role: 'CLINICIAN', label: 'Clinicien' },
+    // DHEALTH-BILLING-001/ADR-066: grantable at both facility types, and granted
+    // explicitly rather than inherited. Administration does not imply the till
+    // any more than it implies clinical authority, which is the separation the
+    // comment above is already about.
+    { role: 'BILLING_CLERK', label: 'Facturation' },
   ],
   LAB: [
     { role: 'ORG_ADMIN', label: 'Administration' },
     { role: 'LAB_TECH', label: 'Analyse' },
     { role: 'LAB_RESULT_RELEASER', label: 'Libération' },
+    { role: 'BILLING_CLERK', label: 'Facturation' },
   ],
 }
 

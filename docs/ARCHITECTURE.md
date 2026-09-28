@@ -2589,6 +2589,15 @@ This file describes what DHealth Native **is**. The switch-ready operating produ
 what an outpatient clinic or a diagnostic laboratory would need in order to stop relying on its
 previous daily software — is specified in **`docs/NATIVE-OPERATING-PRODUCT.md`**. None of it is built.
 
+> **Superseded in part, twice — kept as written rather than edited, because the reasoning below is
+> still the reasoning.** The visit domain was built on 2026-09-27 (§29's neighbour, ADR-065) and the
+> billing domain on 2026-09-28 (**§30**, ADR-066). So "none of it is built", "no `Invoice`,
+> `Payment`, `Receipt`, `Charge` or `Service` model" and "a front-desk, reception or cashier role has
+> no backend authority today" are all now historical. The paragraph on the authorization model being
+> *the binding constraint on the whole product* was right, and §30 records how that constraint was
+> answered for billing: a new authority of its own, asked for as a capability. **Front Desk and
+> reception still have no backend authority**, and D-1's Front Desk half is still open.
+
 That document is the product contract; this section records only the parts that constrain
 *architecture*, so a future implementer does not have to infer them.
 
@@ -2818,3 +2827,110 @@ so a visit never waits for a laboratory and a laboratory never completes a visit
 No `visit_viewed` audit event. Reading is not a mutation, and `ExchangeSecurityAuditEvent` is not an
 access log — a worklist refresh must not write rows. No note body reaches any audit row, log line or
 error message.
+
+---
+
+## 30. Facility billing (DHEALTH-BILLING-001, ADR-066) — added 2026-09-28
+
+§28 recorded, on 2026-09-27, that there was *"no `Invoice`, `Payment`, `Receipt`, `Charge` or
+`Service` model"* and that *"a front-desk, reception or cashier role has no backend authority
+today"*. Both statements are now historical. This section records what replaced them, and the
+architectural constraints a future implementer should not have to infer.
+
+### The six tables, and one shape worth copying
+
+`exchange_clinic_services` · `exchange_clinic_service_prices` · `exchange_invoices` ·
+`exchange_invoice_lines` · `exchange_payments` · `exchange_invoice_number_sequences`.
+
+**`InvoiceLine` uses two nullable typed foreign keys plus CHECK constraints, never a generic
+`(type, id)` pair.** `clinic_service_id` and `lab_order_item_id` are both nullable, and CHECKs
+require that exactly one is set *and* that it matches `source_type`. A generic polymorphic pair
+would have been shorter and would have cost referential integrity entirely — a charge whose subject
+nobody can resolve is not recoverable by later tooling. This is the pattern to reuse when a third
+billable source appears; it is also why adding one is a migration rather than an enum edit.
+
+**Balance and status have no columns**, by decision (`docs/NATIVE-OPERATING-PRODUCT.md` §18 Law 8).
+A stored balance is a second source of truth for the same fact, and the first time it disagrees with
+the payments that produced it nobody can say which is right. `test_bill51` asserts the absence
+against the schema rather than against the model.
+
+**Currency is enforced by a composite foreign key**, not by application code: an invoice line cannot
+disagree with its invoice's currency, because there is nothing to point at if it does. There is no
+conversion and no rate table anywhere in this domain.
+
+### Two locks, both load-bearing, both invisible to SQLite
+
+`record_payment` takes the invoice row `FOR UPDATE` and sums the paid total **inside** that lock;
+`_next_invoice_number` takes a per-organization, per-year counter row `FOR UPDATE` rather than
+computing `count(*) + 1`. SQLAlchemy's SQLite dialect **omits `FOR UPDATE` entirely**, so both are
+silently no-ops in the unit suite and SQLite's own writer serialization then makes those tests pass
+for a reason unrelated to the lock. Anything in this domain that depends on a lock must be qualified
+in `tests/integration/test_dhealthbilling001_postgres_qualification.py` or it is not qualified at
+all — that file found three real defects the 48-test SQLite suite could not see.
+
+**A SAVEPOINT, never `session.rollback()`, inside a caller's transaction.** Both race branches use
+`session.begin_nested()`, and `session.add` belongs *inside* it: `begin_nested()` autoflushes pending
+objects **before** establishing the savepoint, so adding first puts the failing INSERT outside the
+protection it was supposed to have. Both mistakes were made here and both are recorded in the code.
+
+### Authorization: the first capability boundary in this codebase
+
+`exchange/capabilities.py` is one enum (`OrganizationCapability`), one mapping
+(`CAPABILITY_ROLE_GRANTS`) and one question (`capability_is_held`). Every billing endpoint asks for a
+capability; **nothing in `exchange/billing.py` names a role at all**, asserted by an AST-based test
+rather than a substring search, so a docstring may explain the model while code may not depend on it.
+
+The clinical gates (`require_clinician`, `require_lab_tech`, `require_lab_result_releaser`) are
+deliberately **not** migrated. Each carries ADR history about who may do clinical work — ADR-044's
+separation of result entry from release above all — and rewriting them inside a billing ticket would
+have risked that history for no benefit billing needs. `DHEALTH-ACCESS-CAPABILITIES-001` is where
+that migration belongs, and `capabilities.py` is the shape it should follow.
+
+`BILLING_OPERATE` and `BILLING_CONFIGURE_PRICES` are separate on purpose and held by different roles:
+someone who can quietly change a price *and* take the payment is the oldest problem in facility
+billing. Neither gate admits a platform administrator (ADR-063).
+
+### Service-performance ownership is enforced at the line, not at the gate
+
+`_require_performed_here` joins `LabSelection` **and** checks `LabOrder.status` against
+`BILLABLE_ORDER_STATUSES` (`ACCEPTED`, `IN_PROGRESS`, `COMPLETED`). Assignment is not performance:
+a laboratory may not charge for work it has not taken, and `REJECTED`/`CANCELLED` are never billable.
+
+Authorization alone cannot express this rule. Holding `BILLING_OPERATE` at an organization proves you
+may bill *for* that organization and proves nothing about whether that organization did the work, so
+the check lives on the invoice line. Line validation also happens **before** any price is read, so a
+caller cannot learn another facility's prices by asking for a line they are not entitled to.
+
+### Structural independence from clinical work
+
+`exchange/billing.py` imports nothing from `results.py`, `lab_workflow.py`, `visits.py` or
+`selection.py`, and none of those imports billing or so much as contains the strings `Invoice`,
+`invoice` or `balance`. That is asserted by parsing the import graph, and it is what makes the P0
+invariant — an unpaid bill never delays or conditions clinical work — a property of the architecture
+rather than a promise in a docstring. A future author cannot reach for a balance in the release path
+without first adding an import that reddens a test.
+
+`exchange/billing.py` also never reads `LabOrderItem.selected_price_amount`: that is a marketplace
+consent fact, not a billing price, and prices are read through `LabOffering` → `LabPrice`.
+
+### The billing patient lookup is a second, narrower directory read
+
+`GET /organizations/{id}/billing/patients?q=` exists because a clinic clerk has no order to start
+from and must not be handed `CLINICIAN` so that a search box works. It is gated on `BILLING_OPERATE`,
+returns exactly `id`, `display_name` and `date_of_birth`, joins nothing clinical, refuses an empty
+query, and offers no lookup-by-id. Its tenancy is the same two-branch rule `_patient_for_billing`
+enforces on the write path — a provider searches its own directory, a laboratory only the patients
+it has actually done work for — expressed as one `EXISTS` so the read and the write cannot drift.
+
+**It is not audited as a successful read.** D-8 (whether successful reads of sensitive data should be
+audited) is open, and a read-audit regime introduced for one endpoint inside a billing ticket would
+have pre-empted it.
+
+### Audit
+
+Four event types (`clinic_service_created`, `clinic_service_price_changed`, `invoice_created`,
+`payment_recorded`), two resource types (`invoice`, `clinic_service`). **No amount ever reaches an
+audit row** — an audit record says that a financial act happened and by whom, never how much — and
+`test_bill41` asserts it against the real column set. Every audit write shares the transaction of the
+mutation it records, so a refused payment leaves nothing behind; qualified against real PostgreSQL,
+because SQLite would report the same counts for the wrong reason.

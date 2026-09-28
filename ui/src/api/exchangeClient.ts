@@ -90,6 +90,18 @@ import type {
   VisitNoteCreateRequest,
   VisitReasonUpdateRequest,
   VisitStatus,
+  // DHEALTH-BILLING-001
+  BillableOrder,
+  BillingPatient,
+  BillableSource,
+  ClinicService,
+  ClinicServiceCreateRequest,
+  ClinicServicePriceUpdateRequest,
+  Invoice,
+  InvoiceCreateOutcome,
+  InvoiceCreateRequest,
+  PaymentCreateOutcome,
+  PaymentCreateRequest,
 } from './exchangeTypes'
 
 export function mapExchangeErrorToCode(code: ExchangeErrorCode): ErrorCode {
@@ -2092,6 +2104,216 @@ export class ExchangeClient {
       },
       options.token,
     )
+  }
+
+  // -- DHEALTH-BILLING-001: facility billing ----------------------------------------------------
+  //
+  // Every path below is `/organizations/{organization_id}/billing/...` and works identically for a
+  // provider and for a laboratory. That is ADR-066 §3 in the URL shape: the organization in the
+  // path is the one doing the billing, and the server proves it actually performed each line
+  // before it will freeze a price for it. Knowing an order id is not enough to bill for it.
+
+  /** POST /exchange/v1/organizations/{organization_id}/billing/services — needs
+   *  `BILLING_CONFIGURE_PRICES`, which the cashier deliberately does not hold. */
+  async createClinicService(
+    organizationId: string,
+    body: ClinicServiceCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ClinicService> {
+    return this.request<ClinicService>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/services`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /** GET /exchange/v1/organizations/{organization_id}/billing/services — readable with either
+   *  billing capability: the cashier needs to see what things cost to sell them. */
+  async listClinicServices(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ClinicService[]> {
+    return this.request<ClinicService[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/services`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * PUT /exchange/v1/organizations/{organization_id}/billing/services/{service_id}/price
+   *
+   * Supersedes the current price rather than editing it, so invoices already issued keep the
+   * amount they froze. The response is the service at its new price; nothing already invoiced
+   * moves.
+   */
+  async changeClinicServicePrice(
+    organizationId: string,
+    serviceId: string,
+    body: ClinicServicePriceUpdateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ClinicService> {
+    return this.request<ClinicService>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/services/${encodeURIComponent(serviceId)}/price`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{organization_id}/billing/patients?q=…
+   *
+   * The clinic till's way in. A laboratory clerk starts from an order; a clinic clerk has no order
+   * to start from, because a consultation is not one.
+   *
+   * Its own narrow endpoint with its own gate — `BILLING_OPERATE`, never the clinician's directory
+   * and never by granting a cashier `CLINICIAN` so a search box works. Three identity fields come
+   * back and nothing else, and an empty query is refused rather than answered with the roster:
+   * this finds a person who is present, it does not browse a directory.
+   */
+  async searchBillingPatients(
+    organizationId: string,
+    query: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<BillingPatient[]> {
+    const search = new URLSearchParams({ q: query })
+    return this.request<BillingPatient[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/patients?${search.toString()}`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** GET /exchange/v1/organizations/{organization_id}/billing/patients/{patient_id}/billable —
+   *  everything this organization may charge this patient for, and nothing else. */
+  async listBillableSources(
+    organizationId: string,
+    patientId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<BillableSource[]> {
+    return this.request<BillableSource[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/patients/${encodeURIComponent(patientId)}/billable`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{organization_id}/billing/orders
+   *
+   * The laboratory's entry point: orders this lab actually performed, each with its billable
+   * items. A clerk works from this list rather than from a patient search, because a laboratory
+   * knows its work by the order in front of it.
+   */
+  async listBillableOrders(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<BillableOrder[]> {
+    return this.request<BillableOrder[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/orders`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{organization_id}/billing/invoices
+   *
+   * Idempotent on `Idempotency-Key`, like patient, order and visit creation. A double-clicked
+   * `Créer la facture` returns the existing invoice with `created: false` rather than charging the
+   * patient twice — including under a genuine concurrent double-submit, which is qualified against
+   * real PostgreSQL rather than assumed.
+   */
+  async createInvoiceWithOutcome(
+    organizationId: string,
+    idempotencyKey: string,
+    body: InvoiceCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<InvoiceCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<Invoice>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/invoices`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { invoice: data, created: status === 201 }
+  }
+
+  /** GET /exchange/v1/organizations/{organization_id}/billing/invoices */
+  async listInvoices(
+    organizationId: string,
+    params: { patientId?: string; limit?: number } = {},
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Invoice[]> {
+    const search = new URLSearchParams()
+    if (params.patientId) search.set('patient_id', params.patientId)
+    if (params.limit !== undefined) search.set('limit', String(params.limit))
+    const query = search.size > 0 ? `?${search.toString()}` : ''
+    return this.request<Invoice[]>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/invoices${query}`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /** GET /exchange/v1/organizations/{organization_id}/billing/invoices/{invoice_id} */
+  async getInvoice(
+    organizationId: string,
+    invoiceId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Invoice> {
+    return this.request<Invoice>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/invoices/${encodeURIComponent(invoiceId)}`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{organization_id}/billing/invoices/{invoice_id}/payments
+   *
+   * Returns the whole invoice with its new derived balance, because that is what the clerk and the
+   * patient both need next. A payment exceeding the balance is refused with 409: there is no
+   * credit model here, so accepting it would create a patient balance DHealth cannot represent.
+   */
+  async recordPaymentWithOutcome(
+    organizationId: string,
+    invoiceId: string,
+    idempotencyKey: string,
+    body: PaymentCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<PaymentCreateOutcome> {
+    const { data, status } = await this.requestWithResponse<Invoice>(
+      `/organizations/${encodeURIComponent(organizationId)}/billing/invoices/${encodeURIComponent(invoiceId)}/payments`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+    return { invoice: data, created: status === 201 }
   }
 }
 

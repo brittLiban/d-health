@@ -69,6 +69,21 @@ from daher_adapter.exchange.authorization import (
     OrganizationAccessContext,
     ResourceNotFound,
 )
+from daher_adapter.exchange.billing import (
+    BillableSourceType,
+    BillingIdempotencyConflict,
+    BillingNotFound,
+    BillingPatientNotFound,
+    BillingRepository,
+    ClinicServiceRecord,
+    InvoiceRecord,
+    LineRequest,
+    OverpaymentRefused,
+    ServiceNameTaken,
+    ServiceNotPerformedHere,
+    ServicePriceMissing,
+)
+from daher_adapter.exchange.capabilities import OrganizationCapability
 from daher_adapter.exchange.catalog import (
     CatalogEntryConflict,
     CatalogEntryNotFound,
@@ -135,6 +150,7 @@ from daher_adapter.exchange.models import (
     OrganizationRole,
     OrganizationType,
     PatientAccessMode,
+    PaymentMethod,
 )
 from daher_adapter.exchange.order_intents import (
     LabOrderIntentRecord,
@@ -318,7 +334,15 @@ class _InactiveMembershipReplay(Exception):
         self.membership_id = membership_id
 
 
-_ROLE_LITERAL = Literal["ORG_ADMIN", "CLINICIAN", "LAB_TECH", "LAB_RESULT_RELEASER"]
+# DHEALTH-BILLING-001/ADR-066: `BILLING_CLERK` joins the set an administrator may grant, because the
+# decision was explicit that it is administered through the **existing** `Équipe et accès` lifecycle
+# -- same organization boundaries, same audit, same last-administrator reasoning -- rather than
+# through a separate billing-admin surface nobody asked for. `ALLOWED_ROLES_BY_ORG_TYPE` still
+# decides which of these a given organization type may actually hold; this literal only bounds what
+# the HTTP layer will parse.
+_ROLE_LITERAL = Literal[
+    "ORG_ADMIN", "CLINICIAN", "LAB_TECH", "LAB_RESULT_RELEASER", "BILLING_CLERK"
+]
 
 
 class OrganizationCreateRequest(BaseModel):
@@ -2765,6 +2789,221 @@ class VisitDetailResponse(BaseModel):
     orders: list[LabOrderSummaryResponse]
 
 
+# -- DHEALTH-BILLING-001: facility billing --------------------------------------------------------
+
+
+class ClinicServiceCreateRequest(BaseModel):
+    """A service this facility performs and charges for, with its opening price.
+
+    ``amount`` is a string on the wire, deliberately. JSON numbers are IEEE-754 doubles in every
+    mainstream parser, so ``3500.10`` can arrive as ``3500.099999999999`` and a facility's price
+    list would quietly acquire rounding error at the boundary. Pydantic parses the string straight
+    to
+    ``Decimal``, which is what the column stores."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    amount: Decimal = Field(ge=0, decimal_places=2, max_digits=12)
+    currency: str = Field(default="DJF", min_length=3, max_length=3)
+
+
+class ClinicServicePriceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount: Decimal = Field(ge=0, decimal_places=2, max_digits=12)
+    currency: str = Field(default="DJF", min_length=3, max_length=3)
+
+
+class ClinicServiceResponse(BaseModel):
+    """``amount``/``currency`` are ``None`` for a service with no current price -- a real state, not
+    a zero. A service nobody has priced yet cannot be invoiced, and saying "0" would claim it is
+    free."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    name: str
+    active: bool
+    amount: Decimal | None
+    currency: str | None
+
+
+class InvoiceLineRequest(BaseModel):
+    """One requested charge. **No amount** -- the price comes from the facility's own configuration
+    at invoicing time. Letting a browser name the amount would let it decide what a patient pays."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["CLINIC_SERVICE", "LAB_ORDER_ITEM"]
+    source_id: uuid.UUID
+    quantity: int = Field(default=1, ge=1, le=999)
+
+
+class InvoiceCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    lines: list[InvoiceLineRequest] = Field(min_length=1, max_length=50)
+
+
+class PaymentCreateRequest(BaseModel):
+    """``reference`` is a short operator-typed note -- a mobile-money confirmation code, a cheque
+    number. It is bounded and optional, and it must never hold a card number; nothing in DHealth
+    ever
+    asks for one, and no payment provider is contacted by any of this."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: Decimal = Field(gt=0, decimal_places=2, max_digits=12)
+    method: Literal["CASH", "MOBILE_MONEY", "CARD", "BANK_TRANSFER"]
+    reference: str | None = Field(default=None, max_length=64)
+
+
+class InvoiceLineResponse(BaseModel):
+    """The frozen facts, as the invoice keeps them. ``description`` is the snapshot taken at
+    invoicing, never the service's current name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    source_type: str
+    description: str
+    quantity: int
+    unit_amount: Decimal
+    currency: str
+    line_total: Decimal
+
+
+class PaymentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    sequence_number: int
+    amount: Decimal
+    method: str
+    reference: str | None
+    recorded_at: datetime
+    #: `FAC-2026-000123-R2`. Everything a receipt needs to identify itself, derived rather than
+    #: stored -- see `exchange/billing.py`.
+    receipt_reference: str
+
+
+class InvoiceResponse(BaseModel):
+    """One invoice, with everything §18's Law 8 says must be derived rather than stored.
+
+    ``total``, ``paid``, ``balance`` and ``status`` are all computed on read from the lines and the
+    payment rows. No column backs any of them, so none can drift from the facts.
+
+    **Carries no clinical content**, and that is the point of the response shape rather than an
+    accident: a billing user gets the patient's identity, what was charged, how much, and what has
+    been paid. There is no clinician note, no result value, no reference interval, no diagnosis and
+    no visit narrative anywhere in this model or anything it nests (§18's billing-privacy rule). A
+    line may name *"Numération formule sanguine"* because that is the thing being sold; it may not
+    carry what the test found.
+
+    ``organization_name`` is included so a printed receipt is self-contained -- the artifact a
+    patient walks away with should not depend on the browser's session context to say who issued
+    it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    organization_name: str
+    patient_id: uuid.UUID
+    patient_display_name: str | None
+    number: str
+    currency: str
+    issued_at: datetime
+    lines: list[InvoiceLineResponse]
+    payments: list[PaymentResponse]
+    total: Decimal
+    paid: Decimal
+    balance: Decimal
+    status: str
+
+
+class BillingPatientResponse(BaseModel):
+    """The minimum safe identity a cashier needs to be sure who they are charging.
+
+    **Three fields, and the smallness is the whole design.** `display_name` alone was considered and
+    rejected: two patients sharing a name is ordinary, and a till that cannot tell them apart
+    produces a wrong-patient error arriving through the financial door rather than the clinical one.
+    `date_of_birth` is the minimum second fact that separates them, and the one a clerk can confirm
+    out loud with the person in front of them.
+
+    **What is absent, and why each one:**
+
+    * contact details -- `Patient` holds them, and no billing workflow in this release has shown a
+      need; "it was already on the model" is not a need;
+    * reason for visit, clinical notes, clinician notes -- clinical content, and a cashier holds no
+      clinical authority (ADR-066 §2);
+    * visits, orders, result values, result history -- the same, and structurally unreachable:
+      `search_patients` reads `Patient` and joins nothing clinical.
+
+    **There is no facility patient number**, because DHealth has none to give. The only other
+    identifier in this schema is `PatientReference`, which ADR-051 establishes as a provenance
+    binding for one exchanged transaction -- one human may hold several, and none is meant to be
+    read aloud. Returning one would *look* like a patient number without being one, which is worse
+    than the honest absence. A real facility-assigned identifier is a product decision nobody has
+    made.
+
+    **Deliberately not a reuse of the clinician-facing patient model.** A shared response model is
+    exactly how a clinical field eventually lands on a cashier's screen: somebody adds a column to
+    the one the doctor sees and it appears here too, silently. This one cannot grow that way, and
+    `test_bill36` pins its field set against the live response rather than against this docstring.
+    """
+
+    id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+
+
+class BillableSourceResponse(BaseModel):
+    """One thing this organization could charge this patient for, and has not yet.
+
+    Exists so the billing surface can *suggest* rather than the system silently charging: §28
+    forbids a clinical event quietly creating a payable invoice, especially since the clinician who
+    caused it
+    may hold no billing authority at all. A clerk sees the suggestion and confirms it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_id: uuid.UUID
+    description: str
+    amount: Decimal | None
+    currency: str | None
+    #: True once some invoice of this organization already carries a line for this source. Advisory
+    #: only -- nothing refuses a second charge, because a facility may legitimately repeat a
+    #: service.
+    already_invoiced: bool
+
+
+class BillableOrderResponse(BaseModel):
+    """One order a laboratory took, reduced to what billing it needs.
+
+    A laboratory clerk cannot start from a patient -- a laboratory holds no patient directory
+    (**D-6** is open) and the provider's is behind ``require_clinician``. So the lab's route into
+    billing is the order, and this is the minimal read that makes it possible without handing a
+    clerk the clinical order surface.
+
+    Deliberately excludes everything clinical: no result value, no reference interval, no specimen
+    state, no clinician note, no status history. The patient identity here is the same projection a
+    laboratory technician already sees on the order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_order_id: uuid.UUID
+    patient_id: uuid.UUID
+    patient_display_name: str | None
+    status: str
+    created_at: datetime
+    items: list[BillableSourceResponse]
+
+
 logger = logging.getLogger("daher_adapter.exchange.api")
 
 
@@ -2803,6 +3042,10 @@ def build_exchange_router(
     # function taking the caller's own session, deliberately not through this instance, so there is
     # no construction-order dependency between the two to get wrong.
     visits = VisitRepository(session_factory, organizations, security_audit)
+    # DHEALTH-BILLING-001. Constructed with the same three collaborators as `visits` and
+    # nothing else -- in particular no results, release or lab-workflow repository, so this
+    # object structurally cannot observe or alter clinical state (ADR-066).
+    billing = BillingRepository(session_factory, organizations, security_audit)
     selections = LabSelectionRepository(session_factory, organizations)
     provider_lab_routes = ProviderLabRouteRepository(session_factory, organizations)
     patient_access = PatientAccessGrantRepository(
@@ -5110,6 +5353,465 @@ def build_exchange_router(
             body=note.body,
             created_at=note.created_at,
         )
+
+    # -- DHEALTH-BILLING-001: facility billing ----------------------------------------------------
+    #
+    # **Every gate below asks for a capability, never for a role.** Not "is this person a
+    # BILLING_CLERK" but "may this person operate billing here" -- `exchange/capabilities.py` is the
+    # single place that turns the second question into the first, so
+    # `DHEALTH-ACCESS-CAPABILITIES-001`
+    # can later back capabilities with configurable per-facility grants without editing one line
+    # here. `BILLING_CLERK` is a convenient bundle, not a job title billing insists upon.
+    #
+    # Two capabilities, deliberately split, and the split is a financial control rather than
+    # tidiness:
+    #
+    #   BILLING_CONFIGURE_PRICES   who decides what the facility charges
+    #   BILLING_OPERATE            who takes payment and issues receipts
+    #
+    # A person who can quietly change a price *and* take the payment is the oldest problem in
+    # facility billing. Today the first resolves to ORG_ADMIN and the second to BILLING_CLERK; when
+    # they become configurable, the separation is what a facility should still be advised to keep.
+    #
+    # The person operating the till does not set the price list. That is `docs/NATIVE-OPERATING-
+    # PRODUCT.md` §35's own ticket-4 brief ("Roles: cashier (D-1), Org Admin for prices"), and it
+    # survives contact with a real clinic: a cashier who can quietly change a price before taking
+    # payment is the oldest problem in facility billing.
+    #
+    # Neither authority is clinical, and `BILLING_CLERK` reaches no clinical endpoint anywhere in
+    # this router -- every one of those is behind `_require_clinician`, `_require_lab_tech` or
+    # `_require_lab_result_releaser`, none of which accept it. The converse holds too: a CLINICIAN
+    # calling any endpoint below is refused, because `require_billing_clerk` does not accept them.
+
+    def _require_billing_capability(
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        *capabilities: OrganizationCapability,
+    ) -> OrganizationAccessContext:
+        """The one billing gate. Every billing endpoint goes through here and names a capability.
+
+        Accepting several means "any one of these", which is how the price *list* is readable by
+        both the person who sets prices and the person who charges them, without inventing a third
+        capability for reading."""
+        try:
+            return authz.require_capability(principal, organization_id, *capabilities)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_price_reader(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> None:
+        """Either billing capability may *read* the price list: the person who sets prices needs it
+        to maintain one, and the person who charges them needs it to build an invoice. Only
+        ``BILLING_CONFIGURE_PRICES`` may change it.
+
+        Expressing this as "any one of two capabilities" is what the capability seam bought. The
+        first version of this helper tried the role-named billing gate and fell back to
+        ``_require_org_admin`` when it refused -- which quietly handed every facility's price list
+        to
+        any platform administrator, because ``require_org_admin`` delegates to
+        ``require_membership``
+        and *that* does let one through with no membership at all. There is now one gate, it takes
+        both capabilities, and it has no platform bypass to inherit."""
+        _require_billing_capability(
+            principal,
+            organization_id,
+            OrganizationCapability.BILLING_OPERATE,
+            OrganizationCapability.BILLING_CONFIGURE_PRICES,
+        )
+
+    def _to_service_response(record: ClinicServiceRecord) -> ClinicServiceResponse:
+        return ClinicServiceResponse(
+            id=record.id,
+            organization_id=record.organization_id,
+            name=record.name,
+            active=record.active,
+            amount=record.amount,
+            currency=record.currency,
+        )
+
+    def _to_invoice_response(record: InvoiceRecord) -> InvoiceResponse:
+        return InvoiceResponse(
+            id=record.id,
+            organization_id=record.organization_id,
+            organization_name=organizations.get(record.organization_id).name,
+            patient_id=record.patient_id,
+            patient_display_name=record.patient_display_name,
+            number=record.number,
+            currency=record.currency,
+            issued_at=record.issued_at,
+            lines=[
+                InvoiceLineResponse(
+                    id=line.id,
+                    source_type=line.source_type,
+                    description=line.description,
+                    quantity=line.quantity,
+                    unit_amount=line.unit_amount,
+                    currency=line.currency,
+                    line_total=line.line_total,
+                )
+                for line in record.lines
+            ],
+            payments=[
+                PaymentResponse(
+                    id=payment.id,
+                    sequence_number=payment.sequence_number,
+                    amount=payment.amount,
+                    method=payment.method,
+                    reference=payment.reference,
+                    recorded_at=payment.recorded_at,
+                    receipt_reference=payment.receipt_reference,
+                )
+                for payment in record.payments
+            ],
+            total=record.total,
+            paid=record.paid,
+            balance=record.balance,
+            status=record.status,
+        )
+
+    def _billing_error(
+        error: Exception,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+    ) -> HTTPException:
+        """One place where every billing refusal becomes a status, so the endpoints cannot drift.
+
+        - **404** for an invoice, service or patient that does not exist *or* belongs to another
+          organization. One status for both: telling a clerk that another facility's invoice number
+          is real is exactly the cross-tenant disclosure §25 forbids.
+        - **403** for ADR-066's service-performance rule. Deliberately not 404: the caller is a
+          legitimate billing user of a real organization, and what refused them is that the *work*
+          was not theirs. Audited as a refusal through the same best-effort writer as every other
+          403 here.
+        - **409** for a state conflict: overpayment, a reused idempotency key with different
+          content, a service with no configured price. The clerk is permitted to do this; the
+          facility's current state is what refuses it.
+        - **422** for a malformed request that reached the service layer.
+        """
+        if isinstance(error, BillingNotFound | BillingPatientNotFound):
+            return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+        if isinstance(error, ServiceNotPerformedHere):
+            # A 403, and therefore a refusal this facility's operator should be able to find later:
+            # somebody with real billing authority tried to charge for work their organization did
+            # not do. Recorded through the same best-effort file writer as every other 403 here --
+            # never the transactional audit table, which is for committed mutations only.
+            _audit_refused(principal, organization_id)
+            return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error))
+        if isinstance(
+            error,
+            OverpaymentRefused
+            | BillingIdempotencyConflict
+            | ServicePriceMissing
+            | ServiceNameTaken,
+        ):
+            return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error))
+
+    @router.post(
+        "/organizations/{organization_id}/billing/services",
+        response_model=ClinicServiceResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_clinic_service(
+        organization_id: uuid.UUID,
+        body: ClinicServiceCreateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ClinicServiceResponse:
+        """Add a service this facility performs and charges for. **ORG_ADMIN, not the cashier.**"""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_CONFIGURE_PRICES
+        )
+        try:
+            return _to_service_response(
+                billing.create_service(
+                    principal=principal,
+                    organization_id=organization_id,
+                    name=body.name,
+                    amount=body.amount,
+                    currency=body.currency,
+                )
+            )
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+
+    @router.get(
+        "/organizations/{organization_id}/billing/services",
+        response_model=list[ClinicServiceResponse],
+    )
+    def list_clinic_services(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[ClinicServiceResponse]:
+        _require_price_reader(principal, organization_id)
+        return [_to_service_response(record) for record in billing.list_services(organization_id)]
+
+    @router.put(
+        "/organizations/{organization_id}/billing/services/{service_id}/price",
+        response_model=ClinicServiceResponse,
+    )
+    def change_clinic_service_price(
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        body: ClinicServicePriceUpdateRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ClinicServiceResponse:
+        """Supersede the current price. **No existing invoice changes** -- every line froze its own
+        amount when it was issued, which is the property NC-BILL-3 exists to prove."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_CONFIGURE_PRICES
+        )
+        try:
+            return _to_service_response(
+                billing.change_price(
+                    principal=principal,
+                    organization_id=organization_id,
+                    service_id=service_id,
+                    amount=body.amount,
+                    currency=body.currency,
+                )
+            )
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+
+    @router.get(
+        "/organizations/{organization_id}/billing/patients",
+        response_model=list[BillingPatientResponse],
+    )
+    def search_billing_patients(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        q: Annotated[str, Query(min_length=1, max_length=120)],
+    ) -> list[BillingPatientResponse]:
+        """Find the person being billed. The clinic till's only way in.
+
+        A laboratory clerk starts from an order; a clinic clerk has no order to start from, because
+        a consultation is not one. Identifying the person you are about to charge is a legitimate
+        financial act, so it gets its own narrow read with its own gate rather than borrowing the
+        clinician's -- `BILLING_OPERATE`, never `_require_clinician`, and emphatically not by
+        granting a cashier `CLINICIAN` so that a search box works.
+
+        **This is not a way into the patient directory.** The projection is three identity fields
+        (`BillingPatientResponse` says which and why), the query reads `Patient` and joins nothing
+        clinical, and there is no lookup-by-id: a caller holding another organization's patient UUID
+        has nothing to do with it here, and `_patient_for_billing` refuses that id on the invoice
+        call regardless. Tenancy is the same rule the write path enforces -- a provider searches its
+        own directory, a laboratory only the patients it has actually done work for.
+
+        A blank query is refused by `min_length=1` rather than returning the roster. This finds a
+        person who is present; it does not browse a directory.
+
+        **Not audited as a successful read**, deliberately. **D-8** -- whether successful reads of
+        sensitive data should be audited -- is an open decision, and quietly introducing a
+        read-audit regime for one endpoint inside a billing ticket would pre-empt it. Refusals are
+        audited here exactly as every other billing refusal is."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        try:
+            return [
+                BillingPatientResponse(
+                    id=patient.id,
+                    display_name=patient.display_name,
+                    date_of_birth=patient.date_of_birth,
+                )
+                for patient in billing.search_patients(organization_id, query=q)
+            ]
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+
+    @router.get(
+        "/organizations/{organization_id}/billing/patients/{patient_id}/billable",
+        response_model=list[BillableSourceResponse],
+    )
+    def list_billable_sources(
+        organization_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[BillableSourceResponse]:
+        """What this organization could charge this patient for.
+
+        The suggestion half of §28's rule: a clinical event never silently creates a payable
+        invoice, because the clinician who caused it may hold no billing authority at all. The clerk
+        sees what is chargeable and confirms it.
+
+        Only ever this organization's own work -- the active services it configured, and the lab
+        tests it actually performed for this patient (ADR-066). A clinic does not see the routed
+        tests its laboratory ran, because it may not bill for them."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        try:
+            return [
+                BillableSourceResponse(
+                    source_type=source.source_type,
+                    source_id=source.source_id,
+                    description=source.description,
+                    amount=source.amount,
+                    currency=source.currency,
+                    already_invoiced=source.already_invoiced,
+                )
+                for source in billing.list_billable_sources(organization_id, patient_id)
+            ]
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+
+    @router.get(
+        "/organizations/{organization_id}/billing/orders",
+        response_model=list[BillableOrderResponse],
+    )
+    def list_billable_orders(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[BillableOrderResponse]:
+        """The laboratory's entry point into billing: the orders this laboratory actually took.
+
+        Scoped by the same predicate the invoice path enforces, so what a clerk is shown and what
+        the server will accept as a line can never disagree. A clinic sees nothing here for orders
+        it routed away -- it did not perform that work and may not bill it (ADR-066)."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        return [
+            BillableOrderResponse(
+                lab_order_id=record.lab_order_id,
+                patient_id=record.patient_id,
+                patient_display_name=record.patient_display_name,
+                status=record.status,
+                created_at=record.created_at,
+                items=[
+                    BillableSourceResponse(
+                        source_type=item.source_type,
+                        source_id=item.source_id,
+                        description=item.description,
+                        amount=item.amount,
+                        currency=item.currency,
+                        already_invoiced=item.already_invoiced,
+                    )
+                    for item in record.items
+                ],
+            )
+            for record in billing.list_billable_orders(organization_id, limit=limit)
+        ]
+
+    @router.post(
+        "/organizations/{organization_id}/billing/invoices", response_model=InvoiceResponse
+    )
+    def create_invoice(
+        organization_id: uuid.UUID,
+        body: InvoiceCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> InvoiceResponse:
+        """Issue an invoice, freezing a price snapshot per line.
+
+        Idempotent on the header key, the same contract order and patient creation already have: a
+        retried or double-clicked issue returns the existing invoice with 200 rather than billing
+        the patient twice."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        try:
+            result = billing.create_invoice(
+                principal=principal,
+                organization_id=organization_id,
+                patient_id=body.patient_id,
+                lines=[
+                    LineRequest(
+                        source_type=BillableSourceType(line.source_type),
+                        source_id=line.source_id,
+                        quantity=line.quantity,
+                    )
+                    for line in body.lines
+                ],
+                idempotency_key=idempotency_key,
+            )
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_invoice_response(result.invoice)
+
+    @router.get(
+        "/organizations/{organization_id}/billing/invoices", response_model=list[InvoiceResponse]
+    )
+    def list_invoices(
+        organization_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        patient_id: Annotated[uuid.UUID | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[InvoiceResponse]:
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        return [
+            _to_invoice_response(record)
+            for record in billing.list_invoices(organization_id, patient_id=patient_id, limit=limit)
+        ]
+
+    @router.get(
+        "/organizations/{organization_id}/billing/invoices/{invoice_id}",
+        response_model=InvoiceResponse,
+    )
+    def get_invoice(
+        organization_id: uuid.UUID,
+        invoice_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> InvoiceResponse:
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        record = billing.get_invoice(organization_id, invoice_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invoice not found")
+        return _to_invoice_response(record)
+
+    @router.post(
+        "/organizations/{organization_id}/billing/invoices/{invoice_id}/payments",
+        response_model=InvoiceResponse,
+    )
+    def record_payment(
+        organization_id: uuid.UUID,
+        invoice_id: uuid.UUID,
+        body: PaymentCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> InvoiceResponse:
+        """Record that money was received, and return the invoice with its new derived balance.
+
+        Returns the whole invoice rather than only the payment, because the balance is what the
+        clerk and the patient both need next, and a second round trip to fetch it would let the
+        screen show a stale figure at exactly the wrong moment.
+
+        A payment that would exceed the total is refused with 409 -- there is no credit or refund
+        model here, so accepting it would create a patient balance DHealth cannot represent. That
+        check happens under a row lock, so two simultaneous payments cannot both pass it."""
+        _require_billing_capability(
+            principal, organization_id, OrganizationCapability.BILLING_OPERATE
+        )
+        try:
+            result = billing.record_payment(
+                principal=principal,
+                organization_id=organization_id,
+                invoice_id=invoice_id,
+                amount=body.amount,
+                method=PaymentMethod(body.method),
+                reference=body.reference,
+                idempotency_key=idempotency_key,
+            )
+        except (ValueError, RuntimeError) as error:
+            raise _billing_error(error, principal, organization_id) from error
+        response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+        return _to_invoice_response(result.invoice)
 
     # -- DH-EX-010: provider/facility-assigned lab routing (ADR-043 launch option (a)) -----------
 

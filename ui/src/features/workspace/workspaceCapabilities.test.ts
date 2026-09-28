@@ -119,9 +119,62 @@ describe('capabilitiesFor', () => {
       canReleaseResults: false,
       // DHEALTH-NATIVE-ACCESS-001: a clinician who is not also an ORG_ADMIN gets no
       // administration surface. Pinned in the exhaustive shape on purpose -- this is
-      // the test that would catch a seventh capability being granted by default.
+      // the test that would catch a capability being granted by default.
       canAdministerTeam: false,
+      // DHEALTH-BILLING-001/ADR-066 §2: clinical authority does not imply the till,
+      // and it does not imply setting prices either. A clinician at a one-person
+      // clinic who is genuinely also the cashier is granted BILLING_CLERK; they do
+      // not get it for free by being a clinician.
+      canOperateBilling: false,
+      canConfigurePrices: false,
     })
+  })
+
+  it('separates running the till from setting prices (ADR-066 §2)', () => {
+    // The oldest problem in facility billing is somebody who can quietly change a
+    // price *and* take the payment, so the two are different capabilities held by
+    // different roles. Mirrors `CAPABILITY_ROLE_GRANTS` in the adapter, which is the
+    // source of truth; this test is what catches the mirror drifting from it.
+    const clerk = capabilitiesFor(membership({ roles: ['BILLING_CLERK'] }))
+    expect(clerk.canOperateBilling).toBe(true)
+    expect(clerk.canConfigurePrices).toBe(false)
+
+    const admin = capabilitiesFor(membership({ roles: ['ORG_ADMIN'] }))
+    expect(admin.canConfigurePrices).toBe(true)
+    expect(admin.canOperateBilling).toBe(false)
+  })
+
+  it('gives a cashier no clinical authority whatsoever', () => {
+    const clerk = capabilitiesFor(membership({ roles: ['BILLING_CLERK'] }))
+    expect(clerk.canViewPatients).toBe(false)
+    expect(clerk.canCreateOrders).toBe(false)
+    expect(clerk.canReviewResults).toBe(false)
+    expect(clerk.canRunVisits).toBe(false)
+    expect(clerk.canWorkLabOrders).toBe(false)
+    expect(clerk.canReleaseResults).toBe(false)
+    expect(clerk.canAdministerTeam).toBe(false)
+  })
+
+  it('grants the till at a laboratory as well as at a provider', () => {
+    // `ALLOWED_ROLES_BY_ORG_TYPE` lists BILLING_CLERK for both, and a bill is the
+    // same kind of record either way -- unlike the clinical capabilities above,
+    // which are deliberately gated on organization type.
+    const labClerk = capabilitiesFor(
+      membership({ organization_type: 'LAB', roles: ['BILLING_CLERK'] }),
+    )
+    expect(labClerk.canOperateBilling).toBe(true)
+    expect(labClerk.canWorkLabOrders).toBe(false)
+    expect(labClerk.canReleaseResults).toBe(false)
+  })
+
+  it('treats a cashier-only membership as usable, so they are not shown an empty workspace', () => {
+    // The defect this pins is the one DHEALTH-NATIVE-ACCESS-001 found for ORG_ADMIN:
+    // a membership whose only role the frontend did not recognise signed in
+    // successfully and landed on nothing at all.
+    expect(isUsableMembership(membership({ roles: ['BILLING_CLERK'] }))).toBe(true)
+    expect(
+      isUsableMembership(membership({ organization_type: 'LAB', roles: ['BILLING_CLERK'] })),
+    ).toBe(true)
   })
 
   it('keeps result entry and result release as separate authorities (ADR-044)', () => {

@@ -1247,8 +1247,8 @@ Only where different answers materially change architecture or workflow.
 
 | # | Decision | Kind | Why it blocks |
 |---|---|---|---|
-| **D-1** | **Which new backend authority does Front Desk need**, and does Billing share it or need its own? Introducing it changes what guards patient-directory reads. | **BACKEND AUTHORITY DECISION REQUIRED** | Blocks Front Desk, Reception and Billing tickets. **Does not block the first ticket** (clinician-only by design). |
-| **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. | Product / commercial | Determines the billing domain shape. Blocks the billing ticket. |
+| **D-1** | **Which new backend authority does Front Desk need**, and does Billing share it or need its own? Introducing it changes what guards patient-directory reads. **Billing portion RESOLVED 2026-09-28, ADR-066**: Billing needs its own — `BILLING_CLERK`, valid at PROVIDER and LAB, asked for as a *capability* rather than a role name. The **Front Desk portion remains open** and ADR-066 says so explicitly. | **BACKEND AUTHORITY DECISION REQUIRED** (Front Desk portion only) | Still blocks Front Desk and Reception. **No longer blocks Billing.** |
+| **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. **Interim answer 2026-09-28, ADR-066 §3**: each organization invoices only what it actually performed, enforced server-side at the invoice line. **Still open** for commercial arrangements over routed external laboratory work — settlement, commissions, referral fees, revenue sharing, pass-through billing, markup and inter-facility AP/AR are all deliberately unbuilt. | Product / commercial | No longer blocks the billing ticket. Blocks any inter-facility commercial model. |
 | **D-2b** | **What happens when payment is incomplete.** If anyone proposes unpaid → no release, that is clinical policy. | **HUMAN DECISION REQUIRED / CLINICAL POLICY** | Must never be encoded casually. Default until decided: billing never gates clinical release. |
 | **D-3** | **Is a first-class specimen entity required for Launch-1?** (The order-level `BLOCKED` state, P0-4, is needed regardless.) | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
 | **D-4** | **Which patient attributes must a receiving laboratory see to confirm the presenting patient?** (`docs/MVP-1.0.md` gap 10.) | Product + clinical safety | Blocks Lab Reception. Must not be invented. |
@@ -1691,17 +1691,39 @@ Rules the graph encodes:
 
 ## 35. Follow-up ticket sequence
 
-Seven tickets. Each is independently useful and testable; none is a rewrite.
+Eight tickets. Each is independently useful and testable; none is a rewrite.
 
 | # | Ticket | Depends on | Blocked by a decision? |
 |---|---|---|---|
-| 1 | **`DHEALTH-CLINIC-VISIT-001`** — Visits/Encounters, clinician-only | Patient directory (built) | **No** — deliberately |
+| 1 | ~~**`DHEALTH-CLINIC-VISIT-001`**~~ — Visits/Encounters, clinician-only | Patient directory (built) | **DONE** 2026-09-27, ADR-065 |
 | 2 | **`DHEALTH-LAB-BLOCKED-001`** — honest cannot-proceed state | Lab workflow (built) | No |
-| 3 | **`DHEALTH-CLINIC-FRONTDESK-001`** — arrival, waiting list, Front Desk role | Ticket 1 | **D-1** |
-| 4 | **`DHEALTH-BILLING-001`** — services, invoice, payment, receipt | Tickets 1, 3 | **D-2a**, **D-2b** |
+| 3 | **`DHEALTH-CLINIC-FRONTDESK-001`** — arrival, waiting list, Front Desk role | Ticket 1 | **D-1** (Front Desk portion) |
+| 4 | ~~**`DHEALTH-BILLING-001`**~~ — services, invoice, payment, receipt | Ticket 1 | **DONE** 2026-09-28, ADR-066 |
 | 5 | **`DHEALTH-MIGRATE-PATIENTS-001`** — CSV/XLSX directory import | Patient directory | No |
 | 6 | **`DHEALTH-LAB-RECEPTION-001`** — lab reception; specimen entity if D-3 says so | Ticket 2 | **D-1**, **D-3**, **D-4** |
 | 7 | **`DHEALTH-CLINIC-CALENDAR-001`** — minimal appointments | Tickets 1, 3 | No |
+| 8 | **`DHEALTH-ACCESS-CAPABILITIES-001`** — organization roles, permission grants, capability-driven UI | Ticket 4 | No |
+
+Ticket 4 shipped **without** ticket 3. The dependency on Front Desk existed only because Billing was
+assumed to borrow Front Desk's authority; ADR-066 gave Billing its own instead, which removed the
+dependency rather than working around it.
+
+**8 · `DHEALTH-ACCESS-CAPABILITIES-001` — Organization Roles, Permission Grants and
+Capability-Driven UI.** Purpose: make the capability seam ADR-066 §1 introduced into the real thing,
+so a facility decides who may do what instead of inheriting it from a job title. Scope: role
+templates; granular permission grants and revocations per organization; **protected capabilities**
+that may never be delegated; effective-permission calculation for a member holding several roles and
+overrides; navigation and action visibility driven by the computed result rather than by role names
+in the frontend. Also migrates the clinical gates (`require_clinician`, `require_lab_tech`,
+`require_lab_result_releaser`) onto capabilities — carefully, because each carries ADR history
+(ADR-044 above all) that a careless migration would quietly discard. Backend: replace
+`CAPABILITY_ROLE_GRANTS` with configurable per-organization grants; `exchange/billing.py` and every
+billing endpoint should need **no** change, and if they do, the seam was wrong. Safety invariants:
+the last-admin invariant (ADR-063) survives; no capability grant may confer result-release authority
+by accident; `BILLING_CONFIGURE_PRICES` and `BILLING_OPERATE` stay separable. Out of scope: platform
+administration, cross-organization roles, delegation between facilities. Qualification: unit +
+real-browser, plus a negative control proving a revoked capability closes both the endpoint and the
+navigation entry.
 
 ### Ticket briefs
 
@@ -1913,3 +1935,75 @@ demonstrated is that the workflow completes end to end in a real browser against
 **Pilot-ready is still not clinically live.** This adds a place to write a clinical note. It does not
 add clinical sign-off on the order set or on any structured field, and nothing here is authorization
 to use DHealth on a real patient.
+
+---
+
+## 39. `DHEALTH-BILLING-001` as delivered (2026-09-28)
+
+**ADR-066.** Migration `0035_facility_billing`, `exchange/billing.py`, `exchange/capabilities.py`,
+ten endpoints, the `Facturation` section. What follows is the delta between §18/§19's brief and what
+was actually built — departures first, then the gaps that are named rather than filled.
+
+### 39.1 Three departures from the brief, each reported rather than assumed
+
+**(a) Billing did not wait for Front Desk.** §35's table made ticket 4 depend on ticket 3, because
+Billing was assumed to borrow Front Desk's authority. It was given its own instead — `BILLING_CLERK`,
+valid at PROVIDER and LAB — which removed the dependency rather than working around it. The Front
+Desk half of D-1 is untouched and still open.
+
+**(b) The authority is asked for as a capability, not a role.** The brief said "role". After
+`require_billing_clerk` was built, it was **deleted** and replaced by `exchange/capabilities.py`, so
+every billing call site asks *"may this person operate billing here"* rather than *"are you a
+`BILLING_CLERK`"*. This is a departure in shape, not in scope: there is still no grant table, no
+revocation and no per-user override. Those are `DHEALTH-ACCESS-CAPABILITIES-001` (§35, ticket 8), and
+the point of the seam is that building it touches one dictionary and one function.
+
+**(c) A tenth endpoint the brief did not anticipate: `GET /billing/patients?q=`.** §18 assumed a clerk
+could reach a patient. They could not: a laboratory clerk starts from an order, but a clinic clerk has
+no order to start from — a consultation is not one — and the patient directory is behind
+`require_clinician`, which a cashier deliberately does not hold. This was raised as a blocking decision
+rather than filled by instinct, because *who may read the patient directory without clinical authority*
+is D-1's own subject. The answer taken: a narrow, separately gated lookup returning **id, display name
+and date of birth** — not name only, because two people sharing a name is ordinary and a till that
+cannot tell them apart bills the wrong one. Contact details, notes, visits, orders and results are
+absent and structurally unreachable. It is not audited as a successful read, so **D-8 stays open**.
+
+### 39.2 What §18's laws became in code
+
+| §18 | As built |
+|---|---|
+| Law 8 — balance is derived | No `balance` column and no `status` column; `test_bill51` asserts their absence in the schema rather than trusting the model |
+| Money is exact | `Numeric(12, 2)`/`Decimal` throughout; no float touches money in the backend, and the frontend formats the server's **string** without ever parsing it |
+| An invoice is immutable | Lines freeze price, description, quantity and currency at issue; a price change supersedes rather than edits |
+| Payments are append-only | No update path, no delete path, no reversal; NC-BILL-6 confirms adding one reddens the suite |
+| Four payment methods | `CASH`, `MOBILE_MONEY`, `CARD`, `BANK_TRANSFER` — **none of them an integration**: no provider, no merchant account, no secret |
+| Receipts | Derived reference `{invoice_number}-R{n}`, so every receipt has a stable identity without a second counter |
+
+### 39.3 Gaps named rather than filled
+
+1. **Payment correction and voiding.** §26 left the policy undecided. The interface says a mis-keyed
+   payment cannot yet be corrected rather than offering a control that rewrites financial history.
+2. **Refunds, credits, discounts and patient balances across invoices.** Overpayment is *refused*
+   because there is no credit model to hold the difference — not because refusal is ideal.
+3. **Any inter-facility commercial arrangement** (D-2a): settlement, commissions, referral fees,
+   revenue sharing, pass-through billing, markup, AP/AR between facilities.
+4. **Insurance and third-party payers.** Not modelled at all. The invoice is to a patient.
+5. **Tax, fiscal numbering and jurisdictional invoice rules.** `FAC-YYYY-NNNNNN` is a facility-scoped
+   reference and says plainly that it is **not** a legal numbering scheme; a number is consumed and
+   unused when a concurrent double-submit resolves to a replay, and that gap is accepted.
+6. **A facility patient number.** DHealth has none to give — `PatientReference` is a provenance
+   binding (ADR-051), not something a human reads aloud. Returning one would look like a patient
+   number without being one.
+7. **Reporting.** No daily takings, no revenue report, no export. A list of invoices is not a ledger.
+8. **Human usability.** No cashier has used this and nothing has been timed against the paper ledger
+   it replaces, so product law 3 remains a validated target.
+
+### 39.4 What §35's table now says
+
+Ticket 4 is **DONE**. Ticket 8, `DHEALTH-ACCESS-CAPABILITIES-001`, was added by this ticket and is
+blocked by nothing. D-1's Billing portion and D-2a's interim answer are recorded in §28's table with
+their still-open halves stated explicitly.
+
+**Pilot-ready is still not clinically live.** This adds a till. It adds no clinical sign-off, no
+pricing policy advice and no interpretation of any kind, and nothing here is authorization to use
+DHealth on a real patient.

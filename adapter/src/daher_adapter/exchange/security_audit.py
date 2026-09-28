@@ -218,6 +218,26 @@ SecurityEventType = Literal[
     "visit_cancelled",
     "visit_note_appended",
     "visit_reason_amended",
+    # DHEALTH-BILLING-001/ADR-066: the four financial mutations, and deliberately only four.
+    #
+    # Money is the one domain where "who did this, to whom, for how much, when" is the whole
+    # question, so every mutation is here. `payment_recorded` in particular is the row a facility
+    # will actually go looking for when the till does not balance.
+    #
+    # **Amounts are not in these rows.** The audit table has no numeric column and this ticket does
+    # not add one: the authoritative amount lives on the `Invoice`/`Payment` row itself, which is
+    # immutable and already carries its own actor and timestamp. Duplicating it here would create a
+    # second, divergeable record of the same fact -- ADR-064's mistake, in a domain that can least
+    # afford it.
+    #
+    # **Absent on purpose:** `invoice_voided` (voiding is not built -- §26's policy is undecided),
+    # any reversal or correction event (same reason), and any read event. A cashier opening an
+    # invoice is not a mutation, and this table is not an access log; whether sensitive *reads*
+    # should be audited is D-8 and is deliberately not answered here.
+    "clinic_service_created",
+    "clinic_service_price_changed",
+    "invoice_created",
+    "payment_recorded",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
@@ -244,6 +264,11 @@ SecurityResourceType = Literal[
     # the same convention again. Deliberately no "visit_note": a per-revision resource type would
     # invite naming the revision's content next to it.
     "visit",
+    # DHEALTH-BILLING-001. A payment names the *invoice* it was recorded against, not itself:
+    # payments hang off an invoice exactly as note revisions hang off a visit, so audit stays
+    # invoice-centric -- the same convention as every block above.
+    "invoice",
+    "clinic_service",
 ]
 
 

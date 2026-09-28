@@ -21,12 +21,23 @@
 
 /** Presentation order, so a dual-role line always reads the same way regardless
  *  of the order the API happened to return the roles in. */
-const ROLE_ORDER = ['CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER', 'ORG_ADMIN'] as const
+const ROLE_ORDER = [
+  'CLINICIAN',
+  'LAB_TECH',
+  'LAB_RESULT_RELEASER',
+  'BILLING_CLERK',
+  'ORG_ADMIN',
+] as const
 
 const ROLE_LABELS: Record<(typeof ROLE_ORDER)[number], string> = {
   CLINICIAN: 'Clinicien',
   LAB_TECH: 'Analyse',
   LAB_RESULT_RELEASER: 'Libération',
+  // DHEALTH-BILLING-001. "Facturation" matches the section this authority opens,
+  // so the identity band and the navigation call the same thing the same name.
+  // Deliberately before `Administration` in the order: it is an operational
+  // authority, and administration reads last for the reason it already did.
+  BILLING_CLERK: 'Facturation',
   ORG_ADMIN: 'Administration',
 }
 

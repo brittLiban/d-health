@@ -24,6 +24,19 @@
  *   canWorkLabOrders   `_require_lab_tech`             LAB_TECH at the lab
  *   canReleaseResults  release endpoints' own gate     LAB_RESULT_RELEASER at the lab
  *   canAdministerTeam  `_require_org_admin`            ORG_ADMIN at this organization
+ *   canOperateBilling  `BILLING_OPERATE` capability    BILLING_CLERK at this organization
+ *   canConfigurePrices `BILLING_CONFIGURE_PRICES`      ORG_ADMIN at this organization
+ *
+ * The last two are the first entries here whose server gate asks for a
+ * *capability* rather than a role (ADR-066 §1): `_require_billing_capability`
+ * asks "may this person operate billing here", and
+ * `adapter/src/daher_adapter/exchange/capabilities.py` is the single place that
+ * turns that into a role check. This file mirrors that one mapping, and says so
+ * rather than pretending to derive it independently — when
+ * `DHEALTH-ACCESS-CAPABILITIES-001` makes grants configurable per organization,
+ * the server will send the computed capabilities and these two derivations are
+ * what it replaces. Until then a mirror is honest: it is usability, and the
+ * server check behind it is unchanged either way.
  *
  * The first four resolve from the same grant today, because CLINICIAN is the
  * single authority the backend checks for patient binding, order creation,
@@ -66,6 +79,24 @@ export interface WorkspaceCapabilities {
    * request regardless of what this returns.
    */
   canAdministerTeam: boolean
+  /**
+   * DHEALTH-BILLING-001 — may run the till here: issue invoices, record payments, read balances
+   * and print receipts. Valid at a provider and at a laboratory alike.
+   *
+   * Deliberately **not** implied by `canAdministerTeam`. ADR-066 §2 records that administering a
+   * facility is not the same as handling its money, and an administrator who does cover the till
+   * is granted the role explicitly. Mirroring that here matters: an interface that offered the
+   * till to every administrator would quietly contradict the server, which refuses them.
+   */
+  canOperateBilling: boolean
+  /**
+   * DHEALTH-BILLING-001 — may decide what this facility charges: add a service, change a price.
+   *
+   * Separate from `canOperateBilling` and held by the *other* role, which is a financial control
+   * rather than tidiness: someone who can quietly change a price and also take the payment is the
+   * oldest problem in facility billing (ADR-066 §2).
+   */
+  canConfigurePrices: boolean
 }
 
 export const NO_CAPABILITIES: WorkspaceCapabilities = {
@@ -76,6 +107,8 @@ export const NO_CAPABILITIES: WorkspaceCapabilities = {
   canWorkLabOrders: false,
   canReleaseResults: false,
   canAdministerTeam: false,
+  canOperateBilling: false,
+  canConfigurePrices: false,
 }
 
 /**
@@ -100,9 +133,16 @@ export function isUsableMembership(membership: ExchangeMembershipSummary): boole
   if (membership.organization_status !== 'ACTIVE') return false
   if (membership.membership_status !== 'ACTIVE') return false
 
-  // Valid at either organization type, and checked first because it is the one
-  // role whose usefulness does not depend on which kind of facility this is.
-  if (membership.roles.includes('ORG_ADMIN')) {
+  // Valid at either organization type, and checked first because these are the
+  // roles whose usefulness does not depend on which kind of facility this is.
+  //
+  // DHEALTH-BILLING-001 added BILLING_CLERK here for exactly the reason ORG_ADMIN
+  // was added above: a cashier holds that role and nothing else — by design, so
+  // that being an administrator or a clinician does not make someone a cashier —
+  // and without this line they would sign in successfully and be shown no
+  // workspace at all. The same shape as the bug DHEALTH-NATIVE-ACCESS-001 fixed,
+  // and cheaper to avoid than to rediscover in a browser.
+  if (membership.roles.includes('ORG_ADMIN') || membership.roles.includes('BILLING_CLERK')) {
     return (
       membership.organization_type === 'PROVIDER' || membership.organization_type === 'LAB'
     )
@@ -154,5 +194,13 @@ export function capabilitiesFor(
     // laboratory alike (`ALLOWED_ROLES_BY_ORG_TYPE` lists it for both), and the
     // staff a facility administers are the same kind of record either way.
     canAdministerTeam: membership.roles.includes('ORG_ADMIN'),
+    // DHEALTH-BILLING-001/ADR-066. Mirrors `CAPABILITY_ROLE_GRANTS` in
+    // `adapter/src/daher_adapter/exchange/capabilities.py`, which is the source
+    // of truth; if the two ever disagree, the server wins and the operator sees
+    // a refusal where a control was offered. Not gated on organization type —
+    // `ALLOWED_ROLES_BY_ORG_TYPE` lists BILLING_CLERK for a provider and a
+    // laboratory alike, and a bill is the same kind of record either way.
+    canOperateBilling: membership.roles.includes('BILLING_CLERK'),
+    canConfigurePrices: membership.roles.includes('ORG_ADMIN'),
   }
 }

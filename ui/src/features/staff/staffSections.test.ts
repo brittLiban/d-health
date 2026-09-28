@@ -75,33 +75,70 @@ describe('availableSections', () => {
 
   // ── DHEALTH-NATIVE-ACCESS-001: Équipe et accès ─────────────────────────────
 
-  it('offers an ORG_ADMIN-only membership the team section and nothing else', () => {
+  it('offers an ORG_ADMIN-only membership administration and prices, and nothing clinical', () => {
     // Not `['today', 'team']`. `Aujourd'hui` is the clinical/laboratory work relay
     // and would render empty for somebody who holds no clinical role -- the dead
     // navigation entry this module's own rule forbids, reached from the other side.
-    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team'])
-    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team'])
+    //
+    // DHEALTH-BILLING-001 added `billing` here, and it is a real screen rather than a
+    // widening: `BILLING_CONFIGURE_PRICES` is ORG_ADMIN's own capability (ADR-066 §2),
+    // so an administrator opening `Facturation` finds the price list -- what this
+    // facility charges -- and no till. The reverse holds for a cashier, and
+    // `never offers the till to an administrator` below pins that half.
+    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['billing', 'team'])
+    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['billing', 'team'])
   })
 
-  it('lands an administrator with no clinical role directly on the team section', () => {
+  it('lands an administrator with no clinical role on the first section they can use', () => {
     const sections = availableSections(
       provider(['ORG_ADMIN']),
       capabilitiesFor(provider(['ORG_ADMIN'])),
     )
-    expect(resolveSection(null, sections)).toBe('team')
+    expect(resolveSection(null, sections)).toBe('billing')
+    // ...and `Équipe et accès` is still reachable, which is what the landing change
+    // must not cost them.
+    expect(sections.map((section) => section.id)).toContain('team')
   })
 
   it('puts the team section last for an administrator who also works clinically', () => {
-    // Administration is not what they open the application for.
+    // Administration is not what they open the application for. `Facturation` sits
+    // between the clinical sections and administration: money follows the work that
+    // produced it, and precedes administering the establishment.
     expect(idsFor(provider(['CLINICIAN', 'ORG_ADMIN']))).toEqual([
       'today',
       'visits',
       'patients',
       'orders',
       'results',
+      'billing',
       'team',
     ])
-    expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual(['today', 'orders', 'team'])
+    expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual([
+      'today',
+      'orders',
+      'billing',
+      'team',
+    ])
+  })
+
+  it('offers a cashier the till and nothing else, in either kind of facility', () => {
+    // DHEALTH-BILLING-001/ADR-066 §2, as navigation. A BILLING_CLERK holds that role
+    // and nothing else by design, so this is also the membership that would have been
+    // signed in and shown no workspace at all had `isUsableMembership` not learned
+    // about the role -- the same defect DHEALTH-NATIVE-ACCESS-001 fixed for ORG_ADMIN.
+    expect(idsFor(provider(['BILLING_CLERK']))).toEqual(['billing'])
+    expect(idsFor(lab(['BILLING_CLERK']))).toEqual(['billing'])
+  })
+
+  it('never offers a cashier a clinical section, in either direction', () => {
+    const clerk = idsFor(provider(['BILLING_CLERK']))
+    for (const forbidden of ['today', 'visits', 'patients', 'orders', 'results', 'team']) {
+      expect(clerk).not.toContain(forbidden)
+    }
+    // And the clinician gets no till: billing authority is not implied by clinical
+    // authority any more than the reverse.
+    expect(idsFor(provider(['CLINICIAN']))).not.toContain('billing')
+    expect(idsFor(lab(['LAB_TECH', 'LAB_RESULT_RELEASER']))).not.toContain('billing')
   })
 
   it('never offers the team section to somebody who is not an ORG_ADMIN', () => {

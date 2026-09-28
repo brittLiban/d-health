@@ -6,6 +6,86 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-28, DHEALTH-BILLING-001, directly on `master`.** From `c1c205d`. **DHealth's Native clinic
+and laboratory can take money.** A cashier finds the patient, sees what their own facility actually
+performed, issues an invoice that freezes its prices, records a payment, and hands over a receipt with
+a stable reference. An administrator decides what the facility charges. `Facturation` is a staff
+section; six financial tables are real. **ADR-066.** Alembic head is now **`0035_facility_billing`**.
+
+**The rule that shapes the whole domain: an organization may invoice only what it actually performed.**
+When Clinic A routes an order to Lab B, Clinic A bills its consultation and **Lab B bills the tests** —
+and Clinic A *cannot* put Lab B's work on an invoice even holding real billing authority and a real
+order item id. Enforced server-side at the line, not by authorization: holding `BILLING_OPERATE`
+proves you may bill for an organization and proves nothing about whether that organization did the
+work. Knowing an order id is not authority to charge for it.
+
+**Billing asks for a capability, not a role.** `require_billing_clerk` was written and then **deleted**
+— not kept as a second way in. `exchange/capabilities.py` is one enum, one mapping, one question, and
+it is the only file in the billing surface that names a role at all. `BILLING_CLERK` is a convenient
+bundle: `test_bill61` grants `BILLING_OPERATE` to `ORG_ADMIN` by patching only `CAPABILITY_ROLE_GRANTS`
+and watches a 403 become a 200, with no service, endpoint or behavioural test touched. Making those
+grants configurable per organization is `DHEALTH-ACCESS-CAPABILITIES-001`.
+
+**Money never gates care, and that is structural rather than promised.** `exchange/billing.py` imports
+nothing from `results`, `lab_workflow`, `visits` or `selection`, and none of those imports billing or
+so much as names `invoice` or `balance` — so a future author cannot reach for a balance in the release
+path without adding an import that reddens a test. BILL-SAFETY-1 drives a whole order through
+collection, processing, entry, release and doctor review with a real outstanding balance the entire
+way. NC-BILL-4 introduces exactly the forbidden gate and confirms both halves go red.
+
+Qualified, as measured: **48** adapter tests (and **1 832 passed / 193 skipped** across the whole
+adapter suite, no regressions), **12** real-PostgreSQL concurrency/constraint tests, **6
+real-browser phases** end to end, **14** UI unit tests (with all 61 UI files run and reconciled), and
+**7 negative controls** each reddening a named test and reverting byte for byte. Migration `0035` was
+applied, **downgraded** and re-upgraded against real PostgreSQL; against a database holding 120
+`BILLING_CLERK` grants and 91 billing audit rows the downgrade **refuses** atomically rather than
+erasing them, exactly as its docstring claims.
+
+**The browser phase worth naming: BILL-S.** A real order is driven through collection, processing,
+result entry and **release** on the running stack with a real unpaid invoice outstanding against it.
+The release returns 201 and the balance is still owed afterwards. Money not gating care is now a
+demonstrated fact, not only a structural argument.
+
+**The evidence worth reading: real PostgreSQL found three defects the 48 SQLite tests could not.**
+SQLAlchemy's SQLite dialect omits `FOR UPDATE` entirely and SQLite's writer serialization turns these
+races into sequential calls. (1) the invoice-number counter's insert-race branch raised
+`InvalidRequestError`, because a rolled-back SAVEPOINT already detaches what was added inside it;
+(2) `create_invoice`'s idempotency was a read-then-insert, so a genuine concurrent double-submit
+raised a raw unique-constraint violation at a clerk whose invoice *had* been issued — and the natural
+reaction to that error is to issue a second one; (3) the SAVEPOINT added to fix (2) did not cover the
+insert, because `begin_nested()` autoflushes *before* establishing the savepoint. All three fixed.
+**Billing is SQLite green and PostgreSQL qualified**, and only the second sentence is evidence about
+money.
+
+**A negative control found a real hole, and it was fixed rather than explained.** Deleting
+`record_payment`'s organization-ownership check left **all 43 other tests green**: a clerk at one
+facility could record a payment against another facility's invoice, moving its balance and status.
+`test_billauth9` now covers it.
+
+**Two decisions were raised rather than guessed, and one of them is still open.** D-1's *Billing*
+portion is resolved — billing gets its own authority, and being an administrator, clinician or lab
+worker does not make someone a cashier; **the Front Desk half remains open.** D-2a has an *interim*
+answer only, and clinic-to-lab settlement, commissions, referral fees, revenue sharing, pass-through
+billing, markup and inter-facility AP/AR are all deliberately unbuilt. **D-8 was preserved, not quietly
+resolved**: the new billing patient lookup is not audited as a successful read, because introducing a
+read-audit regime for one endpoint inside a billing ticket would have pre-empted an open decision.
+
+**Payment correction is deliberately not built.** There is no edit path, no delete path, no reversal,
+no refund, no credit and no discount — §26 left the policy undecided, so the interface says a mis-keyed
+payment cannot yet be corrected rather than offering a control that quietly rewrites financial history.
+NC-BILL-6 confirms that adding such a route reddens the suite. **DHealth records that money was taken**;
+it moves no money, contacts no bank, calls no mobile-money API and authorises no card. There is no
+payment provider, no merchant account and no secret in this domain.
+
+**Human usability is still not claimed.** No cashier has used this surface and nothing has been timed
+against the paper ledger it replaces, so product law 3 remains a validated target. Still not
+production-deployed, pilot-ready-on-the-Exchange-track, clinically live, or Connect-integrated; all
+patient, service and price data synthetic, no real patient data used.
+
+<!-- The previous as-of block follows, preserved as history rather than deleted. -->
+
+### Previous as-of — 2026-09-27, DHEALTH-CLINIC-VISIT-001
+
 **2026-09-27, DHEALTH-CLINIC-VISIT-001, directly on `master`.** From `7810b7c`. **DHealth's Native
 clinic has a clinical thread.** A clinician can register that a patient arrived and why, take them into
 consultation, write a note and correct it (append-only revisions, earlier ones retained and visible),

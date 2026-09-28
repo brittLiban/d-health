@@ -101,6 +101,14 @@ __all__ = [
     "PractitionerReference",
     "ResultDelivery",
     "ResultDeliveryStatus",
+    "BillableSourceType",
+    "ClinicService",
+    "ClinicServicePrice",
+    "Invoice",
+    "InvoiceLine",
+    "InvoiceNumberSequence",
+    "Payment",
+    "PaymentMethod",
     "TestCatalogEntry",
     "Visit",
     "VisitNote",
@@ -1484,7 +1492,7 @@ class OrganizationMembershipStatus(StrEnum):
 
 
 class OrganizationRole(StrEnum):
-    """MVP organization roles only -- no billing/reception/pharmacy roles. Validity against
+    """MVP organization roles. Validity against
     organization type (PROVIDER: ORG_ADMIN/CLINICIAN; LAB: ORG_ADMIN/LAB_TECH/LAB_RESULT_RELEASER)
     is enforced by ``exchange/membership.py``'s repository layer, not a DB constraint, for the same
     reason ``LabOffering``'s lab-organization-type check is repository-enforced elsewhere in this
@@ -1494,12 +1502,36 @@ class OrganizationRole(StrEnum):
     from ``LAB_TECH``'s result-*entry* authority. ADR-044 binds this as an additive role, not a
     replacement -- the same human may hold both simultaneously (no forced second-person workflow),
     and a membership holding only one of the two may do exactly that one thing (enter, or release)
-    and not the other."""
+    and not the other.
+
+    ``BILLING_CLERK`` (DHEALTH-BILLING-001, ADR-066): the money authority, and **only** the
+    money authority -- invoices, invoice lines, payments, balances, receipts, and the
+    facility's own service prices. It grants no clinical read or write of any kind: no patient
+    clinical note, no visit documentation, no diagnostic ordering, no laboratory processing, no
+    result entry, no result release, no clinician review, no staff administration, no platform
+    administration.
+
+    It is **additive and never implied.** Holding ``ORG_ADMIN``, ``CLINICIAN``, ``LAB_TECH`` or
+    ``LAB_RESULT_RELEASER`` does not make a membership a cashier: the role must be granted
+    explicitly, through the same ``Équipe et accès`` lifecycle and the same audit as every
+    other role. That is the point rather than a detail -- a facility administrator is not
+    automatically trusted with the till, and a clinician is not automatically asked to handle
+    money.
+
+    Valid at **both** organization types, unlike every other non-admin role here. A laboratory
+    charges for the tests it performed and a clinic for the consultation it performed
+    (ADR-066's service-performance rule), so both need the same authority over their own
+    money.
+
+    **2026-09-28 dated note:** the first sentence of this docstring said "no billing/reception/
+    pharmacy roles" until today and is left corrected above rather than silently rewritten --
+    reception and pharmacy roles still do not exist."""
 
     ORG_ADMIN = "ORG_ADMIN"
     CLINICIAN = "CLINICIAN"
     LAB_TECH = "LAB_TECH"
     LAB_RESULT_RELEASER = "LAB_RESULT_RELEASER"
+    BILLING_CLERK = "BILLING_CLERK"
 
 
 class ExchangeIdentity(Base):
@@ -1579,7 +1611,8 @@ class OrganizationRoleAssignment(Base):
             "membership_id", "role", name="uq_exchange_org_role_assignments_membership_role"
         ),
         CheckConstraint(
-            "role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER')",
+            "role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER', "
+            "'BILLING_CLERK')",
             name="ck_exchange_org_role_assignments_role",
         ),
     )
@@ -1802,7 +1835,13 @@ class ExchangeSecurityAuditEvent(Base):
             # refusal events either -- an attempt to complete someone else's visit is an
             # authorization refusal, recorded by `exchange/audit.py`'s best-effort file writer.
             "'visit_created', 'visit_started', 'visit_completed', 'visit_cancelled', "
-            "'visit_note_appended', 'visit_reason_amended'"
+            "'visit_note_appended', 'visit_reason_amended', "
+            # DHEALTH-BILLING-001: the four financial mutations. No amount is recorded here --
+            # the authoritative figure lives on the immutable Invoice/Payment row, and a second
+            # copy could diverge from it. No void, no reversal (neither policy is decided), and
+            # no read event (D-8).
+            "'clinic_service_created', 'clinic_service_price_changed', 'invoice_created', "
+            "'payment_recorded'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1811,7 +1850,8 @@ class ExchangeSecurityAuditEvent(Base):
             name="ck_exchange_security_audit_events_outcome",
         ),
         CheckConstraint(
-            "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', 'LAB_RESULT_RELEASER')",
+            "role IS NULL OR role IN ('ORG_ADMIN', 'CLINICIAN', 'LAB_TECH', "
+            "'LAB_RESULT_RELEASER', 'BILLING_CLERK')",
             name="ck_exchange_security_audit_events_role",
         ),
         CheckConstraint(
@@ -1832,7 +1872,10 @@ class ExchangeSecurityAuditEvent(Base):
             # and notification lines above. There is deliberately no 'patient' or 'visit_note'
             # resource type added here: the patient is reachable from the visit, and naming the
             # patient on every visit event would turn this table into a record of who was seen when.
-            "'connector_installation', 'patient_notification', 'visit')",
+            "'connector_installation', 'patient_notification', 'visit', "
+            # DHEALTH-BILLING-001: payments hang off an invoice, so audit stays
+            # invoice-centric -- the same convention as every line above.
+            "'invoice', 'clinic_service')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
@@ -2435,3 +2478,416 @@ class VisitNote(Base):
     )
 
     visit: Mapped[Visit] = relationship(back_populates="notes")
+
+
+# --- DHEALTH-BILLING-001: facility billing -- services, invoices, payments -----------------------
+
+
+class BillableSourceType(StrEnum):
+    """What a charge is *for*, as a closed set.
+
+    `docs/NATIVE-OPERATING-PRODUCT.md` §19 rejected a single generic ``Service`` object and said
+    why: a laboratory test has a catalogue entry, an offering, a result template, a specimen and a
+    release authority; a consultation has none of those. Forcing one object would either strip what
+    makes ``LabOffering`` safe or bolt laboratory concepts onto a consultation with no use for them.
+    So an invoice line names a *source* instead, and the two source kinds keep their own domains.
+
+    Deliberately only two. Adding a third means a real new thing a facility performs and charges
+    for,
+    not a convenience for something that already fits."""
+
+    CLINIC_SERVICE = "CLINIC_SERVICE"
+    LAB_ORDER_ITEM = "LAB_ORDER_ITEM"
+
+
+class PaymentMethod(StrEnum):
+    """The four ways a small facility in this pilot actually takes money, as
+    ``docs/NATIVE-OPERATING-PRODUCT.md`` §18 already enumerated them: cash, mobile money, card,
+    transfer. Not invented here -- the specification decided them, and this enum matches it.
+
+    **None of these is an integration.** DHealth *records* that money was taken by one of these
+    means; it does not move money, contact a bank, call a mobile-money API, or authorise a card.
+    There is no provider, no merchant account and no secret anywhere in this domain."""
+
+    CASH = "CASH"
+    MOBILE_MONEY = "MOBILE_MONEY"
+    CARD = "CARD"
+    BANK_TRANSFER = "BANK_TRANSFER"
+
+
+class ClinicService(Base):
+    """A thing a facility performs and charges for that is **not** a laboratory test.
+
+    The consultation is the motivating case, but this is deliberately not called ``Consultation``: a
+    clinic may also charge for a dressing, an injection, or a diagnostic it runs on its own bench.
+    What unites them is that they have no catalogue entry, no offering, no result template and no
+    release authority -- which is exactly why they cannot be ``LabOffering`` rows (§19).
+
+    **Organization-owned and organization-scoped.** One facility's price list is not another's, and
+    there is no shared or platform-level service catalogue here. A LAB may hold these too: a
+    laboratory that charges a handling fee has the same need.
+
+    Price lives in ``ClinicServicePrice`` rather than on this row, mirroring
+    ``LabOffering``/``LabPrice`` exactly. That is not ceremony: it means changing a price
+    *supersedes* rather than mutates, so a facility can answer "what did we charge for this in
+    March" without an invoice in hand. Invoice lines still carry their own frozen snapshot -- the
+    price table is the source those snapshots are read from, never the thing a historical invoice is
+    re-rendered from
+    (ADR-066)."""
+
+    __tablename__ = "exchange_clinic_services"
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id", name="uq_exchange_clinic_services_id_org"),
+        UniqueConstraint("organization_id", "name", name="uq_exchange_clinic_services_org_name"),
+        Index("ix_exchange_clinic_services_organization_id", "organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: What appears on the invoice. French, facility-authored, never a code system.
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    prices: Mapped[list[ClinicServicePrice]] = relationship(
+        back_populates="clinic_service", order_by="ClinicServicePrice.effective_at"
+    )
+
+
+class ClinicServicePrice(Base):
+    """One price a facility charged for one of its own services, over one interval of time.
+
+    A deliberate mirror of ``LabPrice``, down to the partial unique index: exactly one row per
+    service has ``superseded_at IS NULL`` (the current price), and changing a price supersedes the
+    old row rather than mutating it, so price history is never destroyed.
+
+    ``Numeric(12, 2)`` and never a float, for the reason every money system eventually learns the
+    hard way: binary floating point cannot represent 0.1, so sums drift and a balance that should be
+    exactly zero is not. The same type ``LabPrice`` already uses.
+
+    Currency is a plain three-letter code defaulting to DJF, exactly as ``LabPrice`` documents: the
+    pilot is Djibouti, the column does not assume it stays that way, and **nothing here implements
+    multi-currency behaviour** -- no conversion, no rates, no display logic. An invoice carries one
+    currency and refuses lines that disagree with it."""
+
+    __tablename__ = "exchange_clinic_service_prices"
+    __table_args__ = (
+        CheckConstraint(
+            "amount >= 0", name="ck_exchange_clinic_service_prices_amount_non_negative"
+        ),
+        CheckConstraint(
+            "length(currency) = 3", name="ck_exchange_clinic_service_prices_currency_shape"
+        ),
+        Index(
+            "uq_exchange_clinic_service_prices_current",
+            "clinic_service_id",
+            unique=True,
+            postgresql_where=text("superseded_at IS NULL"),
+            sqlite_where=text("superseded_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    clinic_service_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_clinic_services.id", ondelete="RESTRICT"), nullable=False
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="DJF")
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    clinic_service: Mapped[ClinicService] = relationship(back_populates="prices")
+
+
+class InvoiceNumberSequence(Base):
+    """One monotonic counter per organization per year, so an invoice number is human-readable and
+    unique without ever being ``count(*) + 1``.
+
+    Counting rows to pick the next number is the classic double-issue bug: two cashiers invoicing at
+    the same instant both count *n* and both write *n+1*. This row is taken ``FOR UPDATE`` inside
+    the invoice-creation transaction, so the second caller waits and reads the first caller's
+    committed value. The unique constraint on ``Invoice.(organization_id, number)`` is the second
+    layer behind that, not the first.
+
+    Scoped per year as well as per organization so numbers restart annually, which is what a
+    facility expects of a paper book. **This is not a legal numbering scheme.** Jurisdictional
+    invoice numbering rules (gapless sequences, fiscal registration, mandated prefixes) are a policy
+    question nobody has answered for Djibouti here, and inventing one would be worse than this
+    honest,
+    stable, facility-scoped reference (ADR-066)."""
+
+    __tablename__ = "exchange_invoice_number_sequences"
+    __table_args__ = (
+        CheckConstraint("next_value >= 1", name="ck_exchange_invoice_number_seq_positive"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), primary_key=True
+    )
+    year: Mapped[int] = mapped_column(Integer, primary_key=True)
+    next_value: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class Invoice(Base):
+    """One facility's bill to one patient, for services **that facility performed**.
+
+    ── Who owns it, and who may be billed ──
+
+    ``organization_id`` owns the invoice, its lines, its payments and its receipts, absolutely. A
+    clinic cannot read a laboratory's invoice and a laboratory cannot read a clinic's, even when
+    both concern the same patient and the same diagnostic order (§25). There is no cross-facility
+    settlement, no accounts payable between organizations, and no pass-through billing.
+
+    ``patient_id`` is the provider-scoped native ``Patient`` (ADR-051) -- never a second customer
+    directory, never a fuzzy match. **There is deliberately no composite tenant foreign key here**,
+    unlike ``Visit``, and the reason is structural rather than an oversight: ``Patient`` is owned by
+    the *provider* that registered them, so a laboratory's invoice legitimately names a patient row
+    another organization owns. The laboratory's right to bill that person is not ownership of their
+    directory record -- it is the fact that the laboratory performed the work, which is proven by
+    the invoice *line's* source. See ``InvoiceLine``. (Whether a laboratory may hold patient records
+    of its own is **D-6**, still open.)
+
+    ── ADR-066's service-performance rule ──
+
+    An organization may invoice only for services it actually performed. A clinic bills its
+    consultation and its own in-house services; a laboratory bills the tests it ran. If Clinic A
+    routes an order to Lab B, **Clinic A may not put Lab B's work on an invoice** -- knowing an
+    order id is not authority to bill for it. Enforced server-side in ``exchange/billing.py``, not
+    by convention. D-2a (the wider commercial question of who ultimately pays whom for routed work)
+    stays open; this is the narrow MVP rule that does not pre-empt it.
+
+    ── No stored status, and no stored balance ──
+
+    Neither exists as a column, and that is deliberate. §18's Law 8: *balance is derived -- invoice
+    total minus payments -- never stored.* A stored balance is a second source of truth that drifts;
+    a stored status is the same mistake one level up, because ``OPEN``/``PARTIALLY_PAID``/``PAID``
+    is a pure function of the total and the payments. The API computes and returns them; the
+    database holds only facts.
+
+    Nothing here is ``VOID`` either: voiding is a policy question §26 of the specification left
+    undecided (may an invoice with payments be voided? what happens to its receipts?), and this
+    ticket refuses to invent it. There is therefore **no delete path and no void path** -- an
+    invoice, once issued, is a permanent record.
+
+    ── What this row must never do ──
+
+    No field here, and nothing that reads it, may influence clinical state. A result release, a
+    visit transition, an order's progress and a doctor's review are all structurally unable to see
+    this
+    table (ADR-066's release-independence rule, and §27's hard rule)."""
+
+    __tablename__ = "exchange_invoices"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "number", name="uq_exchange_invoices_org_number"),
+        UniqueConstraint(
+            "organization_id",
+            "idempotency_key",
+            name="uq_exchange_invoices_org_idempotency_key",
+        ),
+        UniqueConstraint("id", "organization_id", name="uq_exchange_invoices_id_org"),
+        UniqueConstraint("id", "currency", name="uq_exchange_invoices_id_currency"),
+        CheckConstraint("length(currency) = 3", name="ck_exchange_invoices_currency_shape"),
+        Index("ix_exchange_invoices_organization_id", "organization_id"),
+        Index("ix_exchange_invoices_org_patient", "organization_id", "patient_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: A provider-scoped `Patient`. See this class's docstring for why there is no composite key.
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_patients.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: Human-readable, facility-scoped, printed on the receipt. Never a bare UUID (§15).
+    number: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: One currency per invoice. Lines may not disagree -- enforced by a composite foreign key from
+    #: `InvoiceLine`, so the database refuses a mixed-currency invoice rather than trusting code.
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="DJF")
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    created_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    lines: Mapped[list[InvoiceLine]] = relationship(back_populates="invoice")
+    payments: Mapped[list[Payment]] = relationship(back_populates="invoice")
+
+
+class InvoiceLine(Base):
+    """One charge on one invoice, with its own frozen financial facts.
+
+    ── The snapshot is the whole point ──
+
+    ``description_snapshot``, ``quantity``, ``unit_amount`` and ``currency`` are captured when the
+    invoice is created and are never read back from the price tables afterwards. A facility that
+    raises its consultation fee in March does not thereby change what a patient was charged in
+    February. Rendering a historical invoice by joining to today's price would be the defect ADR-066
+    names explicitly -- and NC-BILL-3 exists to prove the snapshot is genuinely load-bearing.
+
+    ``description_snapshot`` is frozen for the same reason: a service renamed from "Consultation" to
+    "Consultation générale" must not retroactively rewrite what an old invoice says was sold.
+
+    ── The source, with real referential integrity ──
+
+    §8 asked for a safer pattern than an untyped polymorphic key, and this is it: **two nullable
+    typed foreign keys and a CHECK that exactly one matches ``source_type``.** The database
+    therefore knows a ``CLINIC_SERVICE`` line points at a real ``exchange_clinic_services`` row and
+    a ``LAB_ORDER_ITEM`` line at a real ``exchange_lab_order_items`` row -- not a dangling UUID
+    whose meaning depends on a string column nobody constrained.
+
+    The source exists to *explain the charge*, never to import clinical content. A line says
+    "Numération formule sanguine, 1, 3 500 DJF" because that is the thing being sold. It does not,
+    and must not, carry the result value, the reference interval, the clinician's note or a
+    diagnosis (§18's billing-privacy rule).
+
+    ── Currency cannot drift from the invoice ──
+
+    The composite foreign key ``(invoice_id, currency)`` against ``Invoice``'s own
+    ``uq_exchange_invoices_id_currency`` makes a mixed-currency invoice unrepresentable. No
+    conversion, no rates, no foreign-exchange engine -- an invoice is in one currency and the
+    database enforces it.
+
+    ── No negative money ──
+
+    Quantity is positive and unit amount is non-negative, by CHECK constraint. Negative lines are
+    how systems without a refund model fake refunds, and this ticket has no refund or credit model;
+    a
+    negative line would be a silent invention of one (§14)."""
+
+    __tablename__ = "exchange_invoice_lines"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["invoice_id", "currency"],
+            ["exchange_invoices.id", "exchange_invoices.currency"],
+            name="fk_exchange_invoice_lines_currency_matches_invoice",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("quantity > 0", name="ck_exchange_invoice_lines_quantity_positive"),
+        CheckConstraint(
+            "unit_amount >= 0", name="ck_exchange_invoice_lines_unit_amount_non_negative"
+        ),
+        CheckConstraint(
+            "source_type IN ('CLINIC_SERVICE', 'LAB_ORDER_ITEM')",
+            name="ck_exchange_invoice_lines_source_type",
+        ),
+        # Exactly one typed source, and it must be the one `source_type` names. This pair is what
+        # makes the polymorphism safe rather than a convention.
+        CheckConstraint(
+            "(source_type = 'CLINIC_SERVICE') = (clinic_service_id IS NOT NULL)",
+            name="ck_exchange_invoice_lines_clinic_source_matches",
+        ),
+        CheckConstraint(
+            "(source_type = 'LAB_ORDER_ITEM') = (lab_order_item_id IS NOT NULL)",
+            name="ck_exchange_invoice_lines_lab_source_matches",
+        ),
+        Index("ix_exchange_invoice_lines_invoice_id", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    invoice_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    clinic_service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_clinic_services.id", ondelete="RESTRICT"), nullable=True
+    )
+    lab_order_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_lab_order_items.id", ondelete="RESTRICT"), nullable=True
+    )
+    #: What the patient sees. Frozen at invoicing; never re-read from the service or catalogue.
+    description_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    unit_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    invoice: Mapped[Invoice] = relationship(back_populates="lines")
+
+
+class Payment(Base):
+    """One recorded fact that money was received against one invoice. Append-only, permanently.
+
+    ── Immutable, and the interface says so ──
+
+    There is no update path and no delete path for a payment, by design. Financial history that can
+    be silently rewritten is not history. Correction and reversal semantics (a reversal row? a
+    credit? who may authorise one?) are a policy question §26 of the operating-product specification
+    left undecided, and ADR-066 refuses to invent one inside this ticket -- so a mis-keyed payment
+    is currently a **named gap**, not a quietly-supported edit. The UI does not pretend otherwise.
+
+    ── Overpayment is refused, under concurrency ──
+
+    ``amount`` is positive by CHECK. The invariant that payments may not exceed the invoice total is
+    not expressible as a row constraint, so it is enforced by locking the invoice row ``FOR UPDATE``
+    and summing committed payments *inside* that lock (``exchange/billing.py``). Two cashiers taking
+    the last 3 500 DJF simultaneously is the case that matters: without the lock both read the same
+    remaining balance and both succeed. Qualified against real PostgreSQL, because the lock is a
+    no-op on SQLite.
+
+    ``sequence_number`` is the payment's ordinal within its invoice, computed under that same lock
+    and unique by constraint. It gives every receipt a stable human-readable reference derived from
+    the invoice number -- ``FAC-2026-000123-R2`` -- without a second counter table.
+
+    ── No provider, no secret ──
+
+    ``method`` records how money arrived, not a payment integration. Nothing here talks to a bank, a
+    card network or a mobile-money API. ``reference`` is a short operator-typed note -- a
+    mobile-money confirmation code or a cheque number -- and is deliberately bounded and optional.
+    It must never
+    hold a card number, and nothing in DHealth ever asks for one."""
+
+    __tablename__ = "exchange_payments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["invoice_id", "organization_id"],
+            ["exchange_invoices.id", "exchange_invoices.organization_id"],
+            name="fk_exchange_payments_invoice_same_org",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "invoice_id", "sequence_number", name="uq_exchange_payments_invoice_sequence"
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "idempotency_key",
+            name="uq_exchange_payments_org_idempotency_key",
+        ),
+        CheckConstraint("amount > 0", name="ck_exchange_payments_amount_positive"),
+        CheckConstraint("sequence_number >= 1", name="ck_exchange_payments_sequence_positive"),
+        CheckConstraint(
+            "method IN ('CASH', 'MOBILE_MONEY', 'CARD', 'BANK_TRANSFER')",
+            name="ck_exchange_payments_method",
+        ),
+        Index("ix_exchange_payments_invoice_id", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    invoice_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    #: Denormalised from the invoice **solely** so the composite foreign key above can exist: it is
+    #: the database's own proof that a payment can never be attached to another organization's
+    #: invoice, rather than a fact this column independently owns.
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: Optional, short, operator-typed. Never a card number, never a credential.
+    reference: Mapped[str | None] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    recorded_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    invoice: Mapped[Invoice] = relationship(back_populates="payments")

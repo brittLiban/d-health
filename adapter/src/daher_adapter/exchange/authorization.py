@@ -25,6 +25,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from daher_adapter.exchange.capabilities import (
+    OrganizationCapability,
+    capability_is_held,
+)
 from daher_adapter.exchange.membership import (
     MembershipRecord,
     OrganizationMembershipRepository,
@@ -163,6 +167,65 @@ class AuthorizationService:
         held_roles = self._roles.list_for_membership(membership.id)
         if OrganizationRole.CLINICIAN.value not in held_roles:
             raise NotAuthorized("clinician role required")
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
+
+    def require_capability(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        *capabilities: OrganizationCapability,
+    ) -> OrganizationAccessContext:
+        """Require **any one** of these capabilities in this organization.
+
+        DHEALTH-BILLING-001/ADR-066. This is the gate billing uses, and it asks a different question
+        from every other ``require_*`` method here: not *"is this person a ``BILLING_CLERK``"* but
+        *"may this person operate billing here"*. ``exchange/capabilities.py`` is the single place
+        that turns the second question into the first, so a future ticket
+        (``DHEALTH-ACCESS-CAPABILITIES-001``) can back capabilities with configurable per-facility
+        grants without touching a single billing endpoint, service or behavioural test.
+
+        ``BILLING_CLERK`` is consequently a **convenient bundle rather than a gate**: it is the role
+        a facility grants somebody whose job is the till, and it happens to be the only role
+        carrying
+        ``BILLING_OPERATE`` today. Nothing downstream knows that.
+
+        Otherwise this behaves exactly like ``require_clinician`` and ``require_lab_tech``, and the
+        sameness is deliberate:
+
+        * **no ``platform_admin`` bypass.** A network administrator is not a cashier. Note that this
+          is stricter than ``require_membership``, which does let one through -- falling back to
+          that
+          would hand every facility's money to anyone holding the realm role, exactly the silent
+          widening ADR-063 forbids.
+        * an inactive organization is refused;
+        * a caller with *no* relationship to a real organization gets ``ResourceNotFound``
+          (anti-enumeration), while a platform admin gets ``NotAuthorized`` for a real organization
+          they lack the capability in -- they can already see that it exists, so a 404 would be an
+          inconsistent lie rather than protection;
+        * a genuinely nonexistent organization is ``ResourceNotFound`` for everyone.
+        """
+        if not capabilities:  # pragma: no cover - a programming error, not a runtime state
+            raise ValueError("require_capability needs at least one capability")
+
+        organization = self._get_organization_or_404(organization_id)
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        wanted = ", ".join(sorted(capability.value for capability in capabilities))
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized(f"{wanted} required")
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held_roles = frozenset(self._roles.list_for_membership(membership.id))
+        if not any(capability_is_held(capability, held_roles) for capability in capabilities):
+            raise NotAuthorized(f"{wanted} required")
 
         return OrganizationAccessContext(
             organization=organization, membership=membership, via_platform_admin=False

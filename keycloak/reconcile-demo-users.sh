@@ -40,6 +40,15 @@ kcadm=/opt/keycloak/bin/kcadm.sh
 : "${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD}"
 : "${DEMO_LAB_ADMIN_USERNAME:?set DEMO_LAB_ADMIN_USERNAME}"
 : "${DEMO_LAB_ADMIN_PASSWORD:?set DEMO_LAB_ADMIN_PASSWORD}"
+# DHEALTH-BILLING-001/ADR-066: one cashier per demo organization, and a cashier is nothing else.
+# Neither holds a clinical role and neither is an administrator -- being able to run a facility or
+# treat a patient does not make someone a cashier, and the demo baseline has to show that rather
+# than assert it. Like every account above, they carry NO Keycloak realm role: BILLING_CLERK is an
+# Exchange-database fact granted by `demo_seed.py`.
+: "${DEMO_CLERK_USERNAME:?set DEMO_CLERK_USERNAME}"
+: "${DEMO_CLERK_PASSWORD:?set DEMO_CLERK_PASSWORD}"
+: "${DEMO_LAB_CLERK_USERNAME:?set DEMO_LAB_CLERK_USERNAME}"
+: "${DEMO_LAB_CLERK_PASSWORD:?set DEMO_LAB_CLERK_PASSWORD}"
 
 trap 'rm -f "$config"' EXIT
 
@@ -123,5 +132,7 @@ reconcile_user "$DEMO_LAB_TECH_USERNAME" "$DEMO_LAB_TECH_PASSWORD" "Démo" "Tech
 reconcile_user "$DEMO_RELEASER_USERNAME" "$DEMO_RELEASER_PASSWORD" "Démo" "Libérateur"
 reconcile_user "$DEMO_ADMIN_USERNAME" "$DEMO_ADMIN_PASSWORD" "Démo" "Administration"
 reconcile_user "$DEMO_LAB_ADMIN_USERNAME" "$DEMO_LAB_ADMIN_PASSWORD" "Démo" "Administration Labo"
+reconcile_user "$DEMO_CLERK_USERNAME" "$DEMO_CLERK_PASSWORD" "Démo" "Facturation"
+reconcile_user "$DEMO_LAB_CLERK_USERNAME" "$DEMO_LAB_CLERK_PASSWORD" "Démo" "Facturation Labo"
 
-echo "DHealth Native Demo users reconciled: $DEMO_CLINICIAN_USERNAME, $DEMO_LAB_TECH_USERNAME, $DEMO_RELEASER_USERNAME, $DEMO_ADMIN_USERNAME, $DEMO_LAB_ADMIN_USERNAME"
+echo "DHealth Native Demo users reconciled: $DEMO_CLINICIAN_USERNAME, $DEMO_LAB_TECH_USERNAME, $DEMO_RELEASER_USERNAME, $DEMO_ADMIN_USERNAME, $DEMO_LAB_ADMIN_USERNAME, $DEMO_CLERK_USERNAME, $DEMO_LAB_CLERK_USERNAME"

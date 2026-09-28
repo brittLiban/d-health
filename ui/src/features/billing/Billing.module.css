@@ -1,0 +1,344 @@
+/* DHEALTH-BILLING-001 — Facturation, in the DHealth design language.
+ *
+ * Every value resolves through the token layer in src/index.css. No literal colour appears in this
+ * file, exactly as Team.module.css and Platform.module.css established, and the semantic token
+ * names are the same ones those files use so the surfaces cannot drift apart.
+ *
+ * Registre density: a till is worked in short bursts with a person standing in front of you, so
+ * rows are floored at the registre height and amounts are comfortable to read aloud. Nothing here
+ * is dense — a mis-read figure on this screen is money.
+ *
+ * ── The print block ──
+ *
+ * A receipt is the one thing in this application that leaves the building on paper. The print
+ * rules at the bottom take the receipt out of the workspace entirely rather than trying to hide
+ * the chrome around it: the printed page is the receipt and nothing else.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  max-width: 76rem;
+}
+
+.pageTitle {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-2xl);
+  color: var(--color-text);
+}
+
+.lede {
+  margin: var(--space-2) 0 0;
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.status {
+  margin: 0;
+  color: var(--color-success-700);
+  font-size: var(--font-size-sm);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+/* Two columns at desk width: choosing what to charge on the left, the invoice
+   being settled on the right. One column below 900px — the tablet case §60 of
+   the design rules requires, and the width a laptop at a reception desk uses. */
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.panelTitle {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.panelNote {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.searchRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+}
+
+.grow {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.row {
+  min-height: var(--row-height-registre);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.rowSelected {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-alt);
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.name {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* A source already on an invoice is marked, never hidden: a facility may
+   legitimately perform the same service twice, and hiding it would refuse a
+   real second charge by omission. */
+.alreadyInvoiced {
+  color: var(--color-waiting);
+  font-size: var(--font-size-sm);
+}
+
+/* A service the facility has not priced. Offered and unselectable, with the
+   reason said plainly — hiding it would tell a clerk nothing is chargeable when
+   what is actually true is that somebody has to set a price. */
+.unpriced {
+  color: var(--color-waiting);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.quantity {
+  width: 5rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+/* ── The invoice ─────────────────────────────────────────────────────────── */
+
+.invoiceHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.invoiceNumber {
+  font-family: var(--font-family-mono, monospace);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.lineTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.lineTable th {
+  text-align: left;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.lineTable td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.totals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
+.totalRow {
+  display: flex;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* The balance is the figure a clerk reads aloud, so it is the one that is large.
+   It is never colour-only: the status badge beside it carries the same fact in
+   words. */
+.balanceRow {
+  display: flex;
+  gap: var(--space-4);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+.paymentForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+}
+
+.receiptList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.receiptRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-alt);
+}
+
+.receiptReference {
+  font-family: var(--font-family-mono, monospace);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* ── Services and prices ─────────────────────────────────────────────────── */
+
+.priceRow {
+  min-height: var(--row-height-registre);
+  display: grid;
+  /* What it is, what it costs, and how to change it. */
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.priceForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+}
+
+/* ── The printable receipt ───────────────────────────────────────────────── */
+
+.receiptSheet {
+  display: none;
+}
+
+@media print {
+  /* The printed page is the receipt and nothing else: the workspace shell, the
+     navigation and every panel are removed rather than merely hidden behind the
+     sheet, so a mis-scoped rule cannot put a fragment of the application on a
+     document a patient takes away. */
+  body * {
+    visibility: hidden;
+  }
+
+  .receiptSheet,
+  .receiptSheet * {
+    visibility: visible;
+  }
+
+  .receiptSheet {
+    display: block;
+    position: absolute;
+    inset: 0;
+    padding: var(--space-5);
+    background: #fff;
+    color: #000;
+  }
+
+  .receiptSheet .lineTable th,
+  .receiptSheet .lineTable td {
+    border-bottom: 1px solid #999;
+    color: #000;
+  }
+}
+
+@media (max-width: 900px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .priceRow {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}

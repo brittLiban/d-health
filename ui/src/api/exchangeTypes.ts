@@ -1394,3 +1394,170 @@ export interface VisitNoteCreateRequest {
 export interface VisitReasonUpdateRequest {
   reason_for_visit: string
 }
+
+
+// ── DHEALTH-BILLING-001: facility billing ────────────────────────────────────────────────────────
+
+/**
+ * Every monetary value crosses this boundary as a **string**, never a number.
+ *
+ * The server holds money as `Numeric(12, 2)`/`Decimal` precisely so no float ever touches it, and
+ * `JSON.parse` would undo that at the door: `0.1 + 0.2` is the canonical example, and a balance
+ * that is off by a hundredth of a franc is a balance nobody can reconcile. So amounts stay strings
+ * end to end — displayed as received, compared as received, and sent back only as the server sent
+ * them. Nothing in the billing UI does arithmetic on money; the server computes every total,
+ * every paid figure and every balance, and this client renders them.
+ */
+export type MoneyString = string
+
+/**
+ * The minimum safe identity a cashier needs to be sure who they are charging.
+ *
+ * Three fields, and the smallness is the design. A name alone bills the wrong person the first
+ * time two patients share one — a wrong-patient error arriving through the financial door — so the
+ * date of birth is here as the second fact a clerk confirms out loud. Contact details, visits,
+ * orders, results and every clinical note are absent, and the server cannot send them: this comes
+ * from `GET /billing/patients`, which has its own narrow projection rather than reusing the
+ * clinician's.
+ *
+ * There is no facility patient number because DHealth has none to give (ADR-051 — `PatientReference`
+ * is a provenance binding, not something a human reads aloud).
+ */
+export interface BillingPatient {
+  id: string
+  display_name: string | null
+  date_of_birth: string | null
+}
+
+export interface ClinicService {
+  id: string
+  organization_id: string
+  name: string
+  active: boolean
+  /** `null` for a service with no current price. A real state, not an error: the service exists and
+   *  cannot be invoiced until somebody prices it. The UI says so rather than showing zero. */
+  amount: MoneyString | null
+  currency: string | null
+}
+
+export interface ClinicServiceCreateRequest {
+  name: string
+  amount: MoneyString
+  currency?: string
+}
+
+export interface ClinicServicePriceUpdateRequest {
+  amount: MoneyString
+  currency?: string
+}
+
+export type BillableSourceType = 'CLINIC_SERVICE' | 'LAB_ORDER_ITEM'
+
+export type PaymentMethod = 'CASH' | 'MOBILE_MONEY' | 'CARD' | 'BANK_TRANSFER'
+
+/** `OPEN` / `PARTIALLY_PAID` / `PAID`, computed by the server from the total and what has been
+ *  paid. Never a stored column and never recomputed here — ADR-066 §6. */
+export type InvoiceStatus = 'OPEN' | 'PARTIALLY_PAID' | 'PAID'
+
+/**
+ * One thing this organization could charge this patient for.
+ *
+ * The list is already filtered server-side by ADR-066 §3's service-performance rule, so a clinic
+ * never sees the routed tests its laboratory ran. `already_invoiced` is advisory: nothing refuses a
+ * second charge for the same source, because a facility may legitimately perform a service twice.
+ */
+export interface BillableSource {
+  source_type: BillableSourceType
+  source_id: string
+  description: string
+  amount: MoneyString | null
+  currency: string | null
+  already_invoiced: boolean
+}
+
+export interface BillableOrder {
+  lab_order_id: string
+  patient_id: string
+  patient_display_name: string | null
+  status: string
+  created_at: string
+  items: BillableSource[]
+}
+
+/** A line as the invoice keeps it: the price **frozen** at issue. Changing what a service costs
+ *  today does not change what this invoice said yesterday. */
+export interface InvoiceLine {
+  id: string
+  source_type: string
+  description: string
+  quantity: number
+  unit_amount: MoneyString
+  currency: string
+  line_total: MoneyString
+}
+
+export interface Payment {
+  id: string
+  sequence_number: number
+  amount: MoneyString
+  method: string
+  reference: string | null
+  recorded_at: string
+  /** `FAC-2026-000123-R2` — derived from the invoice number and this payment's ordinal, so a
+   *  printed receipt has a stable identity without a second counter. */
+  receipt_reference: string
+}
+
+export interface Invoice {
+  id: string
+  organization_id: string
+  organization_name: string
+  patient_id: string
+  patient_display_name: string | null
+  number: string
+  currency: string
+  issued_at: string
+  lines: InvoiceLine[]
+  payments: Payment[]
+  total: MoneyString
+  paid: MoneyString
+  balance: MoneyString
+  status: InvoiceStatus
+}
+
+export interface InvoiceLineRequest {
+  source_type: BillableSourceType
+  source_id: string
+  quantity?: number
+}
+
+/** No amounts. The price comes from the facility's own configuration at invoicing time — a
+ *  caller-supplied amount would let a browser decide what a patient is charged. */
+export interface InvoiceCreateRequest {
+  patient_id: string
+  lines: InvoiceLineRequest[]
+}
+
+export interface InvoiceCreateOutcome {
+  invoice: Invoice
+  /** `false` when an existing invoice for this idempotency key was returned — the double-clicked
+   *  `Créer la facture`, not an error. */
+  created: boolean
+}
+
+export interface PaymentCreateRequest {
+  amount: MoneyString
+  method: PaymentMethod
+  reference?: string | null
+}
+
+/**
+ * The payment endpoint returns the **whole invoice**, not the payment alone: the new balance is
+ * what the clerk and the patient both need next, and a second round trip to fetch it would let the
+ * screen show a stale figure at exactly the wrong moment. The receipt for this payment is the last
+ * entry in `invoice.payments`.
+ */
+export interface PaymentCreateOutcome {
+  invoice: Invoice
+  created: boolean
+}

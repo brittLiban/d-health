@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-CLINIC-VISIT-001, 2026-09-27 — this parenthetical has now gone stale eleven times,
+> DHEALTH-BILLING-001, 2026-09-28 — this parenthetical has now gone stale twelve times,
 > first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -21948,3 +21948,134 @@ Left untouched because both are outside this ticket, and reported here because a
 red pipeline after this commit would otherwise attribute it to this work. Everything this ticket
 touched or added passes both commands. The fix is five prose line-wraps plus one `ruff format` run, and
 it belongs in its own commit so the attribution stays clear.
+
+---
+
+## DHEALTH-BILLING-001 — Facility Billing, Payments and Receipts (2026-09-28) — DONE
+
+**Start:** `c1c205d`, HEAD matched exactly, tree clean, Alembic head `0034_clinic_visits`.
+**Ending Alembic head: `0035_facility_billing`.**
+
+Implements `docs/NATIVE-OPERATING-PRODUCT.md` §18/§19 and its §35 ticket brief. **ADR-066.**
+
+### Read this first: two decisions were raised rather than guessed, and a third was corrected mid-ticket
+
+**D-1 and D-2a both genuinely blocked this ticket**, and both were put to Liban rather than assumed.
+
+- **D-1 (Billing portion) — resolved.** Billing gets its own authority, `BILLING_CLERK`, valid at
+  PROVIDER and LAB. Being an administrator, a clinician or a lab worker does **not** make someone a
+  cashier. **The broader Front Desk authority question is explicitly still open** and ADR-066 says so
+  in its own text.
+- **D-2a — interim answer only.** Each organization invoices only what it actually performed,
+  enforced server-side at the invoice line. **Recorded as still open** for any commercial arrangement
+  over routed external laboratory work.
+
+**Mid-ticket correction, applied in full.** After `BILLING_CLERK` was built, Liban directed that it be
+modelled as a *convenient bundle* rather than a statement that only that job title may bill.
+`require_billing_clerk` was **deleted** — not kept as a second way in — and replaced by
+`exchange/capabilities.py`: one enum, one mapping, one question. Every billing endpoint now asks for a
+*capability*. `test_bill61` grants `BILLING_OPERATE` to `ORG_ADMIN` by patching only
+`CAPABILITY_ROLE_GRANTS` and watches a 403 become a 200, which is the claim made honest. The follow-up
+is recorded as **`DHEALTH-ACCESS-CAPABILITIES-001`** (`docs/NATIVE-OPERATING-PRODUCT.md` §35, ticket 8).
+
+**A third decision was raised mid-build and answered: the clinic till had no way to reach a patient.**
+A laboratory clerk starts from an order; a clinic clerk has no order to start from, and the patient
+directory is behind `require_clinician`, which a cashier deliberately does not hold. That is D-1's
+unresolved half in a new form, so it was raised rather than filled by instinct. Liban's answer: a
+narrow billing-scoped lookup, `GET /billing/patients?q=`, gated on `BILLING_OPERATE`, returning
+**id, display name and date of birth** — *not* name only, because two people sharing a name is
+ordinary and a till that cannot tell them apart bills the wrong one. Contact details, notes, visits,
+orders and results are absent and structurally unreachable. Pinned by BILL-36..39 and NC-BILL-7.
+
+### What was built
+
+| | |
+|---|---|
+| **Migration** | `0035_facility_billing` — six tables; role CHECK widened on assignments and audit; four audit event types, two resource types |
+| **Domain** | `exchange/billing.py` (~1 100 lines), `exchange/capabilities.py` (the capability seam) |
+| **Endpoints** | 10 — services (create/list/reprice), patient lookup, billable sources, billable orders, invoices (create/list/get), payments |
+| **Frontend** | `Facturation` section; `BillingPage.tsx`, `billingVocabulary.ts`, `Billing.module.css`; two new workspace capabilities; `BILLING_CLERK` in role labels, grant choices and `isUsableMembership` |
+| **Demo** | `demo-clerk` and `demo-lab-clerk` personas; two priced clinic services; five financial tables added to `_WORKFLOW_TABLES` |
+| **Tests** | 48 adapter (SQLite), 12 real-PostgreSQL qualification, 14 UI, 7 negative controls, 6 real-browser phases |
+
+### The part that is actual evidence: real PostgreSQL found three defects SQLite could not
+
+SQLAlchemy's SQLite dialect omits `FOR UPDATE` entirely, and SQLite's writer serialization turns
+every one of this domain's races into a sequential call. The 48-test SQLite suite was green against
+all three of these:
+
+1. **`_next_invoice_number`'s insert-race branch raised `InvalidRequestError`.** A rolled-back
+   SAVEPOINT already detaches what was added inside it, so the explicit `session.expunge` was
+   invalid — and the branch is reached exactly when two facilities issue their first invoice of a
+   year at the same instant.
+2. **`create_invoice`'s idempotency was a read-then-insert.** A genuine concurrent double-submit
+   raised a raw unique-constraint violation at a clerk whose invoice *had* been issued. The natural
+   reaction to that error is to issue a second invoice.
+3. **The SAVEPOINT added to fix (2) did not cover the insert**, because `begin_nested()` autoflushes
+   pending objects *before* establishing the savepoint.
+
+All three fixed, all three now covered. **Billing is SQLite green and PostgreSQL qualified** — only
+the second is evidence about money.
+
+### Negative controls — all seven executed and reverted byte for byte
+
+NC-BILL-1 (payment tenant check) · NC-BILL-2 (capability gate) · NC-BILL-3 (price snapshot) ·
+**NC-BILL-4 (mandatory: release gated on an unpaid balance)** · NC-BILL-5 (overpayment) ·
+NC-BILL-6 (destructive payment route) · NC-BILL-7 (billing patient projection widened by one field).
+
+**NC-BILL-1 found a real hole and it was fixed, not explained away.** Deleting `record_payment`'s
+`invoice.organization_id != organization_id` check left **all 43 other tests green** — a clerk at one
+facility could record a payment against another facility's invoice, moving its balance and its status,
+and nothing would have noticed. `test_billauth9` now covers it. `get_invoice` was never at the same
+risk because it filters inside the SQL `WHERE`; `record_payment` must load the row to lock it, which
+is why it needs an explicit check and why that check needed a test.
+
+### Migration qualification (real PostgreSQL, both directions)
+
+- Clean database: `upgrade head` → `downgrade 0034` → `upgrade head`, six tables created, six
+  dropped, six recreated, and both role CHECK constraints back at their widened form.
+- Database **with** 120 `BILLING_CLERK` grants and 91 billing audit rows: the downgrade **refuses**,
+  as designed (0032's precedent — a schema downgrade is not a reason to erase an audit row). The
+  refusal is atomic: version stays `0035_facility_billing`, and all 211 rows are untouched.
+
+### What was deliberately not built
+
+Clinic-to-lab settlement, commissions, referral fees, revenue sharing, pass-through billing, markup
+of external laboratory services, inter-facility AP/AR (all D-2a). Payment correction, voiding,
+reversal, refunds, credits and discounts (§26 undecided — the interface says a mis-keyed payment
+cannot yet be corrected rather than offering a control that rewrites financial history). Insurance,
+third-party payers, tax, and any payment-provider integration: DHealth **records** that money was
+taken and contacts no bank, card network or mobile-money API. No configurable permission system —
+that is `DHEALTH-ACCESS-CAPABILITIES-001`.
+
+**D-8 was preserved, not quietly resolved.** The new patient lookup is not audited as a successful
+read. Whether successful reads of sensitive data should be audited is still open, and introducing a
+read-audit regime for one endpoint inside a billing ticket would have pre-empted it. Refusals are
+audited exactly as every other billing refusal is.
+
+### Honest status
+
+**Written, verified and demonstrated** are distinguished below.
+
+- **Verified:** 48 adapter tests; **1 832 passed / 193 skipped across the whole adapter suite**, no
+  regressions; 12 PostgreSQL qualification tests; 14 UI tests; **all 61 UI test files run and
+  passing** (batched, counts reconciled); 7 negative controls; migration up/down/up; `ruff check`
+  and `ruff format --check` clean across `src tests migrations scripts`; `npm run typecheck` clean.
+- **Demonstrated:** `scripts/demo/qualify-billing.sh` — **six browser phases, all passing** against
+  real Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16. BILL-A (a cashier reaches
+  `Facturation` and nothing clinical), BILL-C1 (find the patient by name *and* date of birth →
+  invoice a consultation → part payment → settled, two receipts), BILL-P (an administrator reprices
+  and the issued invoice does not move, read back from the database), BILL-L1 (the laboratory
+  invoices the test it performed, its own sequence starting at `000001`), **BILL-S (a real order
+  driven to release with a real unpaid invoice outstanding — 201, balance still owed)**, BILL-R (the
+  refusals in both directions).
+
+**The browser suite found two baseline defects, both in the demo rather than the product.** The seed
+patient had no date of birth, so the till could not demonstrate the identification its lookup exists
+to provide; and the laboratory had no `LabPrice`, so `Facturation` correctly offered the performed
+test and correctly refused to charge for it — right behaviour against a wrong baseline. Both are now
+seeded convergently, so an existing demo database picks them up on the next reset.
+
+**Pilot-ready is not clinically live.** This adds a till. It adds no clinical sign-off, no pricing
+advice and no interpretation, and nothing here is authorization to use DHealth on a real patient.
+All patient, service and price data used anywhere in this ticket is synthetic.

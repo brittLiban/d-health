@@ -69,3 +69,8 @@ native-access-results.json
 # by scripts/demo/qualify-visit.sh. Evidence of a run, not part of the source -- same treatment as
 # its four siblings above.
 native-visit-results.json
+
+# DHEALTH-BILLING-001: the facility billing qualification report, written at the repository root
+# by scripts/demo/qualify-billing.sh. Evidence of a run, not part of the source -- same treatment as
+# its five siblings above.
+native-billing-results.json
