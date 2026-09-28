@@ -20,6 +20,7 @@ from daher_adapter.exchange.authorization import (
 )
 from daher_adapter.exchange.membership import (
     ExchangeIdentityRepository,
+    MembershipCapabilityRepository,
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
 )
@@ -48,12 +49,25 @@ def role_assignments(sessions: sessionmaker[Session]) -> OrganizationRoleAssignm
 
 
 @pytest.fixture
+def membership_capabilities(sessions: sessionmaker[Session]) -> MembershipCapabilityRepository:
+    """DHEALTH-ACCESS-CAPABILITIES-001: the resolver every gate now asks.
+
+    A real repository rather than a stub, because the thing under test is precisely that a gate's
+    answer comes from effective capabilities -- a stub returning a fixed set would make these tests
+    agree with themselves rather than with the access model."""
+    return MembershipCapabilityRepository(sessions)
+
+
+@pytest.fixture
 def authz(
     organizations: OrganizationRepository,
     memberships: OrganizationMembershipRepository,
     role_assignments: OrganizationRoleAssignmentRepository,
+    membership_capabilities: MembershipCapabilityRepository,
 ) -> AuthorizationService:
-    return AuthorizationService(organizations, memberships, role_assignments)
+    return AuthorizationService(
+        organizations, memberships, role_assignments, membership_capabilities
+    )
 
 
 def _principal(identity_id: uuid.UUID, *, platform_admin: bool = False) -> AuthenticatedPrincipal:

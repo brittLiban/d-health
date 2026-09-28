@@ -23,10 +23,47 @@ import type {
 } from '../api/exchangeTypes'
 import { WorkspaceProvider } from '../features/workspace/WorkspaceProvider'
 
+/**
+ * DHEALTH-ACCESS-CAPABILITIES-001: what the *server* would send for a membership holding these
+ * roles.
+ *
+ * A deliberate mirror of `SYSTEM_ROLE_TEMPLATES` in `adapter/src/daher_adapter/exchange/
+ * capabilities.py`, and one of the few places §43's structural test allows a role name to appear
+ * in the frontend: a test fixture standing in for the server must produce what the server produces,
+ * and the only way to do that from a role list is to know the templates.
+ *
+ * It exists so hundreds of existing tests can keep saying `providerMembership(id, name)` and mean
+ * "a clinician" rather than reciting six capability strings. Tests that are *about* capabilities
+ * pass them explicitly instead.
+ */
+const TEMPLATE_CAPABILITIES: Record<string, string[]> = {
+  CLINICIAN: [
+    'patient.directory.read',
+    'patient.register',
+    'visit.read',
+    'visit.document',
+    'order.manage',
+    'result.review',
+  ],
+  ORG_ADMIN: ['staff.access.manage', 'facility.configure', 'billing.configure_prices'],
+  LAB_TECH: ['lab.queue.work'],
+  LAB_RESULT_RELEASER: ['lab.result.release'],
+  BILLING_CLERK: ['billing.operate'],
+}
+
+export function capabilitiesForRoles(roles: readonly string[]): string[] {
+  const resolved = new Set<string>()
+  for (const role of roles) {
+    for (const capability of TEMPLATE_CAPABILITIES[role] ?? []) resolved.add(capability)
+  }
+  return [...resolved].sort()
+}
+
 export function providerMembership(
   organizationId: string,
   organizationName: string,
   roles: string[] = ['CLINICIAN'],
+  capabilities: string[] = capabilitiesForRoles(roles),
 ): ExchangeMembershipSummary {
   return {
     organization_id: organizationId,
@@ -35,6 +72,7 @@ export function providerMembership(
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities,
   }
 }
 
@@ -42,6 +80,7 @@ export function labMembership(
   organizationId: string,
   organizationName: string,
   roles: string[] = ['LAB_TECH', 'LAB_RESULT_RELEASER'],
+  capabilities: string[] = capabilitiesForRoles(roles),
 ): ExchangeMembershipSummary {
   return {
     organization_id: organizationId,
@@ -50,6 +89,7 @@ export function labMembership(
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities,
   }
 }
 

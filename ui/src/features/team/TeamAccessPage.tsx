@@ -61,7 +61,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ExchangeApiError } from '../../api/exchangeClient'
-import type { OrganizationMembership } from '../../api/exchangeTypes'
+import type {
+  MemberAccessResponse,
+  MemberCapabilityView,
+  OrganizationMembership,
+} from '../../api/exchangeTypes'
 import { Button, EmptyState, LoadingSkeleton } from '../../design-system'
 import { useWorkspace } from '../workspace/WorkspaceContext'
 import { ROLE_CHOICES_BY_TYPE, roleLabel } from '../platform/onboardingVocabulary'
@@ -117,6 +121,25 @@ function errorMessage(error: ExchangeApiError | undefined): string {
   return "L'opération n'a pas abouti. Vous pouvez réessayer."
 }
 
+/**
+ * The catalog, in the server's order, grouped under its own headings.
+ *
+ * The *order* is the server's: `CAPABILITY_CATALOG` lists capabilities in the order a facility
+ * administrator reads them, and re-sorting here would throw that away and put `Facturation` before
+ * `Patients` because F precedes P.
+ */
+function groupCapabilities(
+  capabilities: readonly MemberCapabilityView[],
+): [string, MemberCapabilityView[]][] {
+  const groups = new Map<string, MemberCapabilityView[]>()
+  for (const capability of capabilities) {
+    const existing = groups.get(capability.group)
+    if (existing) existing.push(capability)
+    else groups.set(capability.group, [capability])
+  }
+  return [...groups.entries()]
+}
+
 export function TeamAccessPage() {
   const { activeOrganization, client, user, reload } = useWorkspace()
 
@@ -126,6 +149,15 @@ export function TeamAccessPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmation, setConfirmation] = useState<string | null>(null)
+
+  // DHEALTH-ACCESS-CAPABILITIES-001: whose capability sheet is open, and what it says.
+  //
+  // One at a time, fetched on demand. The list endpoint deliberately does not carry every member's
+  // capabilities: a staff list is read constantly and a capability sheet is opened occasionally,
+  // and sending twelve capabilities per person on every list read would be paying for the rare
+  // case on every request.
+  const [openMember, setOpenMember] = useState<string | null>(null)
+  const [access, setAccess] = useState<MemberAccessResponse | null>(null)
 
   const organizationId = activeOrganization?.organization_id ?? null
   const organizationName = activeOrganization?.organization_name ?? ''
@@ -186,6 +218,84 @@ export function TeamAccessPage() {
   }
 
   const isSelf = (member: OrganizationMembership) => member.identity_id === user?.identity_id
+
+  /** Open (or close) one member's capability sheet, reading it fresh from the server. */
+  const toggleAccess = async (member: OrganizationMembership) => {
+    setError(null)
+    setConfirmation(null)
+    if (openMember === member.membership_id) {
+      setOpenMember(null)
+      setAccess(null)
+      return
+    }
+    setOpenMember(member.membership_id)
+    setAccess(null)
+    try {
+      setAccess(await client.getMemberAccess(organizationId, member.membership_id))
+    } catch (err) {
+      setError(errorMessage(err as ExchangeApiError))
+      setOpenMember(null)
+    }
+  }
+
+  /**
+   * Grant, deny, or clear one capability, then re-read the sheet.
+   *
+   * Re-read rather than patched locally, for the reason the role mutations already give: this
+   * screen's subject is *other people's* authority, a second administrator may be changing it at
+   * the same time, and the source of a capability can change without its effective value changing
+   * -- clearing a deny on somebody whose role grants it anyway leaves `effective` true and moves
+   * `source` from `DENY` to `TEMPLATE:…`. Only the server knows that.
+   */
+  const changeCapability = async (
+    member: OrganizationMembership,
+    capability: MemberCapabilityView,
+    action: 'GRANT' | 'DENY' | 'CLEAR',
+  ) => {
+    setBusy(true)
+    setError(null)
+    try {
+      if (action === 'CLEAR') {
+        await client.clearMemberCapability(organizationId, member.membership_id, capability.key)
+      } else {
+        await client.setMemberCapability(
+          organizationId,
+          member.membership_id,
+          capability.key,
+          action,
+        )
+      }
+      setAccess(await client.getMemberAccess(organizationId, member.membership_id))
+      setConfirmation(
+        action === 'CLEAR'
+          ? `${displayName(member)} : « ${capability.label} » suit de nouveau ses rôles.`
+          : action === 'GRANT'
+            ? `${displayName(member)} : « ${capability.label} » autorisé.`
+            : `${displayName(member)} : « ${capability.label} » refusé.`,
+      )
+      await load()
+      // The masthead and the navigation both derive from `/me`, so an administrator who just
+      // changed their *own* authority must see the application follow -- including losing a
+      // section they can no longer use.
+      if (isSelf(member)) await reload()
+    } catch (err) {
+      setError(errorMessage(err as ExchangeApiError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** `✓ Autorisé · Via Clinicien`, `✓ Autorisé · Accordé directement`, `✗ Refusé · Exception
+   *  individuelle`, `✗ Non autorisé`. §20: never only the answer, always the reason. */
+  const describeSource = (capability: MemberCapabilityView): string => {
+    if (capability.source === 'GRANT') return 'Accordé directement'
+    if (capability.source === 'DENY') return 'Exception individuelle'
+    if (capability.source?.startsWith('TEMPLATE:')) {
+      const role = capability.source.slice('TEMPLATE:'.length)
+      return `Via ${roleLabel(organizationType, role)}`
+    }
+    return "Aucun rôle ne l'accorde"
+  }
 
   const addRole = (member: OrganizationMembership, role: string) =>
     run(
@@ -389,7 +499,88 @@ export function TeamAccessPage() {
                       Rétablir l'accès
                     </Button>
                   )}
+                  <Button variant="secondary" onClick={() => void toggleAccess(member)}>
+                    {openMember === member.membership_id
+                      ? 'Masquer les autorisations'
+                      : 'Voir les autorisations'}
+                  </Button>
                 </span>
+
+                {openMember === member.membership_id ? (
+                  access === null ? (
+                    <LoadingSkeleton />
+                  ) : (
+                    <section
+                      className={styles.accessSheet}
+                      aria-label={`Autorisations — ${displayName(member)}`}
+                    >
+                      <p className={styles.lede}>
+                        Ce que cette personne peut faire ici. Un rôle est un modèle : vous pouvez
+                        accorder une autorisation en plus, ou en retirer une que son rôle donne.
+                      </p>
+                      {groupCapabilities(access.capabilities).map(([group, entries]) => (
+                        <div key={group}>
+                          <h3 className={styles.groupTitle}>{group}</h3>
+                          <ul className={styles.capabilityList}>
+                            {entries.map((capability) => (
+                              <li key={capability.key} className={styles.capabilityRow}>
+                                <span className={styles.identity}>
+                                  <span className={styles.name}>
+                                    {capability.effective ? '✓ ' : '✗ '}
+                                    {capability.label}
+                                  </span>
+                                  <span className={styles.meta}>{capability.description}</span>
+                                  <span
+                                    className={
+                                      capability.effective ? styles.active : styles.inactive
+                                    }
+                                  >
+                                    {describeSource(capability)}
+                                  </span>
+                                </span>
+                                <span className={styles.actions}>
+                                  {capability.source === 'GRANT' ||
+                                  capability.source === 'DENY' ? (
+                                    <Button
+                                      variant="secondary"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        void changeCapability(member, capability, 'CLEAR')
+                                      }
+                                    >
+                                      Suivre le rôle
+                                    </Button>
+                                  ) : null}
+                                  {capability.effective ? (
+                                    <Button
+                                      variant="secondary"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        void changeCapability(member, capability, 'DENY')
+                                      }
+                                    >
+                                      Refuser
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      variant="secondary"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        void changeCapability(member, capability, 'GRANT')
+                                      }
+                                    >
+                                      Autoriser
+                                    </Button>
+                                  )}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </section>
+                  )
+                ) : null}
               </li>
             )
           })}

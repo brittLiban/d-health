@@ -202,7 +202,9 @@ def world(client: TestClient, keypair, organizations: OrganizationRepository, ca
     rel_id, rel_token = _bootstrap(client, private_key, "rel", name="Libérateur R")
     _out_id, outsider_token = _bootstrap(client, private_key, "out", name="Dehors")
 
-    _attach(client, platform_token, str(provider.id), admin_a_id, ["ORG_ADMIN"])
+    admin_a_membership = _attach(
+        client, platform_token, str(provider.id), admin_a_id, ["ORG_ADMIN"]
+    )
     _attach(client, platform_token, str(other.id), admin_z_id, ["ORG_ADMIN"])
     _attach(client, platform_token, str(lab.id), admin_b_id, ["ORG_ADMIN"])
     _attach(client, admin_a_token, str(provider.id), clerk_a_id, ["BILLING_CLERK"])
@@ -218,6 +220,7 @@ def world(client: TestClient, keypair, organizations: OrganizationRepository, ca
         "lab_id": str(lab.id),
         "catalog_entry_id": str(entry.id),
         "admin_a_token": admin_a_token,
+        "admin_a_membership": admin_a_membership,
         "admin_z_token": admin_z_token,
         "admin_b_token": admin_b_token,
         "clerk_a_token": clerk_a_token,
@@ -998,10 +1001,16 @@ def test_bill60_billing_asks_for_a_capability_never_for_a_role(client, world):
 
     import daher_adapter.exchange.billing as billing_module
     from daher_adapter.exchange.capabilities import (
-        CAPABILITY_ROLE_GRANTS,
-        OrganizationCapability,
-        capability_is_held,
+        SYSTEM_ROLE_TEMPLATES,
+        Capability,
+        resolve_effective_capabilities,
     )
+    from daher_adapter.exchange.models import OrganizationRole
+
+    # DHEALTH-ACCESS-CAPABILITIES-001 renamed the seam's parts: `CAPABILITY_ROLE_GRANTS` became
+    # `SYSTEM_ROLE_TEMPLATES` (a role *is* a template now) and `capability_is_held` became
+    # `resolve_effective_capabilities`, which also accounts for member-specific grants and denies.
+    # The claim this test makes is unchanged and is checked below against the parsed tree.
 
     # The service layer does not know the role exists -- checked against the parsed tree rather
     # than the text, so prose explaining the capability model is fine and a code reference is not.
@@ -1031,16 +1040,31 @@ def test_bill60_billing_asks_for_a_capability_never_for_a_role(client, world):
     assert "OrganizationRole" not in names
     assert not any("BILLING_CLERK" in value for value in code_strings)
 
-    # The seam resolves today's answer, and is the only place that does.
-    assert capability_is_held(OrganizationCapability.BILLING_OPERATE, {"BILLING_CLERK"}) is True
-    assert capability_is_held(OrganizationCapability.BILLING_OPERATE, {"ORG_ADMIN"}) is False
-    assert (
-        capability_is_held(OrganizationCapability.BILLING_CONFIGURE_PRICES, {"ORG_ADMIN"}) is True
+    # The resolver answers today's question, and is the only place that does.
+    def _holds(capability, roles):
+        return capability in resolve_effective_capabilities(
+            roles=frozenset(roles), organization_type="PROVIDER"
+        )
+
+    assert _holds(Capability.BILLING_OPERATE, {"BILLING_CLERK"}) is True
+    assert _holds(Capability.BILLING_OPERATE, {"ORG_ADMIN"}) is False
+    assert _holds(Capability.BILLING_CONFIGURE_PRICES, {"ORG_ADMIN"}) is True
+
+    # The templates still say exactly what ADR-066 §2 decided: the till belongs to the cashier, the
+    # price list to the administrator, and neither role carries both.
+    assert SYSTEM_ROLE_TEMPLATES[OrganizationRole.BILLING_CLERK] == frozenset(
+        {Capability.BILLING_OPERATE}
     )
-    assert set(CAPABILITY_ROLE_GRANTS) == {
-        OrganizationCapability.BILLING_OPERATE,
-        OrganizationCapability.BILLING_CONFIGURE_PRICES,
-    }
+    assert Capability.BILLING_OPERATE not in SYSTEM_ROLE_TEMPLATES[OrganizationRole.ORG_ADMIN]
+    assert Capability.BILLING_CONFIGURE_PRICES in SYSTEM_ROLE_TEMPLATES[OrganizationRole.ORG_ADMIN]
+
+    # ...and a direct grant reaches the same answer without the role, which is what makes
+    # `BILLING_CLERK` a template rather than a gate.
+    assert Capability.BILLING_OPERATE in resolve_effective_capabilities(
+        roles=frozenset({"ORG_ADMIN"}),
+        grants=frozenset({Capability.BILLING_OPERATE.value}),
+        organization_type="PROVIDER",
+    )
 
     # And the authorization layer offers no role-named billing gate to reach for.
     from daher_adapter.exchange.authorization import AuthorizationService
@@ -1063,16 +1087,18 @@ def test_bill60_billing_asks_for_a_capability_never_for_a_role(client, world):
     assert "_require_billing_clerk" not in called
 
 
-def test_bill61_a_second_role_could_be_granted_billing_without_touching_billing(client, world):
-    """The property the seam exists for, demonstrated rather than asserted.
+def test_bill61_billing_authority_can_be_granted_without_the_role(client, world):
+    """The property the seam exists for -- now demonstrated through the product.
 
-    Granting `BILLING_OPERATE` to `ORG_ADMIN` is a one-line change to the mapping. Nothing in the
-    service, the endpoints or this suite's behavioural tests changes -- which is what "without
-    rewriting Billing" means concretely. Monkey-patched here and restored, because the *product*
-    answer (should an administrator hold the till?) is `DHEALTH-ACCESS-CAPABILITIES-001`'s to make,
-    not this test's."""
-    from daher_adapter.exchange import capabilities as capabilities_module
+    This test was written for DHEALTH-BILLING-001 before member-specific grants existed, and
+    proved the point by monkey-patching the role→capability mapping. That was honest and it was a
+    simulation. DHEALTH-ACCESS-CAPABILITIES-001 built the real mechanism, so the simulation is
+    gone: an administrator is granted `billing.operate` directly, through the same endpoint a
+    facility uses, and Billing serves them.
 
+    **Not one line of `exchange/billing.py` or any billing endpoint changed to make this work.**
+    That is the acceptance criterion the capability seam existed for, and this is what proves it:
+    the same 48 behavioural billing tests around it are untouched."""
     provider = world["provider_id"]
     before = client.get(
         f"/exchange/v1/organizations/{provider}/billing/invoices",
@@ -1080,28 +1106,39 @@ def test_bill61_a_second_role_could_be_granted_billing_without_touching_billing(
     )
     assert before.status_code == 403, "an administrator is not a cashier by default"
 
-    original = capabilities_module.CAPABILITY_ROLE_GRANTS[
-        capabilities_module.OrganizationCapability.BILLING_OPERATE
-    ]
-    capabilities_module.CAPABILITY_ROLE_GRANTS[
-        capabilities_module.OrganizationCapability.BILLING_OPERATE
-    ] = frozenset({*original, capabilities_module.OrganizationRole.ORG_ADMIN})
-    try:
-        after = client.get(
-            f"/exchange/v1/organizations/{provider}/billing/invoices",
-            headers=_auth(world["admin_a_token"]),
-        )
-        assert after.status_code == 200, after.text
-    finally:
-        capabilities_module.CAPABILITY_ROLE_GRANTS[
-            capabilities_module.OrganizationCapability.BILLING_OPERATE
-        ] = original
+    granted = client.put(
+        f"/exchange/v1/organizations/{provider}/memberships/"
+        f"{world['admin_a_membership']}/capabilities/billing.operate",
+        headers=_auth(world["admin_a_token"]),
+        json={"effect": "GRANT"},
+    )
+    assert granted.status_code == 200, granted.text
 
+    # Same token, no re-authentication, next request.
+    after = client.get(
+        f"/exchange/v1/organizations/{provider}/billing/invoices",
+        headers=_auth(world["admin_a_token"]),
+    )
+    assert after.status_code == 200, after.text
+
+    # ...and their role is untouched: no promotion, no combination role.
+    sheet = client.get(
+        f"/exchange/v1/organizations/{provider}/memberships/{world['admin_a_membership']}/access",
+        headers=_auth(world["admin_a_token"]),
+    ).json()
+    assert sheet["roles"] == ["ORG_ADMIN"]
+
+    withdrawn = client.delete(
+        f"/exchange/v1/organizations/{provider}/memberships/"
+        f"{world['admin_a_membership']}/capabilities/billing.operate",
+        headers=_auth(world["admin_a_token"]),
+    )
+    assert withdrawn.status_code == 200, withdrawn.text
     restored = client.get(
         f"/exchange/v1/organizations/{provider}/billing/invoices",
         headers=_auth(world["admin_a_token"]),
     )
-    assert restored.status_code == 403, "the mapping must have been restored"
+    assert restored.status_code == 403, "withdrawing the grant must close the till again"
 
 
 # == authorization: BILL-AUTH-1..8 ================================================================

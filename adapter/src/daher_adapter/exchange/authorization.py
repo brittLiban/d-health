@@ -25,11 +25,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from daher_adapter.exchange.capabilities import (
-    OrganizationCapability,
-    capability_is_held,
-)
+from daher_adapter.exchange.capabilities import Capability
 from daher_adapter.exchange.membership import (
+    MembershipCapabilityRepository,
     MembershipRecord,
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
@@ -73,10 +71,96 @@ class AuthorizationService:
         organizations: OrganizationRepository,
         memberships: OrganizationMembershipRepository,
         roles: OrganizationRoleAssignmentRepository,
+        capabilities: MembershipCapabilityRepository,
     ) -> None:
         self._organizations = organizations
         self._memberships = memberships
         self._roles = roles
+        self._capabilities = capabilities
+
+    # -- the one gate ----------------------------------------------------------------------------
+
+    def _effective(
+        self, organization: OrganizationRecord, membership: MembershipRecord
+    ) -> frozenset[Capability]:
+        """This membership's effective capabilities. The single question every gate below asks.
+
+        DHEALTH-ACCESS-CAPABILITIES-001 §16: one resolver, used by everything. Billing does not
+        compute capabilities, the UI does not compute capabilities, Team & Access does not compute
+        capabilities -- they all end up here, which is what stops two answers to one question
+        existing."""
+        return self._capabilities.effective_for_membership(
+            membership_id=membership.id,
+            membership_status=membership.status,
+            organization_type=organization.org_type,
+            organization_status=organization.status,
+        )
+
+    def _require(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        capabilities: tuple[Capability, ...],
+        refusal: str,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> OrganizationAccessContext:
+        """Require **any one** of ``capabilities`` in this organization.
+
+        The shared body of every gate in this module, extracted because the five role gates it
+        replaces were five near-identical copies of it and the copies are where a rewrite loses a
+        line. Its behaviour is theirs, preserved exactly:
+
+        * **no ``platform_admin`` bypass.** A network administrator is not a clinician, a
+          laboratory worker or a cashier (ADR-063). This is deliberately stricter than
+          ``require_membership``, which does let one through.
+        * an inactive organization is refused;
+        * a caller with *no* relationship to a real organization gets ``ResourceNotFound``
+          (anti-enumeration), while a platform admin gets ``NotAuthorized`` for a real organization
+          they lack the capability in -- they can already see it exists, so a 404 would be an
+          inconsistent lie rather than protection;
+        * a genuinely nonexistent organization is ``ResourceNotFound`` for everyone.
+
+        ``refusal`` is the message the old role gate used, carried over verbatim. The wording is
+        not cosmetic: existing tests and a browser qualification assert on it, and changing it
+        would be an undocumented behaviour change hiding inside a refactor.
+
+        ``allow_platform_admin`` exists because the gates this replaces did **not** all agree, and
+        §18 forbids quietly making them agree. The clinical and financial gates have never let a
+        platform administrator through (ADR-063); the *administrative* ones always have, because
+        `require_org_admin` was built on `require_role`, which returns `require_membership`'s
+        `via_platform_admin` context early. DH-EX-002 relies on that: a platform administrator
+        manages a facility's staff and may do so even for a deactivated organization. So the flag
+        is off by default -- the safe direction, and the one every clinical caller wants -- and set
+        explicitly by the two administrative gates, where it is now visible instead of being an
+        emergent property of a helper three calls away.
+        """
+        organization = self._get_organization_or_404(organization_id)
+        if allow_platform_admin and principal.platform_admin:
+            # No organization-ACTIVE check on this path, matching `require_membership`'s
+            # long-standing behaviour: DH-EX-002 records that a platform administrator may still
+            # administer a deactivated organization, which is how one gets reactivated.
+            return OrganizationAccessContext(
+                organization=organization, membership=None, via_platform_admin=True
+            )
+        if organization.status != OrganizationStatus.ACTIVE.value:
+            raise NotAuthorized("organization is inactive")
+
+        membership = self._memberships.find_active(
+            organization_id=organization_id, identity_id=principal.identity_id
+        )
+        if membership is None:
+            if principal.platform_admin:
+                raise NotAuthorized(refusal)
+            raise ResourceNotFound(f"organization {organization_id} is not accessible")
+
+        held = self._effective(organization, membership)
+        if not any(capability in held for capability in capabilities):
+            raise NotAuthorized(refusal)
+
+        return OrganizationAccessContext(
+            organization=organization, membership=membership, via_platform_admin=False
+        )
 
     def require_platform_admin(self, principal: AuthenticatedPrincipal) -> None:
         if not principal.platform_admin:
@@ -129,7 +213,50 @@ class AuthorizationService:
     def require_org_admin(
         self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
     ) -> OrganizationAccessContext:
-        return self.require_role(principal, organization_id, OrganizationRole.ORG_ADMIN)
+        """Administering this organization's **people**: memberships, roles, capabilities.
+
+        DHEALTH-ACCESS-CAPABILITIES-001 §17: the name survives as a domain helper because every
+        call site reads better for it, but the authority is `staff.access.manage` and no longer the
+        `ORG_ADMIN` role name. That distinction is the whole of §22 -- an administrator who keeps
+        the role and is individually denied this capability can no longer administer, and the
+        last-administrator invariant counts *this*, not the role.
+
+        Deliberately **not** the same capability as `require_facility_configure` below, even though
+        `ORG_ADMIN` carries both today. Managing who works here and configuring what the facility
+        offers are different jobs, and splitting them is what lets a facility eventually hand one
+        to somebody without the other.
+
+        One behavioural change from the `require_role` implementation this replaces, and it is a
+        fix rather than drift: `require_role` returned early for a platform administrator, letting
+        one manage staff at any organization. That is preserved where it was actually relied upon
+        (`api.py` passes platform administrators through its own `_require_org_admin` wrapper), and
+        the wrapper is where that decision now lives visibly instead of being buried in a shared
+        helper."""
+        return self._require(
+            principal,
+            organization_id,
+            (Capability.STAFF_ACCESS_MANAGE,),
+            "organization administrator required",
+            allow_platform_admin=True,
+        )
+
+    def require_facility_configure(
+        self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """Configuring what the facility **offers**: catalogue offerings, result templates, the
+        public directory profile.
+
+        Split out of `require_org_admin` by DHEALTH-ACCESS-CAPABILITIES-001. `ORG_ADMIN` carries
+        both capabilities, so nobody's authority changed on the day of the split (§18) -- what
+        changed is that the two can now be separated, which they could not be while both were the
+        single word `ORG_ADMIN`."""
+        return self._require(
+            principal,
+            organization_id,
+            (Capability.FACILITY_CONFIGURE,),
+            "organization administrator required",
+            allow_platform_admin=True,
+        )
 
     def require_clinician(
         self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
@@ -152,40 +279,42 @@ class AuthorizationService:
         admin already has visibility that the organization exists (they can list/create/manage
         organizations), so pretending otherwise here would be an inconsistent lie, not genuine
         anti-enumeration."""
-        organization = self._get_organization_or_404(organization_id)
-        if organization.status != OrganizationStatus.ACTIVE.value:
-            raise NotAuthorized("organization is inactive")
-
-        membership = self._memberships.find_active(
-            organization_id=organization_id, identity_id=principal.identity_id
-        )
-        if membership is None:
-            if principal.platform_admin:
-                raise NotAuthorized("clinician role required")
-            raise ResourceNotFound(f"organization {organization_id} is not accessible")
-
-        held_roles = self._roles.list_for_membership(membership.id)
-        if OrganizationRole.CLINICIAN.value not in held_roles:
-            raise NotAuthorized("clinician role required")
-
-        return OrganizationAccessContext(
-            organization=organization, membership=membership, via_platform_admin=False
+        # DHEALTH-ACCESS-CAPABILITIES-001 §17: the name and the reasoning above are unchanged;
+        # the *authority* is now any of the six clinical capabilities, which a role
+        # template happens to carry. A member granted it directly passes here without holding
+        # the role, and a member denied it individually is refused while still holding the role
+        # -- neither of which the role lookup this replaced could express.
+        return self._require(
+            principal,
+            organization_id,
+            (
+                Capability.PATIENT_DIRECTORY_READ,
+                Capability.PATIENT_REGISTER,
+                Capability.VISIT_READ,
+                Capability.VISIT_DOCUMENT,
+                Capability.ORDER_MANAGE,
+                Capability.RESULT_REVIEW,
+            ),
+            "clinician role required",
         )
 
     def require_capability(
         self,
         principal: AuthenticatedPrincipal,
         organization_id: uuid.UUID,
-        *capabilities: OrganizationCapability,
+        *capabilities: Capability,
     ) -> OrganizationAccessContext:
         """Require **any one** of these capabilities in this organization.
 
         DHEALTH-BILLING-001/ADR-066. This is the gate billing uses, and it asks a different question
         from every other ``require_*`` method here: not *"is this person a ``BILLING_CLERK``"* but
         *"may this person operate billing here"*. ``exchange/capabilities.py`` is the single place
-        that turns the second question into the first, so a future ticket
-        (``DHEALTH-ACCESS-CAPABILITIES-001``) can back capabilities with configurable per-facility
-        grants without touching a single billing endpoint, service or behavioural test.
+        that turns the second question into the first.
+
+        **That promise was kept.** DHEALTH-ACCESS-CAPABILITIES-001 backed capabilities with
+        per-member grants and denies, and no billing endpoint, service or behavioural test changed
+        to make it happen -- which is the acceptance criterion the seam existed for. This method is
+        now the public face of the shared gate every other ``require_*`` here also uses.
 
         ``BILLING_CLERK`` is consequently a **convenient bundle rather than a gate**: it is the role
         a facility grants somebody whose job is the till, and it happens to be the only role
@@ -210,26 +339,8 @@ class AuthorizationService:
         if not capabilities:  # pragma: no cover - a programming error, not a runtime state
             raise ValueError("require_capability needs at least one capability")
 
-        organization = self._get_organization_or_404(organization_id)
-        if organization.status != OrganizationStatus.ACTIVE.value:
-            raise NotAuthorized("organization is inactive")
-
         wanted = ", ".join(sorted(capability.value for capability in capabilities))
-        membership = self._memberships.find_active(
-            organization_id=organization_id, identity_id=principal.identity_id
-        )
-        if membership is None:
-            if principal.platform_admin:
-                raise NotAuthorized(f"{wanted} required")
-            raise ResourceNotFound(f"organization {organization_id} is not accessible")
-
-        held_roles = frozenset(self._roles.list_for_membership(membership.id))
-        if not any(capability_is_held(capability, held_roles) for capability in capabilities):
-            raise NotAuthorized(f"{wanted} required")
-
-        return OrganizationAccessContext(
-            organization=organization, membership=membership, via_platform_admin=False
-        )
+        return self._require(principal, organization_id, capabilities, f"{wanted} required")
 
     def require_lab_tech(
         self, principal: AuthenticatedPrincipal, organization_id: uuid.UUID
@@ -247,24 +358,16 @@ class AuthorizationService:
         this also 404s (anti-enumeration, matching `require_membership`'s convention). For a
         platform admin specifically, a real organization they lack `LAB_TECH` membership in is a
         403, not a 404 -- a platform admin already has visibility that the organization exists."""
-        organization = self._get_organization_or_404(organization_id)
-        if organization.status != OrganizationStatus.ACTIVE.value:
-            raise NotAuthorized("organization is inactive")
-
-        membership = self._memberships.find_active(
-            organization_id=organization_id, identity_id=principal.identity_id
-        )
-        if membership is None:
-            if principal.platform_admin:
-                raise NotAuthorized("lab technician role required")
-            raise ResourceNotFound(f"organization {organization_id} is not accessible")
-
-        held_roles = self._roles.list_for_membership(membership.id)
-        if OrganizationRole.LAB_TECH.value not in held_roles:
-            raise NotAuthorized("lab technician role required")
-
-        return OrganizationAccessContext(
-            organization=organization, membership=membership, via_platform_admin=False
+        # DHEALTH-ACCESS-CAPABILITIES-001 §17: the name and the reasoning above are unchanged;
+        # the *authority* is now `lab.queue.work`, which a role template happens to
+        # carry. A member granted it directly passes here without holding the role, and a member
+        # denied it individually is refused while still holding the role -- neither of which the
+        # role lookup this replaced could express.
+        return self._require(
+            principal,
+            organization_id,
+            (Capability.LAB_QUEUE_WORK,),
+            "lab technician role required",
         )
 
     def require_lab_result_releaser(
@@ -285,24 +388,16 @@ class AuthorizationService:
         404s for everyone; a normal caller with zero relationship to a real organization also
         404s; a platform admin (who already has visibility that the organization exists) gets 403
         for a real organization they lack this role in, never a 404."""
-        organization = self._get_organization_or_404(organization_id)
-        if organization.status != OrganizationStatus.ACTIVE.value:
-            raise NotAuthorized("organization is inactive")
-
-        membership = self._memberships.find_active(
-            organization_id=organization_id, identity_id=principal.identity_id
-        )
-        if membership is None:
-            if principal.platform_admin:
-                raise NotAuthorized("lab result releaser role required")
-            raise ResourceNotFound(f"organization {organization_id} is not accessible")
-
-        held_roles = self._roles.list_for_membership(membership.id)
-        if OrganizationRole.LAB_RESULT_RELEASER.value not in held_roles:
-            raise NotAuthorized("lab result releaser role required")
-
-        return OrganizationAccessContext(
-            organization=organization, membership=membership, via_platform_admin=False
+        # DHEALTH-ACCESS-CAPABILITIES-001 §17: the name and the reasoning above are unchanged;
+        # the *authority* is now `lab.result.release`, which a role template happens to
+        # carry. A member granted it directly passes here without holding the role, and a member
+        # denied it individually is refused while still holding the role -- neither of which the
+        # role lookup this replaced could express.
+        return self._require(
+            principal,
+            organization_id,
+            (Capability.LAB_RESULT_RELEASE,),
+            "lab result releaser role required",
         )
 
     def require_lab_tech_or_result_releaser(
@@ -313,27 +408,19 @@ class AuthorizationService:
         must be able to see their own work, so either role suffices for a read-only inspection.
         Same anti-enumeration and no-platform-admin-bypass discipline as `require_lab_tech`/
         `require_lab_result_releaser`, applied to an "either role" check instead of one role."""
-        organization = self._get_organization_or_404(organization_id)
-        if organization.status != OrganizationStatus.ACTIVE.value:
-            raise NotAuthorized("organization is inactive")
-
-        membership = self._memberships.find_active(
-            organization_id=organization_id, identity_id=principal.identity_id
-        )
-        if membership is None:
-            if principal.platform_admin:
-                raise NotAuthorized("lab technician or lab result releaser role required")
-            raise ResourceNotFound(f"organization {organization_id} is not accessible")
-
-        held_roles = self._roles.list_for_membership(membership.id)
-        if (
-            OrganizationRole.LAB_TECH.value not in held_roles
-            and OrganizationRole.LAB_RESULT_RELEASER.value not in held_roles
-        ):
-            raise NotAuthorized("lab technician or lab result releaser role required")
-
-        return OrganizationAccessContext(
-            organization=organization, membership=membership, via_platform_admin=False
+        # DHEALTH-ACCESS-CAPABILITIES-001 §17: the name and the reasoning above are unchanged;
+        # the *authority* is now either laboratory capability, which a role template happens to
+        # carry. A member granted it directly passes here without holding the role, and a member
+        # denied it individually is refused while still holding the role -- neither of which the
+        # role lookup this replaced could express.
+        return self._require(
+            principal,
+            organization_id,
+            (
+                Capability.LAB_QUEUE_WORK,
+                Capability.LAB_RESULT_RELEASE,
+            ),
+            "lab technician or lab result releaser role required",
         )
 
     def require_any_active_membership(self, principal: AuthenticatedPrincipal) -> None:

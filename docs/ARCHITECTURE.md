@@ -2934,3 +2934,114 @@ audit row** — an audit record says that a financial act happened and by whom, 
 `test_bill41` asserts it against the real column set. Every audit write shares the transaction of the
 mutation it records, so a refused payment leaves nothing behind; qualified against real PostgreSQL,
 because SQLite would report the same counts for the wrong reason.
+
+---
+
+## 31. Capability-driven staff authorization (DHEALTH-ACCESS-CAPABILITIES-001, ADR-067) — added
+## 2026-09-28
+
+§28 recorded, on 2026-09-27, that *"the authorization model is the binding constraint on the whole
+product, not a detail"*, and that a front-desk or cashier role could not be added as a UI persona
+because granting `CLINICIAN` to a non-clinical job also granted order creation and result review.
+That constraint is now answered. This section records how, and what a future implementer must not
+undo.
+
+### Roles are templates. Capabilities are authority.
+
+    effective = (assigned templates' capabilities  ∪  direct GRANTs)  −  direct DENYs
+                then narrowed to what this organization type may hold
+
+**A DENY always wins**, over a template grant and a direct grant alike. One rule, no ordering
+subtlety. An inactive membership — or any membership of an inactive organization — resolves to the
+empty set before a row is read.
+
+### The three layers, and where each lives
+
+| Layer | Where | Mutable by a facility? |
+|---|---|---|
+| Capability catalog | `exchange/capabilities.py`, code-defined | No — DHealth's vocabulary |
+| Role template | `SYSTEM_ROLE_TEMPLATES`, assignments in `exchange_organization_role_assignments` | Assignable, not editable (this release) |
+| Member override | `exchange_membership_capability_overrides` | Yes — one GRANT or DENY per (member, capability) |
+
+The catalog is **code-defined on purpose**. Backend code must know exactly what each capability
+means, so a facility cannot invent `clinic.custom_permission_239` and expect a gate to honour it.
+What a facility composes is who receives which existing capabilities. §40 of the ticket brief
+states the rule as: *a central stable capability enum is desirable; scattered role-name
+conditionals are not.*
+
+### One resolver, and why that is load-bearing
+
+`resolve_effective_capabilities` is pure — role names in, capability set out.
+`MembershipCapabilityRepository.effective_for_membership*` wraps it with the membership-state gate
+and the database read. `AuthorizationService._require` is the single gate body every `require_*`
+method delegates to.
+
+Nothing else computes capabilities. Billing does not, the UI does not, Team & Access does not. Two
+implementations of an authorization rule drift, and the drift is invisible until somebody is shown
+a screen they cannot use — which is exactly what the frontend's old role-to-boolean mapping was.
+
+**The `require_*` names survived deliberately.** `require_clinician` still exists and still reads
+well at 43 call sites; what changed is that it asks for a capability. Their docstrings carry the
+ADR history that explains *why* each behaves as it does (ADR-044's entry/release separation,
+ADR-063's no-platform-bypass rule, the 404-vs-403 anti-enumeration convention) and that reasoning
+did not change — only the representation of authority did.
+
+### Two reads per request became one
+
+Role assignments and capability overrides are fetched in a single `UNION ALL` projected onto
+`(kind, value)`, not two `SELECT`s and not a join. A join between two independent one-to-many
+relations is a cartesian product; two queries add a statement to **every** gated endpoint in the
+application. `test_provider_release_version_history_query_count_does_not_scale_with_version_count`
+caught the two-query version immediately, which is the sort of test worth keeping.
+
+### The last-administrator invariant is computed, not counted
+
+`count_active_with_capability_in_session` is one SQL statement with `EXISTS`/`NOT EXISTS`
+subqueries, evaluated inside the mutation's transaction under the organization lock
+`staff_access.py` already takes. It replaces `count(role = 'ORG_ADMIN')`, which asked the wrong
+question the moment authority could be removed without removing the role.
+
+**A Python loop over members would be wrong**, not merely slow: that is the shape where two
+concurrent removals each see the other's victim still counted. Qualified against real PostgreSQL in
+`tests/integration/test_dhealthaccesscap001_postgres_qualification.py`.
+
+The code-defined half — *which role names carry this capability* — is translated into a literal
+`role IN (...)` before the query is built. That is a constant lookup, not a per-member computation.
+
+### Platform authority is outside this model, structurally
+
+`PLATFORM_ADMIN` is a Keycloak realm role, not a `Capability` member. A facility administrator
+cannot ask for it because there is nothing to ask for — stronger than a deny-list, and the reason
+the negative control had to add an enum member before it could attempt the escalation, at which
+point the module refuses to import (a capability with no catalog entry is an import-time error).
+
+Connect machine identity, Meta HMAC and patient order-scoped grants remain separate trust models.
+
+### Two import-time invariants
+
+`capabilities.py` refuses to load if a capability has no catalog entry (it would reach a facility
+administrator's screen as raw vocabulary), and `membership.py` refuses to load if a role template
+carries a capability its organization type cannot hold (it would silently evaporate under the
+resolver's type filter — authority drift with no error anywhere).
+
+### The anti-hardcoding guard
+
+`tests/test_dhealthaccesscap001_no_role_hardcoding.py` parses nine domain modules and fails on a
+role name used **as code** — an AST walk, so prose explaining the model stays legal. The allowlist
+is seven files, each justified in that module's docstring, and a test asserts it stays small.
+
+The frontend half checks navigation and the capability module for `roles.includes(...)`,
+`role === '...'` and `hasRole(...)`. A third test asserts the TypeScript capability catalog names
+exactly what the Python one defines, extracted from the source rather than duplicated — a key in
+one and not the other is silently broken rather than loudly.
+
+### What a future implementer must not do
+
+- **Do not add a second permission model for screens.** Navigation derives from effective
+  capabilities. A `SCREEN_BILLING` permission would drift from the capability it shadows.
+- **Do not let a facility author capability identifiers.** The catalog is DHealth's.
+- **Do not compute capabilities anywhere but the resolver.**
+- **Do not make the last-administrator check a Python loop**, however much clearer it looks.
+- **Do not put mutable facility capabilities into Keycloak claims.** Authority is read from the
+  database per request, which is what makes revocation effective on the next request with the same
+  valid token — DHEALTH-NATIVE-SEC-001's invariant, re-qualified here for capabilities.

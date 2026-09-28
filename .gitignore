@@ -74,3 +74,8 @@ native-visit-results.json
 # by scripts/demo/qualify-billing.sh. Evidence of a run, not part of the source -- same treatment as
 # its five siblings above.
 native-billing-results.json
+
+# DHEALTH-ACCESS-CAPABILITIES-001: the capability access qualification report, written at the
+# repository root by scripts/demo/qualify-capabilities.sh. Evidence of a run, not part of the
+# source -- same treatment as its six siblings above.
+native-capabilities-results.json

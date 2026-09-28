@@ -28,6 +28,7 @@ import { ExchangeApiError, type ExchangeClient } from '../../api/exchangeClient'
 import type { ExchangeMembershipSummary, OrganizationMembership } from '../../api/exchangeTypes'
 import { WorkspaceProvider } from '../workspace/WorkspaceProvider'
 import { TeamAccessPage } from './TeamAccessPage'
+import { capabilitiesForRoles } from '../../test/renderWithWorkspace'
 
 const ORG_ID = 'org-clinic-1'
 const ORG_NAME = 'Clinique de la Paix'
@@ -71,6 +72,7 @@ function adminMembership(
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities: capabilitiesForRoles(roles),
   }
 }
 

@@ -83,7 +83,7 @@ from daher_adapter.exchange.billing import (
     ServiceNotPerformedHere,
     ServicePriceMissing,
 )
-from daher_adapter.exchange.capabilities import OrganizationCapability
+from daher_adapter.exchange.capabilities import Capability, OverrideEffect
 from daher_adapter.exchange.catalog import (
     CatalogEntryConflict,
     CatalogEntryNotFound,
@@ -136,7 +136,9 @@ from daher_adapter.exchange.membership import (
     ExchangeIdentityRepository,
     IdentityNotFound,
     InvalidRoleForOrganizationType,
+    MembershipCapabilityRepository,
     MembershipInactive,
+    MembershipNotFound,
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
 )
@@ -252,6 +254,7 @@ from daher_adapter.exchange.selection import (
     StalePriceSelection,
 )
 from daher_adapter.exchange.staff_access import (
+    ForbiddenCapability,
     ForbiddenRole,
     LastAdministratorProtected,
     StaffAccessAuthorityLost,
@@ -393,7 +396,66 @@ class MembershipSummary(BaseModel):
     organization_type: str
     organization_status: str
     membership_status: str
+    #: The role templates this membership holds. DHEALTH-ACCESS-CAPABILITIES-001: **a label, not
+    #: authority.** Kept because `Équipe et accès` and the identity band legitimately show somebody
+    #: their job titles; nothing in the frontend may authorize on it (§44), and nothing does.
     roles: list[str]
+    #: What this person may actually do here, resolved by the server (§34).
+    #:
+    #: `(templates ∪ grants) − denies`, narrowed to this organization type, empty for an inactive
+    #: membership or an inactive organization. The frontend renders navigation and actions from
+    #: exactly this list and computes nothing itself -- which is what makes "the UI follows
+    #: capabilities" true rather than aspirational, and what stops the screen and the server ever
+    #: disagreeing about who may do what.
+    capabilities: list[str]
+
+
+class MemberCapabilityView(BaseModel):
+    """One capability on the Team & Access member sheet: held or not, **and why** (§20).
+
+    `source` is the server's answer, never the browser's. An administrator removing somebody's
+    `CLINICIAN` needs to know whether their billing authority came from that role and will vanish,
+    or from a direct grant and will not -- and a frontend that worked that out itself would be a
+    second implementation of the resolution rule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    label: str
+    description: str
+    group: str
+    effective: bool
+    #: `TEMPLATE:<ROLE>`, `GRANT`, `DENY`, or absent when nothing grants it.
+    source: str | None
+
+
+class MemberAccessResponse(BaseModel):
+    """Everything `Équipe et accès` needs about one member's authority, and nothing else.
+
+    §59: no patient records, no notes, no results, no invoices. This screen administers **people
+    and authority**; a capability sheet that carried clinical data would be an administrative
+    surface that needs clinical authorization to open."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    membership_id: uuid.UUID
+    identity_id: uuid.UUID
+    display_name: str | None
+    status: str
+    roles: list[str]
+    capabilities: list[MemberCapabilityView]
+
+
+class CapabilityOverrideRequest(BaseModel):
+    """`GRANT` or `DENY`, for one capability, for one member.
+
+    The capability travels in the URL and the effect in the body, so a request that names no effect
+    is a 422 rather than a silent default -- granting and denying are opposite acts and neither
+    should be what happens when a client forgets a field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    effect: Literal["GRANT", "DENY"]
 
 
 class MeResponse(BaseModel):
@@ -3029,7 +3091,10 @@ def build_exchange_router(
     organizations = OrganizationRepository(session_factory)
     memberships = OrganizationMembershipRepository(session_factory)
     role_assignments = OrganizationRoleAssignmentRepository(session_factory)
-    authz = AuthorizationService(organizations, memberships, role_assignments)
+    membership_capabilities = MembershipCapabilityRepository(session_factory)
+    authz = AuthorizationService(
+        organizations, memberships, role_assignments, membership_capabilities
+    )
     security_audit = ExchangeSecurityAuditRepository()
     catalog = CatalogRepository(session_factory, organizations)
     directory = LabDirectoryProfileRepository(session_factory, organizations)
@@ -3073,6 +3138,7 @@ def build_exchange_router(
         organizations=organizations,
         memberships=memberships,
         roles=role_assignments,
+        capabilities=membership_capabilities,
         security_audit=security_audit,
     )
 
@@ -3216,6 +3282,30 @@ def build_exchange_router(
                 status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
             ) from error
 
+    def _require_facility_configure(
+        principal: AuthenticatedPrincipal, organization_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """DHEALTH-ACCESS-CAPABILITIES-001: configuring what the facility *offers*.
+
+        Split from `_require_org_admin`, which now means administering its *people*. `ORG_ADMIN`
+        carries both capabilities, so nobody's authority changed on the day of the split -- what
+        changed is that the two can be separated, which they could not be while both were the
+        single word `ORG_ADMIN`.
+
+        Same 404/403 mapping as every other wrapper here, including the platform-admin path: a
+        platform administrator configures a facility's catalogue today and this preserves it."""
+        try:
+            return authz.require_facility_configure(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
     def _require_lab_tech(
         principal: AuthenticatedPrincipal, organization_id: uuid.UUID
     ) -> OrganizationAccessContext:
@@ -3336,6 +3426,15 @@ def build_exchange_router(
         for membership in memberships.list_for_identity(principal.identity_id):
             org = organizations.get(membership.organization_id)
             held_roles = sorted(role_assignments.list_for_membership(membership.id))
+            # DHEALTH-ACCESS-CAPABILITIES-001 §34/§35: resolved per membership, so the same
+            # identity carrying different authority at two facilities gets two different answers
+            # and they cannot bleed together. The frontend picks the active organization's entry.
+            effective = membership_capabilities.effective_for_membership(
+                membership_id=membership.id,
+                membership_status=membership.status,
+                organization_type=org.org_type,
+                organization_status=org.status,
+            )
             summaries.append(
                 MembershipSummary(
                     organization_id=org.id,
@@ -3344,6 +3443,7 @@ def build_exchange_router(
                     organization_status=org.status,
                     membership_status=membership.status,
                     roles=held_roles,
+                    capabilities=sorted(capability.value for capability in effective),
                 )
             )
         return MeResponse(
@@ -3630,7 +3730,7 @@ def build_exchange_router(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="membership is inactive; reactivate it before granting a role",
             ) from error
-        except (ForbiddenRole, InvalidRoleForOrganizationType) as error:
+        except (ForbiddenCapability, ForbiddenRole, InvalidRoleForOrganizationType) as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
@@ -3753,6 +3853,137 @@ def build_exchange_router(
             ),
         )
 
+    # -- DHEALTH-ACCESS-CAPABILITIES-001: member capabilities ------------------------------------
+
+    @router.get(
+        "/organizations/{organization_id}/memberships/{membership_id}/access",
+        response_model=MemberAccessResponse,
+    )
+    def get_member_access(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MemberAccessResponse:
+        """One member's authority: every capability this organization type can hold, whether they
+        have it, and **why** (§19/§20).
+
+        The whole catalog rather than only what they hold, because this is the screen an
+        administrator grants from -- a list of the held ones would be a sheet you cannot change
+        anything with.
+
+        Cross-organization reads are refused as *not found* rather than *forbidden* (CAP-AUTH-1,
+        CAP-AUTH-5): a membership belonging to somebody else's organization is indistinguishable
+        from one that does not exist, so knowing a membership uuid tells an administrator of a
+        different facility nothing at all.
+        """
+        _require_org_admin(principal, organization_id)
+        try:
+            target = memberships.get(membership_id)
+        except MembershipNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="membership not found"
+            ) from error
+        if target.organization_id != organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="membership not found"
+            )
+
+        organization = organizations.get(organization_id)
+        identity = identities.get(target.identity_id)
+        views = membership_capabilities.describe_for_membership(
+            membership_id=target.id,
+            membership_status=target.status,
+            organization_type=organization.org_type,
+        )
+        return MemberAccessResponse(
+            membership_id=target.id,
+            identity_id=target.identity_id,
+            display_name=identity.display_name,
+            status=target.status,
+            roles=sorted(role_assignments.list_for_membership(target.id)),
+            capabilities=[
+                MemberCapabilityView(
+                    key=view.key.value,
+                    label=view.label,
+                    description=view.description,
+                    group=view.group,
+                    effective=view.effective,
+                    source=view.source,
+                )
+                for view in views
+            ],
+        )
+
+    @router.put(
+        "/organizations/{organization_id}/memberships/{membership_id}/capabilities/{capability}",
+        response_model=MembershipResponse,
+    )
+    def set_member_capability(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        capability: str,
+        body: CapabilityOverrideRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Grant a capability to one member, or deny them one their role template gives.
+
+        This is the heart of the ticket (§14/§15). An administrator may hold the till without
+        becoming a `BILLING_CLERK`, and a `BILLING_CLERK` may lose price configuration without
+        losing their job title -- neither of which required a new combination role, which is the
+        explosion §62 forbids.
+
+        Effective on the **next request**, with no logout and no token refresh, exactly like role
+        removal: every gate resolves capabilities from the database per request and trusts nothing
+        in the token but who the caller is.
+
+        `capability` is a path `str`, validated inside the service. A FastAPI enum here would make
+        request parsing reject an unknown value before any DHealth code ran, and the negative
+        control proving that validation is load-bearing would have nothing to break -- the same
+        reasoning `role` already carries on the role endpoints above.
+        """
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.set_capability_override(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+                capability_key=capability,
+                effect=OverrideEffect(body.effect),
+            ),
+        )
+
+    @router.delete(
+        "/organizations/{organization_id}/memberships/{membership_id}/capabilities/{capability}",
+        response_model=MembershipResponse,
+    )
+    def clear_member_capability(
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        capability: str,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> MembershipResponse:
+        """Remove an override, returning the member to what their role templates say.
+
+        Clears a `GRANT` and a `DENY` alike: there is one override per (member, capability), so
+        "remove the exception" is one act with one endpoint. Withdrawing a `GRANT` of
+        `staff.access.manage` from the organization's last administrator is refused by the same
+        invariant that refuses removing their role (§23) -- every pathway, not only the obvious
+        one.
+        """
+        _require_org_admin(principal, organization_id)
+        return _run_staff_access(
+            principal,
+            organization_id,
+            lambda: staff_access.clear_capability_override(
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+                capability_key=capability,
+            ),
+        )
+
     # -- DH-EX-003: catalog -----------------------------------------------------------------------
 
     @router.get("/catalog/tests", response_model=list[CatalogEntryResponse])
@@ -3845,7 +4076,7 @@ def build_exchange_router(
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabDirectoryProfileResponse:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
 
         try:
             with session_factory.begin() as session:
@@ -3890,7 +4121,7 @@ def build_exchange_router(
         lab_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> list[LabOfferingResponse]:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         return [_to_offering_response(o) for o in catalog.list_offerings_for_lab(lab_id)]
 
     @router.post(
@@ -3903,7 +4134,7 @@ def build_exchange_router(
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabOfferingResponse:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
 
         try:
             with session_factory.begin() as session:
@@ -3952,7 +4183,7 @@ def build_exchange_router(
         body: LabOfferingStatusUpdateRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabOfferingResponse:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         _existing_offering_for_lab_or_404(offering_id, lab_id)
 
         with session_factory.begin() as session:
@@ -3980,7 +4211,7 @@ def build_exchange_router(
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> LabPriceResponse:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         _existing_offering_for_lab_or_404(offering_id, lab_id)
 
         try:
@@ -4068,7 +4299,7 @@ def build_exchange_router(
         offering_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> list[ResultTemplateResponse]:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         _existing_offering_for_lab_or_404(offering_id, lab_id)
         return [
             _to_template_response(t)
@@ -4089,7 +4320,7 @@ def build_exchange_router(
         # DH-LAB-003 §22: configuration authority mirrors offerings/prices exactly -- an ordinary
         # LAB_TECH who enters Patient results is never automatically the authority who defines the
         # controlled structure they enter results into.
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         _existing_offering_for_lab_or_404(offering_id, lab_id)
 
         definitions = [
@@ -4144,7 +4375,7 @@ def build_exchange_router(
         body: ResultTemplateActivateRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> ResultTemplateResponse:
-        _require_org_admin(principal, lab_id)
+        _require_facility_configure(principal, lab_id)
         _existing_offering_for_lab_or_404(offering_id, lab_id)
         _existing_template_for_offering_or_404(template_id, offering_id)
 
@@ -5386,7 +5617,7 @@ def build_exchange_router(
     def _require_billing_capability(
         principal: AuthenticatedPrincipal,
         organization_id: uuid.UUID,
-        *capabilities: OrganizationCapability,
+        *capabilities: Capability,
     ) -> OrganizationAccessContext:
         """The one billing gate. Every billing endpoint goes through here and names a capability.
 
@@ -5423,8 +5654,8 @@ def build_exchange_router(
         _require_billing_capability(
             principal,
             organization_id,
-            OrganizationCapability.BILLING_OPERATE,
-            OrganizationCapability.BILLING_CONFIGURE_PRICES,
+            Capability.BILLING_OPERATE,
+            Capability.BILLING_CONFIGURE_PRICES,
         )
 
     def _to_service_response(record: ClinicServiceRecord) -> ClinicServiceResponse:
@@ -5526,9 +5757,7 @@ def build_exchange_router(
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> ClinicServiceResponse:
         """Add a service this facility performs and charges for. **ORG_ADMIN, not the cashier.**"""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_CONFIGURE_PRICES
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_CONFIGURE_PRICES)
         try:
             return _to_service_response(
                 billing.create_service(
@@ -5565,9 +5794,7 @@ def build_exchange_router(
     ) -> ClinicServiceResponse:
         """Supersede the current price. **No existing invoice changes** -- every line froze its own
         amount when it was issued, which is the property NC-BILL-3 exists to prove."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_CONFIGURE_PRICES
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_CONFIGURE_PRICES)
         try:
             return _to_service_response(
                 billing.change_price(
@@ -5612,9 +5839,7 @@ def build_exchange_router(
         sensitive data should be audited -- is an open decision, and quietly introducing a
         read-audit regime for one endpoint inside a billing ticket would pre-empt it. Refusals are
         audited here exactly as every other billing refusal is."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         try:
             return [
                 BillingPatientResponse(
@@ -5645,9 +5870,7 @@ def build_exchange_router(
         Only ever this organization's own work -- the active services it configured, and the lab
         tests it actually performed for this patient (ADR-066). A clinic does not see the routed
         tests its laboratory ran, because it may not bill for them."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         try:
             return [
                 BillableSourceResponse(
@@ -5677,9 +5900,7 @@ def build_exchange_router(
         Scoped by the same predicate the invoice path enforces, so what a clerk is shown and what
         the server will accept as a line can never disagree. A clinic sees nothing here for orders
         it routed away -- it did not perform that work and may not bill it (ADR-066)."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         return [
             BillableOrderResponse(
                 lab_order_id=record.lab_order_id,
@@ -5717,9 +5938,7 @@ def build_exchange_router(
         Idempotent on the header key, the same contract order and patient creation already have: a
         retried or double-clicked issue returns the existing invoice with 200 rather than billing
         the patient twice."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         try:
             result = billing.create_invoice(
                 principal=principal,
@@ -5749,9 +5968,7 @@ def build_exchange_router(
         patient_id: Annotated[uuid.UUID | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> list[InvoiceResponse]:
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         return [
             _to_invoice_response(record)
             for record in billing.list_invoices(organization_id, patient_id=patient_id, limit=limit)
@@ -5766,9 +5983,7 @@ def build_exchange_router(
         invoice_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> InvoiceResponse:
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         record = billing.get_invoice(organization_id, invoice_id)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invoice not found")
@@ -5795,9 +6010,7 @@ def build_exchange_router(
         A payment that would exceed the total is refused with 409 -- there is no credit or refund
         model here, so accepting it would create a patient balance DHealth cannot represent. That
         check happens under a row lock, so two simultaneous payments cannot both pass it."""
-        _require_billing_capability(
-            principal, organization_id, OrganizationCapability.BILLING_OPERATE
-        )
+        _require_billing_capability(principal, organization_id, Capability.BILLING_OPERATE)
         try:
             result = billing.record_payment(
                 principal=principal,
@@ -8923,9 +9136,11 @@ def build_exchange_router(
         if principal.platform_admin:
             return
         try:
-            authz.require_role(
-                principal, organization_id=organization_id, role=OrganizationRole.ORG_ADMIN
-            )
+            # DHEALTH-ACCESS-CAPABILITIES-001 §17: `facility.configure`, not the `ORG_ADMIN` role
+            # name. Enrollment and readiness describe what this facility is set up to do, which is
+            # configuration rather than staff administration. `ORG_ADMIN` carries the capability,
+            # so no existing administrator's access changed.
+            authz.require_facility_configure(principal, organization_id)
         except ResourceNotFound as error:
             # Anti-enumeration, the convention this API already follows: someone with no
             # membership at all is told the organization does not exist rather than that it exists

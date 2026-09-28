@@ -11,7 +11,7 @@ import type {
   ReleaseQueue,
 } from '../../../api/exchangeTypes'
 import { StaffApp } from '../../staff/StaffApp'
-import { renderWithWorkspace } from '../../../test/renderWithWorkspace'
+import { capabilitiesForRoles, renderWithWorkspace } from '../../../test/renderWithWorkspace'
 import { LabProvider } from '../LabContext'
 import { LabReleasePage } from './LabReleasePage'
 
@@ -30,19 +30,27 @@ const meDualRole: ExchangeMeResponse = {
       organization_status: 'ACTIVE',
       membership_status: 'ACTIVE',
       roles: ['LAB_TECH', 'LAB_RESULT_RELEASER'],
+      capabilities: ['lab.queue.work', 'lab.result.release'],
     },
   ],
 }
 
-const meReleaserOnly: ExchangeMeResponse = {
-  ...meDualRole,
-  memberships: [{ ...meDualRole.memberships[0], roles: ['LAB_RESULT_RELEASER'] }],
+// DHEALTH-ACCESS-CAPABILITIES-001: `capabilities` is derived from the roles rather than restated,
+// because these fixtures spread the dual-role membership and override only `roles` — which left
+// the releaser-only person holding `lab.queue.work` and the technician holding
+// `lab.result.release`, i.e. exactly the authority each test exists to prove they lack.
+function meWithRoles(roles: string[]): ExchangeMeResponse {
+  return {
+    ...meDualRole,
+    memberships: [
+      { ...meDualRole.memberships[0], roles, capabilities: capabilitiesForRoles(roles) },
+    ],
+  }
 }
 
-const meTechOnly: ExchangeMeResponse = {
-  ...meDualRole,
-  memberships: [{ ...meDualRole.memberships[0], roles: ['LAB_TECH'] }],
-}
+const meReleaserOnly: ExchangeMeResponse = meWithRoles(['LAB_RESULT_RELEASER'])
+
+const meTechOnly: ExchangeMeResponse = meWithRoles(['LAB_TECH'])
 
 function makePatient(overrides: Partial<LabWorkflowPatientIdentity> = {}): LabWorkflowPatientIdentity {
   return {

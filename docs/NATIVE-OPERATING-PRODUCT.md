@@ -1702,7 +1702,7 @@ Eight tickets. Each is independently useful and testable; none is a rewrite.
 | 5 | **`DHEALTH-MIGRATE-PATIENTS-001`** — CSV/XLSX directory import | Patient directory | No |
 | 6 | **`DHEALTH-LAB-RECEPTION-001`** — lab reception; specimen entity if D-3 says so | Ticket 2 | **D-1**, **D-3**, **D-4** |
 | 7 | **`DHEALTH-CLINIC-CALENDAR-001`** — minimal appointments | Tickets 1, 3 | No |
-| 8 | **`DHEALTH-ACCESS-CAPABILITIES-001`** — organization roles, permission grants, capability-driven UI | Ticket 4 | No |
+| 8 | ~~**`DHEALTH-ACCESS-CAPABILITIES-001`**~~ — organization roles, permission grants, capability-driven UI | Ticket 4 | **DONE** 2026-09-28, ADR-067 |
 
 Ticket 4 shipped **without** ticket 3. The dependency on Front Desk existed only because Billing was
 assumed to borrow Front Desk's authority; ADR-066 gave Billing its own instead, which removed the
@@ -2023,3 +2023,74 @@ their still-open halves stated explicitly.
 **Pilot-ready is still not clinically live.** This adds a till. It adds no clinical sign-off, no
 pricing policy advice and no interpretation of any kind, and nothing here is authorization to use
 DHealth on a real patient.
+
+---
+
+## 40. `DHEALTH-ACCESS-CAPABILITIES-001` as delivered (2026-09-28)
+
+**ADR-067.** Migration `0036_capability_overrides`, `exchange/capabilities.py`, one resolver, every
+gate migrated, three Team & Access endpoints, capability-driven navigation.
+
+**Roles are templates. Capabilities are authority.** DHealth no longer needs to know somebody's job
+title to decide whether they may perform a facility operation.
+
+### 40.1 What a facility can now do that it could not
+
+| Want | Before | Now |
+|---|---|---|
+| An administrator who also takes payment | Give them `BILLING_CLERK` as well, or invent `ADMIN_WITH_BILLING` | Grant `billing.operate` to that one person |
+| A cashier who must not change prices | Not expressible | Deny `billing.configure_prices` for that one person |
+| Two receptionists, one of whom bills | Two roles | One role, one override |
+| A clinician covering the till on Saturday | Promote them | Grant, then withdraw |
+
+None of this required a new role, and §62's combination-role explosion is now structurally
+unnecessary rather than merely discouraged.
+
+### 40.2 The capability catalog
+
+Twelve, all derived from authority boundaries that already existed:
+
+`patient.directory.read` · `patient.register` · `visit.read` · `visit.document` · `order.manage` ·
+`result.review` · `lab.queue.work` · `lab.result.release` · `staff.access.manage` ·
+`facility.configure` · `billing.operate` · `billing.configure_prices`
+
+Each carries a French label, a description and the organization types that may hold it — served by
+the API, so `Équipe et accès` shows human words and never an enum value.
+
+### 40.3 Two corrections this ticket owed §18 and §27
+
+**`Facturation` is now `billing.operate` only.** DHEALTH-BILLING-001 opened it for either billing
+capability, so an administrator landed on the till and every control refused them. Price
+configuration became its own section, `Services et tarifs`.
+
+**`facility.configure` split from `staff.access.manage`.** `require_org_admin` guarded staff *and*
+catalogue/result-template/directory configuration. `ORG_ADMIN` carries both, so no administrator's
+authority changed.
+
+**Neither is authority drift**, and that is checked rather than claimed: the authorization matrix
+(10 personas × 16 boundaries = 160 cells, captured before the migration) is **identical** after it.
+
+### 40.4 Gaps named rather than filled
+
+1. **Custom organization role templates.** §13 permits deferring them and this ticket does. A
+   facility composes through member overrides today. The seam is built: custom templates become a
+   table and a resolver branch, with no feature code touched.
+2. **Editable system templates.** Deliberately immutable (§24): editing a shared template can
+   remove authority from many people at once, and doing that safely needs its own concurrency
+   design.
+3. **Per-resource scoping.** A capability is organization-wide. "May bill *this* patient" does not
+   exist and is not needed by anything today.
+4. **Time-bounded grants.** No expiry, no "until Friday". A grant is withdrawn by withdrawing it.
+5. **D-8** (auditing successful sensitive reads) is still open and was deliberately not answered.
+6. **Human usability.** No facility administrator has used the capability sheet, so product law 3
+   remains a validated target.
+
+### 40.5 What §35's table now says
+
+Ticket 8 is **DONE**. Ticket 3 (`DHEALTH-CLINIC-FRONTDESK-001`) is still blocked by **D-1**, and
+this ticket did not answer it — but answering it is now a product decision about *which
+capabilities belong in a Front Desk template*, and implementing that answer touches no Billing,
+Visits, patient-directory or check-in authorization code. That was the point.
+
+**Pilot-ready is still not clinically live.** No staff member's access changed, and nothing here is
+authorization to use DHealth on a real patient.

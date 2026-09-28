@@ -303,9 +303,19 @@ test.describe('DHEALTH-BILLING-001 — a facility takes money, end to end', () =
 
   test('BILL-P: an administrator reprices, and the issued invoice does not move', async ({ page }) => {
     await signIn(page, ADMIN)
-    await openBilling(page)
 
-    // The administrator's half of the screen: prices, and no till.
+    // **DHEALTH-ACCESS-CAPABILITIES-001 §27 changed this.** The administrator used to open
+    // `Facturation`, because that section appeared for either billing capability and setting
+    // prices is theirs. They landed on the operational till -- invoices, payments, receipts --
+    // where every control would refuse them, since they hold no `billing.operate`.
+    //
+    // Price configuration is now its own section. The administrator goes there, and the till is
+    // not offered to them at all.
+    const nav = page.getByRole('navigation', { name: 'Navigation principale' })
+    await expect(nav.getByRole('button', { name: 'Facturation', exact: true })).toHaveCount(0)
+    await nav.getByRole('button', { name: 'Services et tarifs', exact: true }).click()
+
+    // The administrator's screen: prices, and no till.
     await expect(page.getByRole('heading', { name: 'Services et tarifs' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Nouvelle facture' })).toHaveCount(0)
     await expect(page.getByRole('form', { name: 'Rechercher le patient' })).toHaveCount(0)

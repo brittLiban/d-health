@@ -56,6 +56,7 @@ import type {
 } from '../../api/exchangeTypes'
 import { Button, EmptyState, LoadingSkeleton, Select, StatusBadge, TextInput } from '../../design-system'
 import { useWorkspace } from '../workspace/WorkspaceContext'
+import { Capability, can } from '../workspace/workspaceCapabilities'
 import {
   PAYMENT_METHODS,
   describeBillingPatient,
@@ -100,7 +101,16 @@ interface Chosen {
   quantity: number
 }
 
-export function BillingPage() {
+/**
+ * Which half of the billing domain this render is.
+ *
+ * `till` is `Facturation`: invoices, payments, receipts, balances. `prices` is
+ * `Services et tarifs`: what the facility charges. They are separate sections because they are
+ * separate authorities (ADR-066 §2) and a person may hold either, both or neither.
+ */
+export type BillingSurface = 'till' | 'prices'
+
+export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } = {}) {
   const { activeOrganization, capabilities, client } = useWorkspace()
 
   const organizationId = activeOrganization?.organization_id ?? null
@@ -130,8 +140,15 @@ export function BillingPage() {
   const [error, setError] = useState<string | null>(null)
   const [confirmation, setConfirmation] = useState<string | null>(null)
 
-  const canOperate = capabilities.canOperateBilling
-  const canConfigure = capabilities.canConfigurePrices
+  // DHEALTH-ACCESS-CAPABILITIES-001 §27: the till is `billing.operate` and nothing else. An
+  // administrator holding only `billing.configure_prices` no longer reaches this page at all --
+  // `staffSections.ts` sends them to `Services et tarifs` instead -- but the check stays here
+  // because navigation is usability and this is the component's own contract.
+  // Each surface renders only its own half, and only if this person may use it. Both conditions
+  // matter: the capability check is what stops a control being offered that the server refuses,
+  // and the surface check is what puts the price list on its own route rather than inside the till.
+  const canOperate = surface === 'till' && can(capabilities, Capability.BILLING_OPERATE)
+  const canConfigure = surface === 'prices' && can(capabilities, Capability.BILLING_CONFIGURE_PRICES)
 
   const load = useCallback(async () => {
     if (!organizationId) return

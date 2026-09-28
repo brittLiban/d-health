@@ -123,8 +123,15 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.authorization import AuthenticatedPrincipal
+from daher_adapter.exchange.capabilities import (
+    Capability,
+    OverrideEffect,
+    grantable_capabilities,
+    parse_capability,
+)
 from daher_adapter.exchange.membership import (
     ALLOWED_ROLES_BY_ORG_TYPE,
+    MembershipCapabilityRepository,
     MembershipNotFound,
     MembershipRecord,
     OrganizationMembershipRepository,
@@ -167,6 +174,14 @@ class LastAdministratorProtected(RuntimeError):
     exists."""
 
 
+class ForbiddenCapability(RuntimeError):
+    """A capability was named that does not exist, or that this organization's type may not hold.
+
+    DHEALTH-ACCESS-CAPABILITIES-001. Mirrors `ForbiddenRole` exactly, including the deliberate
+    collapsing of "no such capability" and "not valid here" into one answer: distinguishing them
+    would let a caller enumerate the catalog's non-grantable members."""
+
+
 class StaffAccessStateUnchanged(RuntimeError):
     """The membership already held the requested state, or did not hold the role being removed.
     Maps to HTTP 409. Deliberately not a silent success: an administrator who clicked "deactivate"
@@ -205,15 +220,133 @@ class StaffAccessService:
         organizations: OrganizationRepository,
         memberships: OrganizationMembershipRepository,
         roles: OrganizationRoleAssignmentRepository,
+        capabilities: MembershipCapabilityRepository,
         security_audit: ExchangeSecurityAuditRepository,
     ) -> None:
         self._sessions = session_factory
         self._organizations = organizations
         self._memberships = memberships
         self._roles = roles
+        self._capabilities = capabilities
         self._audit = security_audit
 
-    # -- the four operations ----------------------------------------------------------------------
+    # -- member-specific capability overrides ------------------------------------------------
+
+    def set_capability_override(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        capability_key: str,
+        effect: OverrideEffect,
+    ) -> StaffAccessResult:
+        """Grant or deny one capability to one member, on top of their role templates.
+
+        DHEALTH-ACCESS-CAPABILITIES-001 §14/§15. This is what lets an administrator hold the till
+        without becoming a cashier, and a cashier lose price configuration without losing their
+        job title -- the two acceptance scenarios the ticket names, and the reason the
+        combinatorial role explosion of §62 is unnecessary.
+
+        Subject to **every** rule the other staff-access operations are, because it is one of them:
+        the organization lock, the actor's live re-authorization against *effective* authority, the
+        cross-organization target check, and the last-administrator invariant. That last one is the
+        pathway §23 is most concerned with -- denying `staff.access.manage` to the only
+        administrator is a self-lockout, and it is refused here exactly as removing their role
+        would be.
+
+        `capability_key` is a plain `str`, validated here rather than typed as an enum at the API
+        boundary, for the reason `add_role` already records: a FastAPI enum parameter would make
+        request parsing reject an invalid value before any DHealth code ran, and the negative
+        control that proves this check is load-bearing would have nothing left to break.
+        """
+        capability = self._require_grantable_capability(
+            capability_key, organization_id=organization_id
+        )
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+            admins_before = self._count_active_admins(session, organization_id)
+            changed = self._capabilities.set_override_in_session(
+                session,
+                membership_id=target.id,
+                capability=capability,
+                effect=effect,
+                actor_identity_id=principal.identity_id,
+            )
+            self._guard_last_administrator(session, organization_id, admins_before=admins_before)
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            if changed:
+                self._record(
+                    session,
+                    event_type=(
+                        "capability_granted"
+                        if effect is OverrideEffect.GRANT
+                        else "capability_denied"
+                    ),
+                    principal=principal,
+                    organization_id=organization_id,
+                    target=target,
+                    capability=capability.value,
+                    outcome="created",
+                )
+            return StaffAccessResult(
+                membership=target, identity_id=target.identity_id, roles=roles, changed=changed
+            )
+
+    def clear_capability_override(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        capability_key: str,
+    ) -> StaffAccessResult:
+        """Remove one member's override, returning them to what their role templates say.
+
+        Validated with `_require_organization_capability` rather than
+        `_require_grantable_capability`: removal asks only *is this a real capability*, never *may
+        it be granted at this organization type*. That asymmetry is deliberate and copies
+        `remove_role`'s own hard-won rule -- gating removal on grantability created a state the
+        product could no longer withdraw from, where a row existed that nothing could delete.
+
+        The last-administrator invariant applies here too, and not only in the obvious direction:
+        clearing a **GRANT** of `staff.access.manage` removes authority, and if that member was the
+        organization's only remaining administrator the removal is refused.
+        """
+        capability = self._require_organization_capability(capability_key)
+        with self._sessions.begin() as session:
+            target = self._open(
+                session,
+                principal=principal,
+                organization_id=organization_id,
+                membership_id=membership_id,
+            )
+            admins_before = self._count_active_admins(session, organization_id)
+            changed = self._capabilities.clear_override_in_session(
+                session, membership_id=target.id, capability=capability
+            )
+            self._guard_last_administrator(session, organization_id, admins_before=admins_before)
+            roles = self._roles.list_for_membership_in_session(session, target.id)
+            if changed:
+                self._record(
+                    session,
+                    event_type="capability_override_cleared",
+                    principal=principal,
+                    organization_id=organization_id,
+                    target=target,
+                    capability=capability.value,
+                    outcome="updated",
+                )
+            return StaffAccessResult(
+                membership=target, identity_id=target.identity_id, roles=roles, changed=changed
+            )
+
+    # -- the four operations ---------------------------------------------------------------------
 
     def deactivate_membership(
         self,
@@ -468,15 +601,42 @@ class StaffAccessService:
         )
         if actor is None:
             raise StaffAccessAuthorityLost("actor has no active membership in this organization")
-        held = self._roles.list_for_membership_in_session(session, actor.id)
-        if OrganizationRole.ORG_ADMIN.value not in held:
-            raise StaffAccessAuthorityLost("actor no longer holds ORG_ADMIN in this organization")
+        # DHEALTH-ACCESS-CAPABILITIES-001 §22: **effective** authority, not the role name.
+        #
+        # The role check this replaces asked whether the actor still held `ORG_ADMIN`. An
+        # administrator who kept the role and had `staff.access.manage` denied individually passed
+        # it and went on administering -- authority the access model says they do not have.
+        organization = self._organizations.get(organization_id)
+        held = self._capabilities.effective_for_membership_in_session(
+            session,
+            membership_id=actor.id,
+            membership_status=actor.status,
+            organization_type=organization.org_type,
+            organization_status=organization_status,
+        )
+        if Capability.STAFF_ACCESS_MANAGE not in held:
+            raise StaffAccessAuthorityLost(
+                "actor no longer holds staff access authority in this organization"
+            )
 
     # -- the invariant ----------------------------------------------------------------------------
 
     def _count_active_admins(self, session: Session, organization_id: uuid.UUID) -> int:
-        return self._memberships.count_active_with_role_in_session(
-            session, organization_id=organization_id, role=OrganizationRole.ORG_ADMIN
+        """How many people can still administer this organization's access, **effectively**.
+
+        DHEALTH-ACCESS-CAPABILITIES-001 §22 rebuilt this around the capability rather than the
+        role, and the difference is the whole point: the old count asked who still held a role
+        *name*, so every pathway that removed authority without removing the role -- an individual
+        deny, a direct grant withdrawn -- walked straight past the last-administrator invariant and
+        left an organization nobody could administer.
+
+        One SQL statement inside the caller's transaction, under the organization lock `_open`
+        already took. See `MembershipCapabilityRepository.count_active_with_capability_in_session`
+        for why a Python loop over members is the version that races."""
+        return self._capabilities.count_active_with_capability_in_session(
+            session,
+            organization_id=organization_id,
+            capability=Capability.STAFF_ACCESS_MANAGE,
         )
 
     def _guard_last_administrator(
@@ -549,6 +709,7 @@ class StaffAccessService:
         target: MembershipRecord,
         outcome: SecurityOutcome,
         role: str | None = None,
+        capability: str | None = None,
     ) -> None:
         self._audit.record(
             session,
@@ -558,5 +719,43 @@ class StaffAccessService:
             subject_identity_id=target.identity_id,
             membership_id=target.id,
             role=role,
+            capability=capability,
             outcome=outcome,
         )
+
+    def _require_organization_capability(self, capability_key: str) -> Capability:
+        """Is this value a real DHealth capability at all?
+
+        The gate that makes `POST .../capabilities/{anything}` safe (§53). A facility cannot invent
+        `clinic.custom_permission_239`, and it cannot name platform authority either -- not because
+        a list excludes `PLATFORM_ADMIN`, but because `Capability` has no such member, exactly as
+        `_require_organization_role` refuses it by not being an `OrganizationRole`. That is
+        structural, which is why NC-CAP-5 has to add an enum member before it can even attempt the
+        escalation."""
+        try:
+            return parse_capability(capability_key)
+        except ValueError as error:
+            raise ForbiddenCapability(f"{capability_key!r} is not a DHealth capability") from error
+
+    def _require_grantable_capability(
+        self, capability_key: str, *, organization_id: uuid.UUID
+    ) -> Capability:
+        """The gate for **granting or denying**: a real capability, *and* one this organization's
+        type may hold at all.
+
+        Two refusals collapse into one `ForbiddenCapability`, exactly as `_require_allowed_role`
+        collapses its two: a value that is not a capability, and a real capability a laboratory
+        cannot hold (`patient.directory.read` -- a laboratory keeps no patient directory, D-6 is
+        open). Both are the same answer to the caller, and distinguishing them would tell them
+        which non-grantable capability keys exist."""
+        capability = self._require_organization_capability(capability_key)
+        try:
+            organization = self._organizations.get(organization_id)
+        except OrganizationNotFound as error:
+            raise StaffAccessTargetNotFound(str(organization_id)) from error
+        if capability not in grantable_capabilities(organization.org_type):
+            raise ForbiddenCapability(
+                f"capability {capability.value!r} is not valid for a "
+                f"{organization.org_type!r} organization"
+            )
+        return capability

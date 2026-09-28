@@ -2148,3 +2148,99 @@ read-audit regime introduced for one endpoint inside a billing ticket would have
 
 All patient, service and price data used anywhere in this work is synthetic. No real patient data is
 used.
+
+## 2026-09-28 — a job title is no longer a security decision
+
+What this adds to the honest read: **every authorization decision DHealth made about a staff member
+was a question about their job title.** `require_clinician` asked "is this person a `CLINICIAN`?",
+and a facility that wanted a receptionist who also takes payment had exactly two options — give them
+a role carrying authority they should not have, or wait for an engineer to invent
+`FRONT_DESK_WITH_BILLING`. The frontend asked the same question a second time, in TypeScript, from a
+table kept in step by hand. That is closed for the Native track
+(DHEALTH-ACCESS-CAPABILITIES-001, ADR-067, Alembic head now `0036_capability_overrides`).
+
+**Roles are now templates; capabilities are the authority.** Effective authority is
+`(assigned templates ∪ direct GRANTs) − direct DENYs`, narrowed to what the organization's type may
+hold, and a **DENY always wins**. An administrator can hand one person one capability without
+inventing a role for them, and take it back the same way.
+
+**The claim that mattered, and how it is actually known.** A refactor of every authorization gate in
+the product is worth nothing if someone quietly gained authority along the way, and "we were careful"
+is not evidence. Before any code was touched, an authority matrix was written and run on the
+pre-refactor commit: **10 personas × 16 authorization boundaries = 160 cells**, each recording the
+*exact* status code rather than allowed/refused. **All 160 cells are identical afterwards.** 403 and
+404 are kept apart on purpose, because 404 is the anti-enumeration answer and a boolean matrix would
+happily watch one turn into the other. This is the one paragraph to disbelieve first, and it is
+checkable by running the file.
+
+**The migration moves no data**, which is the real reason the matrix held. The existing role-
+assignment table is re-read as the *template* assignment table rather than replaced — a role **is** a
+system template — so `0036` adds one table, one audit column and three audit event types and
+migrates nothing. Nobody's access was rewritten by a data migration, because there was no data
+migration.
+
+**Demonstrated, in a real browser against the real stack** (Chromium, Caddy, Keycloak 26.7.1,
+adapter, PostgreSQL 16 — six phases, all passing): a clinician with no billing authority has no
+`Facturation` section and is refused by the till. An administrator opens that clinician's access
+sheet and **grants `billing.operate` by clicking it**. The clinician's *existing session* — no
+sign-out, no re-authentication — has the section on its next request. The administrator withdraws
+it and it disappears. A cashier individually denied the till loses it while keeping the role that
+grants it, proving DENY beats a template in the interface and not only in a unit test. And the last
+administrator who tries to deny themselves `staff.access.manage` is refused, on the running stack.
+
+**A real bug was found in the invariant that was supposed to be merely preserved.** The
+last-administrator check counted holders of the `ORG_ADMIN` *role*. The moment authority could be
+removed without removing the role, that became the wrong question: deny the only administrator
+`staff.access.manage`, keep their role, and the check passes while the organization becomes
+unadministrable with no way back in. It now counts memberships whose **effective** capabilities
+include `staff.access.manage`, as one SQL statement inside the mutation's transaction under the
+organization lock — a Python read-then-decide is the shape that races. Authority held *through a
+grant* counts, so a clinician granted the capability is a real successor and the incumbent can
+actually step down. **NC-CAP-4 reverts exactly this** and the test reddens.
+
+**What real PostgreSQL proved again.** Eight concurrency tests against PostgreSQL 16, including the
+case SQLite cannot express: two administrators simultaneously removing the two different *pathways*
+by which the last administrator holds authority — one revoking the role, one adding the deny. One
+loses. The test was initially written expecting the invariant to be what refuses it; the run showed
+the loser can instead be refused by its own live re-authorization, because it has by then lost the
+authority to act. Both are correct, and the assertion now covers either rather than being narrowed
+until it matched one run.
+
+**Two corrections fell out of the work, and neither is authority drift.** `Facturation` had been
+opened to either billing capability by the billing ticket, so an administrator holding only
+`billing.configure_prices` landed on an operational till where every control would refuse them;
+prices are now their own section. And `require_org_admin` had conflated staff administration with
+facility configuration, which are now separate capabilities that the same template holds. The matrix
+is what makes "not drift" a measurement rather than an assurance.
+
+**The frontend stopped deciding.** `workspaceCapabilities.ts`'s role-to-boolean table is deleted, not
+adapted — it was a second implementation of the authorization rule in a second language, and it
+could not express authority held by one person. `/me` returns each membership's capabilities and the
+interface reads that list. There is no separate screen-permission model, so there is nothing for the
+backend to drift away from.
+
+**An anti-hardcoding guard exists and parses rather than greps.** Six structural tests walk the AST
+of the API and feature modules looking for role names used as authority outside the template
+definition, so prose, docstrings and ADR references stay legal while a real `if role == ORG_ADMIN`
+does not.
+
+**What is not true.** **Human usability is not claimed.** No facility administrator has used the
+capability sheet and nothing has been timed, so product law 3 remains a validated target. Six green
+browser phases say the mechanism works, not that an administrator finds it obvious.
+
+**D-1 is still open, and this does not resolve it.** Front Desk has no backend authority and **no
+speculative `FRONT_DESK` template was created** — inventing the contents of that role is the product
+decision the ticket explicitly forbade guessing. What changed is the cost of answering it later: it
+is now a choice of which capabilities go in a template, touching no Billing, Visits or patient-
+directory authorization code. **D-8 is still open** — capability *mutations* are audited, reading a
+capability sheet is not, because a read-audit regime introduced inside this ticket would have
+pre-empted that decision for the whole product.
+
+**This is authorization, not an IAM product.** Capabilities are a fixed, code-defined catalog of
+twelve. There is no attribute-based policy engine, no expression language, no per-user screen
+designer, and system templates are not editable this release — editing a shared template can remove
+authority from many people at once and needs its own concurrency design.
+
+**No staff member's real access was changed by this work.** All organizations, memberships and
+people used anywhere in it are synthetic. No real patient data is used. Pilot-ready remains not
+clinically live.

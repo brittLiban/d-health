@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode } from 'react'
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 import { useOptionalWorkspace } from '../workspace/WorkspaceContext'
+import { Capability, can } from '../workspace/workspaceCapabilities'
 import { LabContext, type LabAuthStatus, type LabContextValue } from './LabContext'
 
 export interface LabProviderProps {
@@ -63,8 +64,11 @@ export function LabProvider({ children }: LabProviderProps) {
       activeLab,
       availableLabs,
       capabilities: {
-        canWorkOrders: workspace.capabilities.canWorkLabOrders,
-        canReleaseResults: workspace.capabilities.canReleaseResults,
+        // DHEALTH-ACCESS-CAPABILITIES-001: asked of the server-resolved capability set rather
+        // than a role-derived boolean. A technician granted `lab.result.release` directly gets
+        // the release surface without holding LAB_RESULT_RELEASER, which is the point.
+        canWorkOrders: can(workspace.capabilities, Capability.LAB_QUEUE_WORK),
+        canReleaseResults: can(workspace.capabilities, Capability.LAB_RESULT_RELEASE),
       },
       error: workspace.error,
       client: workspace.client,

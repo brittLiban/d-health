@@ -23,6 +23,7 @@ describe('the staff application at a provider organization', () => {
         organization_status: 'ACTIVE',
         membership_status: 'ACTIVE',
         roles: ['CLINICIAN'],
+        capabilities: ['order.manage', 'patient.directory.read', 'patient.register', 'result.review', 'visit.document', 'visit.read'],
       },
     ],
   }
@@ -276,6 +277,7 @@ describe('the staff application at a provider organization', () => {
           organization_status: 'ACTIVE',
           membership_status: 'ACTIVE',
           roles: ['LAB_TECH'],
+          capabilities: ['lab.queue.work'],
         },
         {
           organization_id: 'clinic-org-2',
@@ -283,7 +285,8 @@ describe('the staff application at a provider organization', () => {
           organization_type: 'PROVIDER',
           organization_status: 'ACTIVE',
           membership_status: 'ACTIVE',
-          roles: [], // no role at all: nothing here for this person to do
+          roles: [],
+          capabilities: [], // no role at all: nothing here for this person to do
         },
       ],
     })
@@ -323,6 +326,7 @@ describe('the staff application at a provider organization', () => {
           organization_status: 'ACTIVE',
           membership_status: 'ACTIVE',
           roles: ['ORG_ADMIN'],
+          capabilities: ['billing.configure_prices', 'facility.configure', 'staff.access.manage'],
         },
       ],
     })

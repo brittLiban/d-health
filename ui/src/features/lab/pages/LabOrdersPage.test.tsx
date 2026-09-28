@@ -11,6 +11,7 @@ import type {
   LabWorkflowPatientIdentity,
   ResultEntryWorkspace,
 } from '../../../api/exchangeTypes'
+import { capabilitiesForRoles } from '../../../test/renderWithWorkspace'
 import { StaffApp } from '../../staff/StaffApp'
 
 const me: ExchangeMeResponse = {
@@ -28,6 +29,7 @@ const me: ExchangeMeResponse = {
       organization_status: 'ACTIVE',
       membership_status: 'ACTIVE',
       roles: ['LAB_TECH'],
+      capabilities: ['lab.queue.work'],
     },
   ],
 }
@@ -40,9 +42,18 @@ const meWithTwoLabs: ExchangeMeResponse = {
   ],
 }
 
+// DHEALTH-ACCESS-CAPABILITIES-001: `capabilities` must be overridden alongside `roles`. Spreading
+// the LAB_TECH membership and changing only `roles` left this "releaser-only" person still holding
+// `lab.queue.work` — the very authority this fixture exists to withhold.
 const meReleaserOnly: ExchangeMeResponse = {
   ...me,
-  memberships: [{ ...me.memberships[0], roles: ['LAB_RESULT_RELEASER'] }],
+  memberships: [
+    {
+      ...me.memberships[0],
+      roles: ['LAB_RESULT_RELEASER'],
+      capabilities: capabilitiesForRoles(['LAB_RESULT_RELEASER']),
+    },
+  ],
 }
 
 function makePatient(overrides: Partial<LabWorkflowPatientIdentity> = {}): LabWorkflowPatientIdentity {

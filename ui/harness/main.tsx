@@ -50,6 +50,7 @@ import { WorkspaceProvider } from '../src/features/workspace/WorkspaceProvider'
 import { capabilitiesFor } from '../src/features/workspace/workspaceCapabilities'
 import '../src/fonts.ts'
 import '../src/index.css'
+import { capabilitiesForRoles } from '../src/test/renderWithWorkspace'
 
 function membership(
   organizationType: 'PROVIDER' | 'LAB',
@@ -63,6 +64,7 @@ function membership(
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities: capabilitiesForRoles(roles),
   }
 }
 

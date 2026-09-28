@@ -1,165 +1,117 @@
 /**
- * DH-MVP-POLISH-001 — what the signed-in person may do *here*, in the
- * organization they currently have active.
+ * DHEALTH-ACCESS-CAPABILITIES-001/ADR-067 — what the signed-in person may do *here*, as the
+ * **server** resolved it.
+ *
+ * ── What changed, and why it matters ──
+ *
+ * This file used to map role names to booleans: `roles.includes('CLINICIAN')` became
+ * `canViewPatients`, and so on for nine capabilities. That was a second implementation of DHealth's
+ * authorization rule, written in TypeScript, kept in step with the Python one by hand. It worked
+ * for as long as authority *was* a role name.
+ *
+ * It stopped working the moment a facility could grant one person one extra authority. A
+ * clinician granted `billing.operate` directly holds a capability no role of theirs implies —
+ * the server knows, and a role-name mapping never could. So the mapping is gone.
+ *
+ * `/me` now returns `capabilities` per membership, resolved by
+ * `adapter/src/daher_adapter/exchange/capabilities.py` — the same resolver every backend gate
+ * asks. This module reads that list. It derives nothing.
  *
  * ── Frontend capability checks are usability, never security ──
  *
- * Nothing in this file authorizes anything. The server decides, on every
- * request, from the caller's token and the organization in the URL. These
- * derivations exist so a person is not offered a workflow their membership
- * cannot complete — an offered-then-refused action is a worse experience than
- * one that was never offered, and it teaches people to distrust the interface.
- * Hiding a control is a convenience for the operator; removing a server check
- * would be a vulnerability. The two are not substitutes.
+ * Unchanged, and worth repeating because the new model makes it easier to forget: nothing here
+ * authorizes anything. The server decides on every request, from the caller's token and the
+ * organization in the URL. These derivations exist so a person is not offered a workflow their
+ * membership cannot complete — an offered-then-refused action is a worse experience than one that
+ * was never offered, and it teaches people to distrust the interface. Hiding a control is a
+ * convenience for the operator; removing a server check would be a vulnerability.
  *
- * ── Every capability maps to a gate the backend actually enforces ──
+ * ── No separate screen permissions ──
  *
- * These are not invented permissions. Each one names a check that exists in
- * `adapter/src/daher_adapter/exchange/api.py`:
- *
- *   canViewPatients    `_require_clinician`            CLINICIAN at the provider
- *   canCreateOrders    `_require_clinician`            CLINICIAN at the provider
- *   canReviewResults   `_require_clinician`            CLINICIAN at the provider
- *   canRunVisits       `_require_clinician`            CLINICIAN at the provider
- *   canWorkLabOrders   `_require_lab_tech`             LAB_TECH at the lab
- *   canReleaseResults  release endpoints' own gate     LAB_RESULT_RELEASER at the lab
- *   canAdministerTeam  `_require_org_admin`            ORG_ADMIN at this organization
- *   canOperateBilling  `BILLING_OPERATE` capability    BILLING_CLERK at this organization
- *   canConfigurePrices `BILLING_CONFIGURE_PRICES`      ORG_ADMIN at this organization
- *
- * The last two are the first entries here whose server gate asks for a
- * *capability* rather than a role (ADR-066 §1): `_require_billing_capability`
- * asks "may this person operate billing here", and
- * `adapter/src/daher_adapter/exchange/capabilities.py` is the single place that
- * turns that into a role check. This file mirrors that one mapping, and says so
- * rather than pretending to derive it independently — when
- * `DHEALTH-ACCESS-CAPABILITIES-001` makes grants configurable per organization,
- * the server will send the computed capabilities and these two derivations are
- * what it replaces. Until then a mirror is honest: it is usability, and the
- * server check behind it is unchanged either way.
- *
- * The first four resolve from the same grant today, because CLINICIAN is the
- * single authority the backend checks for patient binding, order creation,
- * doctor review and the visit lifecycle alike. They are kept as four names
- * rather than collapsed into one so each call site states which authority it
- * believes it needs, and so a future split of that role is a change here rather
- * than across the pages.
- *
- * ADR-044 is the reason entry and release are separate: a LAB_TECH who does not
- * also hold LAB_RESULT_RELEASER can record values and can never release them.
- * The interface must reflect that, not paper over it.
+ * §4: there is no `SCREEN_BILLING` and no `SHOW_RESULTS_TAB`. A section appears because the person
+ * holds a capability that makes it useful, which is the same fact the backend enforces. Two
+ * independent permission systems would drift, and the drift would be invisible until somebody was
+ * shown a screen they could not use.
  */
 
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 
-export interface WorkspaceCapabilities {
-  canViewPatients: boolean
-  canCreateOrders: boolean
-  canReviewResults: boolean
-  /**
-   * DHEALTH-CLINIC-VISIT-001 — may run consultations here: register arrivals, take a waiting
-   * patient, write notes, finish or cancel a visit.
-   *
-   * Resolves from the same CLINICIAN grant as the three above, and is a fourth name rather than a
-   * reuse of `canViewPatients` for the reason this file already gives: each call site states which
-   * authority it believes it needs. It matters more here than elsewhere, because *who may register
-   * an arrival* is an open product question (D-1 in `docs/NATIVE-OPERATING-PRODUCT.md` §28) — when a
-   * front-desk role exists, this capability is where that answer lands, and nothing else has to
-   * move.
-   */
-  canRunVisits: boolean
-  canWorkLabOrders: boolean
-  canReleaseResults: boolean
-  /**
-   * DHEALTH-NATIVE-ACCESS-001 — may operate the Équipe et accès surface here.
-   *
-   * Unlike the five above, this one is not clinical. It is listed beside them
-   * because it is derived the same way, from the same active membership, and
-   * because the server gate behind it (`_require_org_admin`) is checked on every
-   * request regardless of what this returns.
-   */
-  canAdministerTeam: boolean
-  /**
-   * DHEALTH-BILLING-001 — may run the till here: issue invoices, record payments, read balances
-   * and print receipts. Valid at a provider and at a laboratory alike.
-   *
-   * Deliberately **not** implied by `canAdministerTeam`. ADR-066 §2 records that administering a
-   * facility is not the same as handling its money, and an administrator who does cover the till
-   * is granted the role explicitly. Mirroring that here matters: an interface that offered the
-   * till to every administrator would quietly contradict the server, which refuses them.
-   */
-  canOperateBilling: boolean
-  /**
-   * DHEALTH-BILLING-001 — may decide what this facility charges: add a service, change a price.
-   *
-   * Separate from `canOperateBilling` and held by the *other* role, which is a financial control
-   * rather than tidiness: someone who can quietly change a price and also take the payment is the
-   * oldest problem in facility billing (ADR-066 §2).
-   */
-  canConfigurePrices: boolean
+/**
+ * The capability catalog, mirrored as a TypeScript union so a typo is a compile error rather than
+ * a silently false permission check.
+ *
+ * The **values** are the server's, and they are the contract: `capabilities.py` defines them, the
+ * API sends them as strings, and this type names them. A key here that the server does not send
+ * simply never matches — which is why `can()` below is the only way to ask, and why nothing
+ * constructs these strings dynamically.
+ */
+export const Capability = {
+  PATIENT_DIRECTORY_READ: 'patient.directory.read',
+  PATIENT_REGISTER: 'patient.register',
+  VISIT_READ: 'visit.read',
+  VISIT_DOCUMENT: 'visit.document',
+  ORDER_MANAGE: 'order.manage',
+  RESULT_REVIEW: 'result.review',
+  LAB_QUEUE_WORK: 'lab.queue.work',
+  LAB_RESULT_RELEASE: 'lab.result.release',
+  STAFF_ACCESS_MANAGE: 'staff.access.manage',
+  FACILITY_CONFIGURE: 'facility.configure',
+  BILLING_OPERATE: 'billing.operate',
+  BILLING_CONFIGURE_PRICES: 'billing.configure_prices',
+} as const
+
+export type CapabilityKey = (typeof Capability)[keyof typeof Capability]
+
+/**
+ * The signed-in person's authority in the active organization.
+ *
+ * A `Set` rather than an array, because every consumer asks *"do they hold this"* and nobody
+ * iterates. `NO_CAPABILITIES` is the safe default for every state that is not a usable membership:
+ * loading, signed out, no active organization, an inactive membership. The failure direction is
+ * "shows nothing", never "shows everything".
+ */
+export type WorkspaceCapabilities = ReadonlySet<CapabilityKey>
+
+export const NO_CAPABILITIES: WorkspaceCapabilities = new Set<CapabilityKey>()
+
+/**
+ * **The one question.** `can(capabilities, Capability.BILLING_OPERATE)`.
+ *
+ * §44: one abstraction, not `capabilities.includes(...)` scattered through eighty components. A
+ * helper also means the *shape* of the answer can change — a future ticket adding per-resource
+ * scoping — without touching every call site.
+ */
+export function can(capabilities: WorkspaceCapabilities, capability: CapabilityKey): boolean {
+  return capabilities.has(capability)
 }
 
-export const NO_CAPABILITIES: WorkspaceCapabilities = {
-  canViewPatients: false,
-  canCreateOrders: false,
-  canReviewResults: false,
-  canRunVisits: false,
-  canWorkLabOrders: false,
-  canReleaseResults: false,
-  canAdministerTeam: false,
-  canOperateBilling: false,
-  canConfigurePrices: false,
+/** True when the person holds **any** of these. For surfaces two different authorities can open. */
+export function canAny(
+  capabilities: WorkspaceCapabilities,
+  ...wanted: readonly CapabilityKey[]
+): boolean {
+  return wanted.some((capability) => capabilities.has(capability))
 }
 
 /**
- * A membership is only usable if the organization is active, the membership
- * itself is active, and it carries at least one role that unlocks a workflow
- * this application actually renders.
+ * A membership is usable if the organization is active, the membership is active, and the server
+ * gave it at least one capability.
  *
- * ── ORG_ADMIN became usable in DHEALTH-NATIVE-ACCESS-001 ──
+ * ── This is now a fact rather than a list ──
  *
- * It was deliberately excluded before, and the reason given was that
- * "administration is a later ticket's surface, and listing such an organization
- * here would present a workspace with nothing in it". Both halves were true and
- * the second no longer is: Équipe et accès is a real screen, so an ORG_ADMIN who
- * holds no clinical or laboratory role now has something to do here.
+ * It used to enumerate roles: ORG_ADMIN at either type, CLINICIAN at a provider, LAB_TECH or
+ * LAB_RESULT_RELEASER at a laboratory, and later BILLING_CLERK. Every new role meant remembering
+ * to add a line here, and forgetting meant somebody signed in successfully and was shown an empty
+ * workspace — which happened twice: once for ORG_ADMIN (DHEALTH-NATIVE-ACCESS-001) and once for
+ * BILLING_CLERK (DHEALTH-BILLING-001).
  *
- * This is not a widening of authority. An administrator held ORG_ADMIN before
- * this change and the server honoured it before this change — what they could not
- * do was reach any screen at all, which is why revoking access needed a database
- * administrator. That was DHEALTH-NATIVE-SEC-001's P1 in its user-facing form.
+ * It cannot happen again. "Has authority here" is exactly "the server sent at least one
+ * capability", and a member with authority is a member with something to do.
  */
 export function isUsableMembership(membership: ExchangeMembershipSummary): boolean {
   if (membership.organization_status !== 'ACTIVE') return false
   if (membership.membership_status !== 'ACTIVE') return false
-
-  // Valid at either organization type, and checked first because these are the
-  // roles whose usefulness does not depend on which kind of facility this is.
-  //
-  // DHEALTH-BILLING-001 added BILLING_CLERK here for exactly the reason ORG_ADMIN
-  // was added above: a cashier holds that role and nothing else — by design, so
-  // that being an administrator or a clinician does not make someone a cashier —
-  // and without this line they would sign in successfully and be shown no
-  // workspace at all. The same shape as the bug DHEALTH-NATIVE-ACCESS-001 fixed,
-  // and cheaper to avoid than to rediscover in a browser.
-  if (membership.roles.includes('ORG_ADMIN') || membership.roles.includes('BILLING_CLERK')) {
-    return (
-      membership.organization_type === 'PROVIDER' || membership.organization_type === 'LAB'
-    )
-  }
-
-  if (membership.organization_type === 'PROVIDER') {
-    return membership.roles.includes('CLINICIAN')
-  }
-  if (membership.organization_type === 'LAB') {
-    return (
-      membership.roles.includes('LAB_TECH') ||
-      membership.roles.includes('LAB_RESULT_RELEASER')
-    )
-  }
-  // An organization type this build does not know how to render. Not an error,
-  // and not something to guess at: it simply offers no workflow here.
-  return false
+  return membership.capabilities.length > 0
 }
 
 export function usableMemberships(
@@ -169,38 +121,16 @@ export function usableMemberships(
 }
 
 /**
- * Derived from the *active* membership alone. Roles held at some other
- * organization grant nothing here: a clinician at Clinique A who is also a
- * technician at Laboratoire B must not see laboratory work while Clinique A is
- * the active organization. That would misrepresent whose authority is in use.
+ * The active membership's capabilities, as a set.
+ *
+ * Derived from the *active* membership alone. Authority at another organization grants nothing
+ * here: a clinician at Clinique A who is also a cashier at Clinique B must not see `Facturation`
+ * while Clinique A is active — that would misrepresent whose authority is in use, and the server
+ * would refuse the first request anyway (§6/§35).
  */
 export function capabilitiesFor(
   membership: ExchangeMembershipSummary | null,
 ): WorkspaceCapabilities {
   if (membership === null || !isUsableMembership(membership)) return NO_CAPABILITIES
-
-  const isProvider = membership.organization_type === 'PROVIDER'
-  const isLab = membership.organization_type === 'LAB'
-  const clinician = isProvider && membership.roles.includes('CLINICIAN')
-
-  return {
-    canViewPatients: clinician,
-    canCreateOrders: clinician,
-    canReviewResults: clinician,
-    canRunVisits: clinician,
-    canWorkLabOrders: isLab && membership.roles.includes('LAB_TECH'),
-    canReleaseResults: isLab && membership.roles.includes('LAB_RESULT_RELEASER'),
-    // Not gated on organization type: ORG_ADMIN is valid at a provider and at a
-    // laboratory alike (`ALLOWED_ROLES_BY_ORG_TYPE` lists it for both), and the
-    // staff a facility administers are the same kind of record either way.
-    canAdministerTeam: membership.roles.includes('ORG_ADMIN'),
-    // DHEALTH-BILLING-001/ADR-066. Mirrors `CAPABILITY_ROLE_GRANTS` in
-    // `adapter/src/daher_adapter/exchange/capabilities.py`, which is the source
-    // of truth; if the two ever disagree, the server wins and the operator sees
-    // a refusal where a control was offered. Not gated on organization type —
-    // `ALLOWED_ROLES_BY_ORG_TYPE` lists BILLING_CLERK for a provider and a
-    // laboratory alike, and a bill is the same kind of record either way.
-    canOperateBilling: membership.roles.includes('BILLING_CLERK'),
-    canConfigurePrices: membership.roles.includes('ORG_ADMIN'),
-  }
+  return new Set(membership.capabilities as CapabilityKey[])
 }

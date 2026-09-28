@@ -99,6 +99,7 @@ import type {
   ClinicServicePriceUpdateRequest,
   Invoice,
   InvoiceCreateOutcome,
+  MemberAccessResponse,
   InvoiceCreateRequest,
   PaymentCreateOutcome,
   PaymentCreateRequest,
@@ -1820,6 +1821,69 @@ export class ExchangeClient {
     return this.request<OrganizationMembership[]>(
       `/organizations/${encodeURIComponent(organizationId)}/memberships`,
       { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{id}/memberships/{membership_id}/access
+   *
+   * DHEALTH-ACCESS-CAPABILITIES-001 §19/§20: one member's whole capability sheet — every
+   * capability this organization type can hold, whether they have it, and where it comes from.
+   *
+   * The whole catalog rather than only the held ones, because this is the screen an administrator
+   * grants *from*: a list of what somebody already has is not a sheet you can change anything with.
+   */
+  async getMemberAccess(
+    organizationId: string,
+    membershipId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<MemberAccessResponse> {
+    return this.request<MemberAccessResponse>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/${encodeURIComponent(membershipId)}/access`,
+      { signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * PUT .../memberships/{membership_id}/capabilities/{capability}
+   *
+   * Grant a capability directly, or deny one the member's role template gives them. This is what
+   * lets an administrator hold the till without becoming a cashier, and a cashier lose price
+   * configuration without losing their job title — neither of which needs a new combination role.
+   *
+   * Effective on the member's **next request**, with no logout and no token refresh.
+   */
+  async setMemberCapability(
+    organizationId: string,
+    membershipId: string,
+    capability: string,
+    effect: 'GRANT' | 'DENY',
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/${encodeURIComponent(membershipId)}/capabilities/${encodeURIComponent(capability)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ effect }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /** DELETE the override, returning the member to whatever their role templates say. */
+  async clearMemberCapability(
+    organizationId: string,
+    membershipId: string,
+    capability: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<OrganizationMembership> {
+    return this.request<OrganizationMembership>(
+      `/organizations/${encodeURIComponent(organizationId)}/memberships/${encodeURIComponent(membershipId)}/capabilities/${encodeURIComponent(capability)}`,
+      { method: 'DELETE', signal: options.signal },
       options.token,
     )
   }

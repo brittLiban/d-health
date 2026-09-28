@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
 import { capabilitiesFor, NO_CAPABILITIES } from '../workspace/workspaceCapabilities'
 import { availableSections, resolveSection, sectionLabel } from './staffSections'
+import { capabilitiesForRoles } from '../../test/renderWithWorkspace'
 
 function provider(roles: string[] = ['CLINICIAN']): ExchangeMembershipSummary {
   return {
@@ -18,6 +19,7 @@ function provider(roles: string[] = ['CLINICIAN']): ExchangeMembershipSummary {
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities: capabilitiesForRoles(roles),
   }
 }
 
@@ -80,17 +82,64 @@ describe('availableSections', () => {
     // and would render empty for somebody who holds no clinical role -- the dead
     // navigation entry this module's own rule forbids, reached from the other side.
     //
-    // DHEALTH-BILLING-001 added `billing` here, and it is a real screen rather than a
-    // widening: `BILLING_CONFIGURE_PRICES` is ORG_ADMIN's own capability (ADR-066 §2),
-    // so an administrator opening `Facturation` finds the price list -- what this
-    // facility charges -- and no till. The reverse holds for a cashier, and
-    // `never offers a cashier a clinical section` below pins that half.
+    // **DHEALTH-ACCESS-CAPABILITIES-001 §27 corrected this.** DHEALTH-BILLING-001 gave an
+    // administrator `Facturation`, because that section opened for *either* billing capability
+    // and `billing.configure_prices` is ORG_ADMIN's. The effect was an administrator landing on
+    // the operational till -- invoices, payments, receipts -- where every control would refuse
+    // them, since they hold no `billing.operate`.
     //
-    // `team` first, and the order matters: `resolveSection` lands on the first
-    // available section, and DHEALTH-NATIVE-ACCESS-001 decided an administrator opens
-    // the application on `Équipe et accès`. The test below is what holds that.
-    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team', 'billing'])
-    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team', 'billing'])
+    // They now get `Services et tarifs`: the price list, which is what they actually may do, and
+    // which §26 keeps out of both `Facturation` (the till) and `Équipe et accès` (people).
+    //
+    // `team` first, and the order matters: `resolveSection` lands on the first available section,
+    // and DHEALTH-NATIVE-ACCESS-001 decided an administrator opens the application on
+    // `Équipe et accès`. The test below is what holds that.
+    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team', 'prices'])
+    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team', 'prices'])
+  })
+
+  it('never offers the operational till to somebody who cannot take a payment', () => {
+    // §27's correction stated as its own invariant rather than left implicit in the list above.
+    // `Facturation` is `billing.operate`; nothing else opens it.
+    expect(idsFor(provider(['ORG_ADMIN']))).not.toContain('billing')
+    expect(idsFor(provider(['CLINICIAN']))).not.toContain('billing')
+    expect(idsFor(provider(['BILLING_CLERK']))).toContain('billing')
+  })
+
+  it('offers the till to somebody granted it directly, holding no cashier role', () => {
+    // **CAP-1's frontend half**, and the test NC-CAP-7 has to redden.
+    //
+    // Every other case in this file happens to have capabilities that match its roles, so a
+    // navigation rule written as `roles.includes('BILLING_CLERK')` would pass all of them. This is
+    // the one that tells them apart: an administrator granted `billing.operate` individually holds
+    // no billing role at all, and the section must still appear -- because the server will serve
+    // them, and a navigation that hid it would be hiding authority the product actually granted.
+    const granted: ExchangeMembershipSummary = {
+      ...provider(['ORG_ADMIN']),
+      capabilities: [...capabilitiesForRoles(['ORG_ADMIN']), 'billing.operate'],
+    }
+    expect(idsFor(granted)).toContain('billing')
+  })
+
+  it('hides the till from a cashier whose capability was individually denied', () => {
+    // The mirror, and CAP-2's frontend half. The role is still `BILLING_CLERK`; the server resolved
+    // the deny and sent no `billing.operate`, so the section is gone. A role-derived navigation
+    // would show it and every control on it would be refused.
+    const denied: ExchangeMembershipSummary = {
+      ...provider(['BILLING_CLERK']),
+      capabilities: [],
+    }
+    expect(idsFor(denied)).not.toContain('billing')
+  })
+
+  it('offers both surfaces to somebody who genuinely holds both jobs', () => {
+    // The composition case, which is the whole point of capabilities: a person who both runs the
+    // till and sets the prices sees both, and that is the honest rendering of holding both.
+    expect(idsFor(provider(['ORG_ADMIN', 'BILLING_CLERK']))).toEqual([
+      'team',
+      'billing',
+      'prices',
+    ])
   })
 
   it('still lands an administrator with no clinical role directly on the team section', () => {
@@ -103,7 +152,7 @@ describe('availableSections', () => {
       capabilitiesFor(provider(['ORG_ADMIN'])),
     )
     expect(resolveSection(null, sections)).toBe('team')
-    expect(sections.map((section) => section.id)).toContain('billing')
+    expect(sections.map((section) => section.id)).toContain('prices')
   })
 
   it('puts the team section last for an administrator who also works clinically', () => {
@@ -116,13 +165,13 @@ describe('availableSections', () => {
       'orders',
       'results',
       'team',
-      'billing',
+      'prices',
     ])
     expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual([
       'today',
       'orders',
       'team',
-      'billing',
+      'prices',
     ])
   })
 

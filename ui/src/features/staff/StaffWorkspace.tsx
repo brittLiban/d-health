@@ -342,7 +342,7 @@ export function StaffWorkspace({
   // deliberately: those load clinical context a cashier must not pull in, and wrapping the till in
   // either would fetch patients, orders and results in order to take a payment. A clerk holds no
   // clinical authority, so those fetches would also simply be refused.
-  if (activeSection === 'billing') {
+  if (activeSection === 'billing' || activeSection === 'prices') {
     return (
       <StaffShell
         sections={sections}
@@ -351,7 +351,7 @@ export function StaffWorkspace({
         onLogout={handleLogout}
       >
         <div key={activeOrganization.organization_id}>
-          <BillingPage />
+          <BillingPage surface={activeSection === 'prices' ? 'prices' : 'till'} />
         </div>
       </StaffShell>
     )

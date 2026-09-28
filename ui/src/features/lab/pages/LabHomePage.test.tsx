@@ -24,6 +24,7 @@ const meWithTwoLabs: ExchangeMeResponse = {
       organization_status: 'ACTIVE',
       membership_status: 'ACTIVE',
       roles: ['LAB_TECH'],
+      capabilities: ['lab.queue.work'],
     },
     {
       organization_id: 'lab-b',
@@ -32,6 +33,7 @@ const meWithTwoLabs: ExchangeMeResponse = {
       organization_status: 'ACTIVE',
       membership_status: 'ACTIVE',
       roles: ['LAB_TECH'],
+      capabilities: ['lab.queue.work'],
     },
   ],
 }

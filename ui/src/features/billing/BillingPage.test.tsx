@@ -37,6 +37,7 @@ import type {
 } from '../../api/exchangeTypes'
 import { WorkspaceProvider } from '../workspace/WorkspaceProvider'
 import { BillingPage } from './BillingPage'
+import { capabilitiesForRoles } from '../../test/renderWithWorkspace'
 
 const ORG_ID = 'org-clinic-1'
 const ORG_NAME = 'Clinique Démo'
@@ -151,6 +152,7 @@ function membershipFor(
     organization_status: 'ACTIVE',
     membership_status: 'ACTIVE',
     roles,
+    capabilities: capabilitiesForRoles(roles),
   }
 }
 
@@ -191,11 +193,17 @@ function billingClient(
   } as unknown as ExchangeClient
 }
 
-function renderBilling(client: ExchangeClient) {
+/**
+ * DHEALTH-ACCESS-CAPABILITIES-001 §26: the page renders one surface at a time now. `till` is
+ * `Facturation`; `prices` is `Services et tarifs`, its own section, because setting prices and
+ * taking payments are different authorities and an administrator holding only the first must not
+ * land on the till.
+ */
+function renderBilling(client: ExchangeClient, surface: 'till' | 'prices' = 'till') {
   return Object.assign(
     render(
       <WorkspaceProvider client={client}>
-        <BillingPage />
+        <BillingPage surface={surface} />
       </WorkspaceProvider>,
     ),
     { client },
@@ -222,7 +230,7 @@ describe('the two billing authorities', () => {
   })
 
   it('gives an administrator the price list and no till', async () => {
-    renderBilling(billingClient(membershipFor(['ORG_ADMIN'])))
+    renderBilling(billingClient(membershipFor(['ORG_ADMIN'])), 'prices')
 
     expect(await screen.findByRole('heading', { name: 'Services et tarifs' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Nouvelle facture' })).not.toBeInTheDocument()
@@ -234,8 +242,7 @@ describe('the two billing authorities', () => {
     // refusal on screen for a person who did nothing wrong, and would teach them the
     // application is unreliable.
     const client = billingClient(membershipFor(['ORG_ADMIN']))
-    await screen.findByText(ORG_NAME, { exact: false }).catch(() => undefined)
-    renderBilling(client)
+    renderBilling(client, 'prices')
     await screen.findByRole('heading', { name: 'Services et tarifs' })
     expect(client.listInvoices).not.toHaveBeenCalled()
   })
@@ -475,7 +482,7 @@ describe('what the till never touches', () => {
   })
 
   it('tells an administrator that changing a price does not rewrite past invoices', async () => {
-    renderBilling(billingClient(membershipFor(['ORG_ADMIN'])))
+    renderBilling(billingClient(membershipFor(['ORG_ADMIN'])), 'prices')
     expect(
       await screen.findByText(/ne modifie aucune facture déjà établie/),
     ).toBeInTheDocument()

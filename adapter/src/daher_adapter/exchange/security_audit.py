@@ -238,6 +238,11 @@ SecurityEventType = Literal[
     "clinic_service_price_changed",
     "invoice_created",
     "payment_recorded",
+    # DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: member-specific capability overrides. See
+    # `CAPABILITY_EVENT_TYPES` below for why the effect is in the type rather than in a field.
+    "capability_granted",
+    "capability_denied",
+    "capability_override_cleared",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[
@@ -271,6 +276,21 @@ SecurityResourceType = Literal[
     "clinic_service",
 ]
 
+#: DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: the member-specific capability mutations.
+#:
+#: Three types rather than one with an effect field, because "who was granted the till" and "who
+#: was denied it" are the two questions a reader of this table actually asks, and a discriminator
+#: column would make neither answerable by `WHERE event_type`. The `capability` column names the
+#: authority; `membership_id` names whose it was.
+#:
+#: Assigning a role *template* is still `role_assigned`/`role_removed` above -- unchanged, and now
+#: literally true: a role is a template.
+CAPABILITY_EVENT_TYPES: tuple[SecurityEventType, ...] = (
+    "capability_granted",
+    "capability_denied",
+    "capability_override_cleared",
+)
+
 
 class ExchangeSecurityAuditRepository:
     def record(
@@ -286,6 +306,7 @@ class ExchangeSecurityAuditRepository:
         role: str | None = None,
         resource_type: SecurityResourceType | None = None,
         resource_id: uuid.UUID | None = None,
+        capability: str | None = None,
     ) -> None:
         # DH-EX-003: `organization_id` is optional -- a platform-level catalog-entry creation has
         # no single owning organization, unlike every DH-EX-002 event type (which must still pass
@@ -300,6 +321,7 @@ class ExchangeSecurityAuditRepository:
                 role=role,
                 resource_type=resource_type,
                 resource_id=resource_id,
+                capability=capability,
                 outcome=outcome,
             )
         )

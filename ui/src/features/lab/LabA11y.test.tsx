@@ -23,6 +23,7 @@ describe('Lab Accessibility', () => {
         organization_status: 'ACTIVE',
         membership_status: 'ACTIVE',
         roles: ['LAB_TECH'],
+        capabilities: ['lab.queue.work'],
       },
     ],
   }

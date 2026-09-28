@@ -19,20 +19,32 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import false, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.exchange.capabilities import (
+    SYSTEM_ROLE_TEMPLATES,
+    Capability,
+    CapabilityGrantView,
+    OverrideEffect,
+    check_templates_survive_the_type_filter,
+    describe_capabilities,
+    resolve_effective_capabilities,
+)
 from daher_adapter.exchange.models import (
     ExchangeIdentity,
     ExchangeIdentityStatus,
+    MembershipCapabilityOverride,
     Organization,
     OrganizationMembership,
     OrganizationMembershipStatus,
     OrganizationRole,
     OrganizationRoleAssignment,
+    OrganizationStatus,
     OrganizationType,
 )
+from daher_adapter.models import utc_now
 
 # DH-EX-002's approved provider/lab role matrix. PLATFORM_ADMIN is never a member of this
 # dictionary -- it is not an OrganizationRole and is never granted through this repository.
@@ -66,6 +78,12 @@ ALLOWED_ROLES_BY_ORG_TYPE: dict[OrganizationType, frozenset[OrganizationRole]] =
         }
     ),
 }
+
+
+# DHEALTH-ACCESS-CAPABILITIES-001: run at import, immediately after the matrix above exists.
+# Catches a role whose template carries a capability its organization type cannot hold -- which
+# would silently evaporate under the resolver's type filter rather than raising anywhere.
+check_templates_survive_the_type_filter(ALLOWED_ROLES_BY_ORG_TYPE)
 
 
 class InvalidRoleForOrganizationType(RuntimeError):
@@ -309,6 +327,16 @@ class OrganizationMembershipRepository:
                 )
             ).all()
             return [_to_membership_record(membership) for membership in memberships]
+
+    def get(self, membership_id: uuid.UUID) -> MembershipRecord:
+        """One membership by id, in a session of its own.
+
+        DHEALTH-ACCESS-CAPABILITIES-001: for the Team & Access *read* path, which has no
+        transaction to join. Every mutation path keeps using `get_in_session` -- it must resolve
+        the target inside the lock it already holds, or two administrators can act on a membership
+        whose state changed between the lookup and the write."""
+        with self._sessions() as session:
+            return self.get_in_session(session, membership_id)
 
     def get_in_session(self, session: Session, membership_id: uuid.UUID) -> MembershipRecord:
         """DHEALTH-NATIVE-ACCESS-001: read one membership by its own id, whatever its status,
@@ -577,3 +605,310 @@ def _to_role_record(assignment: OrganizationRoleAssignment) -> RoleAssignmentRec
         role=assignment.role,
         created_at=assignment.created_at,
     )
+
+
+class MembershipCapabilityRepository:
+    """Member-specific capability overrides, and the one place effective authority is read.
+
+    DHEALTH-ACCESS-CAPABILITIES-001/ADR-067. `exchange/capabilities.py` owns the *rule*
+    (`(templates ∪ grants) − denies`); this class owns the *rows* and the membership-state
+    preconditions the rule is not allowed to guess at.
+
+    Every method has an ``_in_session`` form because the caller that matters most --
+    `staff_access.py`'s mutation path -- must read effective authority **inside its own
+    transaction, after its own flush, under the organization lock it already holds**. An effective
+    count taken outside that transaction is the version of the last-administrator check that two
+    concurrent administrators both pass.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._sessions = session_factory
+
+    # -- reading ---------------------------------------------------------------------------------
+
+    def overrides_for_membership_in_session(
+        self, session: Session, membership_id: uuid.UUID
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """``(grants, denies)`` as raw capability keys, exactly as stored.
+
+        Returned as keys rather than `Capability` members so an unknown key -- a row written by a
+        newer schema than this build -- travels intact to the resolver, which ignores it. Parsing
+        here would raise on a row that must simply have no effect."""
+        rows = session.scalars(
+            select(MembershipCapabilityOverride).where(
+                MembershipCapabilityOverride.membership_id == membership_id
+            )
+        ).all()
+        grants = {row.capability for row in rows if row.effect == OverrideEffect.GRANT.value}
+        denies = {row.capability for row in rows if row.effect == OverrideEffect.DENY.value}
+        return frozenset(grants), frozenset(denies)
+
+    def effective_for_membership_in_session(
+        self,
+        session: Session,
+        *,
+        membership_id: uuid.UUID,
+        membership_status: str,
+        organization_type: OrganizationType | str,
+        organization_status: str,
+    ) -> frozenset[Capability]:
+        """What this membership may actually do, right now, in this transaction.
+
+        **The membership-state gate lives here and nowhere else.** An INACTIVE membership, or any
+        membership of an INACTIVE organization, has *no* ordinary facility capabilities regardless
+        of what its templates or overrides say (§16) -- returned as an empty set before any row is
+        read, so a deactivated member cannot be given authority by a stale grant. Putting this in
+        the pure resolver was considered and rejected: the resolver would then need to be handed
+        membership state by every caller, and the one caller that forgot would be a silent
+        authorization hole.
+        """
+        if membership_status != OrganizationMembershipStatus.ACTIVE.value:
+            return frozenset()
+        if organization_status != OrganizationStatus.ACTIVE.value:
+            return frozenset()
+        roles, grants, denies = self._authority_rows_in_session(session, membership_id)
+        return resolve_effective_capabilities(
+            roles=roles,
+            grants=grants,
+            denies=denies,
+            organization_type=organization_type,
+        )
+
+    def _authority_rows_in_session(
+        self, session: Session, membership_id: uuid.UUID
+    ) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        """This membership's role names, granted capabilities and denied capabilities, in **one**
+        round trip.
+
+        A `UNION ALL` of two tables projected onto the same `(kind, value)` shape, rather than two
+        `SELECT`s. This runs on every authorized request, so its cost is the cost of authorization
+        itself: the two-query version added one statement to every gated endpoint in the
+        application, which `test_provider_release_version_history_query_count_does_not_scale_with_
+        version_count` noticed immediately and correctly.
+
+        Deliberately **not** a join between the two tables. Role assignments and overrides are
+        independent one-to-many relations, so joining them produces a cartesian product -- three
+        overrides and two roles would return six rows to express five facts, and the waste grows
+        with both. A union returns exactly one row per fact.
+        """
+        rows = session.execute(
+            select(
+                literal("ROLE").label("kind"),
+                OrganizationRoleAssignment.role.label("value"),
+            )
+            .where(OrganizationRoleAssignment.membership_id == membership_id)
+            .union_all(
+                select(
+                    MembershipCapabilityOverride.effect.label("kind"),
+                    MembershipCapabilityOverride.capability.label("value"),
+                ).where(MembershipCapabilityOverride.membership_id == membership_id)
+            )
+        ).all()
+
+        roles = {value for kind, value in rows if kind == "ROLE"}
+        grants = {value for kind, value in rows if kind == OverrideEffect.GRANT.value}
+        denies = {value for kind, value in rows if kind == OverrideEffect.DENY.value}
+        return frozenset(roles), frozenset(grants), frozenset(denies)
+
+    def effective_for_membership(
+        self,
+        *,
+        membership_id: uuid.UUID,
+        membership_status: str,
+        organization_type: OrganizationType | str,
+        organization_status: str,
+    ) -> frozenset[Capability]:
+        """`effective_for_membership_in_session` in a session of its own.
+
+        For the authorization gates, which are called once per request and have no transaction to
+        join. The mutation paths must **not** use this form -- they need the read inside their own
+        transaction and under their own lock, which is what makes the last-administrator invariant
+        hold under concurrency."""
+        with self._sessions() as session:
+            return self.effective_for_membership_in_session(
+                session,
+                membership_id=membership_id,
+                membership_status=membership_status,
+                organization_type=organization_type,
+                organization_status=organization_status,
+            )
+
+    def describe_for_membership_in_session(
+        self,
+        session: Session,
+        *,
+        membership_id: uuid.UUID,
+        membership_status: str,
+        organization_type: OrganizationType | str,
+    ) -> tuple[CapabilityGrantView, ...]:
+        """The whole catalog for this member: held or not, and why (§20).
+
+        What `Équipe et accès` renders. Deliberately does **not** take `organization_status`: this
+        is a description of how a member's access is *configured*, and an administrator looking at
+        a suspended organization still needs to see what its staff would hold. The gates are what
+        enforce the organization being active, and they do."""
+        roles, grants, denies = self._authority_rows_in_session(session, membership_id)
+        return describe_capabilities(
+            roles=roles,
+            grants=grants,
+            denies=denies,
+            organization_type=organization_type,
+            membership_is_active=membership_status == OrganizationMembershipStatus.ACTIVE.value,
+        )
+
+    def describe_for_membership(
+        self,
+        *,
+        membership_id: uuid.UUID,
+        membership_status: str,
+        organization_type: OrganizationType | str,
+    ) -> tuple[CapabilityGrantView, ...]:
+        """`describe_for_membership_in_session` in a session of its own, for read endpoints."""
+        with self._sessions() as session:
+            return self.describe_for_membership_in_session(
+                session,
+                membership_id=membership_id,
+                membership_status=membership_status,
+                organization_type=organization_type,
+            )
+
+    def count_active_with_capability_in_session(
+        self,
+        session: Session,
+        *,
+        organization_id: uuid.UUID,
+        capability: Capability,
+    ) -> int:
+        """How many ACTIVE memberships of this organization hold ``capability`` **effectively**.
+
+        This replaces `count_active_with_role_in_session(role=ORG_ADMIN)` as the last-administrator
+        invariant's counter, and the difference is the whole of §22. The old query asked whether
+        anybody still held a role *name*; an administrator who kept `ORG_ADMIN` and was denied
+        `staff.access.manage` individually passed it while leaving the organization with nobody who
+        could actually administer it. This asks the question that matters.
+
+        **One SQL statement, not a Python loop.** The loop version -- fetch the members, resolve
+        each in turn, count -- is the shape that races: two concurrent removals each see the other's
+        victim still counted. Expressed as `EXISTS`/`NOT EXISTS` subqueries, the whole count is
+        evaluated by the database inside the caller's transaction, under the lock it already holds.
+
+        The template half is translated through the code-defined catalog before the query is built:
+        `SYSTEM_ROLE_TEMPLATES` says which role names carry this capability, and that becomes a
+        literal `role IN (...)`. That is a constant lookup, not a per-member computation, so it
+        costs nothing and keeps the templates in one place.
+        """
+        granting_roles = sorted(
+            role.value
+            for role, capabilities in SYSTEM_ROLE_TEMPLATES.items()
+            if capability in capabilities
+        )
+
+        via_template = (
+            select(OrganizationRoleAssignment.id)
+            .where(
+                OrganizationRoleAssignment.membership_id == OrganizationMembership.id,
+                OrganizationRoleAssignment.role.in_(granting_roles),
+            )
+            .exists()
+            if granting_roles
+            # A capability no template carries -- possible, and it must not silently become
+            # "everybody". `false()` rather than an empty `IN ()`, which some backends reject.
+            else false()
+        )
+        via_grant = (
+            select(MembershipCapabilityOverride.id)
+            .where(
+                MembershipCapabilityOverride.membership_id == OrganizationMembership.id,
+                MembershipCapabilityOverride.capability == capability.value,
+                MembershipCapabilityOverride.effect == OverrideEffect.GRANT.value,
+            )
+            .exists()
+        )
+        denied = (
+            select(MembershipCapabilityOverride.id)
+            .where(
+                MembershipCapabilityOverride.membership_id == OrganizationMembership.id,
+                MembershipCapabilityOverride.capability == capability.value,
+                MembershipCapabilityOverride.effect == OverrideEffect.DENY.value,
+            )
+            .exists()
+        )
+
+        statement = (
+            select(func.count())
+            .select_from(OrganizationMembership)
+            .where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.status == OrganizationMembershipStatus.ACTIVE.value,
+                or_(via_template, via_grant),
+                ~denied,
+            )
+        )
+        return int(session.scalar(statement) or 0)
+
+    # -- writing ---------------------------------------------------------------------------------
+
+    def set_override_in_session(
+        self,
+        session: Session,
+        *,
+        membership_id: uuid.UUID,
+        capability: Capability,
+        effect: OverrideEffect,
+        actor_identity_id: uuid.UUID,
+    ) -> bool:
+        """Set or flip one override. Returns ``True`` if anything actually changed.
+
+        Idempotent by design: setting a GRANT that is already a GRANT reports no change rather than
+        writing a second row, which the unique constraint would refuse anyway. Flipping a GRANT to
+        a DENY updates the existing row instead of leaving two contradictory ones -- the model has
+        exactly one opinion per (membership, capability) and the constraint enforces it.
+
+        The returned flag is what lets the caller audit a real mutation and stay silent on a no-op,
+        so the audit table records decisions rather than clicks."""
+        existing = session.scalar(
+            select(MembershipCapabilityOverride).where(
+                MembershipCapabilityOverride.membership_id == membership_id,
+                MembershipCapabilityOverride.capability == capability.value,
+            )
+        )
+        if existing is not None:
+            if existing.effect == effect.value:
+                return False
+            existing.effect = effect.value
+            existing.created_by_identity_id = actor_identity_id
+            existing.created_at = utc_now()
+            session.flush()
+            return True
+        session.add(
+            MembershipCapabilityOverride(
+                membership_id=membership_id,
+                capability=capability.value,
+                effect=effect.value,
+                created_by_identity_id=actor_identity_id,
+            )
+        )
+        session.flush()
+        return True
+
+    def clear_override_in_session(
+        self, session: Session, *, membership_id: uuid.UUID, capability: Capability
+    ) -> bool:
+        """Remove one override, returning it to whatever the member's templates say. ``True`` if a
+        row was actually removed.
+
+        A genuine delete rather than a tombstone: the *decision* survives in the audit table
+        (`capability_override_cleared`), which is where §56 requires the history to live, and
+        keeping a dead row here would mean the unique constraint could no longer be the thing that
+        guarantees one opinion per capability."""
+        existing = session.scalar(
+            select(MembershipCapabilityOverride).where(
+                MembershipCapabilityOverride.membership_id == membership_id,
+                MembershipCapabilityOverride.capability == capability.value,
+            )
+        )
+        if existing is None:
+            return False
+        session.delete(existing)
+        session.flush()
+        return True

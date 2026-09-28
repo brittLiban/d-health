@@ -91,6 +91,7 @@ __all__ = [
     "OrganizationMembershipStatus",
     "OrganizationRole",
     "OrganizationRoleAssignment",
+    "MembershipCapabilityOverride",
     "OrganizationStatus",
     "OrganizationType",
     "Patient",
@@ -1630,6 +1631,71 @@ class OrganizationRoleAssignment(Base):
     membership: Mapped[OrganizationMembership] = relationship(back_populates="role_assignments")
 
 
+class MembershipCapabilityOverride(Base):
+    """DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: one capability granted to, or denied from, one
+    membership, on top of whatever its role templates give.
+
+    ── Why this table is the whole of "configurable permissions" ──
+
+    A role is a template (``OrganizationRoleAssignment`` above, re-read as a template assignment).
+    This table is the exception list, and it is what makes two people with the same job title have
+    different access without inventing a third job title. The failure it replaces is
+    `FRONT_DESK_WITH_BILLING` / `FRONT_DESK_NO_BILLING` / `ADMIN_WITH_BILLING` — the combinatorial
+    role explosion the ticket forbids by name.
+
+    ``effective = (templates ∪ GRANT) − DENY``, and **a DENY always wins** — over a template grant
+    and over a direct grant alike. One precedence rule, no ordering subtlety: an access model whose
+    answer depends on which row was written first cannot be reasoned about, and the unique
+    constraint below means a membership cannot hold two opinions about one capability anyway.
+
+    ── Relational, not a JSON blob ──
+
+    One row per (membership, capability), never a mutable list column. These rows gate security, so
+    they need referential integrity, a unique constraint, and the ability to be counted in SQL: the
+    last-administrator invariant (§22) is a single query over *effective* authority, and a JSON
+    array would force it into a Python loop over members — which is exactly the shape that races.
+
+    ``capability`` is a string rather than a native enum because the catalog is code-defined
+    (`exchange/capabilities.py`): the database stores the key and the application refuses any key
+    that is not a ``Capability`` member, so a facility cannot invent a permission identifier. There
+    is deliberately **no** CHECK constraint enumerating the catalog — that would make adding a
+    capability a migration of every deployment, and the enforcement that matters is at the write
+    path, where an unknown key is refused before it is ever stored.
+
+    ``ondelete="RESTRICT"`` like every other membership child: an access decision is a record that
+    somebody decided something, and it outlives convenience.
+    """
+
+    __tablename__ = "exchange_membership_capability_overrides"
+    __table_args__ = (
+        UniqueConstraint(
+            "membership_id",
+            "capability",
+            name="uq_exchange_membership_capability_overrides_member_cap",
+        ),
+        CheckConstraint(
+            "effect IN ('GRANT', 'DENY')",
+            name="ck_exchange_membership_capability_overrides_effect",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    membership_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organization_memberships.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: A `Capability` value, e.g. `billing.operate`. Widest catalog key is well under 64.
+    capability: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: `GRANT` or `DENY`. See the class docstring for why there is no third value.
+    effect: Mapped[str] = mapped_column(String(8), nullable=False)
+    #: Who decided this, kept for the audit trail's benefit as well as the audit table's.
+    created_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class LabDirectoryProfile(Base):
     """DH-EX-003: one lab organization's marketplace visibility/location profile. Strictly
     one-to-one with a LAB organization -- a PROVIDER organization never has a row here, enforced
@@ -1841,7 +1907,18 @@ class ExchangeSecurityAuditEvent(Base):
             # copy could diverge from it. No void, no reversal (neither policy is decided), and
             # no read event (D-8).
             "'clinic_service_created', 'clinic_service_price_changed', 'invoice_created', "
-            "'payment_recorded'"
+            "'payment_recorded', "
+            # DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: member-specific capability overrides.
+            #
+            # Three types rather than one with a payload field, because the *effect* is the part a
+            # reader of this table is looking for: "who was granted the till" and "who was denied
+            # it" are different questions, and making them the same event with a discriminator
+            # column buried inside would mean neither can be answered by a `WHERE event_type`.
+            # The `capability` column below says which authority; `membership_id` says whose.
+            #
+            # Deliberately **no** event for assigning a role template: that is `role_assigned`,
+            # which already exists and already means exactly this, now that a role *is* a template.
+            "'capability_granted', 'capability_denied', 'capability_override_cleared'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),
@@ -1906,6 +1983,19 @@ class ExchangeSecurityAuditEvent(Base):
     # FK is not portably expressible; the CHECK constraint above is the closed-set guard instead.
     resource_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     resource_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: *which* authority a capability event was about.
+    #
+    # A column of its own rather than reuse of `role`, because they are different vocabularies and
+    # `role` carries a CHECK constraint naming the five role templates -- storing
+    # `billing.operate` there would either break that constraint or force it open, and a column
+    # that means two things is a column nobody can query. Nullable: every pre-existing event type
+    # leaves it empty, and most always will.
+    #
+    # No CHECK enumerating the catalog, for the reason `MembershipCapabilityOverride.capability`
+    # gives: the catalog is code-defined, adding one would make a new capability a migration for
+    # every deployment, and an audit row is a record of what happened rather than a place to
+    # re-validate it.
+    capability: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
 
 

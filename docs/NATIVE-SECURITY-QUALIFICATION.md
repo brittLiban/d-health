@@ -279,3 +279,59 @@ credentials, any Connect vendor adapter, human usability (DH-USABILITY-001 remai
 `INTERNAL WORKFLOW REVIEW — NOT USER-QUALIFIED`), and any claim about real patients. No pilot gate
 is created or cleared by this ticket: it strengthens the evidence behind gates 1 and 2, which
 DHEALTH-STATE-001 already cleared, and re-testing them is not a new gate.
+
+---
+
+## 10. Capability-driven authorization (DHEALTH-ACCESS-CAPABILITIES-001, ADR-067) — added 2026-09-28
+
+This qualification predates capabilities. Its central security property is unchanged and was
+re-qualified rather than assumed.
+
+### The revocation invariant still holds, now for capabilities
+
+DHEALTH-NATIVE-SEC-001 established that **access changes take effect on the next request, with the
+same valid Keycloak token and no logout.** That was proven for role removal and membership
+deactivation. It now also holds for:
+
+- a capability **granted** directly to one member (CAP-1 / CAP-B3);
+- a capability **withdrawn** from one member (CAP-B4);
+- a capability **denied** individually while the role remains (CAP-2 / CAP-B5);
+- `lab.result.release` granted and withdrawn (CAP-5);
+- `staff.access.manage`, which an administrator cannot remove from the last holder at all (CAP-6).
+
+The mechanism is the same one this document already relies on: **nothing mutable about facility
+authority lives in the token.** A capability is resolved from the database on every protected
+request. `NC-CAP-6` breaks exactly that -- caching the resolved set per session -- and the
+revocation tests redden.
+
+### What changed about the last-administrator protection
+
+DHEALTH-NATIVE-ACCESS-001 counted holders of the `ORG_ADMIN` *role*. That question stopped being
+sufficient the moment authority could be removed without removing the role: an administrator who
+kept `ORG_ADMIN` and was individually denied `staff.access.manage` passed the old check while
+leaving the organization with nobody able to administer it.
+
+The count is now over **effective** authority, as one SQL statement inside the mutation's own
+transaction and under the organization lock. Every pathway to zero is covered: role removal,
+individual deny, withdrawal of a direct grant, and membership deactivation. Qualified against real
+PostgreSQL, including the mixed-pathway race (one administrator removing a role while another
+denies a capability).
+
+**A finding worth recording:** when two administrators deny each other simultaneously, the loser is
+refused by *either* the invariant or their own live re-authorization -- whichever reaches them
+first. Both are correct, both leave the organization administrable, and the qualification asserts
+the outcome rather than which guard won. A test insisting on one exception type would have been
+asserting a scheduling accident.
+
+### Platform authority is still outside the facility model
+
+ADR-063 is unchanged and is now structural: `PLATFORM_ADMIN` is not a `Capability` member, so a
+facility administrator has nothing to ask for. `NC-CAP-5` cannot even construct the escalation --
+adding the enum member makes the module refuse to import.
+
+### §6 is still open
+
+Whether successful reads of sensitive data should be audited (**D-8**) remains unanswered. The
+capability work deliberately did not answer it: capability *mutations* are audited
+(`capability_granted`, `capability_denied`, `capability_override_cleared`), and reading a member's
+capability sheet is not.

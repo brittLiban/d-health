@@ -29,6 +29,7 @@ const me: ExchangeMeResponse = {
       organization_status: 'ACTIVE',
       membership_status: 'ACTIVE',
       roles: ['CLINICIAN'],
+      capabilities: ['order.manage', 'patient.directory.read', 'patient.register', 'result.review', 'visit.document', 'visit.read'],
     },
   ],
 }

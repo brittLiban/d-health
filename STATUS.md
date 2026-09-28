@@ -6,6 +6,116 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-28, DHEALTH-ACCESS-CAPABILITIES-001, directly on `master`.** From `790c736`. **DHealth no
+longer needs to know someone's job title to decide whether they may perform a facility operation.**
+The backend asks for an explicit capability; roles are reusable templates for those capabilities; a
+facility can grant or withdraw an allowed capability from one individual without inventing a
+combination role; and the interface follows the same server-resolved set. **ADR-067.** Alembic head
+is now **`0036_capability_overrides`**.
+
+**Roles are templates. Capabilities are authority.**
+
+    effective = (assigned templates ∪ direct GRANTs) − direct DENYs,
+                narrowed to what this organization type may hold
+
+A **DENY always wins** — over a template grant and over a direct grant alike. One precedence rule,
+no ordering subtlety. An inactive membership, or one in an inactive organization, resolves to the
+empty set before a row is read.
+
+**The thing that was impossible yesterday and is routine today.** Two receptionists doing the same
+job, one of whom also takes payment. An administrator covering the till on a Saturday. A cashier
+who must not change prices. Each of those needed a new combination role — `ADMIN_WITH_BILLING`,
+`FRONT_DESK_NO_BILLING` — or could not be expressed at all. Each is now one override on one person,
+and the role they hold does not change.
+
+**Twelve capabilities, every one derived from an authority boundary that already existed.** The
+catalog was built by walking `api.py`'s own decorators and grouping its `_require_*` calls, not
+from a wishlist. `require_clinician`'s bundle became six, all six held by the `CLINICIAN` template,
+so the split changed nobody's authority on the day it happened.
+
+**The load-bearing claim, and how it is known.** §18 of the ticket makes "no staff member gains or
+loses authority because the representation changed" a P0. It is *checked*, not asserted:
+`tests/test_dhealthaccesscap001_authority_matrix.py` records the exact status code for **10
+personas × 16 authorization boundaries = 160 cells**, captured on `790c736` before capabilities
+existed, and compares them after. **All 160 are identical.** 403 and 404 are distinguished
+throughout, because 404 is anti-enumeration and collapsing them into a boolean would let a
+migration leak whether an organization exists while the test stayed green.
+
+**The migration moves no data.** `exchange_organization_role_assignments` is re-read as the
+*template assignment* table rather than replaced — a role **is** a system template — so `0036` adds
+one table, one audit column and three event types, and migrates nothing. That is the single biggest
+reason the matrix is unchanged.
+
+**The last-administrator invariant was rebuilt, not preserved.** It counted holders of the
+`ORG_ADMIN` role; that stopped being the right question the moment authority could be removed
+without removing the role. It now counts active memberships whose **effective** capabilities contain
+`staff.access.manage`, as one SQL statement inside the mutation's transaction under the organization
+lock — a Python loop is the shape that races. Every pathway is covered: role removal, individual
+deny, withdrawal of a direct grant, membership deactivation. Authority built *through a grant*
+counts, so a clinician granted `staff.access.manage` is a viable successor and the incumbent may
+step down.
+
+**Two corrections this ticket owed.** `Facturation` now requires `billing.operate` and nothing else
+— DHEALTH-BILLING-001 opened it for either billing capability, so an administrator landed on the
+till where every control would refuse them; price configuration became its own section, `Services et
+tarifs`. And `facility.configure` split from `staff.access.manage`, which `require_org_admin`
+conflated. Neither is authority drift, which is exactly what the matrix proves.
+
+**Platform authority is outside the model, structurally.** `PLATFORM_ADMIN` is a Keycloak realm role
+and not a `Capability` member, so a facility administrator has nothing to ask for. The negative
+control could not construct the escalation: adding the enum member makes the module refuse to
+import, because a capability with no catalog entry is an import-time error.
+
+**The frontend derives nothing.** `workspaceCapabilities.ts`'s role-to-boolean mapping is *deleted*
+— it was a second implementation of the authorization rule, in another language, kept in step by
+hand, and it could not express a capability granted to one person. `/me` returns `capabilities` per
+membership and the interface reads that list. There is no separate screen-permission model, so the
+two cannot drift.
+
+Qualified, as measured: **1 866 adapter tests passing / 202 skipped, 0 failing** (no regressions;
+the skips are the `tests/integration/` real-PostgreSQL suite, which skips when no database is up and
+was run separately against one), **21
+capability tests**, **160-cell authority matrix**, **8 real-PostgreSQL concurrency tests**, **6
+real-browser capability phases**, **all six native browser suites green**, **all 61 UI test files
+green**, and **8 negative controls** each reddening a named test and reverting byte for byte.
+Migration `0036` was applied, downgraded and re-upgraded against real PostgreSQL.
+
+**The UI figure is stated that way because the first full run was not green, and the reason matters.**
+Four tests reddened in `LabReleasePage`/`LabOrdersPage` — the §10 result-release boundary, the one
+thing this ticket was told not to touch. They were **fixture** defects, not a product regression:
+those files build their "releaser-only" and "technician-only" people by spreading the *dual-role*
+membership and overriding `roles` alone, so once `capabilities` existed the releaser-only person
+still carried `lab.queue.work` and the technician still carried `lab.result.release` — exactly the
+authority each test exists to prove they lack. The product was never wrong; the adapter's release
+tests, the 160-cell matrix and the browser security suite (whose `demo-releaser` holds
+`LAB_RESULT_RELEASER` and nothing else) were green throughout. The fixtures now *derive*
+capabilities from roles, so the two cannot drift again, and a sweep found one more instance of the
+same pattern that had been passing for a legitimate reason. A fifth red was
+`ExchangeAuthProvider.test.tsx`, the catalogued load-sensitive flake, manufactured by running the
+UI batches and the adapter suite concurrently; it passes on an idle machine. One file's worker
+failed to start and never ran; it was re-run and passes.
+
+**The negative control worth naming: NC-CAP-4.** It reverts the last-administrator count to the old
+role-name query, and `CAP-6` reddens — because denying the only administrator `staff.access.manage`
+then leaves the organization unadministrable while the check passes. That is the bug the rebuild
+existed to prevent, demonstrated.
+
+**D-1 remains open, and this ticket does not claim otherwise.** Front Desk still has no backend
+authority. What changed is that deciding it later is a product question about which capabilities
+belong in a template — implementing the answer touches no Billing, Visits, patient-directory or
+check-in authorization code. No speculative `FRONT_DESK` role was invented.
+
+**Human usability is not claimed.** No facility administrator has used the capability sheet and
+nothing has been timed, so product law 3 remains a validated target. This is authorization, not an
+IAM product: no attribute-based policy engine, no expression language, no per-user screen designer.
+Still not production-deployed, clinically live, or Connect-integrated; all data synthetic, no real
+patient data used.
+
+<!-- The previous as-of block follows, preserved as history rather than deleted. -->
+
+### Previous as-of — 2026-09-28, DHEALTH-BILLING-001
+
+
 **2026-09-28, DHEALTH-BILLING-001, directly on `master`.** From `c1c205d`. **DHealth's Native clinic
 and laboratory can take money.** A cashier finds the patient, sees what their own facility actually
 performed, issues an invoice that freezes its prices, records a payment, and hands over a receipt with

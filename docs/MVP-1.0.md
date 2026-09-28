@@ -1019,3 +1019,36 @@ structured clinical field — vitals, examination templates, diagnosis coding (*
 the clinical lead, and the order set still does. **Pilot-ready remains distinct from clinically live**,
 and nothing here is authorization to use DHealth on a real patient. No real patient data was used at
 any point; every fixture, seed and qualification record is synthetic.
+
+**DHEALTH-ACCESS-CAPABILITIES-001 update (2026-09-28): the two sentences above that say "roles" are
+now wrong, and this is the correction.** DH-MVP-POLISH-001's note says which workflows a person sees
+is "derived from their active organization and their roles in it", and DHEALTH-NATIVE-ACCESS-001's
+correction says `Équipe et accès` is "gated on `ORG_ADMIN`". Both described the truth when written.
+Neither is true now. Staff authority on the Native track is **capabilities**; a role is a *template*
+that grants a set of them, and a facility administrator can grant or withdraw an allowed capability
+from one individual without inventing a combination role. Navigation is derived from the same
+server-resolved capability set the backend enforces, not from role names, and `Équipe et accès` is
+gated on `staff.access.manage`. `ORG_ADMIN` still holds it, so nobody's access changed — that is
+measured, not assumed: a 10-persona × 16-boundary authority matrix recording exact status codes is
+identical either side of the change. ADR-067 and `docs/NATIVE-OPERATING-PRODUCT.md` §40 carry the
+detail; `docs/ARCHITECTURE.md` §31 carries the shape.
+
+**Where it touches this document's laws.** None of the four move. This is an authorization refactor
+with a facility-facing administration surface; it routes nothing, prices nothing, and no patient
+interaction changed. Law 3 is untouched and still a validated target here too — no facility
+administrator has used the capability sheet and nothing has been timed.
+
+**§10 gaps: none closed.** The admin gap entry stands. This is also **not** an answer to the Front
+Desk authority question (**D-1**): no `FRONT_DESK` template was invented, because choosing what such
+a role may do is a product decision, and the ticket that created the seam explicitly forbade
+guessing it. What changed is that answering it later is a choice of which capabilities go in a
+template, not a change to Billing, Visits or patient-directory authorization code. **D-8** (auditing
+successful sensitive reads) is also still open: capability *mutations* are audited, reading a
+capability sheet is not.
+
+**What this does not make true.** A capability model is not an IAM product: the catalog is twelve
+code-defined capabilities, there is no attribute-based policy engine, no expression language and no
+per-user screen designer, and system templates are not editable this release. Nothing here is
+Exchange-track work and nothing here makes the Exchange pilot-ready. **Pilot-ready remains distinct
+from clinically live.** No staff member's real access was changed; every organization, membership
+and person used in this work is synthetic, and no real patient data was used.

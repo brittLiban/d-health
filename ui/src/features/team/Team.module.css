@@ -196,3 +196,48 @@
     justify-content: flex-start;
   }
 }
+
+/* ── DHEALTH-ACCESS-CAPABILITIES-001: the per-member capability sheet ─────── */
+
+/* Indented and on its own ground, so it reads as belonging to the member row
+   above it rather than as a second list of people. */
+.accessSheet {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
+}
+
+.groupTitle {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+}
+
+.capabilityList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.capabilityRow {
+  min-height: var(--row-height-registre);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}

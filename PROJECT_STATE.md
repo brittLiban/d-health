@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-BILLING-001, 2026-09-28 — this parenthetical has now gone stale twelve times,
-> first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DHEALTH-ACCESS-CAPABILITIES-001, 2026-09-28 — this parenthetical has now gone stale thirteen
+> times, first reading "DH-MVP-001 and
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001", then "DHEALTH-BILLING-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -22090,3 +22090,158 @@ access lifecycle 16/16, clinic visit 9/9, facility billing 6/6.**
 **Pilot-ready is not clinically live.** This adds a till. It adds no clinical sign-off, no pricing
 advice and no interpretation, and nothing here is authorization to use DHealth on a real patient.
 All patient, service and price data used anywhere in this ticket is synthetic.
+
+---
+
+## DHEALTH-ACCESS-CAPABILITIES-001 — Capability-Driven Staff Authorization (2026-09-28) — DONE
+
+**Start:** `790c736`, HEAD matched exactly, tree clean, Alembic head `0035_facility_billing`.
+**Ending Alembic head: `0036_capability_overrides`.**
+
+Implements `docs/NATIVE-OPERATING-PRODUCT.md` §35's ticket 8. **ADR-067.** The delivered-vs-brief
+delta is that specification's new **§40**.
+
+### Read this first: the matrix is the ticket
+
+§18 makes "no staff member gains or loses authority merely because the representation changed" a
+P0/P1. Everything else in this ticket was built around making that checkable rather than claimable.
+
+**Before touching any code**, `tests/test_dhealthaccesscap001_authority_matrix.py` was written and
+run on `790c736`: 10 personas × 16 authorization boundaries = **160 cells**, each recording the
+*exact* status code. 403 and 404 are kept distinct deliberately — 404 is anti-enumeration, and
+collapsing them into a boolean would let a rewrite turn one into the other, leaking whether an
+organization exists, while the test stayed green.
+
+**All 160 cells are identical after the migration.** That is the ticket's central claim and it is
+data, not prose.
+
+### What was built
+
+| | |
+|---|---|
+| **Migration** | `0036_capability_overrides` — one table, one audit column, three event types. **Migrates no data.** |
+| **Catalog** | `exchange/capabilities.py` — 12 capabilities, French labels/descriptions/groups, organization-type applicability, grantability metadata |
+| **Resolver** | `resolve_effective_capabilities` — `(templates ∪ grants) − denies`, type-narrowed. One function, used by everything |
+| **Gates** | Five role gates rewritten as capability gates, keeping their names and ADR docstrings; `require_facility_configure` added |
+| **Endpoints** | 3 — member access sheet, set override (GRANT/DENY), clear override |
+| **Frontend** | `can()` / `canAny()`; navigation from capabilities; Team & Access capability sheet with effective **and** source; `Services et tarifs` as its own section |
+| **Tests** | 160-cell matrix, 21 capability tests, 6 structural, 8 real-PostgreSQL, 6 browser phases, 8 negative controls |
+
+### The design decisions worth knowing
+
+**A role *is* a system template.** `exchange_organization_role_assignments` is re-read rather than
+replaced, so the migration moves zero rows — which is the single biggest reason the matrix is
+unchanged. `SYSTEM_ROLE_TEMPLATES` reproduces each old role gate capability for capability.
+
+**A DENY always wins**, over a template grant and a direct grant alike. One precedence rule, and
+the unique constraint means a membership cannot hold two opinions about one capability anyway.
+
+**`require_clinician`'s bundle was split into six**, all six held by `CLINICIAN`. The split changed
+nobody's authority and is what makes §64 achievable: Front Desk can later get `patient.register`
+without `order.manage`, and that decision will not touch Billing, Visits or patient-directory code.
+`LAB_QUEUE_WORK` was deliberately **not** split — the product has never separated accept, reject,
+collection, processing and entry, and inventing the seam now would be speculative.
+
+**The last-administrator invariant was rebuilt around effective authority**, as one SQL statement
+with `EXISTS`/`NOT EXISTS` inside the mutation's transaction under the organization lock. The old
+role-name count passed while an administrator kept `ORG_ADMIN` and was individually denied
+`staff.access.manage` — leaving the organization unadministrable. Every pathway is covered now, and
+authority built *through a grant* counts, so handover works.
+
+**Platform authority is structurally outside the model.** No `Capability` member exists for it, so
+there is nothing for a facility administrator to ask for.
+
+### Two corrections this ticket owed
+
+**§27:** `Facturation` now requires `billing.operate` and nothing else. DHEALTH-BILLING-001 opened
+it for either billing capability, so an administrator holding only `billing.configure_prices` landed
+on the operational till where every control would refuse them. Price configuration became its own
+section, `Services et tarifs` — configuration, so not inside `Équipe et accès`; not the till, so not
+inside `Facturation`.
+
+**`facility.configure` split from `staff.access.manage`.** `require_org_admin` guarded staff *and*
+catalogue/result-template/directory configuration. `ORG_ADMIN` carries both, so no authority
+changed.
+
+### Defects found and fixed during the work
+
+1. **`FACILITY_CONFIGURE` was a dead capability** after the gate was written — no `api.py` wrapper
+   existed and the eight configuration routes still asked for `staff.access.manage`. Team & Access
+   would have rendered a toggle that did nothing. Found by review, before any test could.
+2. **`_require_own_org_admin_or_platform` still called `require_role(ORG_ADMIN)`** — a hardcoded
+   role in feature code, which §17 forbids and the structural test would have caught.
+3. **Resolution cost one extra query per gated request.** An existing query-count test
+   (`test_provider_release_version_history_query_count_does_not_scale_with_version_count`) went red
+   immediately. Fixed by fetching roles and overrides in one `UNION ALL` round trip rather than
+   raising the budget — authorization costs what it did before.
+4. **Three Lab fixtures named a role without its authority, and the full UI run caught it.**
+   `LabReleasePage.test.tsx` and `LabOrdersPage.test.tsx` build their "releaser-only" and
+   "technician-only" people by spreading the *dual-role* membership and overriding `roles` alone —
+   so once `capabilities` existed on that fixture, the releaser-only person kept `lab.queue.work`
+   and the technician kept `lab.result.release`: precisely the authority each test exists to prove
+   they lack. Four tests went red, all four of them the §10 release boundary. **The product was
+   never wrong** — the adapter's own release-boundary tests and the 160-cell matrix stayed green
+   throughout, and the browser security suite exercises releaser-only against the real stack. The
+   fixtures now *derive* capabilities from roles via `capabilitiesForRoles`, so the two cannot drift
+   apart again. A sweep for the same spread-and-override pattern found one more
+   (`StaffApp.laboratory.test.tsx` §9); it was passing for a legitimate reason and was corrected
+   anyway, because a fixture describing a person the server cannot produce is not a test.
+5. **The browser suite granted a capability to the wrong person and still passed.** `openSheet`
+   filtered member rows by role label, and a member row renders an "Ajouter clinicien" button for
+   every role it does *not* hold — so `/Clinicien/i` matched the administrator's own row. The next
+   phase caught it. Sheets are now addressed by username and the returned region names the person,
+   so operating on the wrong sheet is no longer expressible.
+
+### Negative controls — all eight executed and reverted byte for byte
+
+NC-CAP-1 (direct grants ignored) · NC-CAP-2 (deny precedence removed) · NC-CAP-3 (cross-org target
+check dropped) · **NC-CAP-4 (mandatory: last-admin counted by role name)** · NC-CAP-5 (platform
+authority added to the catalog) · NC-CAP-5b (capability validator made lenient) · NC-CAP-6
+(effective capabilities cached per session) · NC-CAP-7 (role check back in navigation).
+
+**NC-CAP-5 reddened in an unexpected and stronger way**, and it is worth recording: adding
+`PLATFORM_ADMIN` to the enum makes the module **refuse to import**, because a capability with no
+catalog entry is an import-time error. The escalation cannot reach a test at all. NC-CAP-5b was
+added to attack the validator instead, which is the version where a test has to refuse.
+
+**NC-CAP-7 reddened the structural test but initially no UI test**, because every navigation fixture
+happened to have capabilities matching its roles. Two tests were added — a person granted the till
+directly, and a cashier individually denied it — which are the cases a role-derived navigation gets
+wrong. Both now redden with it.
+
+### Honest status
+
+- **Verified:** 160-cell authority matrix identical; **1 866 adapter tests passing / 202 skipped, 0
+  failing** (2 068 collected; the skips are `tests/integration/`, the real-PostgreSQL suite, which
+  skips when no database is up and was run separately against one), no regressions — and no test was
+  deleted to get there: the diff against `790c736` removes exactly one test function and adds one,
+  the `test_bill61` rewrite; 21 capability tests; 6 structural tests; 8 real-PostgreSQL tests;
+  migration `0036` up/down/up; **all 61 UI test files green** (947 tests across nine batches, then
+  a re-run of the four files the first pass left unsettled — see defect 4 and the flake note below);
+  `npm run typecheck`; `npm run lint`; `ruff check`/`ruff format --check`.
+  **One red was not a defect at all:** `ExchangeAuthProvider.test.tsx > retry()` is the catalogued
+  load-sensitive flake, and running the UI batches concurrently with the full adapter suite is its
+  documented trigger — my own doing. It passes on an idle machine. Separately, one file's Vitest
+  worker failed to start and the file never ran; the batch script's requested-versus-reported file
+  count is what exposed it, which is why that reconciliation exists.
+- **Demonstrated:** `scripts/demo/qualify-capabilities.sh` — **6 browser phases** against real
+  Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16. A clinician with no billing
+  authority; an administrator granting `billing.operate` **by clicking**; that clinician's *existing
+  session* gaining the till on its next request with no re-authentication; the grant withdrawn and
+  the section disappearing; an individual deny beating a role template; and the last administrator
+  refused when they try to deny themselves.
+- **All six native browser suites green:** golden journey 12, security 31, access 16, visit 9,
+  billing 6, capabilities 6.
+
+### Still open
+
+**D-1 (Front Desk authority) is NOT resolved**, and no speculative `FRONT_DESK` template was
+created. What changed is that answering it later is a product decision about which capabilities
+belong in a template. **D-8** (auditing successful sensitive reads) is untouched — capability
+*mutations* are audited, reading a capability sheet is not. **Custom organization role templates**
+and **editable system templates** are recorded as follow-up (§24 permits deferring them; editing a
+shared template can remove authority from many people at once and needs its own concurrency design).
+
+**Human usability is not claimed.** No facility administrator has used the capability sheet.
+**Pilot-ready is still not clinically live.** No staff member's access was changed by this work.
+All data synthetic; no real patient data used.

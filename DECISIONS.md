@@ -9245,3 +9245,183 @@ policy advice and no interpretation of any kind, and nothing here is authorizati
 a real patient. DHealth **records** that money was taken; it moves no money, contacts no bank, calls
 no mobile-money API and authorises no card. There is no payment provider, no merchant account and no
 secret anywhere in this domain.
+
+---
+
+## ADR-067 — ACCEPTED / IMPLEMENTED (2026-09-28, DHEALTH-ACCESS-CAPABILITIES-001): **roles are
+## templates, capabilities are authority** — staff access is organization-scoped effective
+## capability, composed per member
+
+**Date:** 2026-09-28 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
+`0036_capability_overrides`, `exchange/capabilities.py`, one resolver, every gate migrated, three
+Team & Access endpoints, capability-driven navigation) · **Decided by:** Liban
+(DHEALTH-ACCESS-CAPABILITIES-001 ticket) · **Supersedes in part:** ADR-066 §1's capability seam,
+which this generalizes and fulfils
+
+**Relationship to prior decisions.** ADR-066 §1 built a capability seam for billing and predicted
+this ticket by name; the prediction is kept, and no billing endpoint, service or behavioural test
+changed to make it happen. ADR-044 (entry is not release) survives as a *capability* separation and
+is re-qualified as one. ADR-063 (platform authority does not silently widen) is why platform
+authority is deliberately **not** in the capability model. DHEALTH-NATIVE-ACCESS-001's
+last-administrator invariant is rebuilt rather than preserved — see §5. **D-1's Front Desk question
+is still open** and this ADR does not answer it; it makes answering it cheap.
+
+### 1. One vocabulary, owned by DHealth; composition owned by the facility
+
+DHealth defines the capability catalog (`exchange/capabilities.py`). A facility cannot invent
+`clinic.custom_permission_239`, because backend code must know exactly what each capability means
+and no gate asks for one that does not exist. What a facility composes is **who receives which
+existing capabilities**.
+
+Twelve capabilities, every one derived from an authority boundary `api.py` was already enforcing —
+the catalog was built by walking that file's decorators and grouping its `_require_*` calls, not
+from a wishlist. Where an existing gate guarded several operations it is split, but only along
+lines the product already draws and only where a future composition plainly needs the seam:
+`require_clinician` became six capabilities, all six held by the `CLINICIAN` template, so nobody's
+authority changed on the day of the split.
+
+`LAB_QUEUE_WORK` is deliberately **not** split further. Accept, reject, collection, processing and
+result entry have never been separate authorities, and inventing the seam now would be the
+speculative granularity the ticket forbids.
+
+### 2. The effective-capability equation
+
+    effective = (union of assigned templates' capabilities  ∪  direct GRANTs)  −  direct DENYs
+
+then narrowed to what this organization *type* may hold at all.
+
+**A DENY always wins** — over a template grant and over a direct grant alike. One precedence rule
+and no ordering subtlety: an access model whose answer depends on which row was written first
+cannot be reasoned about at three in the morning, and the unique constraint means a membership
+cannot hold two opinions about one capability anyway.
+
+**An inactive membership, or any membership of an inactive organization, has no ordinary facility
+capabilities**, whatever rows exist beside it. That gate lives in one place
+(`MembershipCapabilityRepository.effective_for_membership_in_session`) rather than in the pure
+resolver, because the resolver would otherwise have to be handed membership state by every caller
+and the one caller that forgot would be a silent hole.
+
+**One resolver.** Billing does not compute capabilities, the UI does not compute capabilities, Team
+& Access does not compute capabilities. Every gate funnels through `AuthorizationService._require`,
+which asks the repository, which asks `resolve_effective_capabilities`.
+
+### 3. Roles survive as templates, and that is a promotion rather than a demotion
+
+`CLINICIAN`, `ORG_ADMIN`, `LAB_TECH`, `LAB_RESULT_RELEASER` and `BILLING_CLERK` remain, mean exactly
+what they meant, and are how a facility onboards somebody in one action instead of twelve. What
+changed is that no feature code asks for them.
+
+`exchange_organization_role_assignments` is **not replaced**: a role *is* a system template, so the
+table is re-read rather than migrated, and the migration moves no data at all. That is the single
+biggest reason §18's authority matrix is identical before and after.
+
+**System templates are immutable in this release.** §24 permits deferring editable templates and
+this ticket takes that permission: a facility tailors a person through member overrides, which
+cannot leave an organization without an administrator by surprise the way editing a shared template
+can. **Custom organization templates are follow-up work**, recorded in
+`docs/NATIVE-OPERATING-PRODUCT.md` §35 — not half-built here.
+
+### 4. Platform authority is outside the model, structurally
+
+`PLATFORM_ADMIN` is a Keycloak realm role carried by the token, not an organization capability.
+There is therefore no `Capability` member for it and **nothing for a facility administrator to ask
+for** — stronger than a deny-list, and the reason NC-CAP-5 could not construct the escalation at
+all: adding the enum member makes the module refuse to import, because a capability with no catalog
+entry is an import-time error.
+
+Connect machine identity, Meta HMAC and patient order-scoped grants stay outside too (§8). This is
+about human staff inside an organization.
+
+### 5. The last-administrator invariant is rebuilt around *effective* authority
+
+DHEALTH-NATIVE-ACCESS-001 counted active memberships holding the `ORG_ADMIN` role. That question
+stopped being the right one the moment authority could be removed without removing the role: an
+administrator who kept `ORG_ADMIN` and was individually denied `staff.access.manage` passed the
+check while leaving the organization with nobody who could actually administer it.
+
+The count is now "active memberships whose **effective** capabilities contain
+`staff.access.manage`", expressed as one SQL statement with `EXISTS`/`NOT EXISTS` subqueries and
+evaluated inside the mutation's own transaction under the organization lock. A Python loop over
+members was considered and rejected: that is the shape that races, where two concurrent removals
+each see the other's victim still counted.
+
+Every pathway is covered, not only the obvious one: removing a role, denying the capability,
+withdrawing a direct grant, and deactivating the membership. **Authority built *through a grant*
+counts** — a clinician granted `staff.access.manage` is a viable administrator and is enough for
+the incumbent to hand over and step down, which is what stops the invariant being a trap.
+
+Qualified against real PostgreSQL. The race that matters most produced a finding worth recording:
+when two administrators deny each other simultaneously, the loser may be refused by *either* guard
+— the invariant, or their own live re-authorization noticing they were denied a moment ago. Both
+are correct and both leave the organization administrable, so the qualification asserts the outcome
+rather than which guard won.
+
+### 6. The UI derives from the same set, and there is no second permission model
+
+`/me` returns `capabilities` per membership. The frontend reads that list and derives nothing:
+`workspaceCapabilities.ts`'s role-to-boolean mapping is **deleted**, which is the point — it was a
+second implementation of the authorization rule, in another language, kept in step by hand, and it
+could not express a capability granted to one person.
+
+There is no `SCREEN_BILLING` and no `SHOW_RESULTS_TAB` (§4). A section appears because the person
+holds a capability that makes it useful — the same fact the backend enforces. Two independent
+permission systems would drift, and the drift would be invisible until somebody was shown a screen
+they could not use.
+
+**Hiding a control remains usability, never security.** The server checks every request.
+
+### 7. Two corrections this ticket owed
+
+**§27 — `Facturation` requires `billing.operate`.** DHEALTH-BILLING-001 opened that section for
+*either* billing capability, so an administrator holding only `billing.configure_prices` landed on
+the operational till, where every control would have refused them. Price configuration is now its
+own section, `Services et tarifs` — configuration, so not inside `Équipe et accès` (which
+administers people), and not the till, so not inside `Facturation` either. Somebody holding both
+capabilities sees both.
+
+**`facility.configure` is separate from `staff.access.manage`.** `require_org_admin` guarded staff
+*and* catalogue/result-template/directory configuration. `ORG_ADMIN` carries both, so nobody's
+authority changed — what changed is that the two can now be separated, which they could not be
+while both were the single word `ORG_ADMIN`.
+
+### 8. What was preserved exactly, and how that is known
+
+**§18 is the load-bearing requirement**: no staff member gains or loses authority because the
+representation changed. It is checked rather than asserted —
+`tests/test_dhealthaccesscap001_authority_matrix.py` records the exact status code for **10
+personas × 16 authorization boundaries = 160 cells**, captured on `790c736` before capabilities
+existed, and compares them after. **All 160 are identical.** A diff there is not a test to update;
+it is drift, and this ticket produced none.
+
+`LAB_RESULT_RELEASE` keeps exactly the assignment policy `LAB_RESULT_RELEASER` had: an
+`ORG_ADMIN` could grant and remove that role under ADR-044/ACCESS-001 and still can. The
+`PROTECTED_CLINICAL` classification is carried as catalog metadata — for the screen to warn on and
+for a future policy to key off — **without changing who may assign what today**. §10 is explicit
+that this ticket expresses existing restrictions rather than broadening or narrowing them.
+
+### 9. Consequences
+
+- One new table (`exchange_membership_capability_overrides`), one new audit column (`capability`),
+  three new audit event types, three new endpoints, one new navigation section.
+- `require_role` has no production caller left. It survives for three service-level tests, which
+  were tightened to assert the capability invariant rather than the role name.
+- **Domain services may no longer name a role.** A structural test parses billing, visits, results,
+  lab workflow, order intents, patients, selection, catalog and directory and fails on a role name
+  used as code — prose explaining the model stays legal, which is why it is an AST walk and not a
+  grep. The frontend half checks navigation and the capability module the same way.
+- The allowlist is seven files and documented entry by entry; a test asserts it stays small.
+- Authorization costs the same as before: role names and overrides are read in **one** `UNION ALL`
+  round trip, because the naive two-query version added a statement to every gated endpoint and an
+  existing query-count test caught it immediately.
+
+**D-1 remains open.** Front Desk still has no backend authority and this ADR does not give it one.
+What it gives is the ability to answer the question later by composing existing capabilities into a
+template — without changing Billing, Visits, patient-directory or check-in authorization code. That
+is an acceptance criterion of this ticket, not a claim that Front Desk is designed.
+
+**This is authorization, not an IAM product.** No attribute-based policy engine, no expression
+language, no per-user screen designer, no combination roles. DHealth asks one question — *may this
+person do this here* — and the answer is a set intersection.
+
+**Pilot-ready is still not clinically live.** Nothing here is authorization to use DHealth on a real
+patient, and no staff member's access was changed by this work.

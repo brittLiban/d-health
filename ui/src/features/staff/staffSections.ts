@@ -28,7 +28,12 @@
  */
 
 import type { ExchangeMembershipSummary } from '../../api/exchangeTypes'
-import type { WorkspaceCapabilities } from '../workspace/workspaceCapabilities'
+import {
+  Capability,
+  can,
+  canAny,
+  type WorkspaceCapabilities,
+} from '../workspace/workspaceCapabilities'
 
 export type StaffSectionId =
   | 'today'
@@ -36,8 +41,9 @@ export type StaffSectionId =
   | 'patients'
   | 'orders'
   | 'results'
-  | 'billing'
   | 'team'
+  | 'billing'
+  | 'prices'
 
 export interface StaffSection {
   id: StaffSectionId
@@ -75,6 +81,10 @@ const SECTION_LABELS: Record<StaffSectionId, string> = {
   results: 'Résultats',
   team: 'Équipe et accès',
   billing: 'Facturation',
+  // DHEALTH-ACCESS-CAPABILITIES-001 §26: what the facility charges, kept out of both
+  // `Équipe et accès` (which administers people) and `Facturation` (which is the till). It is
+  // configuration, and it belongs with configuration even before a full `Paramètres` exists.
+  prices: 'Services et tarifs',
 }
 
 export function sectionLabel(id: StaffSectionId): string {
@@ -114,37 +124,48 @@ export function availableSections(
 
   const ids: StaffSectionId[] = []
 
-  const hasWorkflow =
-    capabilities.canViewPatients ||
-    capabilities.canRunVisits ||
-    capabilities.canCreateOrders ||
-    capabilities.canReviewResults ||
-    capabilities.canWorkLabOrders ||
-    capabilities.canReleaseResults
+  // `Aujourd'hui` is the clinical and laboratory work relay: it answers "what needs
+  // me today" by listing patients, orders and results waiting on this person. For
+  // somebody holding only administrative or financial authority there is nothing for
+  // it to answer, so it requires at least one capability it can actually report on.
+  const hasWorkflow = canAny(
+    capabilities,
+    Capability.PATIENT_DIRECTORY_READ,
+    Capability.VISIT_READ,
+    Capability.ORDER_MANAGE,
+    Capability.RESULT_REVIEW,
+    Capability.LAB_QUEUE_WORK,
+    Capability.LAB_RESULT_RELEASE,
+  )
 
   if (hasWorkflow) ids.push('today')
-  if (capabilities.canRunVisits) ids.push('visits')
-  if (capabilities.canViewPatients) ids.push('patients')
-  if (capabilities.canCreateOrders || capabilities.canWorkLabOrders) ids.push('orders')
-  if (capabilities.canReviewResults || capabilities.canReleaseResults) ids.push('results')
-  if (capabilities.canAdministerTeam) ids.push('team')
-  // DHEALTH-BILLING-001: either billing capability opens the section, and the
-  // section itself decides which of its two surfaces that person can use — the
-  // till needs BILLING_OPERATE, the price list needs BILLING_CONFIGURE_PRICES,
-  // and ADR-066 §2 keeps them in different hands on purpose. A cashier therefore
-  // sees invoices and no price editor; an administrator sees the price list and
-  // no till. Neither is shown a control they would be refused.
+  if (canAny(capabilities, Capability.VISIT_READ, Capability.VISIT_DOCUMENT)) ids.push('visits')
+  if (canAny(capabilities, Capability.PATIENT_DIRECTORY_READ, Capability.PATIENT_REGISTER)) {
+    ids.push('patients')
+  }
+  if (canAny(capabilities, Capability.ORDER_MANAGE, Capability.LAB_QUEUE_WORK)) ids.push('orders')
+  if (canAny(capabilities, Capability.RESULT_REVIEW, Capability.LAB_RESULT_RELEASE)) {
+    ids.push('results')
+  }
+  if (can(capabilities, Capability.STAFF_ACCESS_MANAGE)) ids.push('team')
+
+  // DHEALTH-ACCESS-CAPABILITIES-001 §27 -- the correction this ticket owes DHEALTH-BILLING-001.
   //
-  // **Last, and after `team` specifically.** It was placed before `team` first,
-  // on the reasoning that money follows the work that produced it. That ordering
-  // silently changed where an ORG_ADMIN-only account *lands*: `resolveSection`
-  // takes the first available section, so an administrator would have opened the
-  // application on `Facturation` instead of `Équipe et accès`. DHEALTH-NATIVE-ACCESS-001
-  // decided that landing explicitly — "lands directly on Équipe et accès, which is
-  // the only thing they came here to do" — and its browser suite asserts it right
-  // after sign-in. A tidier reading of one navigation list is not a reason to
-  // change a recorded product decision in passing, so billing goes last.
-  if (capabilities.canOperateBilling || capabilities.canConfigurePrices) ids.push('billing')
+  // `Facturation` is the **operational** till: invoices, payments, receipts, balances. It requires
+  // `billing.operate` and nothing else. Under the previous ticket it also appeared for
+  // `billing.configure_prices`, so an administrator who may set a price but may not take a payment
+  // landed on a surface where every control would refuse them.
+  //
+  // Still after `team`, for the reason that ticket's follow-up commit recorded: `resolveSection`
+  // lands on the first available section, and DHEALTH-NATIVE-ACCESS-001 decided an administrator
+  // opens the application on `Équipe et accès`.
+  if (can(capabilities, Capability.BILLING_OPERATE)) ids.push('billing')
+
+  // ...and price configuration gets its own entry (§26). It is configuration, not people
+  // administration, so it does not belong inside `Équipe et accès`; and it is not the till, so it
+  // does not belong inside `Facturation` either. Somebody holding both capabilities sees both
+  // sections, which is the honest rendering of holding both jobs.
+  if (can(capabilities, Capability.BILLING_CONFIGURE_PRICES)) ids.push('prices')
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))
 }

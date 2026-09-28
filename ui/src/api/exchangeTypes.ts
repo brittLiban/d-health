@@ -20,7 +20,51 @@ export interface ExchangeMembershipSummary {
   organization_type: 'PROVIDER' | 'LAB' | string
   organization_status: 'ACTIVE' | 'SUSPENDED' | string
   membership_status: 'ACTIVE' | 'INVITED' | 'REVOKED' | string
+  /**
+   * The role templates this membership holds.
+   *
+   * DHEALTH-ACCESS-CAPABILITIES-001: **a label, not authority.** Shown in the identity band and on
+   * the Team & Access list because people think in job titles, and used for authorization
+   * absolutely nowhere — §44 forbids the frontend reconstructing permissions from role names, and
+   * `workspaceCapabilities.ts` no longer can.
+   */
   roles: string[]
+  /**
+   * What this person may actually do in this organization, resolved by the server.
+   *
+   * `(role templates ∪ direct grants) − direct denies`, narrowed to the organization type, empty
+   * for an inactive membership or organization. Navigation and actions derive from exactly this;
+   * the browser computes none of it. See `workspaceCapabilities.ts` for why that matters.
+   */
+  capabilities: string[]
+}
+
+/** One capability on the Team & Access member sheet: held or not, and **why** (§20). */
+export interface MemberCapabilityView {
+  key: string
+  /** French, server-supplied. The catalog owns its own wording so one place defines it (§9). */
+  label: string
+  description: string
+  /** The heading it is grouped under: `Patients`, `Visites`, `Facturation`, … */
+  group: string
+  effective: boolean
+  /**
+   * `TEMPLATE:<ROLE>`, `GRANT`, `DENY`, or `null` when nothing grants it.
+   *
+   * Computed server-side beside the resolver that produced `effective`, so the explanation can
+   * never disagree with the decision it explains.
+   */
+  source: string | null
+}
+
+/** Everything `Équipe et accès` needs about one member's authority, and nothing else (§59). */
+export interface MemberAccessResponse {
+  membership_id: string
+  identity_id: string
+  display_name: string | null
+  status: string
+  roles: string[]
+  capabilities: MemberCapabilityView[]
 }
 
 export interface ExchangeMeResponse {

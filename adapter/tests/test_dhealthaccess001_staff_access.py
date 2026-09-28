@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from daher_adapter.exchange.api import build_exchange_router
 from daher_adapter.exchange.audit import ExchangeAuditWriter
 from daher_adapter.exchange.membership import (
+    MembershipCapabilityRepository,
     OrganizationMembershipRepository,
     OrganizationRoleAssignmentRepository,
 )
@@ -874,6 +875,7 @@ def test_authority_is_rechecked_inside_the_mutation_not_only_at_the_http_boundar
         organizations=OrganizationRepository(sessions),
         memberships=memberships,
         roles=roles,
+        capabilities=MembershipCapabilityRepository(sessions),
         security_audit=ExchangeSecurityAuditRepository(),
     )
     provider = uuid.UUID(world["provider_id"])
@@ -1069,6 +1071,7 @@ def test_a_role_name_that_is_not_an_organization_role_is_refused_before_any_look
         organizations=organizations,
         memberships=memberships,
         roles=OrganizationRoleAssignmentRepository(sessions),
+        capabilities=MembershipCapabilityRepository(sessions),
         security_audit=ExchangeSecurityAuditRepository(),
     )
     principal = AuthenticatedPrincipal(

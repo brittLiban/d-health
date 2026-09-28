@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { StaffApp } from './StaffApp'
 import type { ExchangeClient } from '../../api/exchangeClient'
-import { sectionButton } from '../../test/renderWithWorkspace'
+import { capabilitiesForRoles, sectionButton } from '../../test/renderWithWorkspace'
 
 describe('the staff application at a laboratory organization', () => {
   const sampleMe = {
@@ -21,6 +21,7 @@ describe('the staff application at a laboratory organization', () => {
         organization_status: 'ACTIVE',
         membership_status: 'ACTIVE',
         roles: ['LAB_TECH'],
+        capabilities: ['lab.queue.work'],
       },
     ],
   }
@@ -129,6 +130,7 @@ describe('the staff application at a laboratory organization', () => {
             organization_status: 'ACTIVE',
             membership_status: 'ACTIVE',
             roles: ['CLINICIAN'],
+            capabilities: ['order.manage', 'patient.directory.read', 'patient.register', 'result.review', 'visit.document', 'visit.read'],
           },
         ],
       }),
@@ -147,7 +149,16 @@ describe('the staff application at a laboratory organization', () => {
     const client = makeMockClient({
       getMe: vi.fn().mockResolvedValue({
         ...sampleMe,
-        memberships: [{ ...sampleMe.memberships[0], roles: ['LAB_TECH', 'LAB_RESULT_RELEASER'] }],
+        // DHEALTH-ACCESS-CAPABILITIES-001: the capabilities move with the roles. This passed
+        // either way (its assertion needs only the LAB_TECH queue), but a fixture that names a
+        // role without its authority describes a person the server cannot produce.
+        memberships: [
+          {
+            ...sampleMe.memberships[0],
+            roles: ['LAB_TECH', 'LAB_RESULT_RELEASER'],
+            capabilities: capabilitiesForRoles(['LAB_TECH', 'LAB_RESULT_RELEASER']),
+          },
+        ],
       }),
     })
     render(<StaffApp client={client} initialSection="orders" />)
