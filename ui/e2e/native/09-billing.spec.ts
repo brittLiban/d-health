@@ -156,9 +156,18 @@ async function get(token: string, path: string) {
   }
 }
 
-/** Opens `Facturation` the way a cashier does: by clicking the navigation. */
+/**
+ * Opens `Facturation` the way a cashier does: by clicking the navigation.
+ *
+ * Scoped to the navigation landmark, not the page. `BILLING_CLERK`'s French label is also
+ * "Facturation", so `Équipe et accès` renders buttons carrying that word for every staff member's
+ * role chips — an unscoped locator matched three elements there and failed strict mode. The same
+ * word legitimately names a section and a role, which is the point of labelling them consistently;
+ * the test has to say which one it means.
+ */
 async function openBilling(page: Page) {
-  await page.getByRole('button', { name: 'Facturation' }).click()
+  const nav = page.getByRole('navigation', { name: 'Navigation principale' })
+  await nav.getByRole('button', { name: 'Facturation', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Facturation', level: 1 })).toBeVisible()
 }
 
@@ -205,9 +214,25 @@ test.describe('DHEALTH-BILLING-001 — a facility takes money, end to end', () =
 
     // Every clinical section is absent, not disabled. A navigation entry that cannot be used is a
     // promise the product has not kept.
-    for (const section of ['Aujourd’hui', 'Visites', 'Patients', 'Ordres', 'Résultats', 'Équipe et accès']) {
-      await expect(page.getByRole('button', { name: section })).toHaveCount(0)
+    //
+    // Scoped to the navigation and `exact`, so these are assertions about *sections*. An absence
+    // check that names something the page never had is vacuous and silently green — this loop
+    // originally spelled `Aujourd’hui` with a typographic apostrophe against a label rendered with
+    // an ASCII one, and proved nothing for it.
+    const nav = page.getByRole('navigation', { name: 'Navigation principale' })
+    for (const section of [
+      "Aujourd'hui",
+      'Visites',
+      'Patients',
+      'Ordres',
+      'Résultats',
+      'Équipe et accès',
+    ]) {
+      await expect(nav.getByRole('button', { name: section, exact: true })).toHaveCount(0)
     }
+    // The positive control for the loop above: the one section this account *does* have is found by
+    // the same locator shape, so a query that matches nothing cannot pass for an absence.
+    await expect(nav.getByRole('button', { name: 'Facturation', exact: true })).toHaveCount(1)
 
     // ...and the price editor is absent too: setting prices is the administrator's capability.
     await expect(page.getByRole('heading', { name: 'Services et tarifs' })).toHaveCount(0)
@@ -514,7 +539,11 @@ test.describe('DHEALTH-BILLING-001 — a facility takes money, end to end', () =
     // A clinician holds every clinical authority and no billing authority.
     const clinic = await freshSignIn(browser, CLINICIAN)
     const clinicianSession = clinic.session
-    await expect(clinic.page.getByRole('button', { name: 'Facturation' })).toHaveCount(0)
+    await expect(
+      clinic.page
+        .getByRole('navigation', { name: 'Navigation principale' })
+        .getByRole('button', { name: 'Facturation', exact: true }),
+    ).toHaveCount(0)
     const provider = orgOf(clinicianSession, 'PROVIDER').organization_id
     expect((await get(clinicianSession.token, `/organizations/${provider}/billing/invoices`)).status)
       .toBe(403)

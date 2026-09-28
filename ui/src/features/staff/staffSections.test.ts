@@ -84,40 +84,45 @@ describe('availableSections', () => {
     // widening: `BILLING_CONFIGURE_PRICES` is ORG_ADMIN's own capability (ADR-066 §2),
     // so an administrator opening `Facturation` finds the price list -- what this
     // facility charges -- and no till. The reverse holds for a cashier, and
-    // `never offers the till to an administrator` below pins that half.
-    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['billing', 'team'])
-    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['billing', 'team'])
+    // `never offers a cashier a clinical section` below pins that half.
+    //
+    // `team` first, and the order matters: `resolveSection` lands on the first
+    // available section, and DHEALTH-NATIVE-ACCESS-001 decided an administrator opens
+    // the application on `Équipe et accès`. The test below is what holds that.
+    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team', 'billing'])
+    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team', 'billing'])
   })
 
-  it('lands an administrator with no clinical role on the first section they can use', () => {
+  it('still lands an administrator with no clinical role directly on the team section', () => {
+    // DHEALTH-NATIVE-ACCESS-001's decision, re-pinned because DHEALTH-BILLING-001 nearly
+    // moved it by accident: `Facturation` was ordered before `Équipe et accès` at first,
+    // which silently made the till an administrator's landing page. `07-access-lifecycle`
+    // asserts this same thing in a real browser immediately after sign-in.
     const sections = availableSections(
       provider(['ORG_ADMIN']),
       capabilitiesFor(provider(['ORG_ADMIN'])),
     )
-    expect(resolveSection(null, sections)).toBe('billing')
-    // ...and `Équipe et accès` is still reachable, which is what the landing change
-    // must not cost them.
-    expect(sections.map((section) => section.id)).toContain('team')
+    expect(resolveSection(null, sections)).toBe('team')
+    expect(sections.map((section) => section.id)).toContain('billing')
   })
 
   it('puts the team section last for an administrator who also works clinically', () => {
-    // Administration is not what they open the application for. `Facturation` sits
-    // between the clinical sections and administration: money follows the work that
-    // produced it, and precedes administering the establishment.
+    // Administration is not what they open the application for, and neither is the
+    // price list, so `Facturation` follows it.
     expect(idsFor(provider(['CLINICIAN', 'ORG_ADMIN']))).toEqual([
       'today',
       'visits',
       'patients',
       'orders',
       'results',
-      'billing',
       'team',
+      'billing',
     ])
     expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual([
       'today',
       'orders',
-      'billing',
       'team',
+      'billing',
     ])
   })
 

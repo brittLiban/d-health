@@ -2118,6 +2118,14 @@ exists to provide; and the laboratory had no price for its own offering, so `Fac
 offered the performed test and correctly refused to charge for it — right behaviour against a wrong
 baseline. Both are seeded now, convergently, so an existing demo database picks them up on reset.
 
+**And the sibling suites caught a regression this ticket had introduced without noticing.** Adding
+`Facturation` between `Résultats` and `Équipe et accès` silently changed where an `ORG_ADMIN`-only
+account *lands*, because the workspace opens on the first available section — so an administrator
+would have arrived at the till instead of the staff screen DHEALTH-NATIVE-ACCESS-001 explicitly
+decided they arrive at. The access suite asserts that landing immediately after sign-in and went
+red. The ordering was changed, not the assertion. All four native qualifications pass now: golden
+journey 12/12, access 16/16, visit 9/9, billing 6/6.
+
 **What is not true.** **Human usability is not claimed for this surface.** No cashier has used it and
 nothing has been timed against the paper ledger it replaces, so product law 3 ("faster than what it
 replaces") remains a validated target rather than a fact. Six green browser phases are a different

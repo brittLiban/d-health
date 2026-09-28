@@ -64,9 +64,8 @@ export interface StaffSection {
  *
  * `Facturation` rather than `Caisse` or `Paiements`: the section covers what the
  * facility charges, what it has invoiced and what it has been paid, and only the
- * first of those words is true of all three. It sits after the clinical sections
- * and before `Équipe et accès` — money follows the work that produced it, and
- * precedes administration, which is not what anyone opens the application for.
+ * first of those words is true of all three. It sits last — see `availableSections`
+ * for why that position is load-bearing rather than aesthetic.
  */
 const SECTION_LABELS: Record<StaffSectionId, string> = {
   today: "Aujourd'hui",
@@ -74,8 +73,8 @@ const SECTION_LABELS: Record<StaffSectionId, string> = {
   patients: 'Patients',
   orders: 'Ordres',
   results: 'Résultats',
-  billing: 'Facturation',
   team: 'Équipe et accès',
+  billing: 'Facturation',
 }
 
 export function sectionLabel(id: StaffSectionId): string {
@@ -128,14 +127,24 @@ export function availableSections(
   if (capabilities.canViewPatients) ids.push('patients')
   if (capabilities.canCreateOrders || capabilities.canWorkLabOrders) ids.push('orders')
   if (capabilities.canReviewResults || capabilities.canReleaseResults) ids.push('results')
+  if (capabilities.canAdministerTeam) ids.push('team')
   // DHEALTH-BILLING-001: either billing capability opens the section, and the
   // section itself decides which of its two surfaces that person can use — the
   // till needs BILLING_OPERATE, the price list needs BILLING_CONFIGURE_PRICES,
   // and ADR-066 §2 keeps them in different hands on purpose. A cashier therefore
   // sees invoices and no price editor; an administrator sees the price list and
   // no till. Neither is shown a control they would be refused.
+  //
+  // **Last, and after `team` specifically.** It was placed before `team` first,
+  // on the reasoning that money follows the work that produced it. That ordering
+  // silently changed where an ORG_ADMIN-only account *lands*: `resolveSection`
+  // takes the first available section, so an administrator would have opened the
+  // application on `Facturation` instead of `Équipe et accès`. DHEALTH-NATIVE-ACCESS-001
+  // decided that landing explicitly — "lands directly on Équipe et accès, which is
+  // the only thing they came here to do" — and its browser suite asserts it right
+  // after sign-in. A tidier reading of one navigation list is not a reason to
+  // change a recorded product decision in passing, so billing goes last.
   if (capabilities.canOperateBilling || capabilities.canConfigurePrices) ids.push('billing')
-  if (capabilities.canAdministerTeam) ids.push('team')
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))
 }

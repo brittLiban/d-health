@@ -22076,6 +22076,17 @@ to provide; and the laboratory had no `LabPrice`, so `Facturation` correctly off
 test and correctly refused to charge for it — right behaviour against a wrong baseline. Both are now
 seeded convergently, so an existing demo database picks them up on the next reset.
 
+**The sibling suites were re-run, and one of them caught a real regression.** `Facturation` was
+first ordered between `Résultats` and `Équipe et accès`; because `resolveSection` lands on the first
+available section, that silently made the till an `ORG_ADMIN`-only account's landing page, against
+DHEALTH-NATIVE-ACCESS-001's explicit decision. `07-access-lifecycle.spec.ts`'s ACCESS-0a asserts
+that landing right after sign-in and went red. **The ordering was fixed, not the assertion** —
+billing now sorts last, and the unit test holds that position deliberately. Fixed in the follow-up
+commit, together with ADR-066 §2a.
+
+All four native browser qualifications pass against the current stack: **golden journey 12/12,
+access lifecycle 16/16, clinic visit 9/9, facility billing 6/6.**
+
 **Pilot-ready is not clinically live.** This adds a till. It adds no clinical sign-off, no pricing
 advice and no interpretation, and nothing here is authorization to use DHealth on a real patient.
 All patient, service and price data used anywhere in this ticket is synthetic.

@@ -1,6 +1,6 @@
 """DHEALTH-BILLING-001: real PostgreSQL qualification of invoices, payments and numbering.
 
-The SQLite unit suite (``tests/test_dhealthbilling001_billing.py``, 44 tests) proves every *rule*
+The SQLite unit suite (``tests/test_dhealthbilling001_billing.py``, 48 tests) proves every *rule*
 billing has. It cannot prove the properties money actually depends on, for three stated reasons:
 
 1. **SQLAlchemy's SQLite dialect omits ``FOR UPDATE`` entirely.** ``record_payment``'s invoice lock

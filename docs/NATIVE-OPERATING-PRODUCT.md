@@ -1968,6 +1968,22 @@ and date of birth** — not name only, because two people sharing a name is ordi
 cannot tell them apart bills the wrong one. Contact details, notes, visits, orders and results are
 absent and structurally unreachable. It is not audited as a successful read, so **D-8 stays open**.
 
+### 39.1a A navigation ordering that nearly changed a recorded decision
+
+`Facturation` was first placed between `Résultats` and `Équipe et accès`, on the reasoning that
+money follows the work that produced it. That is a defensible reading of one list and it was wrong,
+for a reason the reasoning could not see: `resolveSection` lands on the **first** available section,
+so an `ORG_ADMIN`-only account would have opened the application on `Facturation` instead of
+`Équipe et accès`. DHEALTH-NATIVE-ACCESS-001 decided that landing explicitly — *"lands directly on
+Équipe et accès, which is the only thing they came here to do"* — and `07-access-lifecycle.spec.ts`
+asserts it in a real browser immediately after sign-in.
+
+`Facturation` goes **last**, and `staffSections.ts` says why at the line that does it. The unit test
+`still lands an administrator with no clinical role directly on the team section` now holds that
+position deliberately rather than incidentally. A tidier navigation list is not a reason to move a
+recorded product decision in passing — and the browser suite catching it is the argument for running
+the sibling qualifications rather than only the new one.
+
 ### 39.2 What §18's laws became in code
 
 | §18 | As built |

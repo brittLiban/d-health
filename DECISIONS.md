@@ -9014,7 +9014,7 @@ clinical sign-off. The order set and any structured clinical field still require
 ## an organization may invoice only what it **performed**, and money never gates clinical work
 
 **Date:** 2026-09-28 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
-`0035_facility_billing`, `exchange/billing.py`, `exchange/capabilities.py`, nine endpoints,
+`0035_facility_billing`, `exchange/billing.py`, `exchange/capabilities.py`, ten endpoints,
 `Facturation`) · **Decided by:** Liban (DHEALTH-BILLING-001 ticket, decisions D-1-billing and
 D-2a-interim) · **Implements:** `docs/NATIVE-OPERATING-PRODUCT.md` §18/§19 and its §35 ticket brief
 
@@ -9079,6 +9079,60 @@ organization role.
 
 **This resolves only the Billing portion of D-1.** The broader Front Desk authority question —
 reception, arrivals, appointments — remains open and is not answered here.
+
+### 2a. A cashier may look a patient up, through a second narrow read of their own
+
+**Decided 2026-09-28, mid-ticket, after §2 was already written.** §2 gave billing its own authority
+and left a hole nobody had noticed: a clinic cashier could not reach a patient at all.
+
+A laboratory clerk starts from an order (`GET /billing/orders`) and needs no directory, because a
+laboratory knows its work by the order in front of it. A clinic clerk has no order to start from —
+**a consultation is not one** — and the provider's patient directory is behind `require_clinician`,
+which §2 deliberately does not grant a cashier. Two answers were available and both were wrong:
+granting `CLINICIAN` to a cashier so a search box would work, or opening the clinician's directory
+endpoint to billing. Each would have dissolved the separation §2 exists to create.
+
+**The decision: a second, narrower read with its own gate and its own projection.**
+`GET /organizations/{id}/billing/patients?q=` is gated on `BILLING_OPERATE`, never
+`require_clinician`. Identifying the person you are about to charge is a legitimate *financial* act
+and should not require clinical authority.
+
+**It returns three fields: `id`, `display_name`, and `date_of_birth` when present.** Name alone was
+considered and rejected. Two people sharing a name is ordinary, and a till that cannot tell them
+apart bills the wrong person — a wrong-patient error arriving through the financial door instead of
+the clinical one. The date of birth is the minimum second fact that separates them and the one a
+clerk can confirm out loud with the person standing in front of them.
+
+**There is no facility patient number**, because DHealth has none to give. The only other identifier
+in this schema is `PatientReference`, which ADR-051 establishes as a provenance binding for one
+exchanged transaction — one human may hold several, and none is meant to be read aloud. Returning
+one would *look* like a patient number without being one, which is worse than the honest absence. A
+real facility-assigned identifier is a product decision nobody has made.
+
+**Absent, and structurally unreachable:** contact details (no billing workflow in this release has
+demonstrated a need, and "it was already on the model" is not a need), reason for visit, clinical
+notes, clinician notes, visits, orders, result values and result history. `search_patients` reads
+`Patient` and joins nothing clinical, and `BillingPatientResponse` is its own type rather than a
+reuse of the clinician-facing one — a shared response model is exactly how a clinical field lands on
+a cashier's screen later, by somebody adding a column to the one the doctor sees.
+
+**It cannot become a way into the patient directory.** There is no lookup-by-id, so holding another
+organization's patient UUID buys nothing; an empty query is refused rather than answered with the
+roster, because this finds a person who is present rather than browsing a register; and tenancy is
+the same two-branch rule `_patient_for_billing` enforces on the write path — a provider searches its
+own directory, a laboratory only the patients it has actually done work for — expressed as one
+`EXISTS` so the read and the write cannot drift apart.
+
+**D-8 is preserved, not quietly resolved.** This read is **not** audited as a successful read.
+Whether successful reads of sensitive data should be audited is an open decision, and introducing a
+read-audit regime for one endpoint inside a billing ticket would have pre-empted it. Refusals are
+audited exactly as every other billing refusal is.
+
+Pinned by `test_bill36` (the exact field set, against the live response), `test_bill37` (the same
+patient carrying a visit, an order and a released result — the projection is unchanged),
+`test_bill38` (no cross-tenant route in), `test_bill39` (billing authority required, the clinician's
+directory still closed to the cashier) and negative control NC-BILL-7, which widens the projection
+by one field and confirms both projection tests redden.
 
 ### 3. An organization may invoice only what it actually performed
 

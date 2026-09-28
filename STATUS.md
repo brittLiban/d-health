@@ -46,6 +46,12 @@ result entry and **release** on the running stack with a real unpaid invoice out
 The release returns 201 and the balance is still owed afterwards. Money not gating care is now a
 demonstrated fact, not only a structural argument.
 
+**All four native browser qualifications pass against the current stack** — golden journey 12/12,
+access lifecycle 16/16, clinic visit 9/9, facility billing 6/6 — and running the siblings was not a
+formality: adding `Facturation` between `Résultats` and `Équipe et accès` silently made the till an
+administrator's landing page, because `resolveSection` takes the first available section.
+ACCESS-0a caught it. The ordering was changed, not the assertion.
+
 **The evidence worth reading: real PostgreSQL found three defects the 48 SQLite tests could not.**
 SQLAlchemy's SQLite dialect omits `FOR UPDATE` entirely and SQLite's writer serialization turns these
 races into sequential calls. (1) the invoice-number counter's insert-race branch raised
