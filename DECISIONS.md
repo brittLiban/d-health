@@ -9608,3 +9608,46 @@ complete LIS parity · a confirmed reason vocabulary · **human usability**.
 
 **Human usability is not qualified.** No laboratory worker has used this screen; automated browser
 evidence is not human evidence. **Pilot-ready is still not clinically live.** All data synthetic.
+
+### ADR-068 addendum — 2026-09-29, same day, on accepting the ticket: D-11 stays open and gets its question list
+
+The ticket is accepted as complete at `d48d965`. §3's "provisional" classification is **reaffirmed,
+not softened**, and this addendum exists to make the outstanding question answerable rather than
+merely recorded.
+
+**Nothing about the implementation changes.** The four reasons stay exactly as shipped —
+`SPECIMEN_UNUSABLE`, `SPECIMEN_INSUFFICIENT`, `PATIENT_DID_NOT_ATTEND`, `CLARIFICATION_REQUIRED` —
+as the provisional catalog. **`TECHNICAL_ISSUE` is not added, and neither is anything else**, because
+the only argument for any of them is our own reasoning about how a laboratory works, which is
+precisely what §3 refuses to act on. The optional free-text note remains the honest home for a case
+that does not fit, and stays available for exactly that.
+
+**What is explicitly NOT claimed:** that the catalog is right, that the French labels are a
+laboratory's own words, or that either has been validated. Nobody who works in a laboratory has
+seen them.
+
+**When it gets answered: during human usability / workflow qualification**, which has not happened
+either. **How it gets answered:** by asking a participant how *they* would categorise each of the
+situations below in real work — in their own words, including whether they would call it a block at
+all — rather than asking which of our four fits.
+
+| Scenario | Category today |
+|---|---|
+| Analyser downtime | **none** — free-text note |
+| Power outage | **none** — free-text note |
+| Reagent shortage / unavailability | **none** — free-text note |
+| Recollection needed | **none** — free-text note. `SPECIMEN_UNUSABLE` says the laboratory stopped, never that a new sample was requested; recollection has no representation anywhere (see also **D-3**) |
+| Insufficient sample | `SPECIMEN_INSUFFICIENT` — assumed, unverified |
+| Damaged sample | `SPECIMEN_UNUSABLE` — assumed, unverified; "damaged" and "unusable" may not be one thing to them |
+| Incorrect / wrong sample | `SPECIMEN_UNUSABLE` — assumed, unverified; a wrong tube is arguably a different operational problem from a spoiled one |
+| Missing information | `CLARIFICATION_REQUIRED` — assumed, unverified; we chose "the laboratory is asking a question" over "a required field is absent", which may be the wrong distinction entirely |
+
+The first four are gaps. The last four are **assumptions wearing the appearance of coverage**, which
+is the more dangerous half: a category that exists and is subtly wrong will be used, and the note
+that would have carried the truth will not be written.
+
+**D-11 is remaining Lab work in its own right.** P0-4 being closed means the mechanism is built and
+qualified; it does not mean the vocabulary that mechanism puts in front of a laboratory has been
+validated by one. **Human usability remains unqualified** and the Lab product remains **not
+switch-ready** — Réception, the specimen entity (**D-3**), labels, facility-owned offerings and
+configuration, a printable result report, and this item all remain.

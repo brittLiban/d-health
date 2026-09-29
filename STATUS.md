@@ -34,10 +34,16 @@ processing asserted for an order that had never been collected.
 
 **Four reasons, and the list is deliberately PROVISIONAL.** They are exactly the four
 `docs/NATIVE-OPERATING-PRODUCT.md` §16 already names. §16 also requires the list to be confirmed
-with a laboratory participant before it is fixed, and **that has not happened** — recorded as
-**D-11** and as an open `Human Decision Required` item. The concrete gap, named rather than filled:
-**there is no equipment/analyser reason**, so a laboratory whose analyser is down must use the free
--text note. The ticket proposed adding one; it was not added on an agent's authority.
+with a laboratory participant before it is fixed, and **that has not happened** — **D-11**, open, to
+be answered **during human usability / workflow qualification**. **Neither the catalog nor the
+French labels has been validated by anyone who works in a laboratory.**
+
+Four ordinary situations have **no category at all** and go in the free-text note: **analyser
+downtime, power outage, reagent shortage, recollection needed.** Four more map to a reason on our
+**unverified assumption**: **insufficient sample, damaged sample, incorrect sample, missing
+information** — the more dangerous half, because a category that exists and is subtly wrong gets
+used while the note that would have carried the truth does not get written. All eight are the
+scenarios to put to a participant. **No reason was added on an agent's authority and none may be.**
 
 **Who is told what.** The ordering clinician sees the status and the reason key — §27 makes them
 the next owner, so silence would recreate the very problem being fixed. They do **not** see the

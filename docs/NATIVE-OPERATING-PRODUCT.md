@@ -763,10 +763,20 @@ attend, clarification needed*) and must be confirmed with a laboratory participa
 > the technician's identity do not cross the organization boundary; the patient sees neither.
 >
 > **The reason list above is implemented exactly as written here and remains PROVISIONAL.** The
-> confirmation this paragraph requires has *not* happened — it is an open `Human Decision Required`
-> item in `PROJECT_STATE.md`. Note in particular that **no equipment/analyser reason exists**: a
-> laboratory whose analyser is down has no category among these four today and must use the free-text
-> note. That gap is named deliberately rather than filled on an agent's authority.
+> confirmation this paragraph requires has *not* happened — it is **D-11** in §28 and an open
+> `Human Decision Required` item in `PROJECT_STATE.md`. **Neither the catalog nor its French labels
+> has been validated by anyone who works in a laboratory**, and they are to be validated **during
+> human usability / workflow qualification**, not inferred.
+>
+> Four ordinary laboratory situations have **no category at all** today and go in the free-text
+> note: **analyser downtime, power outage, reagent shortage or unavailability, and recollection
+> needed.** Four more map to a reason only on our own unverified assumption: **insufficient sample,
+> damaged sample, incorrect/wrong sample, missing information.** All eight are the scenarios to put
+> to the participant — asking how *they* would file each one in their own words, not which of our
+> four they would pick.
+>
+> **No reason may be added on an agent's or an author's own reasoning**, `TECHNICAL_ISSUE` included.
+> The free-text note is the honest home for whatever does not fit, and stays available for it.
 >
 > Still **not** built, and deliberately: the specimen entity (**D-3**), recollection linkage, and any
 > announcement of a block to an external system through Connect (§22 — Connect refuses to apply a
@@ -1271,7 +1281,7 @@ Only where different answers materially change architecture or workflow.
 | **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. **Interim answer 2026-09-28, ADR-066 §3**: each organization invoices only what it actually performed, enforced server-side at the invoice line. **Still open** for commercial arrangements over routed external laboratory work — settlement, commissions, referral fees, revenue sharing, pass-through billing, markup and inter-facility AP/AR are all deliberately unbuilt. | Product / commercial | No longer blocks the billing ticket. Blocks any inter-facility commercial model. |
 | **D-2b** | **What happens when payment is incomplete.** If anyone proposes unpaid → no release, that is clinical policy. | **HUMAN DECISION REQUIRED / CLINICAL POLICY** | Must never be encoded casually. Default until decided: billing never gates clinical release. |
 | **D-3** | **Is a first-class specimen entity required for Launch-1?** ~~(The order-level `BLOCKED` state, P0-4, is needed regardless.)~~ **P0-4 is now BUILT (2026-09-29, ADR-068) and D-3 is unaffected by it** — order-level blocking deliberately models no specimen, so this question is exactly as open as it was. | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
-| **D-11** | **Is the block-reason catalog right?** Four reasons ship as **provisional** (ADR-068), exactly the four §16 names. §16 requires confirmation with a laboratory participant before the list is fixed, and that has not happened. Specifically: does an **equipment/analyser** reason belong, and are the French labels a laboratory's own words? | Product, needs a laboratory participant | Does not block — the workflow is complete and qualified. Blocks calling the vocabulary settled. |
+| **D-11** | **Is the block-reason catalog right, and are its French labels a laboratory's own words?** Four reasons ship as **provisional** (ADR-068), exactly the four §16 names. §16 requires confirmation with a laboratory participant before the list is fixed; **that has not happened, and neither the catalog nor the wording has been validated by anyone who works in a laboratory.** To be validated **during human usability / workflow qualification**, by asking a participant how *they* would categorise, in their own words: **analyser downtime · power outage · reagent shortage or unavailability · recollection needed · insufficient sample · damaged sample · incorrect/wrong sample · missing information.** The first four have no category today and go in the free-text note; the last four map to a reason only on our unverified assumption. **No reason is to be added on our own reasoning** — the free-text note stays the honest home for whatever does not fit. | Product, needs a laboratory participant | Does not block — the workflow is complete and qualified. Blocks calling the vocabulary settled, and is itself remaining Lab work. |
 | **D-4** | **Which patient attributes must a receiving laboratory see to confirm the presenting patient?** (`docs/MVP-1.0.md` gap 10.) | Product + clinical safety | Blocks Lab Reception. Must not be invented. |
 | **D-5** | **Diagnosis coding** — free text only, or a code system, and which? Clinician-recorded either way; system-generated never. | Clinical lead | Blocks any structured diagnosis. Free-text note is unaffected. |
 | **D-6** | **May a laboratory hold its own patient records** so a walk-in laboratory patient is representable? | Product + privacy | Blocks walk-in lab workflow. P0 only if the pilot is a laboratory. |

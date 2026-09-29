@@ -22283,22 +22283,42 @@ No fifth was invented. The ticket's own brief proposed a longer candidate list i
 technical/analyser reason and a free `OTHER`; both were left out rather than added on an agent's
 authority.
 
-> **BLOCKER — `Human Decision Required: Yes`**
-> **Confirm the block-reason catalog with a laboratory participant.** §16 states the list *"must be
-> confirmed with a laboratory participant before it is fixed"*, and that has not happened. Two
-> specific questions:
-> 1. **Does an equipment/analyser reason belong in the list?** A laboratory whose analyser is down
->    has no home among the four today. Such a case currently lands in the optional free-text note —
->    honestly unstructured rather than filed under a category nobody approved. This is a real gap,
->    named rather than quietly filled.
-> 2. **Are the French labels right?** `Prélèvement inutilisable`, `Quantité insuffisante`,
->    `Patient non présenté`, `Précision nécessaire` (`ui/src/features/lab/blockVocabulary.ts`) are
->    unconfirmed operational vocabulary, not clinical content, but still a laboratory's words.
+> **BLOCKER — `Human Decision Required: Yes` — D-11, OPEN**
+> **The block-reason catalog and its French labels must be validated with an actual laboratory
+> participant, during human usability / workflow qualification.** §16 states the list *"must be
+> confirmed with a laboratory participant before it is fixed"*, and that has not happened. **Neither
+> the catalog nor the French wording has been validated by anyone who works in a laboratory.**
 >
-> Until answered, the catalog ships as **provisional** and is documented as such in
-> `models.py`'s `LabOrderBlockReason`, `blockVocabulary.ts`, and `docs/NATIVE-OPERATING-PRODUCT.md`
-> §16. Nothing is blocked on this — the workflow is complete and qualified — but the list must not
-> be treated as settled.
+> **The four implemented reasons stay exactly as they are** — `SPECIMEN_UNUSABLE`,
+> `SPECIMEN_INSUFFICIENT`, `PATIENT_DID_NOT_ATTEND`, `CLARIFICATION_REQUIRED` — as the **provisional**
+> catalog. **No reason is to be added on our assumptions**, `TECHNICAL_ISSUE` included. Anything that
+> does not fit the four cleanly continues to go in the **optional free-text note**, which stays
+> available for exactly that purpose.
+>
+> **Ask the participant how they would categorise each of these in real work.** Not "which of our
+> four fits" — how *they* would file it, in their own words, including whether it is a block at all:
+>
+> | Scenario | Has a category today? |
+> |---|---|
+> | Analyser downtime | **No** — free-text note |
+> | Power outage | **No** — free-text note |
+> | Reagent shortage / unavailability | **No** — free-text note |
+> | Recollection needed | **No** — free-text note; `SPECIMEN_UNUSABLE` says the laboratory stopped, not that a new sample was asked for. Recollection has no representation anywhere (see also **D-3**) |
+> | Insufficient sample | `SPECIMEN_INSUFFICIENT` — is that their word for it? |
+> | Damaged sample | `SPECIMEN_UNUSABLE`? — unverified, and "damaged" and "unusable" may not be the same thing to them |
+> | Incorrect / wrong sample | `SPECIMEN_UNUSABLE`? — unverified; a wrong tube is arguably a different operational problem from a spoiled one |
+> | Missing information | `CLARIFICATION_REQUIRED`? — unverified; we chose "the laboratory is asking a question" over "a field is absent", which may be the wrong distinction |
+>
+> **The second question is the French labels**: `Prélèvement inutilisable`, `Quantité insuffisante`,
+> `Patient non présenté`, `Précision nécessaire` (`ui/src/features/lab/blockVocabulary.ts`). These are
+> unconfirmed operational vocabulary — not clinical content, but still a laboratory's own words, and
+> the clinic reads the same strings.
+>
+> Until answered, the catalog ships as **provisional** and is documented as such in `models.py`'s
+> `LabOrderBlockReason`, `blockVocabulary.ts`, `docs/NATIVE-OPERATING-PRODUCT.md` §16 and §28, and
+> ADR-068 §3. Nothing is blocked on this — the workflow itself is complete and qualified — but the
+> list must not be treated as settled, and **D-11 is remaining Lab work in its own right**, not a
+> footnote to work that is finished.
 
 ### Who sees what — the data-minimization decision, recorded
 
@@ -22473,9 +22493,10 @@ known gap, not as interoperability.
 
 - **The full adapter suite ran under Python 3.14, not the shipped 3.13.** The forward-reference
   defect above was caught by `ruff`, never by execution. What *is* real 3.13 evidence: the adapter
-  container was rebuilt on `python:3.13` and came up healthy, and all 13 browser phases plus five
-  sibling browser suites ran against it — so the import path, the new endpoints, the migration and
-  every request path those suites touch are qualified on 3.13. The 1 939-test suite is not.
+  container was rebuilt on `python:3.13`, came up healthy, and **62 browser phases** ran against it
+  — 13 blocked-order, 12 golden journey, 16 access, 9 visit, 6 billing, 6 capabilities — so the
+  import path, the new endpoints, the migration and every request path those suites touch are
+  qualified on the shipped runtime. **The 1 939-test suite is not.**
 - **PG-BLOCK-4 raced `orders.transition(COMPLETED)`, not `results.release`.** Both take the
   identical `FOR UPDATE` lock on the identical row, which is what serializes the pair, and the
   release row the transition requires was seeded so the release half could genuinely win. But the
@@ -22484,7 +22505,13 @@ known gap, not as interoperability.
 - **The migration downgrade qualification used direct SQL to resolve the blocked orders**, standing
   in for the operator the design requires. That is the intended workflow (the downgrade refuses
   until a human deals with them), but no product path performed it.
-- **NC-BLOCK-3's concurrency half is nondeterministic** (4 of 6 runs) and is reported as such above.
+- **NC-BLOCK-3 has a deterministic half and a nondeterministic one, and they prove different
+  things.** Dropping the partial unique index reddened **PG-BLOCK-6 on 5 of 5 runs** — the
+  *database uniqueness invariant* is deterministically demonstrated. Removing the `FOR UPDATE` lock
+  as well reddened **PG-BLOCK-1 on only 4 of 6 runs** — the *concurrency mutation* is
+  nondeterministic, because a `threading.Barrier` maximizes overlap but cannot guarantee the worst
+  interleaving. Both layers are real and both are needed; only the uniqueness one is
+  deterministically demonstrable, and no stronger claim is made for the other.
 - **The AST no-role-hardcoding guard does not cover `api.py`**, which is legitimately allowlisted.
   NC-BLOCK-8 therefore reddened only the behavioural capability tests. LAB-BLOCK-3/4 are
   load-bearing rather than belt-and-braces.
@@ -22515,10 +22542,22 @@ Front Desk portion · **D-6** (walk-in laboratory patient) · **D-8** (auditing 
 reads) — all untouched. The **reason-catalog confirmation** (**D-11**) above is the new one.
 
 **Remaining Lab P0:** none from `docs/NATIVE-OPERATING-PRODUCT.md` §26's list — P0-4 was the last
-Lab-track P0 that was not billing, and billing shipped with ADR-066. **This does not make the Lab
-switch-ready**, and no such claim is made: Réception (P1, blocked on **D-1**/**D-4**), the specimen
-entity (P1, **D-3**), specimen labels (P1), facility-owned offerings/templates/prices (P1) and a
-printable result report (P1) all remain.
+Lab-track P0 that was not billing, and billing shipped with ADR-066.
+
+**The Lab product is NOT switch-ready, and no such claim is made.** Remaining Lab work, in full:
+
+| # | Remaining | Status |
+|---|---|---|
+| 1 | **Réception** (lab reception screen) | P1 — blocked on **D-1** and **D-4** |
+| 2 | **Specimen entity** | P1 — **D-3**, entirely open; order-level blocking models no specimen at all |
+| 3 | **Specimen labels** | P1 |
+| 4 | **Facility-owned offerings / configuration** (offerings, result templates, prices, facility profile) | P1 — backend-only today |
+| 5 | **Printable result report** | P1 |
+| 6 | **D-11 — human validation of the block-reason catalog and its French labels** | **OPEN** — to be done with an actual laboratory participant during human usability / workflow qualification. See the D-11 blocker above for the scenario list to put to them |
+
+Item 6 is remaining Lab work in its own right. P0-4 being closed means the *mechanism* is built and
+qualified; it does not mean the vocabulary that mechanism presents to a laboratory has been
+validated by one.
 
 **Human usability is not claimed.** No laboratory worker has used this screen. Automated browser
 evidence is not human usability evidence. **Pilot-ready is still not clinically live.** All data

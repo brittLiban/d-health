@@ -23,9 +23,19 @@
  *
  * The four keys are `docs/NATIVE-OPERATING-PRODUCT.md` §16's own list and the catalog is
  * **provisional**: §16 requires it to be confirmed with a laboratory participant before it is
- * fixed, and that has not happened. Notably absent, and absent on purpose: any equipment or
- * analyser reason. A laboratory whose analyser is down currently records the nearest true reason
- * and explains it in the free-text note.
+ * fixed, and that has not happened — **D-11**, open, to be answered during human usability /
+ * workflow qualification. **The French strings below have not been validated by anyone who works
+ * in a laboratory either**, and the clinic reads the same strings.
+ *
+ * Absent on purpose: any equipment, power or supply reason. Analyser downtime, a power outage, a
+ * reagent shortage and a needed recollection all have no category today and go in the free-text
+ * note. Less obviously, four scenarios *do* have a category but only on an unverified assumption —
+ * insufficient sample, damaged sample, incorrect sample, missing information — and that is the
+ * more dangerous half: a subtly wrong label gets used, and the note that would have carried the
+ * truth never gets written.
+ *
+ * **No reason may be added here on an author's own reasoning.** Adding one is a product decision
+ * with a laboratory participant in the room, not an edit to this file.
  */
 
 import type { LabOrderBlockReason } from '../../api/exchangeTypes'

@@ -176,11 +176,25 @@ class LabOrderBlockReason(StrEnum):
     each of those was left out rather than added on an agent's authority.
 
     **The list is provisional, and §16 says so:** it *"must be confirmed with a laboratory
-    participant before it is fixed."* That confirmation has not happened; it is recorded as an
-    open `HUMAN DECISION REQUIRED` item in `PROJECT_STATE.md`, and it specifically includes
-    whether a technical/equipment reason belongs here. A real laboratory's analyser going down has
-    no home among these four today. Such a case currently lands in the optional free-text note --
-    honestly unstructured rather than filed under a category nobody approved.
+    participant before it is fixed."* That confirmation has not happened -- **D-11**, open, to be
+    answered during human usability / workflow qualification. Neither these keys nor their French
+    labels (``ui/src/features/lab/blockVocabulary.ts``) have been validated by anyone who works in
+    a laboratory.
+
+    Two kinds of gap, and the second is the worse one:
+
+    * **No category at all**, so the free-text note carries it: analyser downtime, power outage,
+      reagent shortage or unavailability, recollection needed.
+    * **A category that exists only on an unverified assumption**: insufficient sample, damaged
+      sample, incorrect/wrong sample, missing information. A missing category is visible and a
+      worker writes a note; a subtly wrong one is simply used, and the note that would have carried
+      the truth never gets written. ``SPECIMEN_UNUSABLE`` may not be what a technician means by a
+      *damaged* tube, and ``CLARIFICATION_REQUIRED`` may not be what they mean by *missing
+      information*.
+
+    **No reason may be added here on an author's own reasoning**, ``TECHNICAL_ISSUE`` included --
+    that is exactly what `AGENTS.md`'s rule forbids. The optional free-text note stays the honest
+    home for anything that does not fit, and stays available for it.
     """
 
     #: The specimen cannot be used. §16's "sample unusable".

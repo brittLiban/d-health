@@ -2276,10 +2276,22 @@ validated target here as everywhere else.
 **The reason vocabulary is provisional, and that is a real open question rather than a formality.**
 The four reasons are the four `docs/NATIVE-OPERATING-PRODUCT.md` §16 already named, and §16 itself
 requires them to be confirmed with a laboratory participant before they are fixed. That has not
-happened (`D-11`). The consequence a reader should hold onto: **a laboratory whose analyser is down
-has no reason to choose** and must write it in the free-text note. The ticket proposed adding a
-technical reason; it was not added, because inventing an operational vocabulary for a laboratory
-nobody has spoken to is the failure mode `AGENTS.md` names.
+happened (**D-11**, open). **Neither the catalog nor the French labels has been validated by anyone
+who works in a laboratory**, and both are to be validated **during human usability / workflow
+qualification** — the same qualification that has not happened either.
+
+Two kinds of gap, and the second is the worse one. **No category at all**, so the free-text note
+carries it: analyser downtime, power outage, reagent shortage or unavailability, recollection
+needed. **A category that exists only on our unverified assumption**: insufficient sample, damaged
+sample, incorrect/wrong sample, missing information. The first kind is visibly missing and a worker
+will write a note. The second kind will simply be used — and if `SPECIMEN_UNUSABLE` is not what a
+technician means by a *damaged* tube, or `CLARIFICATION_REQUIRED` is not what they mean by *missing
+information*, the note that would have carried the truth never gets written. All eight are the
+scenarios to put to a participant, asking how *they* would file each one.
+
+A technical reason was proposed and **not added**, and none may be added on our own reasoning:
+inventing an operational vocabulary for a laboratory nobody has spoken to is the failure mode
+`AGENTS.md` names.
 
 **No specimen entity was built and `D-3` is exactly as open as it was.** `SPECIMEN_UNUSABLE` is a
 statement that the laboratory stopped. It does not identify a tube, create an accession, record a
